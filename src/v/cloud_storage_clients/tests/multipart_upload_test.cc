@@ -15,8 +15,11 @@
 #include "cloud_storage_clients/tests/client_pool_builder.h"
 #include "test_utils/random_bytes.h"
 
+#include <seastar/core/abort_source.hh>
 #include <seastar/core/future.hh>
+#include <seastar/core/timed_out_error.hh>
 #include <seastar/testing/thread_test_case.hh>
+#include <seastar/util/later.hh>
 
 #include <boost/test/unit_test.hpp>
 
@@ -25,6 +28,61 @@ using namespace cloud_storage_clients::tests;
 
 static ss::logger test_log("multipart_upload_test");
 static constexpr size_t test_part_size = 5_MiB;
+
+namespace {
+// A backend state where one chosen op never resolves, to exercise the
+// per-operation deadline (set_op_timeout); the rest complete promptly so the
+// upload can still be finalized. Records its own destruction so a test can
+// assert the deadline's keep-alive holds the state alive while an abandoned op
+// is still in flight (otherwise that op would use-after-free).
+class hanging_multipart_state final : public multipart_upload_state {
+public:
+    enum class hang_on { initialize, upload_part, complete, abort };
+
+    hanging_multipart_state(
+      hang_on which,
+      ss::lw_shared_ptr<ss::promise<>> hang,
+      ss::lw_shared_ptr<bool> destroyed)
+      : _hang_on(which)
+      , _hang(std::move(hang))
+      , _destroyed(std::move(destroyed)) {}
+
+    ~hanging_multipart_state() override { *_destroyed = true; }
+
+    ss::future<> initialize_multipart() override {
+        return gate(hang_on::initialize);
+    }
+    ss::future<> upload_part(size_t, iobuf) override {
+        return gate(hang_on::upload_part);
+    }
+    ss::future<> complete_multipart_upload() override {
+        return gate(hang_on::complete);
+    }
+    ss::future<> abort_multipart_upload() override {
+        return gate(hang_on::abort);
+    }
+    ss::future<> upload_as_single_object(iobuf) override {
+        return gate(hang_on::complete);
+    }
+    bool is_multipart_initialized() const override { return true; }
+    ss::sstring upload_id() const override { return "hanging"; }
+
+private:
+    // A coroutine that suspends on an external promise, mirroring a real
+    // backend op whose suspended frame holds only a raw `this` to the state --
+    // so the deadline's keep-alive is the only thing keeping the state alive
+    // once the op is abandoned.
+    ss::future<> gate(hang_on op) {
+        if (op == _hang_on) {
+            co_await _hang->get_future();
+        }
+    }
+
+    hang_on _hang_on;
+    ss::lw_shared_ptr<ss::promise<>> _hang;
+    ss::lw_shared_ptr<bool> _destroyed;
+};
+} // namespace
 
 SEASTAR_THREAD_TEST_CASE(test_multipart_upload_basic) {
     s3_imposter_fixture imposter;
@@ -398,4 +456,138 @@ SEASTAR_THREAD_TEST_CASE(test_multipart_upload_put_after_complete_is_noop) {
     upload->abort().get();
 
     BOOST_CHECK_EQUAL(imposter.get_requests().size(), requests_after_complete);
+}
+
+// When an op deadline is set, a stalled backend op (here, upload_part that
+// never resolves) must fail the call rather than hang forever -- this is what
+// unblocks reconciler shutdown in CORE-16648. The upload must then still
+// finalize and destruct cleanly (no dtor vassert, no use-after-free from the
+// abandoned op).
+// The deadline fires when a backend op stalls, so put() fails instead of
+// blocking forever.
+SEASTAR_THREAD_TEST_CASE(test_multipart_upload_op_deadline_fires) {
+    auto hang = ss::make_lw_shared<ss::promise<>>();
+    auto destroyed = ss::make_lw_shared<bool>(false);
+    auto state = ss::make_shared<hanging_multipart_state>(
+      hanging_multipart_state::hang_on::upload_part, hang, destroyed);
+    auto upload = ss::make_shared<multipart_upload>(
+      state, test_part_size, test_log);
+    upload->set_op_timeout(std::chrono::milliseconds(100));
+
+    // 6 MiB triggers a part upload, which hangs.
+    auto data = ::tests::random_iobuf(6_MiB);
+    BOOST_CHECK_THROW(upload->put(std::move(data)).get(), ss::timed_out_error);
+
+    // The upload still finalizes cleanly via abort() (its backend abort does
+    // not hang), so the destructor's finalized invariant holds.
+    upload->abort().get();
+
+    hang->set_value();
+    ss::yield().get();
+}
+
+// The key safety property: an op abandoned by the deadline keeps its backend
+// state alive (via the keep-alive in with_op_deadline), so it cannot
+// use-after-free even after every caller-visible handle is dropped. In
+// production the op is never released -- the stalled connection is force-closed
+// at shutdown -- so this exercises the path the original (manual-release) test
+// could not.
+SEASTAR_THREAD_TEST_CASE(test_multipart_upload_op_deadline_keeps_state_alive) {
+    auto hang = ss::make_lw_shared<ss::promise<>>();
+    auto destroyed = ss::make_lw_shared<bool>(false);
+    auto state = ss::make_shared<hanging_multipart_state>(
+      hanging_multipart_state::hang_on::upload_part, hang, destroyed);
+    auto upload = ss::make_shared<multipart_upload>(
+      state, test_part_size, test_log);
+    upload->set_op_timeout(std::chrono::milliseconds(100));
+
+    BOOST_CHECK_THROW(
+      upload->put(::tests::random_iobuf(6_MiB)).get(), ss::timed_out_error);
+    upload->abort().get();
+
+    // Drop every external reference. The abandoned upload_part is still
+    // suspended; only the deadline's keep-alive references the state now, so it
+    // must not have been destroyed.
+    state = {};
+    upload = {};
+    BOOST_CHECK(!*destroyed);
+
+    // Releasing the stuck op (the production analogue is the force-closed
+    // connection erroring it) drops the keep-alive and frees the state.
+    hang->set_value();
+    ss::yield().get();
+}
+
+// The cleanup abort is itself deadline-bounded and best-effort: a stalled abort
+// must not throw, so the worst-case shutdown drain (a stalled op plus its
+// cleanup abort) stays bounded.
+SEASTAR_THREAD_TEST_CASE(test_multipart_upload_op_deadline_bounds_abort) {
+    auto hang = ss::make_lw_shared<ss::promise<>>();
+    auto destroyed = ss::make_lw_shared<bool>(false);
+    auto state = ss::make_shared<hanging_multipart_state>(
+      hanging_multipart_state::hang_on::abort, hang, destroyed);
+    auto upload = ss::make_shared<multipart_upload>(
+      state, test_part_size, test_log);
+    upload->set_op_timeout(std::chrono::milliseconds(100));
+
+    // Initialize the multipart upload (the part upload completes promptly).
+    upload->put(::tests::random_iobuf(6_MiB)).get();
+
+    // abort()'s backend op hangs; the deadline bounds it and abort() swallows
+    // the timeout rather than propagating it.
+    upload->abort().get();
+    BOOST_CHECK(upload->is_finalized());
+
+    hang->set_value();
+    ss::yield().get();
+}
+
+// complete() marks the upload finalized before issuing its backend op, so a
+// deadline-failed completion still leaves the upload finalized -- the
+// destructor invariant holds without a follow-up abort.
+SEASTAR_THREAD_TEST_CASE(test_multipart_upload_op_deadline_bounds_complete) {
+    auto hang = ss::make_lw_shared<ss::promise<>>();
+    auto destroyed = ss::make_lw_shared<bool>(false);
+    auto state = ss::make_shared<hanging_multipart_state>(
+      hanging_multipart_state::hang_on::complete, hang, destroyed);
+    auto upload = ss::make_shared<multipart_upload>(
+      state, test_part_size, test_log);
+    upload->set_op_timeout(std::chrono::milliseconds(100));
+
+    // Upload one full part (completes promptly), then complete(), whose backend
+    // completion op hangs.
+    upload->put(::tests::random_iobuf(6_MiB)).get();
+    BOOST_CHECK_THROW(upload->complete().get(), ss::timed_out_error);
+    BOOST_CHECK(upload->is_finalized());
+
+    hang->set_value();
+    ss::yield().get();
+}
+
+// An abort source bounds the wait too: on shutdown the caller stops waiting
+// promptly (rather than draining the deadline) while the keep-alive still holds
+// the state for the abandoned op.
+SEASTAR_THREAD_TEST_CASE(test_multipart_upload_op_deadline_aborts) {
+    ss::abort_source as;
+    auto hang = ss::make_lw_shared<ss::promise<>>();
+    auto destroyed = ss::make_lw_shared<bool>(false);
+    auto state = ss::make_shared<hanging_multipart_state>(
+      hanging_multipart_state::hang_on::upload_part, hang, destroyed);
+    auto upload = ss::make_shared<multipart_upload>(
+      state, test_part_size, test_log);
+    // Long deadline, so abort -- not the deadline -- is what ends the wait.
+    upload->set_op_timeout(std::chrono::seconds(5), &as);
+
+    auto put_fut = upload->put(::tests::random_iobuf(6_MiB));
+    as.request_abort();
+    BOOST_CHECK_THROW(put_fut.get(), ss::abort_requested_exception);
+    upload->abort().get();
+
+    // The abandoned upload_part still holds the state via the keep-alive.
+    state = {};
+    upload = {};
+    BOOST_CHECK(!*destroyed);
+
+    hang->set_value();
+    ss::yield().get();
 }

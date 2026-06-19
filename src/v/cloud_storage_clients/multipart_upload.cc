@@ -14,6 +14,9 @@
 #include "base/vlog.h"
 #include "ssx/future-util.h"
 
+#include <seastar/core/lowres_clock.hh>
+#include <seastar/core/shared_future.hh>
+#include <seastar/core/with_timeout.hh>
 #include <seastar/coroutine/as_future.hh>
 #include <seastar/coroutine/exception.hh>
 
@@ -57,6 +60,32 @@ multipart_upload::multipart_upload(
   , _part_size(part_size)
   , _logger(logger) {}
 
+ss::future<> multipart_upload::with_op_deadline(ss::future<> op) {
+    if (!_op_timeout.has_value()) {
+        return op;
+    }
+    // The wait below stops at the deadline (or on abort) but does not keep the
+    // abandoned op alive, and the op still references _state -- so without a
+    // keep-alive an op we stop waiting on could be freed (along with its state
+    // and leased connection) while still in flight and use-after-free.
+    //
+    // Wrap the op in a shared_future observed by two continuations: the
+    // caller's bounded wait, and a detached, self-retaining keep-alive that
+    // holds a _state reference until the op resolves. It thus outlives this
+    // call regardless of the deadline or abort.
+    auto shared = ss::make_lw_shared<ss::shared_future<>>(std::move(op));
+    (void)shared->get_future().then_wrapped(
+      [shared, state = _state](ss::future<> f) { f.ignore_ready_future(); });
+    auto deadline = ss::lowres_clock::now() + *_op_timeout;
+    // When an abort source is set, observe it so shutdown stops the wait
+    // promptly instead of draining the full deadline per stalled op.
+    if (_op_as != nullptr) {
+        return ssx::with_timeout_abortable(
+          shared->get_future(), deadline, *_op_as);
+    }
+    return ss::with_timeout(deadline, shared->get_future());
+}
+
 multipart_upload::~multipart_upload() {
     vassert(
       _finalized || !_multipart_initialized,
@@ -92,7 +121,7 @@ ss::future<> multipart_upload::put(iobuf data) {
               _logger.debug,
               "Initializing multipart upload for first part (size: {})",
               _part_size);
-            co_await _state->initialize_multipart();
+            co_await with_op_deadline(_state->initialize_multipart());
             _multipart_initialized = true;
         }
 
@@ -101,7 +130,8 @@ ss::future<> multipart_upload::put(iobuf data) {
           "Uploading part {} (size: {})",
           _part_number,
           part_data.size_bytes());
-        co_await _state->upload_part(_part_number++, std::move(part_data));
+        co_await with_op_deadline(
+          _state->upload_part(_part_number++, std::move(part_data)));
     }
 }
 
@@ -119,7 +149,8 @@ ss::future<> multipart_upload::complete() {
           _logger.debug,
           "Small file optimization: using single put_object (size: {})",
           _buffer.size_bytes());
-        co_await _state->upload_as_single_object(std::move(_buffer));
+        co_await with_op_deadline(
+          _state->upload_as_single_object(std::move(_buffer)));
         co_return;
     }
 
@@ -130,8 +161,8 @@ ss::future<> multipart_upload::complete() {
           "Uploading final part {} (size: {})",
           _part_number,
           _buffer.size_bytes());
-        auto fut = co_await ss::coroutine::as_future(
-          _state->upload_part(_part_number++, std::move(_buffer)));
+        auto fut = co_await ss::coroutine::as_future(with_op_deadline(
+          _state->upload_part(_part_number++, std::move(_buffer))));
         if (fut.failed()) {
             auto ex = fut.get_exception();
             vlogl(
@@ -150,7 +181,7 @@ ss::future<> multipart_upload::complete() {
       "Completing multipart upload ({} parts)",
       _part_number - 1);
     auto fut = co_await ss::coroutine::as_future(
-      _state->complete_multipart_upload());
+      with_op_deadline(_state->complete_multipart_upload()));
     if (fut.failed()) {
         auto ex = fut.get_exception();
         vlogl(
@@ -179,7 +210,7 @@ ss::future<> multipart_upload::abort() {
 
     vlog(_logger.debug, "Aborting multipart upload");
     try {
-        co_await _state->abort_multipart_upload();
+        co_await with_op_deadline(_state->abort_multipart_upload());
     } catch (...) {
         // Log but don't propagate abort failures - we're already aborting
         vlog(
@@ -191,7 +222,7 @@ ss::future<> multipart_upload::abort() {
 
 ss::future<> multipart_upload::abort_on_error() {
     auto fut = co_await ss::coroutine::as_future(
-      _state->abort_multipart_upload());
+      with_op_deadline(_state->abort_multipart_upload()));
     if (fut.failed()) {
         vlog(
           _logger.warn,

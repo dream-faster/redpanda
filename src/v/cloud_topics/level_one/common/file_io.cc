@@ -284,6 +284,18 @@ ss::future<std::expected<cloud_storage_clients::multipart_upload_ref, io::errc>>
 file_io::create_multipart_upload(
   object_id oid, size_t part_size, ss::abort_source* as) {
     static constexpr auto timeout = 10s;
+    // Per-operation deadline (and abort source) for the multipart upload's
+    // parts/complete/abort. The multipart backend API is otherwise unbounded
+    // (its HTTP timeout covers only connect), so a part send stalled on a
+    // saturated connection never completes and blocks reconciler shutdown
+    // (CORE-16648). Abort cannot wake the stalled send (a parked TLS connection
+    // is not woken by teardown), but on shutdown it stops the wait promptly so
+    // the reconciler need not drain the deadline per stalled op; the deadline
+    // bounds a stall with no abort. On expiry or abort the op fails through the
+    // normal error path. Tradeoff: a slow-but-healthy part exceeding the
+    // deadline also fails and retries -- 10s is generous for one part and
+    // matches file_io's other object-store ops.
+    static constexpr auto op_timeout = 10s;
     auto key = object_path_factory::level_one_path(oid);
     auto result_fut = co_await ss::coroutine::as_future(
       _remote->initiate_multipart_upload(_bucket, key, part_size, timeout));
@@ -301,6 +313,7 @@ file_io::create_multipart_upload(
           result.error());
         co_return std::unexpected(io::errc::cloud_op_error);
     }
+    result.value()->set_op_timeout(op_timeout, as);
     co_return std::move(result.value());
 }
 

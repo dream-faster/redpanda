@@ -15,12 +15,15 @@
 #include "bytes/iobuf.h"
 #include "cloud_storage_clients/types.h"
 
+#include <seastar/core/abort_source.hh>
 #include <seastar/core/future.hh>
 #include <seastar/core/iostream.hh>
+#include <seastar/core/lowres_clock.hh>
 #include <seastar/core/shared_ptr.hh>
 #include <seastar/util/log.hh>
 
 #include <memory>
+#include <optional>
 
 namespace cloud_storage_clients {
 
@@ -174,9 +177,35 @@ public:
     /// \return Output stream for writing data
     [[nodiscard]] ss::output_stream<char> as_stream();
 
+    /// Bound each backend operation (initialize/upload_part/complete/abort) by
+    /// a deadline, and optionally an abort source.
+    ///
+    /// The multipart backend API is otherwise unbounded: its HTTP timeout
+    /// covers only connection establishment, not the body send or response
+    /// read, so a stalled upload (e.g. a part send parked on a saturated
+    /// connection) never completes and blocks the caller's shutdown. Callers
+    /// whose lifetime cannot tolerate that (the cloud_topics reconciler) set a
+    /// deadline and pass their abort source: the deadline bounds a stall, and
+    /// the abort source stops the wait promptly on shutdown. On expiry or abort
+    /// the op fails through the normal error path. Abort cannot wake the
+    /// stalled send (a parked TLS connection is not woken by teardown), but the
+    /// caller stops waiting on it; the abandoned op is kept alive (it pins its
+    /// state and leased connection) until it resolves, so abandonment cannot
+    /// use-after-free.
+    ///
+    /// Unset by default, so tiered-storage callers are unchanged.
+    void set_op_timeout(
+      ss::lowres_clock::duration timeout, ss::abort_source* as = nullptr) {
+        _op_timeout = timeout;
+        _op_as = as;
+    }
+
 private:
     /// Best-effort abort after a failure during complete()
     ss::future<> abort_on_error();
+
+    /// Wrap a backend op in the configured deadline (no-op if unset).
+    ss::future<> with_op_deadline(ss::future<> op);
 
     ss::shared_ptr<multipart_upload_state> _state;
     size_t _part_size;
@@ -185,6 +214,8 @@ private:
     size_t _part_number{1};
     bool _multipart_initialized{false};
     bool _finalized{false};
+    std::optional<ss::lowres_clock::duration> _op_timeout;
+    ss::abort_source* _op_as{nullptr};
 };
 
 } // namespace cloud_storage_clients
