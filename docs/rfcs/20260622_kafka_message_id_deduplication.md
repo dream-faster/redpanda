@@ -195,6 +195,123 @@ On leadership change:
 2. It rejects or stalls produce requests until the dedup table is ready.
 3. It then serves lookups locally. No quorum read is needed because the Raft log is the source of truth.
 
+
+## Cluster-correct implementation plan
+
+The produce-path prototype is not sufficient for clustered Redpanda because an in-memory, `thread_local` table on the current leader is not part of the partition's replicated state. The cluster-correct implementation must make the deduplication index a deterministic, partition-owned state machine whose source of truth is the Raft log.
+
+### Phase 0: Remove the unsafe prototype behavior
+
+- Do not enable deduplication from a process-local global or `thread_local` table.
+- Keep header parsing and batch-filtering helpers only if they are moved behind topic-level enablement and wired to partition-owned replicated state.
+- Add a feature flag/version gate so no topic can enable message-ID deduplication until every broker understands the metadata batch format and recovery rules.
+
+### Phase 1: Define replicated deduplication metadata
+
+Add a versioned internal metadata record for every accepted message ID:
+
+- topic/partition identity is implicit from the log receiving the metadata;
+- message ID bytes;
+- accepted record offset;
+- append timestamp used for window expiry;
+- optional producer identity and sequence information for diagnostics;
+- metadata schema version.
+
+Encode this metadata as either:
+
+1. a new data-partition internal batch type that is included in `offset_translator_batch_types()`, so it is replicated but not exposed to Kafka consumers; or
+2. a command in a partition STM dedicated to message-ID deduplication.
+
+The preferred path is a partition STM because it gives a natural place for apply, snapshot, recovery, and leadership readiness logic. The STM should still write compact metadata batches to the partition log so followers and future leaders can rebuild the same dedup table.
+
+### Phase 2: Add a partition-owned deduplication STM
+
+Create `cluster::message_id_dedup_stm` with the following responsibilities:
+
+- maintain an in-memory lookup table keyed by exact message ID bytes;
+- maintain an expiry queue ordered by append timestamp plus configured window;
+- apply replicated accepted-ID commands in log order on leaders and followers;
+- expose `is_duplicate(id)`, `filter_records(batch)`, and `prepare_append_metadata(ids)` APIs to the produce path;
+- snapshot live entries and the last applied offset;
+- reject or stall produce requests until recovery has loaded the snapshot and replayed through the committed log end.
+
+The STM must be owned by the partition, not by the Kafka request handler. This keeps the state on the shard that owns the partition and lets leadership transfer use the same recovery path as other replicated partition state.
+
+### Phase 3: Make append and dedup metadata atomic
+
+The leader must never append user records without also making their message IDs recoverable. Use one of these atomicity strategies:
+
+- append a single Raft replicate batch group that contains filtered user data and the dedup metadata command;
+- or have the STM replicate a command that includes both the accepted IDs and the offsets assigned by the append path;
+- or append user data first but delay produce success until the dedup metadata has also been durably replicated, with recovery code able to repair any committed data that lacks metadata.
+
+The first option is preferred: the same Raft operation should commit the filtered records and the corresponding accepted-ID metadata. If that is not possible with the current append API, introduce a partition-level append method that accepts a vector of batches and returns one combined replication result.
+
+### Phase 4: Rebuild state on followers, restart, and leadership transfer
+
+Follower apply must insert accepted IDs into the STM as metadata commands are replayed. Restart recovery must:
+
+1. load the latest dedup snapshot;
+2. drop snapshot entries already outside the current deduplication window;
+3. replay subsequent metadata commands from the log;
+4. prune by append timestamp;
+5. mark the STM ready only after replay reaches the partition's committed offset.
+
+Leadership transfer must gate produce requests on `message_id_dedup_stm::is_ready()`. Until ready, the leader should return a retriable error or wait within the produce timeout. Once ready, duplicate checks are local and require no cross-node request because Raft log replay has synchronized the state.
+
+### Phase 5: Wire topic-level configuration
+
+Add topic properties for:
+
+- `redpanda.message.id.deduplication.enabled`;
+- `redpanda.message.id.header`, defaulting to `Redpanda-Msg-Id` but allowing `Nats-Msg-Id`;
+- `redpanda.message.id.deduplication.window.ms`, defaulting to `120000`;
+- `redpanda.message.id.max.bytes`;
+- optional per-partition memory/entry caps.
+
+Configuration is stored in cluster metadata and applied to partitions through the existing topic-property update path. The STM should observe config changes and prune immediately when the window shrinks. Increasing the window should only apply to entries that are still recoverable from metadata and snapshots; otherwise the effective increase begins from the config-change point.
+
+### Phase 6: Integrate with the Kafka produce path
+
+The Kafka handler should remain mostly stateless:
+
+1. Validate the request and schema as it does today.
+2. Route to the leader shard.
+3. Ask the partition-owned STM to filter the batch using the configured header.
+4. If every record is duplicate, return a successful ProduceResponse using the original accepted offset retained by the STM.
+5. If any records are novel, append filtered user batches plus dedup metadata atomically.
+6. Return success only after the required acknowledgement level is satisfied.
+
+All duplicate decisions must come from the STM, never from a request-handler-global table.
+
+### Phase 7: Correctness tests for clustered behavior
+
+Add tests that fail against the prototype and pass with the replicated design:
+
+- duplicate suppressed on the same leader;
+- duplicate suppressed after leadership transfer;
+- duplicate suppressed after broker restart inside the window;
+- duplicate suppressed after partition movement/reallocation;
+- duplicate allowed after the deduplication window expires;
+- follower promotion waits for dedup STM readiness before accepting produce;
+- mixed batches preserve Kafka offset, timestamp, transaction, and idempotent-producer invariants;
+- transactional append plus dedup metadata is atomic across commit and abort paths;
+- old brokers reject enabling the topic property during rolling upgrade;
+- memory caps produce deterministic errors or backpressure without corrupting STM state.
+
+### Phase 8: Observability and operations
+
+Expose per-partition metrics from the STM:
+
+- tracked ID count and estimated memory;
+- duplicate lookup hits/misses;
+- IDs pruned by time and by memory pressure;
+- snapshot read/write latency;
+- replay duration and readiness state;
+- rejected records due to malformed or oversized IDs.
+
+Add an Admin API diagnostic endpoint to inspect aggregate state for a topic partition and optionally check whether a specific message ID is currently live in the dedup window.
+
 # Drawbacks
 
 - Memory can grow quickly for high-throughput topics with long windows.
