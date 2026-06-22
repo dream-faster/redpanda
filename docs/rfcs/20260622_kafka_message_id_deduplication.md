@@ -1,0 +1,233 @@
+- Feature Name: Kafka message ID based deduplication
+- Status: draft
+- Start Date: 2026-06-22
+- Authors: Redpanda
+- Issue: TBD
+
+# Executive Summary
+
+Add optional producer-side duplicate suppression for Kafka records using a client supplied message ID and a per-topic deduplication window. The behavior matches the default JetStream model: the first accepted record for a message ID is stored, retries with the same message ID during the configured window are acknowledged as duplicates without appending another record, and the comparison is based only on the message ID rather than the record value or headers.
+
+## What is being proposed
+
+Redpanda will recognize a configured Kafka record header as a message ID, keep a replicated time-bounded index of recently accepted IDs per partition, and consult that index on the partition leader before appending produce records. If a record's ID is already present and still within the deduplication window, the broker returns success for that record but does not append it again. Records without the configured header continue through the current produce path unchanged.
+
+## Why (short reason)
+
+Kafka idempotent producers prevent duplicates for a single producer session and sequence number stream, but they do not cover application-level retry keys that survive producer restarts, multiple producers, or cross-service retry orchestration. A message-ID window gives users the same practical publishing primitive as NATS JetStream's `Nats-Msg-Id`: make retries safe by reusing a deterministic ID.
+
+## How (short plan)
+
+Implement this as a Raft-replicated partition feature. The leader parses configured message-ID headers from produce batches, performs in-memory lookups against a dedup table reconstructed from the partition log plus snapshots, appends only novel records, and records enough metadata in the replicated log to rebuild the dedup table after leadership changes, restarts, and recovery. The table is pruned by record timestamp/append timestamp and the configured window.
+
+## Impact
+
+The feature is opt-in and scoped per topic. It adds CPU for header parsing and hash lookups, memory proportional to publish rate times the deduplication window, and a small amount of replicated metadata. It changes produce acknowledgements only for records that carry the configured message-ID header and duplicate a still-live ID: those requests will succeed without increasing the partition's log end offset. Consumers see only the first accepted record, exactly as they would with JetStream duplicate suppression.
+
+# Motivation
+
+## Why are we doing this?
+
+NATS JetStream supports idempotent publication by letting publishers set a `Nats-Msg-Id` header. JetStream tracks IDs in a duplicate window, whose default is two minutes, and rejects duplicate storage based only on that ID, not on payload equality. NATS documentation describes this as a sliding-window stream property, with `DuplicateWindow` controlling how long IDs are tracked. This feature gives Kafka users a comparable application-level idempotency primitive in Redpanda.
+
+Research notes:
+
+- JetStream duplicate suppression is triggered by the `Nats-Msg-Id` publish header.
+- JetStream consults only the message ID; a retry with the same ID and different body is still a duplicate.
+- JetStream's default duplicate tracking window is two minutes and can be configured per stream.
+- Operationally, the server retains an ID-to-sequence mapping in memory for the window, so memory grows with publish rate times window duration.
+
+Sources: [NATS JetStream model deep dive](https://docs.nats.io/using-nats/developer/develop_jetstream/model_deep_dive), [NATS stream configuration](https://docs.nats.io/nats-concepts/jetstream/streams), [NATS JetStream headers](https://docs.nats.io/nats-concepts/jetstream/headers), and [Synadia large deduplication window note](https://www.synadia.com/insights/checks/nats-large-deduplication-window).
+
+## What use cases does it support?
+
+- A producer times out after a successful append and retries with the same deterministic message ID.
+- A producer process restarts and loses Kafka idempotent producer state, but its business event still has a stable event ID.
+- Multiple active producers race to publish the same business event and use a shared event ID.
+- An upstream workflow engine retries a step after failover and must avoid creating duplicate Kafka records.
+
+## What is the expected outcome?
+
+For enabled topics, users can publish records with a configured message-ID header and rely on Redpanda to store at most one record with that ID within the deduplication window for the target partition. The feature should continue to work across leadership transfer, node restart, follower promotion, partition movement, and cluster upgrades.
+
+# Guide-level explanation
+
+## How do we teach this?
+
+Deduplication is a topic-level produce option. Users choose:
+
+- `redpanda.message.id.deduplication.enabled=true`
+- `redpanda.message.id.header=<header-name>`; default proposal: `Redpanda-Msg-Id`
+- `redpanda.message.id.deduplication.window.ms=<duration>`; default proposal: `120000`
+- optional limits for maximum ID length and maximum tracked IDs per partition
+
+When enabled, producers attach a stable ID to each record that needs retry protection:
+
+```text
+headers = {
+  "Redpanda-Msg-Id": "order-2026-06-22-000123"
+}
+```
+
+The first produce request that reaches the partition leader and passes validation is appended. Any later produce request to the same partition with the same ID during the deduplication window is acknowledged successfully but not appended. Consumers therefore see the first record only. If the second produce has a different value, timestamp, or other headers, those fields do not matter; the ID alone controls duplicate detection.
+
+The deduplication boundary is the Kafka partition. This matches Kafka ordering and routing semantics: a message ID is unique only among records produced to the same topic partition. If an application needs global topic-level deduplication, it must ensure records with the same ID use the same partitioning key or explicit partition.
+
+A duplicate response should be observable but protocol-compatible. The Kafka ProduceResponse has no standard per-record duplicate marker, so Redpanda should return a normal successful partition response. Optional future surfacing can use broker logs, metrics, and an Admin API lookup rather than altering Kafka protocol behavior.
+
+# Reference-level explanation
+
+## Interaction with other features
+
+- Idempotent producers and transactions: message-ID deduplication runs after Kafka request validation and before append. It is complementary to producer ID/sequence validation. For transactional records, duplicates are suppressed within the transaction append path, and duplicate metadata is committed atomically with the transaction's replicated batches.
+- Compaction and retention: the dedup index is independent of data retention. IDs expire by the deduplication window even if the original record remains in the log; IDs may also be unavailable before the window if an operator lowers the window and triggers pruning.
+- Tiered storage and recovery: recovery must not depend on scanning remote segments on every startup. The implementation should persist compact dedup snapshots locally and in Raft snapshots so a promoted replica can rebuild recent IDs without remote-log reads.
+- Schema Registry, transforms, and consumers: unchanged, because duplicate records are never appended.
+- MirrorMaker and cluster linking: deduplication applies to produce requests received by a Redpanda leader. Replicated records that already lack duplicates do not require special consumer-side behavior.
+
+## Telemetry & Observability
+
+Expose per-topic-partition metrics:
+
+- deduplication enabled flag and configured window
+- current tracked ID count and estimated bytes
+- lookup count, hit count, miss count, and hit ratio
+- evicted ID count by age and by capacity pressure
+- rejected records due to malformed ID, ID too large, or limits
+- dedup snapshot write/read latency and failures
+- leadership recovery rebuild time and recovered ID count
+
+Add debug/admin surfaces:
+
+- `rpk topic describe` should show deduplication config.
+- Admin API partition status should include tracked ID count, oldest tracked timestamp, newest tracked timestamp, and last snapshot offset.
+- Optional diagnostic endpoint can check whether a message ID is currently tracked for a topic partition without exposing the full table by default.
+
+## Corner cases dissected by example
+
+- Same ID, same partition, within window: append the first record; acknowledge but skip subsequent records.
+- Same ID, same partition, after window: append again, because the ID expired.
+- Same ID, different partition: append independently on each partition.
+- Same ID, different payload: treat as duplicate if the ID is still tracked.
+- Missing header: append normally and do not add to the dedup table.
+- Multiple message-ID headers on one record: reject the record with `INVALID_RECORD` or choose a documented first-value rule. The proposed safer behavior is reject, because ambiguous IDs make retries difficult to reason about.
+- Empty or oversized ID: reject with `INVALID_RECORD` and count a validation metric.
+- Batched records with duplicates inside the same produce request: append the first occurrence in batch order and suppress later occurrences.
+- Partial batch filtering: if only some records in a batch are duplicates, the broker must rewrite the record batch or split it so offsets, CRCs, and record counts remain valid.
+- Leader change between original produce and retry: the new leader rebuilds the dedup table from replicated metadata before accepting writes, so the retry is suppressed.
+- Clock skew: use broker append time or log offset ordering for expiration, not producer wall-clock time alone.
+- Window config changes: increasing the window only affects records from the change point forward unless retained metadata is sufficient; decreasing the window prunes immediately after the config is applied.
+
+## Detailed design - What needs to change to get there
+
+1. Product/API definition
+   - Define topic properties for enablement, header name, window duration, max ID length, and max tracked IDs/bytes.
+   - Decide default header name. Prefer a Redpanda-specific default while documenting how users can configure `Nats-Msg-Id` for migration-like workflows.
+   - Define duplicate acknowledgement semantics as successful produce without append.
+
+2. Kafka request parsing
+   - Extend the produce path to scan record headers only when deduplication is enabled for the target topic.
+   - Extract exactly one message ID per record and validate size/encoding.
+   - Preserve the fast path for disabled topics and records without the header.
+
+3. Partition-local dedup index
+   - Add an in-memory index keyed by message ID hash plus collision-safe stored bytes.
+   - Store first accepted offset, append timestamp, and expiry timestamp.
+   - Maintain an expiry queue ordered by expiry timestamp for efficient pruning.
+   - Account memory against partition resources and expose backpressure/rejection behavior when limits are exceeded.
+
+4. Replicated metadata
+   - Append dedup metadata in the same Raft operation as accepted user records, or encode the message ID in a deterministic sidecar batch adjacent to the data batch.
+   - Ensure followers apply the same ID additions in log order.
+   - For duplicates, do not append a user record. A separate duplicate marker is not required unless needed for auditing; metrics on the leader are sufficient.
+
+5. Batch rewrite path
+   - Implement record-batch filtering for mixed novel/duplicate records.
+   - Recompute record offsets, batch count, CRC, timestamps, and attributes correctly.
+   - Preserve transactional and idempotent-producer invariants.
+
+6. Snapshot and recovery
+   - Include live dedup entries in partition snapshots or a local persistent snapshot tied to a committed offset.
+   - On startup or leadership acquisition, load the latest snapshot and replay subsequent log entries to reconstruct the table before writes are accepted.
+   - Validate snapshot staleness against the current window and append timestamps.
+
+7. Config propagation
+   - Store topic deduplication properties in cluster metadata.
+   - Make leaders update their partition dedup subsystem when topic configs change.
+   - Add validation to prevent unsafe values, such as unbounded windows without explicit memory caps.
+
+8. Tests
+   - Unit-test ID extraction, validation, hash collision handling, pruning, and batch rewriting.
+   - Integration-test duplicate suppression, expiry, intra-batch duplicates, leadership transfer, node restart, partition movement, transactions, idempotent producers, and config changes.
+   - Add ducktape tests with multi-broker clusters to prove cross-cluster behavior through failover and recovery.
+   - Add performance benchmarks for disabled path overhead, enabled path throughput, and memory growth.
+
+9. Documentation and rollout
+   - Document the feature as application-level produce deduplication, not exactly-once end-to-end processing.
+   - Warn that memory grows with publish rate multiplied by the window.
+   - Roll out behind a feature flag and require all brokers to support the feature before enabling it on topics.
+
+## Detailed design - How it works
+
+Each partition owns a `message_id_deduplicator` on the shard that owns the partition leader state. The deduplicator has two responsibilities: filtering incoming records and applying replicated additions from the log.
+
+On produce:
+
+1. The leader checks whether deduplication is enabled for the topic.
+2. If disabled, it uses the existing append path.
+3. If enabled, it iterates records and extracts the configured message-ID header.
+4. For each ID, the leader prunes expired entries, then checks the index.
+5. If no live entry exists, the record is retained for append and a pending dedup entry is associated with it.
+6. If a live entry exists, the record is removed from the append set and a duplicate metric is incremented.
+7. If all records are duplicates, the leader returns success without appending user data.
+8. If any records are novel, the leader appends filtered user batches plus replicated dedup metadata.
+9. Once the append is committed according to the request's required acknowledgements, the produce response is returned.
+
+On follower apply:
+
+1. The follower reads committed batches in log order.
+2. For each dedup metadata entry, it inserts the ID and offset/timestamp into its in-memory table.
+3. Expired entries are pruned using the same append-time basis.
+
+On leadership change:
+
+1. The replica waits until it has applied through its committed log end and loaded the latest dedup snapshot.
+2. It rejects or stalls produce requests until the dedup table is ready.
+3. It then serves lookups locally. No quorum read is needed because the Raft log is the source of truth.
+
+# Drawbacks
+
+- Memory can grow quickly for high-throughput topics with long windows.
+- Produce latency increases because the broker must parse headers and possibly rewrite batches.
+- Kafka clients cannot receive a standard duplicate marker in ProduceResponse.
+- Cross-partition deduplication is intentionally not provided, which may surprise users expecting topic-wide uniqueness.
+- Persisting and snapshotting the index adds recovery complexity.
+
+Mitigations include strict defaults, topic-level opt-in, memory caps, clear metrics, and documentation that mirrors JetStream's guidance against very large windows.
+
+# Rationale and Alternatives
+
+## Why this design?
+
+A partition-local, Raft-replicated dedup table aligns with Kafka's append and ordering model. It avoids introducing a global coordinator in the produce path, continues to work after failover, and makes correctness depend on the same replicated log that already controls partition state.
+
+## Alternatives considered
+
+- Client-only deduplication: cheaper for the broker but does not protect against producer restarts, multiple producers, or uncertain append outcomes.
+- Kafka idempotent producers only: already available but scoped to producer IDs and sequence numbers, not application message IDs.
+- Global topic-level deduplication service: offers stronger uniqueness but adds cross-partition coordination, availability tradeoffs, and significant latency.
+- Consumer-side deduplication: prevents duplicate effects only for consumers that implement it and still stores duplicate records.
+- Infinite deduplication: closer to JetStream's newer per-subject discard patterns, but it requires different retention semantics and can create unbounded state. This RFC targets the common sliding-window behavior first.
+
+## Impact of not doing this
+
+Users that need retry-safe application event publication must continue to build deduplication outside Redpanda or accept duplicates in Kafka topics. That increases operational complexity and makes Redpanda less attractive for workloads migrating from systems that provide server-side message-ID deduplication.
+
+# Unresolved questions
+
+- What exact header name should be the default?
+- Should duplicates be exposed through a Redpanda-specific produce response extension, logs only, or metrics only?
+- Should the dedup metadata be encoded in a new internal batch type or embedded in existing record-batch metadata?
+- What are the default and maximum allowed values for window duration, ID length, and memory usage?
+- How should duplicates inside aborted transactions be represented in the dedup table?
+- Can we avoid batch rewriting in v1 by requiring all records in a compressed batch to be either accepted or rejected, or is per-record filtering mandatory for user expectations?
