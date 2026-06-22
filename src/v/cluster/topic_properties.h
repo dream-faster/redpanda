@@ -35,7 +35,7 @@ namespace cluster {
  */
 struct topic_properties
   : serde::
-      envelope<topic_properties, serde::version<14>, serde::compat_version<0>> {
+      envelope<topic_properties, serde::version<15>, serde::compat_version<0>> {
     topic_properties() noexcept = default;
     topic_properties(
       std::optional<model::compression> compression,
@@ -247,6 +247,12 @@ struct topic_properties
     model::redpanda_storage_mode storage_mode{
       storage::ntp_config::default_storage_mode};
 
+    // Windowed last-wins deduplication by record key. Within the window
+    // (measured from the maximum in-log record timestamp), only the record
+    // with the highest offset per key is retained. std::nullopt / disabled
+    // means dedup is off.
+    tristate<std::chrono::milliseconds> dedup_window_ms{disable_tristate};
+
     bool is_local_topic() const;
 
     bool is_cloud_topic() const {
@@ -329,11 +335,12 @@ struct topic_properties
           message_timestamp_before_max_ms,
           message_timestamp_after_max_ms,
           storage_mode,
-          schema_registry_context);
+          schema_registry_context,
+          dedup_window_ms);
     }
 
-    friend bool
-    operator==(const topic_properties&, const topic_properties&) = default;
+    friend bool operator==(const topic_properties&, const topic_properties&)
+      = default;
 
 private:
     // This was deprecated in favour of redpanda.storage.mode, but is kept here

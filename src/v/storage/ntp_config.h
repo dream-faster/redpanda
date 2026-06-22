@@ -96,6 +96,10 @@ public:
         // Storage mode for the topic (local, tiered, or cloud)
         model::redpanda_storage_mode storage_mode{default_storage_mode};
 
+        // Windowed last-wins deduplication by record key. std::nullopt means
+        // dedup is disabled (the default).
+        tristate<std::chrono::milliseconds> dedup_window_ms{std::nullopt};
+
         fmt::iterator format_to(fmt::iterator it) const;
     };
 
@@ -476,6 +480,18 @@ public:
             return _overrides->max_compaction_lag_ms.value();
         }
         return config::shard_local_cfg().max_compaction_lag_ms();
+    }
+
+    std::optional<std::chrono::milliseconds> dedup_window_ms() const {
+        if (_overrides) {
+            if (_overrides->dedup_window_ms.is_disabled()) {
+                return std::nullopt;
+            }
+            if (_overrides->dedup_window_ms.has_optional_value()) {
+                return _overrides->dedup_window_ms.value();
+            }
+        }
+        return std::nullopt;
     }
 
     ntp_config copy() const {

@@ -266,6 +266,7 @@ topic_properties::get_ntp_cfg_overrides() const {
     ret.max_compaction_lag_ms = max_compaction_lag_ms;
     ret.remote_allow_gaps = remote_topic_allow_gaps;
     ret.storage_mode = storage_mode;
+    ret.dedup_window_ms = dedup_window_ms;
     return ret;
 }
 

@@ -84,8 +84,9 @@ struct allocate_id_request
     explicit allocate_id_request(model::timeout_clock::duration timeout)
       : timeout(timeout) {}
 
-    friend bool operator==(
-      const allocate_id_request&, const allocate_id_request&) = default;
+    friend bool
+    operator==(const allocate_id_request&, const allocate_id_request&)
+      = default;
     fmt::iterator format_to(fmt::iterator it) const {
         return fmt::format_to(it, "timeout: {}", timeout.count());
     }
@@ -105,8 +106,8 @@ struct allocate_id_reply
       : id(id)
       , ec(ec) {}
 
-    friend bool
-    operator==(const allocate_id_reply&, const allocate_id_reply&) = default;
+    friend bool operator==(const allocate_id_reply&, const allocate_id_reply&)
+      = default;
     fmt::iterator format_to(fmt::iterator it) const {
         return fmt::format_to(it, "id: {}, ec: {}", id, ec);
     }
@@ -130,8 +131,8 @@ struct reset_id_allocator_request
       , producer_id(producer_id) {}
 
     friend bool operator==(
-      const reset_id_allocator_request&,
-      const reset_id_allocator_request&) = default;
+      const reset_id_allocator_request&, const reset_id_allocator_request&)
+      = default;
     fmt::iterator format_to(fmt::iterator it) const {
         return fmt::format_to(
           it, "timeout: {}, producer_id: {}", timeout.count(), producer_id);
@@ -227,8 +228,8 @@ struct join_node_request
     // have its feature table initialized to this version.
     cluster_version earliest_logical_version{cluster::invalid_version};
 
-    friend bool
-    operator==(const join_node_request&, const join_node_request&) = default;
+    friend bool operator==(const join_node_request&, const join_node_request&)
+      = default;
     fmt::iterator format_to(fmt::iterator it) const {
         return fmt::format_to(
           it,
@@ -362,8 +363,9 @@ struct join_node_reply
         return *this;
     }
 
-    friend bool operator==(
-      const join_node_reply& lhs, const join_node_reply& rhs) = default;
+    friend bool
+    operator==(const join_node_reply& lhs, const join_node_reply& rhs)
+      = default;
     fmt::iterator format_to(fmt::iterator it) const {
         return fmt::format_to(
           it,
@@ -396,8 +398,8 @@ struct configuration_update_request
     model::node_id target_node;
 
     friend bool operator==(
-      const configuration_update_request&,
-      const configuration_update_request&) = default;
+      const configuration_update_request&, const configuration_update_request&)
+      = default;
 
     fmt::iterator format_to(fmt::iterator it) const;
 
@@ -416,8 +418,8 @@ struct configuration_update_reply
     bool success;
 
     friend bool operator==(
-      const configuration_update_reply&,
-      const configuration_update_reply&) = default;
+      const configuration_update_reply&, const configuration_update_reply&)
+      = default;
 
     fmt::iterator format_to(fmt::iterator it) const;
 
@@ -455,8 +457,8 @@ struct partition_bootstrap_params
     }
 
     friend bool operator==(
-      const partition_bootstrap_params&,
-      const partition_bootstrap_params&) = default;
+      const partition_bootstrap_params&, const partition_bootstrap_params&)
+      = default;
 
     fmt::iterator format_to(fmt::iterator it) const;
 };
@@ -507,8 +509,9 @@ struct partition_assignment
     auto serde_fields() { return std::tie(group, id, replicas); }
     fmt::iterator format_to(fmt::iterator it) const;
 
-    friend bool operator==(
-      const partition_assignment&, const partition_assignment&) = default;
+    friend bool
+    operator==(const partition_assignment&, const partition_assignment&)
+      = default;
 };
 
 enum class incremental_update_operation : int8_t { none, set, remove };
@@ -556,8 +559,8 @@ struct property_update
           incremental_update_operation_as_string(op));
     }
 
-    friend bool
-    operator==(const property_update<T>&, const property_update<T>&) = default;
+    friend bool operator==(const property_update<T>&, const property_update<T>&)
+      = default;
 };
 
 template<typename T>
@@ -567,7 +570,7 @@ struct property_update<tristate<T>>
       serde::version<0>,
       serde::compat_version<0>> {
     property_update()
-      : value(std::nullopt) {};
+      : value(std::nullopt){};
 
     property_update(tristate<T> v, incremental_update_operation op)
       : value(std::move(v))
@@ -585,14 +588,14 @@ struct property_update<tristate<T>>
     }
 
     friend bool operator==(
-      const property_update<tristate<T>>&,
-      const property_update<tristate<T>>&) = default;
+      const property_update<tristate<T>>&, const property_update<tristate<T>>&)
+      = default;
 };
 
 struct incremental_topic_updates
   : serde::envelope<
       incremental_topic_updates,
-      serde::version<11>,
+      serde::version<12>,
       serde::compat_version<0>> {
     static constexpr int8_t version_with_data_policy = -1;
     static constexpr int8_t version_with_shadow_indexing = -3;
@@ -687,6 +690,8 @@ struct incremental_topic_updates
     property_update<std::optional<pandaproxy::schema_registry::context>>
       schema_registry_context;
 
+    property_update<tristate<std::chrono::milliseconds>> dedup_window_ms;
+
     // Not a regular topic property. Used to assign topic UUIDs to pre-25-2
     // topics that were created without one.
     property_update<std::optional<model::topic_id>> topic_id;
@@ -750,14 +755,15 @@ struct incremental_topic_updates
           message_timestamp_after_max_ms,
           remote_label,
           storage_mode,
-          schema_registry_context);
+          schema_registry_context,
+          dedup_window_ms);
     }
 
     fmt::iterator format_to(fmt::iterator it) const;
 
     friend bool operator==(
-      const incremental_topic_updates&,
-      const incremental_topic_updates&) = default;
+      const incremental_topic_updates&, const incremental_topic_updates&)
+      = default;
 
 private:
     // This field is kept here for legacy purposes, but should be considered
@@ -789,7 +795,8 @@ struct incremental_topic_custom_updates
 
     friend bool operator==(
       const incremental_topic_custom_updates&,
-      const incremental_topic_custom_updates&) = default;
+      const incremental_topic_custom_updates&)
+      = default;
 
     auto serde_fields() { return std::tie(data_policy, replication_factor); }
 };
@@ -828,8 +835,9 @@ struct topic_properties_update
 
     fmt::iterator format_to(fmt::iterator it) const;
 
-    friend bool operator==(
-      const topic_properties_update&, const topic_properties_update&) = default;
+    friend bool
+    operator==(const topic_properties_update&, const topic_properties_update&)
+      = default;
 
     auto serde_fields() {
         return std::tie(tp_ns, properties, custom_properties);
@@ -850,7 +858,7 @@ struct custom_partition_assignment {
  */
 struct custom_assignable_topic_configuration {
     explicit custom_assignable_topic_configuration(topic_configuration cfg)
-      : cfg(std::move(cfg)) {};
+      : cfg(std::move(cfg)){};
 
     topic_configuration cfg;
     std::vector<custom_partition_assignment> custom_assignments;
@@ -888,7 +896,8 @@ struct create_partitions_configuration
 
     friend bool operator==(
       const create_partitions_configuration&,
-      const create_partitions_configuration&) = default;
+      const create_partitions_configuration&)
+      = default;
 
     auto serde_fields() {
         return std::tie(tp_ns, new_total_partition_count, custom_assignments);
@@ -913,9 +922,11 @@ struct configuration_with_assignment
     configuration_with_assignment(configuration_with_assignment&&) noexcept
       = default;
     configuration_with_assignment&
-    operator=(configuration_with_assignment&&) noexcept = default;
+    operator=(configuration_with_assignment&&) noexcept
+      = default;
     configuration_with_assignment&
-    operator=(const configuration_with_assignment&) = delete;
+    operator=(const configuration_with_assignment&)
+      = delete;
     ~configuration_with_assignment() = default;
     // we need to make the type copyable as it is being copied when dispatched
     // to remote shards
@@ -1083,8 +1094,9 @@ struct create_topics_request
     topic_configuration_vector topics;
     model::timeout_clock::duration timeout;
 
-    friend bool operator==(
-      const create_topics_request&, const create_topics_request&) = default;
+    friend bool
+    operator==(const create_topics_request&, const create_topics_request&)
+      = default;
 
     fmt::iterator format_to(fmt::iterator it) const;
 
@@ -1113,8 +1125,9 @@ struct create_topics_reply
       , metadata(std::move(metadata))
       , configs(std::move(configs)) {}
 
-    friend bool operator==(
-      const create_topics_reply&, const create_topics_reply&) = default;
+    friend bool
+    operator==(const create_topics_reply&, const create_topics_reply&)
+      = default;
 
     fmt::iterator format_to(fmt::iterator it) const;
 
@@ -1134,8 +1147,9 @@ struct purged_topic_request
     model::timeout_clock::duration timeout;
     topic_purge_domain domain = topic_purge_domain::cloud_storage;
 
-    friend bool operator==(
-      const purged_topic_request&, const purged_topic_request&) = default;
+    friend bool
+    operator==(const purged_topic_request&, const purged_topic_request&)
+      = default;
 
     fmt::iterator format_to(fmt::iterator it) const;
 
@@ -1153,8 +1167,8 @@ struct purged_topic_reply
     purged_topic_reply(topic_result r)
       : result(r) {}
 
-    friend bool
-    operator==(const purged_topic_reply&, const purged_topic_reply&) = default;
+    friend bool operator==(const purged_topic_reply&, const purged_topic_reply&)
+      = default;
 
     fmt::iterator format_to(fmt::iterator it) const;
 
@@ -1171,7 +1185,8 @@ struct finish_partition_update_request
 
     friend bool operator==(
       const finish_partition_update_request&,
-      const finish_partition_update_request&) = default;
+      const finish_partition_update_request&)
+      = default;
 
     auto serde_fields() { return std::tie(ntp, new_replica_set); }
 
@@ -1187,7 +1202,8 @@ struct finish_partition_update_reply
 
     friend bool operator==(
       const finish_partition_update_reply&,
-      const finish_partition_update_reply&) = default;
+      const finish_partition_update_reply&)
+      = default;
 
     auto serde_fields() { return std::tie(result); }
 
@@ -1205,7 +1221,8 @@ struct update_topic_properties_request
 
     friend bool operator==(
       const update_topic_properties_request&,
-      const update_topic_properties_request&) = default;
+      const update_topic_properties_request&)
+      = default;
 
     auto serde_fields() { return std::tie(updates); }
 
@@ -1226,7 +1243,8 @@ struct update_topic_properties_reply
     friend bool operator==(
       const update_topic_properties_reply&,
 
-      const update_topic_properties_reply&) = default;
+      const update_topic_properties_reply&)
+      = default;
 
     auto serde_fields() { return std::tie(results); }
 
@@ -1255,11 +1273,10 @@ public:
     explicit configuration_invariants_changed(
       const configuration_invariants& expected,
       const configuration_invariants& current)
-      : _msg(
-          ssx::sformat(
-            "Configuration invariants changed. Expected: {}, current: {}",
-            expected,
-            current)) {}
+      : _msg(ssx::sformat(
+          "Configuration invariants changed. Expected: {}, current: {}",
+          expected,
+          current)) {}
 
     const char* what() const noexcept final { return _msg.c_str(); }
 
@@ -1321,8 +1338,9 @@ struct shard_placement_target {
 
     fmt::iterator format_to(fmt::iterator it) const;
 
-    friend bool operator==(
-      const shard_placement_target&, const shard_placement_target&) = default;
+    friend bool
+    operator==(const shard_placement_target&, const shard_placement_target&)
+      = default;
 };
 
 /// Type of controller backend operation
@@ -1417,8 +1435,9 @@ struct replica_recovery_state
     size_t bytes_left;
     fmt::iterator format_to(fmt::iterator it) const;
 
-    friend bool operator==(
-      const replica_recovery_state&, const replica_recovery_state&) = default;
+    friend bool
+    operator==(const replica_recovery_state&, const replica_recovery_state&)
+      = default;
 
     auto serde_fields() { return std::tie(last_offset, bytes_left); }
 };
@@ -1432,8 +1451,8 @@ struct recovery_state
 
     fmt::iterator format_to(fmt::iterator it) const;
 
-    friend bool
-    operator==(const recovery_state&, const recovery_state&) = default;
+    friend bool operator==(const recovery_state&, const recovery_state&)
+      = default;
 
     auto serde_fields() {
         return std::tie(local_last_offset, replicas, local_size);
@@ -1454,8 +1473,8 @@ struct backend_operation
 
     fmt::iterator format_to(fmt::iterator it) const;
 
-    friend bool
-    operator==(const backend_operation&, const backend_operation&) = default;
+    friend bool operator==(const backend_operation&, const backend_operation&)
+      = default;
 
     auto serde_fields() {
         return std::tie(
@@ -1504,8 +1523,9 @@ struct cluster_property_kv
 
     auto serde_fields() { return std::tie(key, value); }
 
-    friend bool operator==(
-      const cluster_property_kv&, const cluster_property_kv&) = default;
+    friend bool
+    operator==(const cluster_property_kv&, const cluster_property_kv&)
+      = default;
     fmt::iterator format_to(fmt::iterator it) const;
 };
 
@@ -1520,7 +1540,8 @@ struct cluster_config_delta_cmd_data
 
     friend bool operator==(
       const cluster_config_delta_cmd_data&,
-      const cluster_config_delta_cmd_data&) = default;
+      const cluster_config_delta_cmd_data&)
+      = default;
 
     auto serde_fields() { return std::tie(upsert, remove); }
 
@@ -1536,7 +1557,8 @@ struct cluster_config_status_cmd_data
 
     friend bool operator==(
       const cluster_config_status_cmd_data&,
-      const cluster_config_status_cmd_data&) = default;
+      const cluster_config_status_cmd_data&)
+      = default;
 
     auto serde_fields() { return std::tie(status); }
 
@@ -1556,8 +1578,9 @@ struct feature_update_cmd_data
     cluster_version logical_version;
     std::vector<feature_update_action> actions;
 
-    friend bool operator==(
-      const feature_update_cmd_data&, const feature_update_cmd_data&) = default;
+    friend bool
+    operator==(const feature_update_cmd_data&, const feature_update_cmd_data&)
+      = default;
 
     auto serde_fields() { return std::tie(logical_version, actions); }
 
@@ -1594,7 +1617,8 @@ struct force_partition_reconfiguration_cmd_data
 
     friend bool operator==(
       const force_partition_reconfiguration_cmd_data&,
-      const force_partition_reconfiguration_cmd_data&) = default;
+      const force_partition_reconfiguration_cmd_data&)
+      = default;
 
     fmt::iterator format_to(fmt::iterator it) const;
 };
@@ -1632,7 +1656,8 @@ struct set_topic_partitions_disabled_cmd_data
 
     friend bool operator==(
       const set_topic_partitions_disabled_cmd_data&,
-      const set_topic_partitions_disabled_cmd_data&) = default;
+      const set_topic_partitions_disabled_cmd_data&)
+      = default;
 
     fmt::iterator format_to(fmt::iterator it) const;
 };
@@ -1658,8 +1683,8 @@ struct cluster_recovery_init_state
       serde::version<0>,
       serde::compat_version<0>> {
     friend bool operator==(
-      const cluster_recovery_init_state&,
-      const cluster_recovery_init_state&) = default;
+      const cluster_recovery_init_state&, const cluster_recovery_init_state&)
+      = default;
 
     auto serde_fields() { return std::tie(manifest, bucket); }
 
@@ -1677,8 +1702,8 @@ struct bootstrap_cluster_cmd_data
       serde::version<3>,
       serde::compat_version<0>> {
     friend bool operator==(
-      const bootstrap_cluster_cmd_data&,
-      const bootstrap_cluster_cmd_data&) = default;
+      const bootstrap_cluster_cmd_data&, const bootstrap_cluster_cmd_data&)
+      = default;
 
     auto serde_fields() {
         return std::tie(
@@ -1711,7 +1736,8 @@ struct cluster_recovery_init_cmd_data
       serde::compat_version<0>> {
     friend bool operator==(
       const cluster_recovery_init_cmd_data&,
-      const cluster_recovery_init_cmd_data&) = default;
+      const cluster_recovery_init_cmd_data&)
+      = default;
 
     auto serde_fields() { return std::tie(state); }
 
@@ -1762,7 +1788,8 @@ struct cluster_recovery_update_cmd_data
       serde::compat_version<0>> {
     friend bool operator==(
       const cluster_recovery_update_cmd_data&,
-      const cluster_recovery_update_cmd_data&) = default;
+      const cluster_recovery_update_cmd_data&)
+      = default;
 
     auto serde_fields() { return std::tie(stage, error_msg); }
 
@@ -1894,8 +1921,8 @@ struct reconciliation_state_request
     chunked_vector<model::ntp> ntps;
 
     friend bool operator==(
-      const reconciliation_state_request&,
-      const reconciliation_state_request&) = default;
+      const reconciliation_state_request&, const reconciliation_state_request&)
+      = default;
     fmt::iterator format_to(fmt::iterator it) const {
         return fmt::format_to(it, "{{ ntps: {} }}", fmt::join(ntps, ", "));
     }
@@ -1952,12 +1979,14 @@ struct bulk_force_reconfiguration_cmd_data
     bulk_force_reconfiguration_cmd_data(
       const bulk_force_reconfiguration_cmd_data&);
     bulk_force_reconfiguration_cmd_data&
-    operator=(bulk_force_reconfiguration_cmd_data&&) = default;
+    operator=(bulk_force_reconfiguration_cmd_data&&)
+      = default;
     bulk_force_reconfiguration_cmd_data&
     operator=(const bulk_force_reconfiguration_cmd_data&);
     friend bool operator==(
       const bulk_force_reconfiguration_cmd_data&,
-      const bulk_force_reconfiguration_cmd_data&) = default;
+      const bulk_force_reconfiguration_cmd_data&)
+      = default;
 
     std::vector<model::node_id> from_nodes;
     chunked_vector<ntp_with_majority_loss>
@@ -1979,8 +2008,8 @@ struct reconciliation_state_reply
     chunked_vector<ntp_reconciliation_state> results;
 
     friend bool operator==(
-      const reconciliation_state_reply&,
-      const reconciliation_state_reply&) = default;
+      const reconciliation_state_reply&, const reconciliation_state_reply&)
+      = default;
     fmt::iterator format_to(fmt::iterator it) const {
         return fmt::format_to(it, "{{ results {} }}", fmt::join(results, ", "));
     }
@@ -2006,8 +2035,8 @@ struct decommission_node_request
     model::node_id id;
 
     friend bool operator==(
-      const decommission_node_request&,
-      const decommission_node_request&) = default;
+      const decommission_node_request&, const decommission_node_request&)
+      = default;
 
     auto serde_fields() { return std::tie(id); }
     fmt::iterator format_to(fmt::iterator it) const {
@@ -2022,8 +2051,9 @@ struct decommission_node_reply
       serde::compat_version<0>> {
     errc error;
 
-    friend bool operator==(
-      const decommission_node_reply&, const decommission_node_reply&) = default;
+    friend bool
+    operator==(const decommission_node_reply&, const decommission_node_reply&)
+      = default;
 
     auto serde_fields() { return std::tie(error); }
     fmt::iterator format_to(fmt::iterator it) const {
@@ -2039,8 +2069,8 @@ struct recommission_node_request
     model::node_id id;
 
     friend bool operator==(
-      const recommission_node_request&,
-      const recommission_node_request&) = default;
+      const recommission_node_request&, const recommission_node_request&)
+      = default;
 
     auto serde_fields() { return std::tie(id); }
     fmt::iterator format_to(fmt::iterator it) const {
@@ -2055,8 +2085,9 @@ struct recommission_node_reply
       serde::compat_version<0>> {
     errc error;
 
-    friend bool operator==(
-      const recommission_node_reply&, const recommission_node_reply&) = default;
+    friend bool
+    operator==(const recommission_node_reply&, const recommission_node_reply&)
+      = default;
 
     auto serde_fields() { return std::tie(error); }
     fmt::iterator format_to(fmt::iterator it) const {
@@ -2072,8 +2103,8 @@ struct finish_reallocation_request
     model::node_id id;
 
     friend bool operator==(
-      const finish_reallocation_request&,
-      const finish_reallocation_request&) = default;
+      const finish_reallocation_request&, const finish_reallocation_request&)
+      = default;
 
     auto serde_fields() { return std::tie(id); }
     fmt::iterator format_to(fmt::iterator it) const {
@@ -2089,8 +2120,8 @@ struct finish_reallocation_reply
     errc error;
 
     friend bool operator==(
-      const finish_reallocation_reply&,
-      const finish_reallocation_reply&) = default;
+      const finish_reallocation_reply&, const finish_reallocation_reply&)
+      = default;
 
     auto serde_fields() { return std::tie(error); }
     fmt::iterator format_to(fmt::iterator it) const {
@@ -2108,8 +2139,8 @@ struct set_maintenance_mode_request
     bool enabled;
 
     friend bool operator==(
-      const set_maintenance_mode_request&,
-      const set_maintenance_mode_request&) = default;
+      const set_maintenance_mode_request&, const set_maintenance_mode_request&)
+      = default;
 
     auto serde_fields() { return std::tie(id, enabled); }
     fmt::iterator format_to(fmt::iterator it) const {
@@ -2126,8 +2157,8 @@ struct set_maintenance_mode_reply
     errc error;
 
     friend bool operator==(
-      const set_maintenance_mode_reply&,
-      const set_maintenance_mode_reply&) = default;
+      const set_maintenance_mode_reply&, const set_maintenance_mode_reply&)
+      = default;
 
     auto serde_fields() { return std::tie(error); }
     fmt::iterator format_to(fmt::iterator it) const {
@@ -2144,8 +2175,9 @@ struct config_status_request
 
     fmt::iterator format_to(fmt::iterator it) const;
 
-    friend bool operator==(
-      const config_status_request&, const config_status_request&) = default;
+    friend bool
+    operator==(const config_status_request&, const config_status_request&)
+      = default;
 
     auto serde_fields() { return std::tie(status); }
 };
@@ -2159,8 +2191,9 @@ struct config_status_reply
 
     fmt::iterator format_to(fmt::iterator it) const;
 
-    friend bool operator==(
-      const config_status_reply&, const config_status_reply&) = default;
+    friend bool
+    operator==(const config_status_reply&, const config_status_reply&)
+      = default;
 
     auto serde_fields() { return std::tie(error); }
 };
@@ -2172,8 +2205,9 @@ struct feature_action_request
       serde::compat_version<0>> {
     feature_update_action action;
 
-    friend bool operator==(
-      const feature_action_request&, const feature_action_request&) = default;
+    friend bool
+    operator==(const feature_action_request&, const feature_action_request&)
+      = default;
 
     fmt::iterator format_to(fmt::iterator it) const;
 
@@ -2187,8 +2221,9 @@ struct feature_action_response
       serde::compat_version<0>> {
     errc error;
 
-    friend bool operator==(
-      const feature_action_response&, const feature_action_response&) = default;
+    friend bool
+    operator==(const feature_action_response&, const feature_action_response&)
+      = default;
 
     fmt::iterator format_to(fmt::iterator it) const;
 
@@ -2208,8 +2243,9 @@ struct feature_barrier_request
     model::node_id peer;
     bool entered; // Has the requester entered?
 
-    friend bool operator==(
-      const feature_barrier_request&, const feature_barrier_request&) = default;
+    friend bool
+    operator==(const feature_barrier_request&, const feature_barrier_request&)
+      = default;
 
     fmt::iterator format_to(fmt::iterator it) const;
 
@@ -2242,8 +2278,9 @@ struct config_update_request final
     std::vector<cluster_property_kv> upsert;
     std::vector<ss::sstring> remove;
 
-    friend bool operator==(
-      const config_update_request&, const config_update_request&) = default;
+    friend bool
+    operator==(const config_update_request&, const config_update_request&)
+      = default;
 
     fmt::iterator format_to(fmt::iterator it) const;
 
@@ -2258,8 +2295,9 @@ struct config_update_reply
     errc error;
     cluster::config_version latest_version{config_version_unset};
 
-    friend bool operator==(
-      const config_update_reply&, const config_update_reply&) = default;
+    friend bool
+    operator==(const config_update_reply&, const config_update_reply&)
+      = default;
 
     fmt::iterator format_to(fmt::iterator it) const;
 
@@ -2274,8 +2312,8 @@ struct hello_request final
     // milliseconds since epoch
     std::chrono::milliseconds start_time;
 
-    friend bool
-    operator==(const hello_request&, const hello_request&) = default;
+    friend bool operator==(const hello_request&, const hello_request&)
+      = default;
 
     auto serde_fields() { return std::tie(peer, start_time); }
 
@@ -2328,8 +2366,9 @@ struct topic_metadata_fields
     // for serde
     topic_metadata_fields() noexcept = default;
 
-    friend bool operator==(
-      const topic_metadata_fields&, const topic_metadata_fields&) = default;
+    friend bool
+    operator==(const topic_metadata_fields&, const topic_metadata_fields&)
+      = default;
 
     auto serde_fields() {
         return std::tie(configuration, source_topic, revision, remote_revision);
@@ -2415,7 +2454,8 @@ struct cancel_all_partition_movements_request
 
     friend bool operator==(
       const cancel_all_partition_movements_request&,
-      const cancel_all_partition_movements_request&) = default;
+      const cancel_all_partition_movements_request&)
+      = default;
 
     fmt::iterator format_to(fmt::iterator it) const {
         return fmt::format_to(it, "{{}}");
@@ -2433,7 +2473,8 @@ struct cancel_node_partition_movements_request
 
     friend bool operator==(
       const cancel_node_partition_movements_request&,
-      const cancel_node_partition_movements_request&) = default;
+      const cancel_node_partition_movements_request&)
+      = default;
 
     fmt::iterator format_to(fmt::iterator it) const;
 };
@@ -2445,7 +2486,8 @@ struct cancel_partition_movements_reply
       serde::compat_version<0>> {
     friend bool operator==(
       const cancel_partition_movements_reply&,
-      const cancel_partition_movements_reply&) = default;
+      const cancel_partition_movements_reply&)
+      = default;
 
     auto serde_fields() { return std::tie(general_error, partition_results); }
 
@@ -2463,8 +2505,8 @@ struct cloud_storage_usage_request
     std::vector<model::ntp> partitions;
 
     friend bool operator==(
-      const cloud_storage_usage_request&,
-      const cloud_storage_usage_request&) = default;
+      const cloud_storage_usage_request&, const cloud_storage_usage_request&)
+      = default;
 
     auto serde_fields() { return std::tie(partitions); }
 };
@@ -2483,8 +2525,8 @@ struct cloud_storage_usage_reply
     std::vector<model::ntp> missing_partitions;
 
     friend bool operator==(
-      const cloud_storage_usage_reply&,
-      const cloud_storage_usage_reply&) = default;
+      const cloud_storage_usage_reply&, const cloud_storage_usage_reply&)
+      = default;
 
     auto serde_fields() {
         return std::tie(total_size_bytes, missing_partitions);
@@ -2523,8 +2565,9 @@ struct partition_state_request
       serde::version<0>,
       serde::compat_version<0>> {
     model::ntp ntp;
-    friend bool operator==(
-      const partition_state_request&, const partition_state_request&) = default;
+    friend bool
+    operator==(const partition_state_request&, const partition_state_request&)
+      = default;
 
     auto serde_fields() { return std::tie(ntp); }
 };
@@ -2615,8 +2658,8 @@ struct partition_raft_state
               is_recovering);
         }
 
-        friend bool
-        operator==(const follower_state&, const follower_state&) = default;
+        friend bool operator==(const follower_state&, const follower_state&)
+          = default;
     };
 
     struct follower_recovery_state
@@ -2632,8 +2675,8 @@ struct partition_raft_state
         }
 
         friend bool operator==(
-          const follower_recovery_state&,
-          const follower_recovery_state&) = default;
+          const follower_recovery_state&, const follower_recovery_state&)
+          = default;
     };
 
     // Set only on leaders.
@@ -2670,8 +2713,9 @@ struct partition_raft_state
           time_since_last_flush);
     }
 
-    friend bool operator==(
-      const partition_raft_state&, const partition_raft_state&) = default;
+    friend bool
+    operator==(const partition_raft_state&, const partition_raft_state&)
+      = default;
 };
 
 struct partition_state
@@ -2724,8 +2768,8 @@ struct partition_state
           max_transaction_free_offset);
     }
 
-    friend bool
-    operator==(const partition_state&, const partition_state&) = default;
+    friend bool operator==(const partition_state&, const partition_state&)
+      = default;
 };
 
 struct partition_state_reply
@@ -2737,8 +2781,9 @@ struct partition_state_reply
     std::optional<partition_state> state;
     errc error_code;
 
-    friend bool operator==(
-      const partition_state_reply&, const partition_state_reply&) = default;
+    friend bool
+    operator==(const partition_state_reply&, const partition_state_reply&)
+      = default;
 
     auto serde_fields() { return std::tie(ntp, state, error_code); }
 };
@@ -2754,7 +2799,8 @@ struct revert_cancel_partition_move_cmd_data
 
     friend bool operator==(
       const revert_cancel_partition_move_cmd_data&,
-      const revert_cancel_partition_move_cmd_data&) = default;
+      const revert_cancel_partition_move_cmd_data&)
+      = default;
 };
 
 struct revert_cancel_partition_move_request
@@ -2768,7 +2814,8 @@ struct revert_cancel_partition_move_request
 
     friend bool operator==(
       const revert_cancel_partition_move_request&,
-      const revert_cancel_partition_move_request&) = default;
+      const revert_cancel_partition_move_request&)
+      = default;
 };
 
 struct revert_cancel_partition_move_reply
@@ -2782,7 +2829,8 @@ struct revert_cancel_partition_move_reply
 
     friend bool operator==(
       const revert_cancel_partition_move_reply&,
-      const revert_cancel_partition_move_reply&) = default;
+      const revert_cancel_partition_move_reply&)
+      = default;
 };
 
 /**
@@ -2831,8 +2879,8 @@ struct node_metadata {
     model::broker broker;
     broker_state state;
 
-    friend bool
-    operator==(const node_metadata&, const node_metadata&) = default;
+    friend bool operator==(const node_metadata&, const node_metadata&)
+      = default;
     fmt::iterator format_to(fmt::iterator it) const;
 };
 
@@ -2974,7 +3022,8 @@ struct metrics_reporter_cluster_info
 
     friend bool operator==(
       const metrics_reporter_cluster_info&,
-      const metrics_reporter_cluster_info&) = default;
+      const metrics_reporter_cluster_info&)
+      = default;
 
     auto serde_fields() { return std::tie(uuid, creation_timestamp); }
 };
@@ -3019,7 +3068,8 @@ struct update_partition_replicas_cmd_data
 
     friend bool operator==(
       const update_partition_replicas_cmd_data&,
-      const update_partition_replicas_cmd_data&) = default;
+      const update_partition_replicas_cmd_data&)
+      = default;
 
     auto serde_fields() { return std::tie(ntp, replicas, policy); }
 
@@ -3042,7 +3092,8 @@ struct topic_disabled_partitions_set
 
     friend bool operator==(
       const topic_disabled_partitions_set&,
-      const topic_disabled_partitions_set&) = default;
+      const topic_disabled_partitions_set&)
+      = default;
 
     auto serde_fields() { return std::tie(partitions); }
 
@@ -3067,8 +3118,9 @@ struct delete_topics_request
     std::vector<model::topic_namespace> topics_to_delete;
     std::chrono::milliseconds timeout;
 
-    friend bool operator==(
-      const delete_topics_request&, const delete_topics_request&) = default;
+    friend bool
+    operator==(const delete_topics_request&, const delete_topics_request&)
+      = default;
 
     auto serde_fields() { return std::tie(topics_to_delete, timeout); }
 };
@@ -3080,8 +3132,9 @@ struct delete_topics_reply
       serde::compat_version<0>> {
     std::vector<topic_result> results;
 
-    friend bool operator==(
-      const delete_topics_reply&, const delete_topics_reply&) = default;
+    friend bool
+    operator==(const delete_topics_reply&, const delete_topics_reply&)
+      = default;
 
     auto serde_fields() { return std::tie(results); }
 };
@@ -3095,8 +3148,8 @@ struct set_partition_shard_request
     uint32_t shard = -1;
 
     friend bool operator==(
-      const set_partition_shard_request&,
-      const set_partition_shard_request&) = default;
+      const set_partition_shard_request&, const set_partition_shard_request&)
+      = default;
 
     auto serde_fields() { return std::tie(ntp, shard); }
 };
@@ -3109,8 +3162,8 @@ struct set_partition_shard_reply
     errc ec;
 
     friend bool operator==(
-      const set_partition_shard_reply&,
-      const set_partition_shard_reply&) = default;
+      const set_partition_shard_reply&, const set_partition_shard_reply&)
+      = default;
 
     auto serde_fields() { return std::tie(ec); }
 };

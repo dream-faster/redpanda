@@ -141,9 +141,8 @@ create_topic_properties_update(
         return make_error_alter_config_resource_response<resp_resource_t>(
           resource,
           error_code::policy_violation,
-          fmt::format(
-            "Topic cannot be altered because it belongs to an active "
-            "shadow link."));
+          fmt::format("Topic cannot be altered because it belongs to an active "
+                      "shadow link."));
     }
 
     schema_id_validation_config_parser schema_id_validation_config_parser{
@@ -536,6 +535,12 @@ create_topic_properties_update(
                   update.properties.storage_mode, cfg.value, op, validator);
                 continue;
             }
+
+            if (cfg.name == topic_property_dedup_window_ms) {
+                parse_and_set_tristate(
+                  update.properties.dedup_window_ms, cfg.value, op);
+                continue;
+            }
         } catch (const validation_error& e) {
             vlog(
               klog.debug,
@@ -762,10 +767,9 @@ ss::future<response_ptr> incremental_alter_configs_handler::handle(
           incremental_alter_configs_resource>(
           std::move(groupped), std::move(unauthorized_responsens));
 
-        co_return co_await ctx.respond(
-          assemble_alter_config_response<
-            incremental_alter_configs_response,
-            resp_resource_t>(std::move(responses)));
+        co_return co_await ctx.respond(assemble_alter_config_response<
+                                       incremental_alter_configs_response,
+                                       resp_resource_t>(std::move(responses)));
     }
 
     std::vector<ss::future<chunked_vector<resp_resource_t>>> futures;
@@ -779,10 +783,9 @@ ss::future<response_ptr> incremental_alter_configs_handler::handle(
     // include authorization errors
     ret.push_back(std::move(unauthorized_responsens));
 
-    co_return co_await ctx.respond(
-      assemble_alter_config_response<
-        incremental_alter_configs_response,
-        resp_resource_t>(std::move(ret)));
+    co_return co_await ctx.respond(assemble_alter_config_response<
+                                   incremental_alter_configs_response,
+                                   resp_resource_t>(std::move(ret)));
 }
 
 } // namespace kafka

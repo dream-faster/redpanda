@@ -372,6 +372,7 @@ private:
     ss::future<> do_compact(
       compaction::compaction_config,
       std::optional<model::offset> new_start_offset);
+    ss::future<> do_dedup(compaction::compaction_config cfg);
 
     ss::future<> remove_empty_segments();
 

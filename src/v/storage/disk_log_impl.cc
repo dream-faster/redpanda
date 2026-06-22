@@ -189,11 +189,10 @@ disk_log_impl::disk_log_impl(
       resources())
   , _probe(std::make_unique<storage::probe>())
   , _max_segment_size(compute_max_segment_size())
-  , _readers_cache(
-      std::make_unique<readers_cache>(
-        config().ntp(),
-        _manager.config().readers_cache_eviction_timeout,
-        config::shard_local_cfg().readers_cache_target_max_size.bind()))
+  , _readers_cache(std::make_unique<readers_cache>(
+      config().ntp(),
+      _manager.config().readers_cache_eviction_timeout,
+      config::shard_local_cfg().readers_cache_target_max_size.bind()))
   , _compaction_enabled(config().is_locally_compacted()) {
     for (auto& s : _segs) {
         _probe->add_initial_segment(*s);
@@ -461,9 +460,8 @@ disk_log_impl::time_based_gc_max_offset(gc_config cfg) const {
 ss::future<model::offset>
 disk_log_impl::monitor_eviction(ss::abort_source& as) {
     if (_eviction_monitor) {
-        throw std::logic_error(
-          "Eviction promise already registered. Eviction "
-          "can not be monitored twice.");
+        throw std::logic_error("Eviction promise already registered. Eviction "
+                               "can not be monitored twice.");
     }
 
     auto opt_sub = as.subscribe([this]() noexcept {
@@ -1041,9 +1039,8 @@ disk_log_impl::compact_adjacent_segment_ranges(
   compaction::compaction_config cfg,
   std::optional<model::offset> new_start_offset) {
     chunked_vector<compaction_result> rs;
-    if (
-      auto ranges = find_adjacent_compaction_ranges(cfg, new_start_offset);
-      ranges) {
+    if (auto ranges = find_adjacent_compaction_ranges(cfg, new_start_offset);
+        ranges) {
         // lightweight copy of segments in all of the found ranges. once a
         // scheduling event occurs in this method we can't rely on the iterators
         // in the range remaining valid. for example, a concurrent truncate may
@@ -1401,6 +1398,10 @@ ss::future<> disk_log_impl::housekeeping(housekeeping_config cfg) {
             co_await ss::coroutine::return_exception_ptr(fut.get_exception());
         }
     }
+
+    if (config().dedup_window_ms().has_value()) {
+        co_await do_dedup(cfg.compact);
+    }
 }
 
 ss::future<> disk_log_impl::do_compact(
@@ -1702,11 +1703,10 @@ ss::future<> disk_log_impl::rewrite_segment_with_offset_map(
     auto rdr_holder = co_await _readers_cache->evict_segment_readers(seg);
     auto write_lock = co_await seg->write_lock();
     if (initial_generation_id != seg->get_generation_id()) {
-        throw std::runtime_error(
-          fmt::format(
-            "Aborting compaction of segment: {}, segment was mutated "
-            "while compacting",
-            seg->path()));
+        throw std::runtime_error(fmt::format(
+          "Aborting compaction of segment: {}, segment was mutated "
+          "while compacting",
+          seg->path()));
     }
     if (seg->is_closed()) {
         throw segment_closed_exception();
@@ -1760,6 +1760,129 @@ ss::future<> disk_log_impl::rewrite_segment_with_offset_map(
     seg->advance_generation();
     staging_to_clean.clear();
     vlog(gclog.debug, "[{}] Final compacted segment {}", config().ntp(), seg);
+}
+
+ss::future<> disk_log_impl::do_dedup(compaction::compaction_config cfg) {
+    const auto window = config().dedup_window_ms();
+    if (!window || _segs.empty()) {
+        co_return;
+    }
+
+    // Combine the caller's abort source with the local compaction abort source.
+    std::optional<ssx::composite_abort_source> composite_as;
+    if (cfg.asrc) {
+        composite_as.emplace(_compaction_as, *cfg.asrc);
+        cfg.asrc = &composite_as->as();
+    } else {
+        cfg.asrc = &_compaction_as;
+    }
+
+    // T_head: max max_timestamp across all non-active (closed) segments.
+    auto head = model::timestamp::min();
+    for (const auto& seg : _segs) {
+        if (seg->has_appender()) {
+            continue;
+        }
+        head = std::max(head, seg->index().max_timestamp());
+    }
+    if (head == model::timestamp::min()) {
+        co_return;
+    }
+
+    // Only include segments whose max_timestamp falls within the window.
+    const auto cutoff_ms = head.value() - window->count();
+    segment_set::underlying_t buf;
+    for (const auto& seg : _segs) {
+        if (seg->has_appender()) {
+            continue;
+        }
+        if (seg->index().max_timestamp().value() >= cutoff_ms) {
+            buf.push_back(seg);
+        }
+    }
+    if (buf.empty()) {
+        co_return;
+    }
+    segment_set in_window(std::move(buf));
+
+    vlog(
+      gclog.debug,
+      "[{}] dedup pass: {} segments within {}ms window",
+      config().ntp(),
+      in_window.size(),
+      window->count());
+
+    // Build key→max_offset map, newest-to-oldest, so the map holds the
+    // highest offset per key (last-wins).
+    auto simple_map = std::make_unique<compaction::simple_key_offset_map>(
+      cfg.key_offset_map_max_keys);
+    compaction::key_offset_map& map = dynamic_cast<compaction::key_offset_map&>(
+      *simple_map);
+
+    try {
+        co_await build_offset_map(
+          cfg,
+          in_window,
+          _stm_hookset,
+          _manager.resources(),
+          *_probe,
+          map,
+          _feature_table);
+    } catch (const zero_segments_indexed_exception&) {
+        vlog(
+          gclog.warn,
+          "[{}] dedup pass: key map full on first segment, skipping this pass",
+          config().ntp());
+        co_return;
+    } catch (...) {
+        auto eptr = std::current_exception();
+        if (ssx::is_shutdown_exception(eptr)) {
+            std::rethrow_exception(eptr);
+        }
+        vlog(
+          gclog.warn,
+          "[{}] dedup pass: failed to build offset map: {}",
+          config().ntp(),
+          eptr);
+        co_return;
+    }
+
+    auto segment_modify_lock = co_await _segment_rewrite_lock.get_units();
+    scoped_file_tracker::set_t leftovers;
+    cfg.files_to_cleanup = &leftovers;
+
+    for (auto& seg : in_window) {
+        if (cfg.asrc) {
+            cfg.asrc->check();
+        }
+        if (seg->is_closed()) {
+            continue;
+        }
+        bool needs_rewrite = co_await segment_needs_rewrite_with_offset_map(
+          cfg, seg, map);
+        if (!needs_rewrite) {
+            continue;
+        }
+        co_await rewrite_segment_with_offset_map(cfg, seg, map, false, false);
+    }
+
+    while (!leftovers.empty()) {
+        auto it = leftovers.begin();
+        const auto file = it->string();
+        try {
+            if (co_await ss::file_exists(file)) {
+                co_await ss::remove_file(file);
+            }
+        } catch (...) {
+            vlog(
+              gclog.warn,
+              "[{}] dedup pass: error removing leftover file {}: {}",
+              config().ntp(),
+              file,
+              std::current_exception());
+        }
+        leftovers.erase(it);
+    }
 }
 
 ss::future<> disk_log_impl::gc(gc_config cfg) {
@@ -2473,12 +2596,11 @@ auto disk_log_impl::get_file_offset(
   std::optional<segment_index::entry> maybe_index_entry,
   model::offset target,
   boundary_type boundary) -> ss::future<file_offset_t> {
-    auto index_entry = maybe_index_entry.value_or(
-      segment_index::entry{
-        .offset = s->offsets().get_base_offset(),
-        .timestamp = s->index().base_timestamp(),
-        .filepos = 0,
-      });
+    auto index_entry = maybe_index_entry.value_or(segment_index::entry{
+      .offset = s->offsets().get_base_offset(),
+      .timestamp = s->index().base_timestamp(),
+      .filepos = 0,
+    });
     size_t size_bytes{index_entry.filepos};
     model::timestamp base_timestamp = index_entry.timestamp;
     model::timestamp max_timestamp = model::timestamp::max();
@@ -3074,9 +3196,8 @@ bool disk_log_impl::is_compacted(
 
 bool disk_log_impl::eligible_for_compacted_reupload(
   model::offset first, model::offset last) const {
-    if (
-      auto mco = max_eligible_for_compacted_reupload_offset(first);
-      mco.has_value()) {
+    if (auto mco = max_eligible_for_compacted_reupload_offset(first);
+        mco.has_value()) {
         return last <= mco.value();
     }
     return false;
@@ -3132,11 +3253,10 @@ disk_log_impl::make_reader(local_log_reader_config config) {
     throw_if_closed();
     if (config.start_offset < _start_offset) {
         return ss::make_exception_future<model::record_batch_reader>(
-          std::runtime_error(
-            fmt::format(
-              "Reader cannot read before start of the log {} < {}",
-              config.start_offset,
-              _start_offset)));
+          std::runtime_error(fmt::format(
+            "Reader cannot read before start of the log {} < {}",
+            config.start_offset,
+            _start_offset)));
     }
 
     if (config.start_offset > config.max_offset) {
@@ -3947,10 +4067,8 @@ disk_log_impl::disk_usage_and_reclaimable_space(gc_config input_cfg) {
         }
     }
 
-    ss::semaphore limit(
-      std::max<size_t>(
-        1,
-        config::shard_local_cfg().space_management_max_segment_concurrency()));
+    ss::semaphore limit(std::max<size_t>(
+      1, config::shard_local_cfg().space_management_max_segment_concurrency()));
 
     auto [retention, available, remaining, lcl] = co_await ss::when_all_succeed(
       // reduce segment subject to retention policy
@@ -4175,10 +4293,8 @@ disk_log_impl::disk_usage_target_time_retention(gc_config cfg) {
         co_return std::nullopt;
     }
 
-    ss::semaphore limit(
-      std::max<size_t>(
-        1,
-        config::shard_local_cfg().space_management_max_segment_concurrency()));
+    ss::semaphore limit(std::max<size_t>(
+      1, config::shard_local_cfg().space_management_max_segment_concurrency()));
 
     // roll up the amount of disk space taken by these segments
     auto usage = co_await ss::map_reduce(
@@ -4229,11 +4345,10 @@ ss::future<usage_report> disk_log_impl::disk_usage(gc_config cfg) {
         // reason. Return the used size, but with 0 bytes indicated as
         // reclaimable.
         auto e = usage_and_reclaim_fut.get_exception();
-        ss::semaphore limit(
-          std::max<size_t>(
-            1,
-            config::shard_local_cfg()
-              .space_management_max_segment_concurrency()));
+        ss::semaphore limit(std::max<size_t>(
+          1,
+          config::shard_local_cfg()
+            .space_management_max_segment_concurrency()));
 
         // Copy segment pointers so that concurrent modification of
         // _segs does not invalidate the range we iterate over.
