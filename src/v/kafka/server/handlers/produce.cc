@@ -43,8 +43,6 @@
 namespace kafka {
 namespace {
 static constexpr auto despam_interval = std::chrono::minutes(5);
-static constexpr std::string_view redpanda_msg_id_header = "Redpanda-Msg-Id";
-static constexpr std::string_view nats_msg_id_header = "Nats-Msg-Id";
 static constexpr auto message_id_deduplication_window = std::chrono::minutes(2);
 
 struct message_id_dedup_key {
@@ -126,22 +124,10 @@ duplicate_message_id_offset(const model::ntp& ntp, std::string_view id) {
 }
 
 std::optional<ss::sstring> extract_message_id(model::record& record) {
-    std::optional<ss::sstring> id;
-    for (auto& header : record.headers()) {
-        if (
-          header.key() != redpanda_msg_id_header
-          && header.key() != nats_msg_id_header) {
-            continue;
-        }
-        if (header.value_size() < 0) {
-            return ss::sstring{};
-        }
-        if (id.has_value()) {
-            return ss::sstring{};
-        }
-        id = header.value().linearize_to_string();
+    if (!record.has_key()) {
+        return std::nullopt;
     }
-    return id;
+    return record.key().linearize_to_string();
 }
 
 struct message_id_filter_result {
@@ -174,9 +160,6 @@ message_id_filter_result filter_message_id_duplicates(
     std::unordered_set<ss::sstring> accepted_in_batch;
     batch.for_each_record([&](model::record record) {
         auto id = extract_message_id(record);
-        if (id.has_value() && id->empty()) {
-            return;
-        }
         if (id.has_value()) {
             if (auto offset = duplicate_message_id_offset(ntp, *id)) {
                 result.duplicate_base_offset

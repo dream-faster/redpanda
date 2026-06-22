@@ -6,23 +6,23 @@
 
 # Executive Summary
 
-Add optional producer-side duplicate suppression for Kafka records using a client supplied message ID and a per-topic deduplication window. The behavior matches the default JetStream model: the first accepted record for a message ID is stored, retries with the same message ID during the configured window are acknowledged as duplicates without appending another record, and the comparison is based only on the message ID rather than the record value or headers.
+Add optional producer-side duplicate suppression for Kafka records using the Kafka record key as a client supplied message ID and a per-topic deduplication window. The behavior is modeled after JetStream duplicate windows: the first accepted record for a key is stored, retries with the same key during the configured window are acknowledged as duplicates without appending another record, and the comparison is based only on the serialized key bytes rather than the record value or headers.
 
 ## What is being proposed
 
-Redpanda will recognize a configured message-ID source per topic, keep a replicated time-bounded index of recently accepted IDs per partition, and consult that index on the partition leader before appending produce records. The message-ID source can be either a Kafka record header or the Kafka record key. If a record's ID is already present and still within the deduplication window, the broker returns success for that record but does not append it again. Records without an ID in the configured source continue through the current produce path unchanged unless a future strict mode is added.
+Redpanda will use the Kafka record key as the message ID for enabled topics, keep a replicated time-bounded index of recently accepted keys per partition, and consult that index on the partition leader before appending produce records. If a key is already present and still within the deduplication window, the broker returns success for that record but does not append it again. Records with null keys continue through the current produce path unchanged unless a future strict mode is added.
 
 ## Why (short reason)
 
-Kafka idempotent producers prevent duplicates for a single producer session and sequence number stream, but they do not cover application-level retry keys that survive producer restarts, multiple producers, or cross-service retry orchestration. A message-ID window gives users the same practical publishing primitive as NATS JetStream's `Nats-Msg-Id`: make retries safe by reusing a deterministic ID.
+Kafka idempotent producers prevent duplicates for a single producer session and sequence number stream, but they do not cover application-level retry keys that survive producer restarts, multiple producers, or cross-service retry orchestration. A record-key deduplication window gives users a practical publishing primitive similar to NATS JetStream duplicate windows: make retries safe by reusing a deterministic application ID as the Kafka key.
 
 ## How (short plan)
 
-Implement this as a Raft-replicated partition feature. The leader extracts IDs from the configured source (record header or record key), performs in-memory lookups against a dedup table reconstructed from the partition log plus snapshots, appends only novel records, and records enough metadata in the replicated log to rebuild the dedup table after leadership changes, restarts, and recovery. The table is pruned by record timestamp/append timestamp and the configured window.
+Implement this as a Raft-replicated partition feature. The leader extracts IDs from Kafka record keys, performs in-memory lookups against a dedup table reconstructed from the partition log plus snapshots, appends only novel records, and records enough metadata in the replicated log to rebuild the dedup table after leadership changes, restarts, and recovery. The table is pruned by record timestamp/append timestamp and the configured window.
 
 ## Impact
 
-The feature is opt-in and scoped per topic. It adds CPU for message-ID extraction and hash lookups, memory proportional to publish rate times the deduplication window, and a small amount of replicated metadata. It changes produce acknowledgements only for records that carry an ID in the configured source and duplicate a still-live ID: those requests will succeed without increasing the partition's log end offset. Consumers see only the first accepted record, exactly as they would with JetStream duplicate suppression.
+The feature is opt-in and scoped per topic. It adds CPU for key extraction and hash lookups, memory proportional to publish rate times the deduplication window, and a small amount of replicated metadata. It changes produce acknowledgements only for keyed records that duplicate a still-live key: those requests will succeed without increasing the partition's log end offset. Consumers see only the first accepted record for a key within the window.
 
 # Motivation
 
@@ -48,7 +48,7 @@ Sources: [NATS JetStream model deep dive](https://docs.nats.io/using-nats/develo
 
 ## What is the expected outcome?
 
-For enabled topics, users can publish records with a configured message-ID source and rely on Redpanda to store at most one record with that ID within the deduplication window for the target partition. Header mode uses a configured record header. Key mode uses the Kafka record key bytes as the message ID. The feature should continue to work across leadership transfer, node restart, follower promotion, partition movement, and cluster upgrades.
+For enabled topics, users can publish records with a stable Kafka record key and rely on Redpanda to store at most one record with that key within the deduplication window for the target partition. The feature should continue to work across leadership transfer, node restart, follower promotion, partition movement, and cluster upgrades.
 
 # Guide-level explanation
 
@@ -57,41 +57,26 @@ For enabled topics, users can publish records with a configured message-ID sourc
 Deduplication is a topic-level produce option. Users choose:
 
 - `redpanda.message.id.deduplication.enabled=true`
-- `redpanda.message.id.source=header|record_key`; default proposal: `header` for JetStream compatibility
-- `redpanda.message.id.header=<header-name>`; used only when `source=header`; default proposal: `Redpanda-Msg-Id`
 - `redpanda.message.id.deduplication.window.ms=<duration>`; default proposal: `120000`
-- optional limits for maximum ID length and maximum tracked IDs per partition
+- optional limits for maximum key length and maximum tracked keys per partition
 
-When header mode is enabled, producers attach a stable ID to each record that needs retry protection:
-
-```text
-headers = {
-  "Redpanda-Msg-Id": "order-2026-06-22-000123"
-}
-```
-
-When record-key mode is enabled, the Kafka record key itself is the message ID:
+Producers attach a stable Kafka record key to each record that needs retry protection. The Kafka record key itself is the message ID:
 
 ```text
 key = "order-2026-06-22-000123"
 value = {...}
-headers = {}
+headers = {...}
 ```
 
-Key mode is appropriate when applications already use the Kafka key as the business event ID, or when they want deduplication to align with Kafka partitioning and existing compacted-topic patterns. Header mode remains the closest match for NATS JetStream because JetStream deduplicates using `Nats-Msg-Id` rather than the message subject or payload.
+This is appropriate when applications already use the Kafka key as the business event ID, or when they want deduplication to align with Kafka partitioning and existing compacted-topic patterns.
 
-The first produce request that reaches the partition leader and passes validation is appended. Any later produce request to the same partition with the same ID during the deduplication window is acknowledged successfully but not appended. Consumers therefore see the first record only. If the second produce has a different value, timestamp, key, or headers, those fields do not matter unless the changed field is the configured ID source. The ID alone controls duplicate detection.
+The first produce request that reaches the partition leader and passes validation is appended. Any later produce request to the same partition with the same key during the deduplication window is acknowledged successfully but not appended. Consumers therefore see the first record only. If the second produce has a different value, timestamp, or headers, those fields do not matter. The exact serialized key bytes alone control duplicate detection.
 
-The deduplication boundary is the Kafka partition. This matches Kafka ordering and routing semantics: a message ID is unique only among records produced to the same topic partition. If an application needs global topic-level deduplication, it must ensure records with the same ID use the same partitioning key or explicit partition.
+The deduplication boundary is the Kafka partition. This matches Kafka ordering and routing semantics: a key is unique only among records produced to the same topic partition. If an application needs global topic-level deduplication, it must ensure records with the same key use the same partitioning key or explicit partition.
 
-### Message-ID source: header vs record key
+### Message-ID source: record key
 
-Yes, the Kafka record key can be used instead of a custom header. The proposal should support both sources because they serve different compatibility and operational needs.
-
-- Header source: best for JetStream-like semantics and for applications that already have a Kafka key for partitioning or compaction that is not the retry/deduplication ID.
-- Record-key source: best for applications where the Kafka key already is the business event ID. It avoids custom headers, reduces header scanning overhead, and naturally routes retries for the same ID to the same partition when the default key partitioner is used.
-
-Record-key source must use the exact serialized key bytes as the ID. Redpanda should not deserialize, normalize, or schema-interpret the key, because producers using different serializers could otherwise disagree about equality. A null key means there is no message ID for that record and the record is not deduplicated.
+The Kafka record key is the only message-ID source in this proposal. Redpanda must use the exact serialized key bytes as the ID. It should not deserialize, normalize, or schema-interpret the key, because producers using different serializers could otherwise disagree about equality. A null key means there is no message ID for that record and the record is not deduplicated.
 
 A duplicate response should be observable but protocol-compatible. The Kafka ProduceResponse has no standard per-record duplicate marker, so Redpanda should return a normal successful partition response. Optional future surfacing can use broker logs, metrics, and an Admin API lookup rather than altering Kafka protocol behavior.
 
@@ -129,9 +114,9 @@ Add debug/admin surfaces:
 - Same ID, same partition, after window: append again, because the ID expired.
 - Same ID, different partition: append independently on each partition.
 - Same ID, different payload: treat as duplicate if the ID is still tracked.
-- Missing configured ID source: append normally and do not add to the dedup table. In header mode this means the configured header is absent. In key mode this means the Kafka record key is null.
-- Multiple message-ID headers on one record in header mode: reject the record with `INVALID_RECORD` or choose a documented first-value rule. The proposed safer behavior is reject, because ambiguous IDs make retries difficult to reason about.
-- Empty or oversized ID: reject with `INVALID_RECORD` and count a validation metric.
+- Null record key: append normally and do not add to the dedup table.
+- Empty key: treat as a valid message ID because it is a valid serialized key byte sequence.
+- Oversized key: reject with `INVALID_RECORD` and count a validation metric.
 - Batched records with duplicates inside the same produce request: append the first occurrence in batch order and suppress later occurrences.
 - Partial batch filtering: if only some records in a batch are duplicates, the broker must rewrite the record batch or split it so offsets, CRCs, and record counts remain valid.
 - Leader change between original produce and retry: the new leader rebuilds the dedup table from replicated metadata before accepting writes, so the retry is suppressed.
@@ -141,14 +126,14 @@ Add debug/admin surfaces:
 ## Detailed design - What needs to change to get there
 
 1. Product/API definition
-   - Define topic properties for enablement, ID source, header name, window duration, max ID length, and max tracked IDs/bytes.
-   - Decide default ID source and header name. Prefer header mode with a Redpanda-specific default while documenting how users can configure `Nats-Msg-Id` for migration-like workflows or `record_key` for key-based applications.
+   - Define topic properties for enablement, window duration, max key length, and max tracked IDs/bytes.
+   - Document that the Kafka record key is the message ID; no custom message-ID header is supported.
    - Define duplicate acknowledgement semantics as successful produce without append.
 
 2. Kafka request parsing
-   - Extend the produce path to extract the configured ID source only when deduplication is enabled for the target topic. Header mode scans record headers; key mode reads the record key bytes.
-   - Extract exactly one message ID per record and validate size/encoding.
-   - Preserve the fast path for disabled topics and records without an ID in the configured source.
+   - Extend the produce path to read the Kafka record key only when deduplication is enabled for the target topic.
+   - Treat the exact serialized key bytes as the message ID and validate key size.
+   - Preserve the fast path for disabled topics and null-key records.
 
 3. Partition-local dedup index
    - Add an in-memory index keyed by message ID hash plus collision-safe stored bytes.
@@ -195,7 +180,7 @@ On produce:
 
 1. The leader checks whether deduplication is enabled for the topic.
 2. If disabled, it uses the existing append path.
-3. If enabled, it iterates records and extracts the configured message-ID source: a named header in header mode or the Kafka record key in key mode.
+3. If enabled, it iterates records and extracts the Kafka record key as the message ID.
 4. For each ID, the leader prunes expired entries, then checks the index.
 5. If no live entry exists, the record is retained for append and a pending dedup entry is associated with it.
 6. If a live entry exists, the record is removed from the append set and a duplicate metric is incremented.
@@ -223,7 +208,7 @@ The produce-path prototype is not sufficient for clustered Redpanda because an i
 ### Phase 0: Remove the unsafe prototype behavior
 
 - Do not enable deduplication from a process-local global or `thread_local` table.
-- Keep header parsing and batch-filtering helpers only if they are moved behind topic-level enablement and wired to partition-owned replicated state.
+- Keep batch-filtering helpers only if they are moved behind topic-level enablement and wired to partition-owned replicated state.
 - Add a feature flag/version gate so no topic can enable message-ID deduplication until every broker understands the metadata batch format and recovery rules.
 
 ### Phase 1: Define replicated deduplication metadata
@@ -284,10 +269,8 @@ Leadership transfer must gate produce requests on `message_id_dedup_stm::is_read
 Add topic properties for:
 
 - `redpanda.message.id.deduplication.enabled`;
-- `redpanda.message.id.source`, one of `header` or `record_key`;
-- `redpanda.message.id.header`, defaulting to `Redpanda-Msg-Id` but allowing `Nats-Msg-Id`, and used only when `source=header`;
 - `redpanda.message.id.deduplication.window.ms`, defaulting to `120000`;
-- `redpanda.message.id.max.bytes`;
+- `redpanda.message.id.max.key.bytes`;
 - optional per-partition memory/entry caps.
 
 Configuration is stored in cluster metadata and applied to partitions through the existing topic-property update path. The STM should observe config changes and prune immediately when the window shrinks. Increasing the window should only apply to entries that are still recoverable from metadata and snapshots; otherwise the effective increase begins from the config-change point.
@@ -298,7 +281,7 @@ The Kafka handler should remain mostly stateless:
 
 1. Validate the request and schema as it does today.
 2. Route to the leader shard.
-3. Ask the partition-owned STM to filter the batch using the configured ID source.
+3. Ask the partition-owned STM to filter the batch using the Kafka record key as the ID.
 4. If every record is duplicate, return a successful ProduceResponse using the original accepted offset retained by the STM.
 5. If any records are novel, append filtered user batches plus dedup metadata atomically.
 6. Return success only after the required acknowledgement level is satisfied.
@@ -336,7 +319,7 @@ Add an Admin API diagnostic endpoint to inspect aggregate state for a topic part
 # Drawbacks
 
 - Memory can grow quickly for high-throughput topics with long windows.
-- Produce latency increases because the broker must extract IDs and possibly rewrite batches. Header mode requires header parsing; key mode can be cheaper because keys are already first-class record fields.
+- Produce latency increases because the broker must extract keys and possibly rewrite batches.
 - Kafka clients cannot receive a standard duplicate marker in ProduceResponse.
 - Cross-partition deduplication is intentionally not provided, which may surprise users expecting topic-wide uniqueness.
 - Persisting and snapshotting the index adds recovery complexity.
@@ -363,10 +346,8 @@ Users that need retry-safe application event publication must continue to build 
 
 # Unresolved questions
 
-- Should the default ID source be `header` for JetStream compatibility, or should some deployments prefer `record_key`?
-- What exact header name should be the default when `source=header`?
 - Should duplicates be exposed through a Redpanda-specific produce response extension, logs only, or metrics only?
 - Should the dedup metadata be encoded in a new internal batch type or embedded in existing record-batch metadata?
-- What are the default and maximum allowed values for window duration, ID length, and memory usage?
+- What are the default and maximum allowed values for window duration, key length, and memory usage?
 - How should duplicates inside aborted transactions be represented in the dedup table?
 - Can we avoid batch rewriting in v1 by requiring all records in a compressed batch to be either accepted or rejected, or is per-record filtering mandatory for user expectations?
