@@ -18,6 +18,7 @@
 #include "kafka/protocol/errors.h"
 #include "kafka/protocol/kafka_batch_adapter.h"
 #include "kafka/server/handlers/produce_validation.h"
+#include "model/batch_builder.h"
 #include "model/fundamental.h"
 #include "model/metadata.h"
 #include "model/namespace.h"
@@ -33,12 +34,184 @@
 #include <seastar/util/log.hh>
 
 #include <chrono>
+#include <deque>
 #include <exception>
 #include <functional>
+#include <unordered_map>
+#include <unordered_set>
 
 namespace kafka {
 namespace {
 static constexpr auto despam_interval = std::chrono::minutes(5);
+static constexpr std::string_view redpanda_msg_id_header = "Redpanda-Msg-Id";
+static constexpr std::string_view nats_msg_id_header = "Nats-Msg-Id";
+static constexpr auto message_id_deduplication_window = std::chrono::minutes(2);
+
+struct message_id_dedup_key {
+    model::ntp ntp;
+    ss::sstring id;
+
+    bool operator==(const message_id_dedup_key& o) const noexcept {
+        return ntp == o.ntp && id == o.id;
+    }
+};
+
+struct message_id_dedup_key_hash {
+    size_t operator()(const message_id_dedup_key& k) const noexcept {
+        return std::hash<model::ntp>{}(k.ntp) ^ std::hash<ss::sstring>{}(k.id);
+    }
+};
+
+struct message_id_dedup_entry {
+    model::offset offset;
+    ss::lowres_clock::time_point expires_at;
+};
+
+struct message_id_expiry_entry {
+    message_id_dedup_key key;
+    ss::lowres_clock::time_point expires_at;
+};
+
+using message_id_dedup_table = std::unordered_map<
+  message_id_dedup_key,
+  message_id_dedup_entry,
+  message_id_dedup_key_hash>;
+
+thread_local message_id_dedup_table message_id_dedup_state;
+thread_local std::deque<message_id_expiry_entry> message_id_dedup_expiry;
+
+void prune_message_id_dedup_state() {
+    const auto now = ss::lowres_clock::now();
+    while (!message_id_dedup_expiry.empty()
+           && message_id_dedup_expiry.front().expires_at <= now) {
+        auto exp = std::move(message_id_dedup_expiry.front());
+        message_id_dedup_expiry.pop_front();
+        auto it = message_id_dedup_state.find(exp.key);
+        if (
+          it != message_id_dedup_state.end()
+          && it->second.expires_at == exp.expires_at) {
+            message_id_dedup_state.erase(it);
+        }
+    }
+}
+
+void remember_message_ids(
+  const model::ntp& ntp,
+  const std::vector<std::pair<ss::sstring, int32_t>>& ids,
+  model::offset base_offset) {
+    prune_message_id_dedup_state();
+    auto expires_at = ss::lowres_clock::now() + message_id_deduplication_window;
+    for (const auto& [id, offset_delta] : ids) {
+        message_id_dedup_key key{.ntp = ntp, .id = id};
+        message_id_dedup_state.insert_or_assign(
+          key,
+          message_id_dedup_entry{
+            .offset = model::offset(base_offset() + offset_delta),
+            .expires_at = expires_at});
+        message_id_dedup_expiry.push_back(
+          message_id_expiry_entry{
+            .key = std::move(key), .expires_at = expires_at});
+    }
+}
+
+std::optional<model::offset>
+duplicate_message_id_offset(const model::ntp& ntp, std::string_view id) {
+    prune_message_id_dedup_state();
+    auto it = message_id_dedup_state.find(
+      message_id_dedup_key{.ntp = ntp, .id = ss::sstring{id}});
+    if (it == message_id_dedup_state.end()) {
+        return std::nullopt;
+    }
+    return it->second.offset;
+}
+
+std::optional<ss::sstring> extract_message_id(model::record& record) {
+    std::optional<ss::sstring> id;
+    for (auto& header : record.headers()) {
+        if (
+          header.key() != redpanda_msg_id_header
+          && header.key() != nats_msg_id_header) {
+            continue;
+        }
+        if (header.value_size() < 0) {
+            return ss::sstring{};
+        }
+        if (id.has_value()) {
+            return ss::sstring{};
+        }
+        id = header.value().linearize_to_string();
+    }
+    return id;
+}
+
+struct message_id_filter_result {
+    std::unique_ptr<model::record_batch> batch;
+    std::vector<std::pair<ss::sstring, int32_t>> accepted_ids;
+    std::optional<model::offset> duplicate_base_offset;
+    int32_t accepted_records{0};
+};
+
+message_id_filter_result filter_message_id_duplicates(
+  const model::ntp& ntp, const model::record_batch& batch) {
+    message_id_filter_result result;
+    model::batch_builder builder;
+    const auto& header = batch.header();
+    builder.set_batch_type(header.type);
+    builder.set_compression(header.attrs.compression());
+    builder.set_batch_timestamp(
+      header.attrs.timestamp_type(), header.first_timestamp);
+    builder.set_producer_id(header.producer_id);
+    builder.set_producer_epoch(header.producer_epoch);
+    builder.set_base_sequence(header.base_sequence);
+    builder.set_base_offset(header.base_offset);
+    if (header.attrs.is_transactional()) {
+        builder.set_transactional();
+    }
+    if (header.attrs.is_control()) {
+        builder.set_control();
+    }
+
+    std::unordered_set<ss::sstring> accepted_in_batch;
+    batch.for_each_record([&](model::record record) {
+        auto id = extract_message_id(record);
+        if (id.has_value() && id->empty()) {
+            return;
+        }
+        if (id.has_value()) {
+            if (auto offset = duplicate_message_id_offset(ntp, *id)) {
+                result.duplicate_base_offset
+                  = result.duplicate_base_offset.value_or(*offset);
+                return;
+            }
+            if (!accepted_in_batch.insert(*id).second) {
+                return;
+            }
+        }
+        chunked_vector<model::record_header> headers;
+        headers.reserve(record.headers().size());
+        for (auto& h : record.headers()) {
+            headers.push_back(h.copy());
+        }
+        builder.add_record(
+          model::record(
+            record.attributes(),
+            record.timestamp_delta(),
+            result.accepted_records,
+            record.share_key_opt(),
+            record.share_value_opt(),
+            std::move(headers)));
+        if (id.has_value()) {
+            result.accepted_ids.emplace_back(*id, result.accepted_records);
+        }
+        ++result.accepted_records;
+    });
+
+    if (result.accepted_records > 0) {
+        result.batch = std::make_unique<model::record_batch>(
+          builder.build_sync());
+    }
+    return result;
+}
 
 void fill_response_with_errors(
   produce_request::topic_cit topics_begin,
@@ -134,9 +307,11 @@ error_code map_produce_error_code(std::error_code ec) {
  */
 partition_produce_stages partition_append(
   model::partition_id id,
+  model::ntp ntp,
   partition_proxy partition,
   model::batch_identity bid,
   std::unique_ptr<model::record_batch> batch,
+  std::vector<std::pair<ss::sstring, int32_t>> accepted_message_ids,
   int16_t acks,
   int32_t num_records,
   int64_t num_bytes,
@@ -156,6 +331,8 @@ partition_produce_stages partition_append(
       .produced = stages.replicate_finished.then_wrapped(
         [partition = std::move(partition),
          id,
+         ntp = std::move(ntp),
+         accepted_message_ids = std::move(accepted_message_ids),
          num_records = num_records,
          num_bytes,
          log_append_time_ms = log_append_time_ms](
@@ -170,6 +347,8 @@ partition_produce_stages partition_append(
                       r.value().last_offset - (num_records - 1));
                     p.log_append_time_ms = log_append_time_ms;
                     p.error_code = error_code::none;
+                    remember_message_ids(
+                      ntp, accepted_message_ids, p.base_offset);
                     partition.probe().add_records_produced(num_records);
                     partition.probe().add_bytes_produced(num_bytes);
                     partition.probe().add_batches_produced(1);
@@ -317,14 +496,32 @@ ss::future<produce_response::partition> do_produce_topic_partition(
                 source_shard));
           }
 
+          auto filter_result = filter_message_id_duplicates(ntp, *batch);
+          if (!filter_result.batch) {
+              ssx::background = ss::smp::submit_to(
+                source_shard, [dispatch = std::move(dispatch)]() mutable {
+                    dispatch->set_value();
+                    dispatch.reset();
+                });
+              return ss::make_ready_future<produce_response::partition>(
+                produce_response::partition{
+                  .partition_index = ntp.tp.partition,
+                  .error_code = error_code::none,
+                  .base_offset = filter_result.duplicate_base_offset.value_or(
+                    model::offset{0})});
+          }
+          batch = std::move(filter_result.batch);
+          auto accepted_message_ids = std::move(filter_result.accepted_ids);
           auto bid = model::batch_identity::from(batch->header());
           auto num_records = batch->record_count();
           auto batch_size = batch->size_bytes();
           auto stages = partition_append(
             ntp.tp.partition,
+            ntp,
             std::move(*partition),
             bid,
             std::move(batch),
+            std::move(accepted_message_ids),
             acks,
             num_records,
             batch_size,
@@ -503,9 +700,9 @@ produce_topic(produce_ctx& octx, produce_request::topic& topic) {
                   .error_code = errc}));
         };
 
-        if (
-          unlikely(
-            disabled_set && disabled_set->is_disabled(part.partition_index))) {
+        if (unlikely(
+              disabled_set
+              && disabled_set->is_disabled(part.partition_index))) {
             push_error_response(error_code::replica_not_available);
             continue;
         }
@@ -534,9 +731,9 @@ produce_topic(produce_ctx& octx, produce_request::topic& topic) {
         // NOTE: for produce version 0 and 1 the adapter transparently converts
         // the batch into an v2 batch and sets the v2_format flag. conversion
         // also produces a single record batch by accumulating legacy messages.
-        if (
-          unlikely(
-            !part.records->adapter.v2_format || !part.records->adapter.batch)) {
+        if (unlikely(
+              !part.records->adapter.v2_format
+              || !part.records->adapter.batch)) {
             push_error_response(error_code::invalid_record);
             continue;
         }
