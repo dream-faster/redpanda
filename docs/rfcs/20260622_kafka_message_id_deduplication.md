@@ -203,7 +203,7 @@ On leadership change:
 
 ## Cluster-correct implementation plan
 
-The produce-path prototype is not sufficient for clustered Redpanda because an in-memory, `thread_local` table on the current leader is not part of the partition's replicated state. The cluster-correct implementation must make the deduplication index a deterministic, partition-owned state machine whose source of truth is the Raft log.
+The produce-path prototype is not sufficient for clustered Redpanda because an in-memory, `thread_local` table on the current leader is not part of the partition's replicated state. The cluster-correct implementation must make duplicate decisions from deterministic partition state whose source of truth is the Raft log. The initial implementation may rebuild the live deduplication window by scanning recent committed log records on the leader before append; a partition-owned STM remains the target optimization for avoiding per-produce scans while preserving the same log-derived correctness model.
 
 ### Phase 0: Remove the unsafe prototype behavior
 

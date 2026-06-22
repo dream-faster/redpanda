@@ -23,6 +23,7 @@
 #include "model/metadata.h"
 #include "model/namespace.h"
 #include "model/record.h"
+#include "model/record_batch_reader.h"
 #include "model/timestamp.h"
 #include "pandaproxy/schema_registry/validation.h"
 #include "raft/errc.h"
@@ -34,7 +35,6 @@
 #include <seastar/util/log.hh>
 
 #include <chrono>
-#include <deque>
 #include <exception>
 #include <functional>
 #include <unordered_map>
@@ -44,84 +44,9 @@ namespace kafka {
 namespace {
 static constexpr auto despam_interval = std::chrono::minutes(5);
 static constexpr auto message_id_deduplication_window = std::chrono::minutes(2);
+static constexpr size_t max_message_id_dedup_scan_bytes = 128 * 1024 * 1024;
 
-struct message_id_dedup_key {
-    model::ntp ntp;
-    ss::sstring id;
-
-    bool operator==(const message_id_dedup_key& o) const noexcept {
-        return ntp == o.ntp && id == o.id;
-    }
-};
-
-struct message_id_dedup_key_hash {
-    size_t operator()(const message_id_dedup_key& k) const noexcept {
-        return std::hash<model::ntp>{}(k.ntp) ^ std::hash<ss::sstring>{}(k.id);
-    }
-};
-
-struct message_id_dedup_entry {
-    model::offset offset;
-    ss::lowres_clock::time_point expires_at;
-};
-
-struct message_id_expiry_entry {
-    message_id_dedup_key key;
-    ss::lowres_clock::time_point expires_at;
-};
-
-using message_id_dedup_table = std::unordered_map<
-  message_id_dedup_key,
-  message_id_dedup_entry,
-  message_id_dedup_key_hash>;
-
-thread_local message_id_dedup_table message_id_dedup_state;
-thread_local std::deque<message_id_expiry_entry> message_id_dedup_expiry;
-
-void prune_message_id_dedup_state() {
-    const auto now = ss::lowres_clock::now();
-    while (!message_id_dedup_expiry.empty()
-           && message_id_dedup_expiry.front().expires_at <= now) {
-        auto exp = std::move(message_id_dedup_expiry.front());
-        message_id_dedup_expiry.pop_front();
-        auto it = message_id_dedup_state.find(exp.key);
-        if (
-          it != message_id_dedup_state.end()
-          && it->second.expires_at == exp.expires_at) {
-            message_id_dedup_state.erase(it);
-        }
-    }
-}
-
-void remember_message_ids(
-  const model::ntp& ntp,
-  const std::vector<std::pair<ss::sstring, int32_t>>& ids,
-  model::offset base_offset) {
-    prune_message_id_dedup_state();
-    auto expires_at = ss::lowres_clock::now() + message_id_deduplication_window;
-    for (const auto& [id, offset_delta] : ids) {
-        message_id_dedup_key key{.ntp = ntp, .id = id};
-        message_id_dedup_state.insert_or_assign(
-          key,
-          message_id_dedup_entry{
-            .offset = model::offset(base_offset() + offset_delta),
-            .expires_at = expires_at});
-        message_id_dedup_expiry.push_back(
-          message_id_expiry_entry{
-            .key = std::move(key), .expires_at = expires_at});
-    }
-}
-
-std::optional<model::offset>
-duplicate_message_id_offset(const model::ntp& ntp, std::string_view id) {
-    prune_message_id_dedup_state();
-    auto it = message_id_dedup_state.find(
-      message_id_dedup_key{.ntp = ntp, .id = ss::sstring{id}});
-    if (it == message_id_dedup_state.end()) {
-        return std::nullopt;
-    }
-    return it->second.offset;
-}
+using message_id_dedup_table = std::unordered_map<ss::sstring, model::offset>;
 
 std::optional<ss::sstring> extract_message_id(model::record& record) {
     if (!record.has_key()) {
@@ -132,13 +57,12 @@ std::optional<ss::sstring> extract_message_id(model::record& record) {
 
 struct message_id_filter_result {
     std::unique_ptr<model::record_batch> batch;
-    std::vector<std::pair<ss::sstring, int32_t>> accepted_ids;
     std::optional<model::offset> duplicate_base_offset;
     int32_t accepted_records{0};
 };
 
 message_id_filter_result filter_message_id_duplicates(
-  const model::ntp& ntp, const model::record_batch& batch) {
+  const message_id_dedup_table& dedup_table, const model::record_batch& batch) {
     message_id_filter_result result;
     model::batch_builder builder;
     const auto& header = batch.header();
@@ -161,9 +85,9 @@ message_id_filter_result filter_message_id_duplicates(
     batch.for_each_record([&](model::record record) {
         auto id = extract_message_id(record);
         if (id.has_value()) {
-            if (auto offset = duplicate_message_id_offset(ntp, *id)) {
+            if (auto it = dedup_table.find(*id); it != dedup_table.end()) {
                 result.duplicate_base_offset
-                  = result.duplicate_base_offset.value_or(*offset);
+                  = result.duplicate_base_offset.value_or(it->second);
                 return;
             }
             if (!accepted_in_batch.insert(*id).second) {
@@ -183,9 +107,6 @@ message_id_filter_result filter_message_id_duplicates(
             record.share_key_opt(),
             record.share_value_opt(),
             std::move(headers)));
-        if (id.has_value()) {
-            result.accepted_ids.emplace_back(*id, result.accepted_records);
-        }
         ++result.accepted_records;
     });
 
@@ -194,6 +115,49 @@ message_id_filter_result filter_message_id_duplicates(
           builder.build_sync());
     }
     return result;
+}
+
+ss::future<message_id_dedup_table>
+build_message_id_dedup_table(partition_proxy& partition) {
+    message_id_dedup_table dedup_table;
+    auto high_watermark = partition.high_watermark();
+    auto start_offset = partition.start_offset();
+    if (high_watermark < start_offset) {
+        co_return dedup_table;
+    }
+
+    auto now = model::timestamp::now();
+    auto cutoff = model::timestamp{
+      now()
+      - std::chrono::duration_cast<std::chrono::milliseconds>(
+          message_id_deduplication_window)
+          .count()};
+
+    auto reader = co_await partition.make_reader(
+      kafka::log_reader_config(
+        kafka::offset_cast(start_offset),
+        kafka::offset_cast(high_watermark),
+        0,
+        max_message_id_dedup_scan_bytes,
+        cutoff,
+        std::nullopt));
+    auto batches = co_await model::consume_reader_to_memory(
+      std::move(reader), model::no_timeout);
+    for (auto& batch : batches) {
+        if (batch.header().max_timestamp < cutoff) {
+            continue;
+        }
+        batch.for_each_record(
+          [&dedup_table, base = batch.base_offset()](model::record record) {
+              auto id = extract_message_id(record);
+              if (!id.has_value()) {
+                  return;
+              }
+              dedup_table.insert_or_assign(
+                std::move(*id), model::offset(base() + record.offset_delta()));
+          });
+    }
+    co_return dedup_table;
 }
 
 void fill_response_with_errors(
@@ -290,11 +254,9 @@ error_code map_produce_error_code(std::error_code ec) {
  */
 partition_produce_stages partition_append(
   model::partition_id id,
-  model::ntp ntp,
   partition_proxy partition,
   model::batch_identity bid,
   std::unique_ptr<model::record_batch> batch,
-  std::vector<std::pair<ss::sstring, int32_t>> accepted_message_ids,
   int16_t acks,
   int32_t num_records,
   int64_t num_bytes,
@@ -314,8 +276,6 @@ partition_produce_stages partition_append(
       .produced = stages.replicate_finished.then_wrapped(
         [partition = std::move(partition),
          id,
-         ntp = std::move(ntp),
-         accepted_message_ids = std::move(accepted_message_ids),
          num_records = num_records,
          num_bytes,
          log_append_time_ms = log_append_time_ms](
@@ -330,8 +290,6 @@ partition_produce_stages partition_append(
                       r.value().last_offset - (num_records - 1));
                     p.log_append_time_ms = log_append_time_ms;
                     p.error_code = error_code::none;
-                    remember_message_ids(
-                      ntp, accepted_message_ids, p.base_offset);
                     partition.probe().add_records_produced(num_records);
                     partition.probe().add_bytes_produced(num_bytes);
                     partition.probe().add_batches_produced(1);
@@ -469,47 +427,46 @@ ss::future<produce_response::partition> do_produce_topic_partition(
        acks = octx.request.data.acks,
        timeout,
        source_shard = ss::this_shard_id()](
-        cluster::partition_manager& mgr) mutable {
+        cluster::partition_manager& mgr) mutable
+        -> ss::future<produce_response::partition> {
           auto partition = kafka::make_partition_proxy(ntp, mgr);
           if (!partition || !partition->is_leader()) {
-              return ss::as_ready_future(finalize_request_with_error_code(
+              co_return finalize_request_with_error_code(
                 error_code::not_leader_for_partition,
                 std::move(dispatch),
                 ntp,
-                source_shard));
+                source_shard);
           }
 
-          auto filter_result = filter_message_id_duplicates(ntp, *batch);
+          auto dedup_table = co_await build_message_id_dedup_table(*partition);
+          auto filter_result = filter_message_id_duplicates(
+            dedup_table, *batch);
           if (!filter_result.batch) {
               ssx::background = ss::smp::submit_to(
                 source_shard, [dispatch = std::move(dispatch)]() mutable {
                     dispatch->set_value();
                     dispatch.reset();
                 });
-              return ss::make_ready_future<produce_response::partition>(
-                produce_response::partition{
-                  .partition_index = ntp.tp.partition,
-                  .error_code = error_code::none,
-                  .base_offset = filter_result.duplicate_base_offset.value_or(
-                    model::offset{0})});
+              co_return produce_response::partition{
+                .partition_index = ntp.tp.partition,
+                .error_code = error_code::none,
+                .base_offset = filter_result.duplicate_base_offset.value_or(
+                  model::offset{0})};
           }
           batch = std::move(filter_result.batch);
-          auto accepted_message_ids = std::move(filter_result.accepted_ids);
           auto bid = model::batch_identity::from(batch->header());
           auto num_records = batch->record_count();
           auto batch_size = batch->size_bytes();
           auto stages = partition_append(
             ntp.tp.partition,
-            ntp,
             std::move(*partition),
             bid,
             std::move(batch),
-            std::move(accepted_message_ids),
             acks,
             num_records,
             batch_size,
             timeout);
-          return stages.dispatched
+          co_return co_await stages.dispatched
             .then_wrapped([source_shard, dispatch = std::move(dispatch)](
                             ss::future<> f) mutable {
                 if (f.failed()) {
