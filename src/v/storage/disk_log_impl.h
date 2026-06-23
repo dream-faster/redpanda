@@ -536,6 +536,12 @@ private:
     // since last window compaction.
     std::optional<model::offset> _last_compaction_window_start_offset;
 
+    // The highest closed-segment committed offset processed by the last
+    // windowed dedup pass. If the head of the log hasn't advanced past this,
+    // there is no new data that could introduce duplicates, so the pass is
+    // skipped. Only advanced when the whole window was indexed in one pass.
+    model::offset _last_dedup_offset{};
+
     size_t _reclaimable_size_bytes{0};
 
     mutable ssize_t _dirty_segment_bytes{0};

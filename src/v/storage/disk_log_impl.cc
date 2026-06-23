@@ -1399,7 +1399,11 @@ ss::future<> disk_log_impl::housekeeping(housekeeping_config cfg) {
         }
     }
 
-    if (config().dedup_window_ms().has_value()) {
+    // Windowed dedup. Skipped for locally-compacted topics, where compaction
+    // already performs whole-log last-wins deduplication by key.
+    if (
+      config().dedup_window_ms().has_value() && !config().is_locally_compacted()
+      && !_segs.empty()) {
         co_await do_dedup(cfg.compact);
     }
 }
@@ -1777,15 +1781,38 @@ ss::future<> disk_log_impl::do_dedup(compaction::compaction_config cfg) {
         cfg.asrc = &_compaction_as;
     }
 
-    // T_head: max max_timestamp across all non-active (closed) segments.
+    // Dedup is about removing key-superseded records only. Disable tombstone
+    // and transaction-marker removal so the pass cannot collect those as a side
+    // effect (relevant for non-compacted topics).
+    cfg.tombstone_retention_ms = std::nullopt;
+    cfg.tx_retention_ms = std::nullopt;
+
+    // T_head: max max_timestamp across all compactible (closed, in-bounds)
+    // segments. Also track the head committed offset to gate redundant passes.
     auto head = model::timestamp::min();
+    auto head_committed = model::offset{};
     for (const auto& seg : _segs) {
-        if (seg->has_appender()) {
+        if (seg->has_appender() || !seg->is_compactible(cfg)) {
             continue;
         }
         head = std::max(head, seg->index().max_timestamp());
+        head_committed = std::max(
+          head_committed, seg->offsets().get_committed_offset());
     }
     if (head == model::timestamp::min()) {
+        co_return;
+    }
+
+    // Skip if no new data has been added since the last completed pass: new
+    // duplicates can only arrive as new data at the head of the log.
+    if (head_committed <= _last_dedup_offset) {
+        vlog(
+          gclog.trace,
+          "[{}] dedup pass: head offset {} not advanced past last pass {}, "
+          "skipping",
+          config().ntp(),
+          head_committed,
+          _last_dedup_offset);
         co_return;
     }
 
@@ -1793,7 +1820,7 @@ ss::future<> disk_log_impl::do_dedup(compaction::compaction_config cfg) {
     const auto cutoff_ms = head.value() - window->count();
     segment_set::underlying_t buf;
     for (const auto& seg : _segs) {
-        if (seg->has_appender()) {
+        if (seg->has_appender() || !seg->is_compactible(cfg)) {
             continue;
         }
         if (seg->index().max_timestamp().value() >= cutoff_ms) {
@@ -1812,15 +1839,26 @@ ss::future<> disk_log_impl::do_dedup(compaction::compaction_config cfg) {
       in_window.size(),
       window->count());
 
-    // Build key→max_offset map, newest-to-oldest, so the map holds the
-    // highest offset per key (last-wins).
-    auto simple_map = std::make_unique<compaction::simple_key_offset_map>(
-      cfg.key_offset_map_max_keys);
-    compaction::key_offset_map& map = dynamic_cast<compaction::key_offset_map&>(
-      *simple_map);
+    // Build key→max_offset map, newest-to-oldest, so the map holds the highest
+    // offset per key (last-wins). Reuse the large shared hash map when one is
+    // available, otherwise fall back to a per-pass simple map.
+    std::unique_ptr<compaction::simple_key_offset_map> simple_map;
+    const bool use_hash_map = cfg.hash_key_map
+                              && cfg.hash_key_map->capacity() > 0;
+    if (use_hash_map) {
+        co_await cfg.hash_key_map->reset();
+    } else {
+        simple_map = std::make_unique<compaction::simple_key_offset_map>(
+          cfg.key_offset_map_max_keys);
+    }
+    compaction::key_offset_map& map
+      = use_hash_map
+          ? dynamic_cast<compaction::key_offset_map&>(*cfg.hash_key_map)
+          : dynamic_cast<compaction::key_offset_map&>(*simple_map);
 
+    model::offset idx_start_offset;
     try {
-        co_await build_offset_map(
+        idx_start_offset = co_await build_offset_map(
           cfg,
           in_window,
           _stm_hookset,
@@ -1847,25 +1885,38 @@ ss::future<> disk_log_impl::do_dedup(compaction::compaction_config cfg) {
         co_return;
     }
 
+    // The pass only fully covers the window if the earliest in-window segment
+    // was completely indexed; otherwise older keys may be under-deduplicated
+    // and the watermark must not advance.
+    const bool full_window_indexed
+      = idx_start_offset <= in_window.front()->offsets().get_base_offset();
+
     auto segment_modify_lock = co_await _segment_rewrite_lock.get_units();
     scoped_file_tracker::set_t leftovers;
     cfg.files_to_cleanup = &leftovers;
 
-    for (auto& seg : in_window) {
-        if (cfg.asrc) {
-            cfg.asrc->check();
+    std::exception_ptr eptr;
+    try {
+        for (auto& seg : in_window) {
+            if (cfg.asrc) {
+                cfg.asrc->check();
+            }
+            if (seg->is_closed()) {
+                continue;
+            }
+            bool needs_rewrite = co_await segment_needs_rewrite_with_offset_map(
+              cfg, seg, map);
+            if (!needs_rewrite) {
+                continue;
+            }
+            co_await rewrite_segment_with_offset_map(
+              cfg, seg, map, false, false);
         }
-        if (seg->is_closed()) {
-            continue;
-        }
-        bool needs_rewrite = co_await segment_needs_rewrite_with_offset_map(
-          cfg, seg, map);
-        if (!needs_rewrite) {
-            continue;
-        }
-        co_await rewrite_segment_with_offset_map(cfg, seg, map, false, false);
+    } catch (...) {
+        eptr = std::current_exception();
     }
 
+    // Always clean up staging files, even if a rewrite failed midway.
     while (!leftovers.empty()) {
         auto it = leftovers.begin();
         const auto file = it->string();
@@ -1882,6 +1933,24 @@ ss::future<> disk_log_impl::do_dedup(compaction::compaction_config cfg) {
               std::current_exception());
         }
         leftovers.erase(it);
+    }
+
+    if (eptr) {
+        if (ssx::is_shutdown_exception(eptr)) {
+            std::rethrow_exception(eptr);
+        }
+        // Best-effort: log and retry on the next pass without advancing the
+        // watermark.
+        vlog(
+          gclog.warn,
+          "[{}] dedup pass: segment rewrite failed: {}",
+          config().ntp(),
+          eptr);
+        co_return;
+    }
+
+    if (full_window_indexed) {
+        _last_dedup_offset = head_committed;
     }
 }
 
