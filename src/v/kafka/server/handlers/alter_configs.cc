@@ -80,8 +80,9 @@ create_topic_properties_update(
           alter_configs_resource_response>(
           resource,
           error_code::policy_violation,
-          fmt::format("Topic cannot be altered because it belongs to an active "
-                      "shadow link."));
+          fmt::format(
+            "Topic cannot be altered because it belongs to an active "
+            "shadow link."));
     }
     /**
      * Alter topic configuration should override topic properties with values
@@ -329,8 +330,9 @@ create_topic_properties_update(
             if (
               config::shard_local_cfg().enable_schema_id_validation()
               != pandaproxy::schema_registry::schema_id_validation_mode::none) {
-                if (schema_id_validation_config_parser(
-                      cfg, kafka::config_resource_operation::set)) {
+                if (
+                  schema_id_validation_config_parser(
+                    cfg, kafka::config_resource_operation::set)) {
                     continue;
                 }
             }

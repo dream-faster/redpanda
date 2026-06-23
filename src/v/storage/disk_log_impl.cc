@@ -189,10 +189,11 @@ disk_log_impl::disk_log_impl(
       resources())
   , _probe(std::make_unique<storage::probe>())
   , _max_segment_size(compute_max_segment_size())
-  , _readers_cache(std::make_unique<readers_cache>(
-      config().ntp(),
-      _manager.config().readers_cache_eviction_timeout,
-      config::shard_local_cfg().readers_cache_target_max_size.bind()))
+  , _readers_cache(
+      std::make_unique<readers_cache>(
+        config().ntp(),
+        _manager.config().readers_cache_eviction_timeout,
+        config::shard_local_cfg().readers_cache_target_max_size.bind()))
   , _compaction_enabled(config().is_locally_compacted()) {
     for (auto& s : _segs) {
         _probe->add_initial_segment(*s);
@@ -460,8 +461,9 @@ disk_log_impl::time_based_gc_max_offset(gc_config cfg) const {
 ss::future<model::offset>
 disk_log_impl::monitor_eviction(ss::abort_source& as) {
     if (_eviction_monitor) {
-        throw std::logic_error("Eviction promise already registered. Eviction "
-                               "can not be monitored twice.");
+        throw std::logic_error(
+          "Eviction promise already registered. Eviction "
+          "can not be monitored twice.");
     }
 
     auto opt_sub = as.subscribe([this]() noexcept {
@@ -1039,8 +1041,9 @@ disk_log_impl::compact_adjacent_segment_ranges(
   compaction::compaction_config cfg,
   std::optional<model::offset> new_start_offset) {
     chunked_vector<compaction_result> rs;
-    if (auto ranges = find_adjacent_compaction_ranges(cfg, new_start_offset);
-        ranges) {
+    if (
+      auto ranges = find_adjacent_compaction_ranges(cfg, new_start_offset);
+      ranges) {
         // lightweight copy of segments in all of the found ranges. once a
         // scheduling event occurs in this method we can't rely on the iterators
         // in the range remaining valid. for example, a concurrent truncate may
@@ -1707,10 +1710,11 @@ ss::future<> disk_log_impl::rewrite_segment_with_offset_map(
     auto rdr_holder = co_await _readers_cache->evict_segment_readers(seg);
     auto write_lock = co_await seg->write_lock();
     if (initial_generation_id != seg->get_generation_id()) {
-        throw std::runtime_error(fmt::format(
-          "Aborting compaction of segment: {}, segment was mutated "
-          "while compacting",
-          seg->path()));
+        throw std::runtime_error(
+          fmt::format(
+            "Aborting compaction of segment: {}, segment was mutated "
+            "while compacting",
+            seg->path()));
     }
     if (seg->is_closed()) {
         throw segment_closed_exception();
@@ -2665,11 +2669,12 @@ auto disk_log_impl::get_file_offset(
   std::optional<segment_index::entry> maybe_index_entry,
   model::offset target,
   boundary_type boundary) -> ss::future<file_offset_t> {
-    auto index_entry = maybe_index_entry.value_or(segment_index::entry{
-      .offset = s->offsets().get_base_offset(),
-      .timestamp = s->index().base_timestamp(),
-      .filepos = 0,
-    });
+    auto index_entry = maybe_index_entry.value_or(
+      segment_index::entry{
+        .offset = s->offsets().get_base_offset(),
+        .timestamp = s->index().base_timestamp(),
+        .filepos = 0,
+      });
     size_t size_bytes{index_entry.filepos};
     model::timestamp base_timestamp = index_entry.timestamp;
     model::timestamp max_timestamp = model::timestamp::max();
@@ -3265,8 +3270,9 @@ bool disk_log_impl::is_compacted(
 
 bool disk_log_impl::eligible_for_compacted_reupload(
   model::offset first, model::offset last) const {
-    if (auto mco = max_eligible_for_compacted_reupload_offset(first);
-        mco.has_value()) {
+    if (
+      auto mco = max_eligible_for_compacted_reupload_offset(first);
+      mco.has_value()) {
         return last <= mco.value();
     }
     return false;
@@ -3322,10 +3328,11 @@ disk_log_impl::make_reader(local_log_reader_config config) {
     throw_if_closed();
     if (config.start_offset < _start_offset) {
         return ss::make_exception_future<model::record_batch_reader>(
-          std::runtime_error(fmt::format(
-            "Reader cannot read before start of the log {} < {}",
-            config.start_offset,
-            _start_offset)));
+          std::runtime_error(
+            fmt::format(
+              "Reader cannot read before start of the log {} < {}",
+              config.start_offset,
+              _start_offset)));
     }
 
     if (config.start_offset > config.max_offset) {
@@ -4136,8 +4143,10 @@ disk_log_impl::disk_usage_and_reclaimable_space(gc_config input_cfg) {
         }
     }
 
-    ss::semaphore limit(std::max<size_t>(
-      1, config::shard_local_cfg().space_management_max_segment_concurrency()));
+    ss::semaphore limit(
+      std::max<size_t>(
+        1,
+        config::shard_local_cfg().space_management_max_segment_concurrency()));
 
     auto [retention, available, remaining, lcl] = co_await ss::when_all_succeed(
       // reduce segment subject to retention policy
@@ -4362,8 +4371,10 @@ disk_log_impl::disk_usage_target_time_retention(gc_config cfg) {
         co_return std::nullopt;
     }
 
-    ss::semaphore limit(std::max<size_t>(
-      1, config::shard_local_cfg().space_management_max_segment_concurrency()));
+    ss::semaphore limit(
+      std::max<size_t>(
+        1,
+        config::shard_local_cfg().space_management_max_segment_concurrency()));
 
     // roll up the amount of disk space taken by these segments
     auto usage = co_await ss::map_reduce(
@@ -4414,10 +4425,11 @@ ss::future<usage_report> disk_log_impl::disk_usage(gc_config cfg) {
         // reason. Return the used size, but with 0 bytes indicated as
         // reclaimable.
         auto e = usage_and_reclaim_fut.get_exception();
-        ss::semaphore limit(std::max<size_t>(
-          1,
-          config::shard_local_cfg()
-            .space_management_max_segment_concurrency()));
+        ss::semaphore limit(
+          std::max<size_t>(
+            1,
+            config::shard_local_cfg()
+              .space_management_max_segment_concurrency()));
 
         // Copy segment pointers so that concurrent modification of
         // _segs does not invalidate the range we iterate over.

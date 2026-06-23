@@ -70,16 +70,17 @@ void run_dedup_housekeeping(
   std::chrono::milliseconds min_lag_ms = std::chrono::milliseconds{0}) {
     ss::abort_source as;
     b.get_log()
-      ->housekeeping(storage::housekeeping_config(
-        model::timestamp::min(), // gc upper bound: nothing collected
-        std::nullopt,            // max_bytes_in_log
-        model::offset::max(),    // max_collect_offset
-        model::offset::max(),    // max_tombstone_remove_offset
-        model::offset::max(),    // max_tx_end_remove_offset
-        std::nullopt,            // tombstone_retention_ms
-        std::nullopt,            // tx_retention_ms
-        min_lag_ms,
-        as))
+      ->housekeeping(
+        storage::housekeeping_config(
+          model::timestamp::min(), // gc upper bound: nothing collected
+          std::nullopt,            // max_bytes_in_log
+          model::offset::max(),    // max_collect_offset
+          model::offset::max(),    // max_tombstone_remove_offset
+          model::offset::max(),    // max_tx_end_remove_offset
+          std::nullopt,            // tombstone_retention_ms
+          std::nullopt,            // tx_retention_ms
+          min_lag_ms,
+          as))
       .get();
 }
 
