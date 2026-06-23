@@ -13,9 +13,8 @@
 // dependencies. Each test constructs small record batches in memory and
 // verifies the first-wins dedup semantics.
 
-#include "cluster/dedup_window_filter.h"
-
 #include "bytes/iobuf.h"
+#include "cluster/dedup_window_filter.h"
 #include "model/batch_compression.h"
 #include "model/record.h"
 #include "storage/record_batch_builder.h"
@@ -40,8 +39,7 @@ model::record_batch make_batch(
   model::record_batch_type type = model::record_batch_type::raft_data) {
     storage::record_batch_builder builder(type, model::offset{0});
     builder.set_timestamp(batch_ts);
-    builder.add_raw_kv(
-      iobuf::from(key), iobuf::from(value));
+    builder.add_raw_kv(iobuf::from(key), iobuf::from(value));
     return std::move(builder).build();
 }
 
@@ -60,8 +58,8 @@ model::record_batch make_multi_batch(
 }
 
 // Build a batch with a null (absent) key.
-model::record_batch make_null_key_batch(
-  std::string_view value, model::timestamp batch_ts) {
+model::record_batch
+make_null_key_batch(std::string_view value, model::timestamp batch_ts) {
     storage::record_batch_builder builder(
       model::record_batch_type::raft_data, model::offset{0});
     builder.set_timestamp(batch_ts);
@@ -70,9 +68,7 @@ model::record_batch make_null_key_batch(
 }
 
 // Count records in a batch.
-int32_t record_count(const model::record_batch& b) {
-    return b.record_count();
-}
+int32_t record_count(const model::record_batch& b) { return b.record_count(); }
 
 } // namespace
 
@@ -208,7 +204,8 @@ TEST(DedupWindowFilter, CompressedBatch) {
     builder.set_timestamp(ts(1000));
     builder.add_raw_kv(iobuf::from("k"), iobuf::from("v1"));
     auto plain = std::move(builder).build();
-    auto compressed = model::compress_batch_sync(model::compression::lz4, std::move(plain));
+    auto compressed = model::compress_batch_sync(
+      model::compression::lz4, std::move(plain));
 
     // First produce: kept.
     auto r1 = f.filter(std::move(compressed));

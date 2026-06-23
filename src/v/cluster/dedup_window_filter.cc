@@ -19,8 +19,7 @@ namespace cluster {
 dedup_window_filter::dedup_window_filter(std::chrono::milliseconds window)
   : _window(window) {}
 
-bool dedup_window_filter::is_duplicate(
-  const iobuf& key, model::timestamp ts) {
+bool dedup_window_filter::is_duplicate(const iobuf& key, model::timestamp ts) {
     auto key_bytes = iobuf_to_bytes(key);
     auto it = _map.find(key_bytes);
     if (it != _map.end()) {
@@ -88,9 +87,7 @@ dedup_window_filter::filter(model::record_batch batch) {
     batch.for_each_record([&](model::record r) {
         if (keep[static_cast<size_t>(idx)]) {
             builder.add_raw_kw(
-              r.share_key_opt(),
-              r.share_value_opt(),
-              std::move(r.headers()));
+              r.share_key_opt(), r.share_value_opt(), std::move(r.headers()));
         }
         ++idx;
     });
