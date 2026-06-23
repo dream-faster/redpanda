@@ -1217,7 +1217,9 @@ config_response_container_t make_topic_configs(
       topic_property_dedup_window_ms,
       std::optional<std::chrono::milliseconds>{},
       topic_property_dedup_window_ms,
-      topic_properties.dedup_window_ms,
+      hide_disabled_tristate(
+        topic_properties.dedup_window_ms,
+        std::optional<std::chrono::milliseconds>{}),
       include_synonyms,
       maybe_make_documentation(
         include_documentation,

@@ -249,8 +249,8 @@ struct topic_properties
 
     // Windowed last-wins deduplication by record key. Within the window
     // (measured from the maximum in-log record timestamp), only the record
-    // with the highest offset per key is retained. std::nullopt / disabled
-    // means dedup is off.
+    // with the highest offset per key is retained. Both the empty and disabled
+    // tristate states are treated as "dedup off"; the default is disabled.
     tristate<std::chrono::milliseconds> dedup_window_ms{disable_tristate};
 
     bool is_local_topic() const;

@@ -96,8 +96,9 @@ public:
         // Storage mode for the topic (local, tiered, or cloud)
         model::redpanda_storage_mode storage_mode{default_storage_mode};
 
-        // Windowed last-wins deduplication by record key. std::nullopt means
-        // dedup is disabled (the default).
+        // Windowed last-wins deduplication by record key. The default is an
+        // empty tristate (no override); both the empty and disabled states are
+        // treated as "dedup off" by the dedup_window_ms() accessor.
         tristate<std::chrono::milliseconds> dedup_window_ms{std::nullopt};
 
         fmt::iterator format_to(fmt::iterator it) const;
