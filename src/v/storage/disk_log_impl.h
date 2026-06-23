@@ -372,7 +372,6 @@ private:
     ss::future<> do_compact(
       compaction::compaction_config,
       std::optional<model::offset> new_start_offset);
-    ss::future<> do_dedup(compaction::compaction_config cfg);
 
     ss::future<> remove_empty_segments();
 
@@ -535,12 +534,6 @@ private:
     // can skip segments above this offset, if no new segments have been created
     // since last window compaction.
     std::optional<model::offset> _last_compaction_window_start_offset;
-
-    // The highest closed-segment committed offset processed by the last
-    // windowed dedup pass. If the head of the log hasn't advanced past this,
-    // there is no new data that could introduce duplicates, so the pass is
-    // skipped. Only advanced when the whole window was indexed in one pass.
-    model::offset _last_dedup_offset{};
 
     size_t _reclaimable_size_bytes{0};
 

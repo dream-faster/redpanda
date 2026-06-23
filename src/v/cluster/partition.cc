@@ -16,6 +16,7 @@
 #include "cluster/archival/archival_metadata_stm.h"
 #include "cluster/archival/ntp_archiver_service.h"
 #include "cluster/archival/upload_housekeeping_service.h"
+#include "cluster/dedup_window_filter.h"
 #include "cluster/id_allocator_stm.h"
 #include "cluster/log_eviction_stm.h"
 #include "cluster/logger.h"
@@ -423,6 +424,27 @@ kafka_stages partition::replicate_in_stages(
         }
     }
 
+    // Apply write-path dedup for plain (non-idempotent, non-transactional)
+    // batches. Idempotent and transactional batches bypass the filter so their
+    // producer sequence numbers remain intact.
+    if (_dedup_filter && !bid.is_idempotent() && !bid.is_transactional) {
+        auto filtered = _dedup_filter->filter(std::move(batch));
+        if (!filtered) {
+            // All records were duplicates. Ack with the current end offset so
+            // the producer sees a successful response without any replication.
+            auto end_offset = kafka::offset(
+              log()->from_log_offset(_raft->committed_offset())());
+            auto term = _raft->term();
+            ss::promise<> enqueued;
+            auto enqueued_f = enqueued.get_future();
+            enqueued.set_value();
+            return kafka_stages(
+              std::move(enqueued_f),
+              ss::make_ready_future<ret_t>(kafka_result{end_offset, term}));
+        }
+        batch = std::move(*filtered);
+    }
+
     return stages_with_units(
       hold_writes_enabled(),
       [this,
@@ -542,6 +564,16 @@ ss::future<> partition::start(
         std::optional<std::reference_wrapper<ss::abort_source>>) {
           return flush_archiver();
       });
+
+    if (const auto w = get_ntp_config().dedup_window_ms(); w) {
+        _dedup_filter = std::make_unique<dedup_window_filter>(*w);
+    }
+}
+
+void partition::on_leader_change(bool is_leader [[maybe_unused]]) {
+    if (_dedup_filter) {
+        _dedup_filter->clear();
+    }
 }
 
 ss::future<> partition::stop() {
@@ -922,6 +954,16 @@ ss::future<> partition::update_configuration(topic_properties new_properties) {
             // configuration changes.
             _archiver->notify_topic_config();
         }
+    }
+
+    // Refresh the dedup filter from the new ntp_config. Done after
+    // set_overrides so get_ntp_config() reflects the updated window.
+    if (const auto w = get_ntp_config().dedup_window_ms(); w) {
+        if (!_dedup_filter) {
+            _dedup_filter = std::make_unique<dedup_window_filter>(*w);
+        }
+    } else {
+        _dedup_filter.reset();
     }
 }
 
