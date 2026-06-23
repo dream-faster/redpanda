@@ -658,6 +658,27 @@ redpanda_cc_gtest(
 )
 
 redpanda_cc_gtest(
+    name = "dedup_e2e_test",
+    timeout = "moderate",
+    srcs = [
+        "dedup_e2e_test.cc",
+    ],
+    cpu = 1,
+    deps = [
+        ":disk_log_builder",
+        ":disk_log_builder_fixture",
+        "//src/v/bytes:iobuf",
+        "//src/v/model",
+        "//src/v/storage",
+        "//src/v/storage:record_batch_builder",
+        "//src/v/utils:tristate",
+        "//src/v/test_utils:gtest",
+        "@googletest//:gtest",
+        "@seastar",
+    ],
+)
+
+redpanda_cc_gtest(
     name = "log_segment_reader_test",
     timeout = "short",
     srcs = [
