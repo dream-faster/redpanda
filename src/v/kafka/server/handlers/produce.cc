@@ -18,10 +18,12 @@
 #include "kafka/protocol/errors.h"
 #include "kafka/protocol/kafka_batch_adapter.h"
 #include "kafka/server/handlers/produce_validation.h"
+#include "model/batch_builder.h"
 #include "model/fundamental.h"
 #include "model/metadata.h"
 #include "model/namespace.h"
 #include "model/record.h"
+#include "model/record_batch_reader.h"
 #include "model/timestamp.h"
 #include "pandaproxy/schema_registry/validation.h"
 #include "raft/errc.h"
@@ -35,10 +37,128 @@
 #include <chrono>
 #include <exception>
 #include <functional>
+#include <unordered_map>
+#include <unordered_set>
 
 namespace kafka {
 namespace {
 static constexpr auto despam_interval = std::chrono::minutes(5);
+static constexpr auto message_id_deduplication_window = std::chrono::minutes(2);
+static constexpr size_t max_message_id_dedup_scan_bytes = 128 * 1024 * 1024;
+
+using message_id_dedup_table = std::unordered_map<ss::sstring, model::offset>;
+
+std::optional<ss::sstring> extract_message_id(model::record& record) {
+    if (!record.has_key()) {
+        return std::nullopt;
+    }
+    return record.key().linearize_to_string();
+}
+
+struct message_id_filter_result {
+    std::unique_ptr<model::record_batch> batch;
+    std::optional<model::offset> duplicate_base_offset;
+    int32_t accepted_records{0};
+};
+
+message_id_filter_result filter_message_id_duplicates(
+  const message_id_dedup_table& dedup_table, const model::record_batch& batch) {
+    message_id_filter_result result;
+    model::batch_builder builder;
+    const auto& header = batch.header();
+    builder.set_batch_type(header.type);
+    builder.set_compression(header.attrs.compression());
+    builder.set_batch_timestamp(
+      header.attrs.timestamp_type(), header.first_timestamp);
+    builder.set_producer_id(header.producer_id);
+    builder.set_producer_epoch(header.producer_epoch);
+    builder.set_base_sequence(header.base_sequence);
+    builder.set_base_offset(header.base_offset);
+    if (header.attrs.is_transactional()) {
+        builder.set_transactional();
+    }
+    if (header.attrs.is_control()) {
+        builder.set_control();
+    }
+
+    std::unordered_set<ss::sstring> accepted_in_batch;
+    batch.for_each_record([&](model::record record) {
+        auto id = extract_message_id(record);
+        if (id.has_value()) {
+            if (auto it = dedup_table.find(*id); it != dedup_table.end()) {
+                result.duplicate_base_offset
+                  = result.duplicate_base_offset.value_or(it->second);
+                return;
+            }
+            if (!accepted_in_batch.insert(*id).second) {
+                return;
+            }
+        }
+        chunked_vector<model::record_header> headers;
+        headers.reserve(record.headers().size());
+        for (auto& h : record.headers()) {
+            headers.push_back(h.copy());
+        }
+        builder.add_record(
+          model::record(
+            record.attributes(),
+            record.timestamp_delta(),
+            result.accepted_records,
+            record.share_key_opt(),
+            record.share_value_opt(),
+            std::move(headers)));
+        ++result.accepted_records;
+    });
+
+    if (result.accepted_records > 0) {
+        result.batch = std::make_unique<model::record_batch>(
+          builder.build_sync());
+    }
+    return result;
+}
+
+ss::future<message_id_dedup_table>
+build_message_id_dedup_table(partition_proxy& partition) {
+    message_id_dedup_table dedup_table;
+    auto high_watermark = partition.high_watermark();
+    auto start_offset = partition.start_offset();
+    if (high_watermark < start_offset) {
+        co_return dedup_table;
+    }
+
+    auto now = model::timestamp::now();
+    auto cutoff = model::timestamp{
+      now()
+      - std::chrono::duration_cast<std::chrono::milliseconds>(
+          message_id_deduplication_window)
+          .count()};
+
+    auto reader = co_await partition.make_reader(
+      kafka::log_reader_config(
+        kafka::offset_cast(start_offset),
+        kafka::offset_cast(high_watermark),
+        0,
+        max_message_id_dedup_scan_bytes,
+        cutoff,
+        std::nullopt));
+    auto batches = co_await model::consume_reader_to_memory(
+      std::move(reader), model::no_timeout);
+    for (auto& batch : batches) {
+        if (batch.header().max_timestamp < cutoff) {
+            continue;
+        }
+        batch.for_each_record(
+          [&dedup_table, base = batch.base_offset()](model::record record) {
+              auto id = extract_message_id(record);
+              if (!id.has_value()) {
+                  return;
+              }
+              dedup_table.insert_or_assign(
+                std::move(*id), model::offset(base() + record.offset_delta()));
+          });
+    }
+    co_return dedup_table;
+}
 
 void fill_response_with_errors(
   produce_request::topic_cit topics_begin,
@@ -307,16 +427,33 @@ ss::future<produce_response::partition> do_produce_topic_partition(
        acks = octx.request.data.acks,
        timeout,
        source_shard = ss::this_shard_id()](
-        cluster::partition_manager& mgr) mutable {
+        cluster::partition_manager& mgr) mutable
+        -> ss::future<produce_response::partition> {
           auto partition = kafka::make_partition_proxy(ntp, mgr);
           if (!partition || !partition->is_leader()) {
-              return ss::as_ready_future(finalize_request_with_error_code(
+              co_return finalize_request_with_error_code(
                 error_code::not_leader_for_partition,
                 std::move(dispatch),
                 ntp,
-                source_shard));
+                source_shard);
           }
 
+          auto dedup_table = co_await build_message_id_dedup_table(*partition);
+          auto filter_result = filter_message_id_duplicates(
+            dedup_table, *batch);
+          if (!filter_result.batch) {
+              ssx::background = ss::smp::submit_to(
+                source_shard, [dispatch = std::move(dispatch)]() mutable {
+                    dispatch->set_value();
+                    dispatch.reset();
+                });
+              co_return produce_response::partition{
+                .partition_index = ntp.tp.partition,
+                .error_code = error_code::none,
+                .base_offset = filter_result.duplicate_base_offset.value_or(
+                  model::offset{0})};
+          }
+          batch = std::move(filter_result.batch);
           auto bid = model::batch_identity::from(batch->header());
           auto num_records = batch->record_count();
           auto batch_size = batch->size_bytes();
@@ -329,7 +466,7 @@ ss::future<produce_response::partition> do_produce_topic_partition(
             num_records,
             batch_size,
             timeout);
-          return stages.dispatched
+          co_return co_await stages.dispatched
             .then_wrapped([source_shard, dispatch = std::move(dispatch)](
                             ss::future<> f) mutable {
                 if (f.failed()) {
@@ -503,9 +640,9 @@ produce_topic(produce_ctx& octx, produce_request::topic& topic) {
                   .error_code = errc}));
         };
 
-        if (
-          unlikely(
-            disabled_set && disabled_set->is_disabled(part.partition_index))) {
+        if (unlikely(
+              disabled_set
+              && disabled_set->is_disabled(part.partition_index))) {
             push_error_response(error_code::replica_not_available);
             continue;
         }
@@ -534,9 +671,9 @@ produce_topic(produce_ctx& octx, produce_request::topic& topic) {
         // NOTE: for produce version 0 and 1 the adapter transparently converts
         // the batch into an v2 batch and sets the v2_format flag. conversion
         // also produces a single record batch by accumulating legacy messages.
-        if (
-          unlikely(
-            !part.records->adapter.v2_format || !part.records->adapter.batch)) {
+        if (unlikely(
+              !part.records->adapter.v2_format
+              || !part.records->adapter.batch)) {
             push_error_response(error_code::invalid_record);
             continue;
         }
