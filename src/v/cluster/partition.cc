@@ -427,12 +427,18 @@ kafka_stages partition::replicate_in_stages(
     // Apply write-path dedup for plain (non-idempotent, non-transactional)
     // batches. Idempotent and transactional batches bypass the filter so their
     // producer sequence numbers remain intact.
+    //
+    // When records are dropped, the produce response must report base_offset
+    // using the post-filter record count, so the admitted count is stamped onto
+    // the kafka_result below and propagated through to the produce handler.
+    std::optional<int32_t> admitted_record_count;
     if (_dedup_filter && !bid.is_idempotent() && !bid.is_transactional) {
+        const auto original_count = batch.record_count();
         auto filtered = _dedup_filter->filter(std::move(batch));
         if (!filtered) {
             // All records were duplicates. Ack with the current committed
-            // offset so the producer sees a successful response without any
-            // replication.
+            // offset and a zero record count so the producer sees a successful
+            // response without any replication.
             auto committed_offset = kafka::offset(
               log()->from_log_offset(_raft->committed_offset())());
             auto term = _raft->term();
@@ -442,12 +448,15 @@ kafka_stages partition::replicate_in_stages(
             return kafka_stages(
               std::move(enqueued_f),
               ss::make_ready_future<ret_t>(
-                kafka_result{committed_offset, term}));
+                kafka_result{committed_offset, term, 0}));
+        }
+        if (filtered->record_count() != original_count) {
+            admitted_record_count = filtered->record_count();
         }
         batch = std::move(*filtered);
     }
 
-    return stages_with_units(
+    auto stages = stages_with_units(
       hold_writes_enabled(),
       [this,
        bid = std::move(bid),
@@ -471,6 +480,21 @@ kafka_stages partition::replicate_in_stages(
           return kafka_stages(
             std::move(res.request_enqueued), std::move(replicate_finished));
       });
+
+    // Stamp the post-filter record count onto the result so the produce
+    // handler computes base_offset from the number of records actually
+    // appended rather than the original request count.
+    if (admitted_record_count) {
+        stages.replicate_finished
+          = std::move(stages.replicate_finished)
+              .then([n = *admitted_record_count](ret_t r) {
+                  if (r) {
+                      r.value().replicated_record_count = n;
+                  }
+                  return r;
+              });
+    }
+    return stages;
 }
 
 raft::group_id partition::group() const { return _raft->group(); }
@@ -572,7 +596,7 @@ ss::future<> partition::start(
     }
 }
 
-void partition::on_leader_change(bool is_leader [[maybe_unused]]) {
+void partition::on_leader_change() {
     if (_dedup_filter) {
         _dedup_filter->clear();
     }

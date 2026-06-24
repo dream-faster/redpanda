@@ -165,6 +165,11 @@ struct reset_id_allocator_reply
 struct kafka_result {
     kafka::offset last_offset;
     model::term_id last_term;
+    /// Number of records actually appended (see
+    /// raft::replicate_result::replicated_record_count). -1 means
+    /// "unspecified"; set by the write-path dedup filter when records are
+    /// dropped so the produce response reports the correct base_offset.
+    int32_t replicated_record_count{-1};
 };
 struct kafka_stages {
     kafka_stages(ss::future<>, ss::future<result<kafka_result>>);

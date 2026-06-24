@@ -406,9 +406,9 @@ public:
     fmt::iterator format_to(fmt::iterator it) const;
 
     /// Notify the partition of a leadership change. Called by partition_manager
-    /// on every term change. Clears the dedup map when leadership changes to
-    /// avoid carrying stale state across leader/follower transitions.
-    void on_leader_change(bool is_leader);
+    /// on every term change. Clears the dedup map on any leader/follower
+    /// transition to avoid carrying stale state across them.
+    void on_leader_change();
 
 private:
     ss::future<>

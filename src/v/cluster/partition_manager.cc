@@ -73,9 +73,7 @@ partition_manager::partition_manager(
                 if (a) {
                     a.value().get().notify_leadership(leader_id);
                 }
-                const bool is_leader = leader_id.has_value()
-                                       && *leader_id == p->raft()->self().id();
-                p->on_leader_change(is_leader);
+                p->on_leader_change();
             }
         });
     _shutdown_watchdog.set_callback(

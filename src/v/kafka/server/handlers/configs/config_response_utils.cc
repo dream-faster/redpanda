@@ -1234,8 +1234,9 @@ config_response_container_t make_topic_configs(
         include_documentation,
         "Windowed first-wins deduplication window in milliseconds. Applied at "
         "produce time before replication: a record is dropped if its key was "
-        "already produced within the window, so consumers never observe the "
-        "duplicate. Idempotent and transactional produce are not affected. "
+        "already produced within the window. This is best-effort: it does not "
+        "apply to idempotent or transactional produce or to records without a "
+        "key, and the in-memory window is reset on leadership changes. "
         "Set to -1 to disable."));
 
     return result;
