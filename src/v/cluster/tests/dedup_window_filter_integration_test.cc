@@ -62,7 +62,8 @@ model::record_batch make_idempotent_batch(
 } // namespace
 
 // Fixture: one-node Raft group + a dedup_window_filter.
-// The two helper methods mirror the branching in partition::replicate_in_stages.
+// The two helper methods mirror the branching in
+// partition::replicate_in_stages.
 struct dedup_raft_fixture : simple_raft_fixture {
     static constexpr std::chrono::milliseconds window{1000};
 
@@ -133,7 +134,8 @@ FIXTURE_TEST(idempotent_batch_bypasses_dedup_filter, dedup_raft_fixture) {
     BOOST_CHECK_EQUAL(off_dup, off1);
 
     // Idempotent producer with same key in same window: committed.
-    auto off_idm = do_bypass_produce(make_idempotent_batch("k", "v2", ts(1300)));
+    auto off_idm = do_bypass_produce(
+      make_idempotent_batch("k", "v2", ts(1300)));
     BOOST_CHECK_GT(off_idm, off1);
 }
 
