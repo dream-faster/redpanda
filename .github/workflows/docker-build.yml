@@ -63,9 +63,6 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install crane
-        uses: imjasonh/setup-crane@v0.4
-
       - name: Determine image tag
         id: meta
         run: |
@@ -80,19 +77,29 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "image_ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${TAG}" >> "$GITHUB_OUTPUT"
 
-      - name: Check disk space
-        run: df -h / /home/runner
-
-      - name: Build OCI image layout with Bazel
+      - name: Build redpanda package tarball
         run: |
           unset CI
-          bazel build --spawn_strategy=local --verbose_failures //bazel/packaging:image
+          bazel build --spawn_strategy=local //bazel/packaging:redpanda_tar
 
-      - name: Push image to ghcr.io
+      - name: Build and push Docker image
         if: inputs.push != false
         run: |
-          crane push bazel-bin/bazel/packaging/image "${{ steps.meta.outputs.image_ref }}"
+          mkdir -p /tmp/image/opt/redpanda
+          tar xzf bazel-bin/bazel/packaging/redpanda.tar.gz -C /tmp/image/opt/redpanda
+
+          cat > /tmp/image/Dockerfile <<'DOCKERFILE'
+          FROM gcr.io/distroless/cc-debian12
+          COPY opt/ /opt/
+          ENTRYPOINT ["/opt/redpanda/bin/rpk"]
+          CMD ["redpanda", "start", "--overprovisioned"]
+          EXPOSE 9092 8081 8082 9644
+          DOCKERFILE
+
+          docker build -t "${{ steps.meta.outputs.image_ref }}" /tmp/image
+          docker push "${{ steps.meta.outputs.image_ref }}"
 
           if [[ "${{ github.ref_name }}" == "dev" ]] || [[ "${{ github.ref_name }}" == "main" ]]; then
-            crane push bazel-bin/bazel/packaging/image "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
+            docker tag "${{ steps.meta.outputs.image_ref }}" "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
+            docker push "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
           fi
