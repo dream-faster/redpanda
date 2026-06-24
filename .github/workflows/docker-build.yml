@@ -80,8 +80,13 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "image_ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${TAG}" >> "$GITHUB_OUTPUT"
 
+      - name: Check disk space
+        run: df -h / /home/runner
+
       - name: Build OCI image layout with Bazel
-        run: unset CI && bazel build --spawn_strategy=local //bazel/packaging:image
+        run: |
+          unset CI
+          bazel build --spawn_strategy=local --verbose_failures //bazel/packaging:image
 
       - name: Push image to ghcr.io
         if: inputs.push != false
