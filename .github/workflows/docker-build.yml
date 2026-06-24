@@ -1,0 +1,89 @@
+---
+name: docker-build
+on:
+  push:
+    branches:
+      - 'claude/laughing-heisenberg-e7n54k'
+  workflow_call:
+    inputs:
+      image_tag:
+        description: 'Tag for the Docker image (default: branch name or sha)'
+        required: false
+        type: string
+      push:
+        description: 'Whether to push the image'
+        required: false
+        type: boolean
+        default: true
+    outputs:
+      image_ref:
+        description: 'Full image reference pushed to ghcr'
+        value: ${{ jobs.build.outputs.image_ref }}
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image_ref: ${{ steps.meta.outputs.image_ref }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Bazelisk
+        run: |
+          mkdir -p ~/bin
+          wget -O ~/bin/bazel https://github.com/bazelbuild/bazelisk/releases/latest/download/bazelisk-linux-amd64
+          chmod +x ~/bin/bazel
+          echo "$HOME/bin" >> $GITHUB_PATH
+
+      - name: Install system dependencies
+        run: sudo ./bazel/install-deps.sh
+
+      - name: Log in to ghcr.io
+        if: inputs.push != false
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install crane
+        uses: imjasonh/setup-crane@v0.4
+
+      - name: Determine image tag
+        id: meta
+        run: |
+          if [[ -n "${{ inputs.image_tag }}" ]]; then
+            TAG="${{ inputs.image_tag }}"
+          elif [[ "${{ github.ref_type }}" == "branch" ]]; then
+            TAG="${{ github.ref_name }}"
+          else
+            TAG="${{ github.sha }}"
+          fi
+          # Sanitize tag for use as a Docker tag
+          TAG=$(echo "$TAG" | sed 's/[^a-zA-Z0-9._-]/-/g')
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "image_ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Build OCI image with Bazel
+        run: bazel build //bazel/packaging:image_load
+
+      - name: Load and push image
+        if: inputs.push != false
+        run: |
+          # The oci_load target loads into Docker's image store
+          # Re-tag and push to ghcr
+          docker tag redpandadata/redpanda-dev:latest "${{ steps.meta.outputs.image_ref }}"
+          docker push "${{ steps.meta.outputs.image_ref }}"
+
+          # Also tag as latest if on the main branch of the PR
+          if [[ "${{ github.ref_name }}" == "dev" ]] || [[ "${{ github.ref_name }}" == "main" ]]; then
+            docker tag redpandadata/redpanda-dev:latest "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
+            docker push "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
+          fi
