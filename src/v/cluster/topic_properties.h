@@ -247,9 +247,10 @@ struct topic_properties
     model::redpanda_storage_mode storage_mode{
       storage::ntp_config::default_storage_mode};
 
-    // Windowed last-wins deduplication by record key. Within the window
-    // (measured from the maximum in-log record timestamp), only the record
-    // with the highest offset per key is retained. Both the empty and disabled
+    // Windowed first-wins deduplication by record key. Applied at produce time
+    // before Raft replication: a record is dropped if its key was already seen
+    // within the window, so consumers never observe the duplicate. Idempotent
+    // and transactional produce bypass the filter. Both the empty and disabled
     // tristate states are treated as "dedup off"; the default is disabled.
     tristate<std::chrono::milliseconds> dedup_window_ms{disable_tristate};
 

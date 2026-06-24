@@ -1232,9 +1232,10 @@ config_response_container_t make_topic_configs(
       include_synonyms,
       maybe_make_documentation(
         include_documentation,
-        "Windowed last-wins deduplication window in milliseconds. Records "
-        "within the most recent window are deduplicated by record key, "
-        "keeping only the record with the highest offset per key. "
+        "Windowed first-wins deduplication window in milliseconds. Applied at "
+        "produce time before replication: a record is dropped if its key was "
+        "already produced within the window, so consumers never observe the "
+        "duplicate. Idempotent and transactional produce are not affected. "
         "Set to -1 to disable."));
 
     return result;

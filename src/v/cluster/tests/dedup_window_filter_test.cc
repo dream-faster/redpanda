@@ -217,3 +217,63 @@ TEST(DedupWindowFilter, CompressedBatch) {
     auto r2 = f.filter(std::move(b2));
     EXPECT_FALSE(r2.has_value());
 }
+
+// When nothing is filtered, a compressed batch is returned unchanged (still
+// compressed) rather than the decompressed temporary.
+TEST(DedupWindowFilter, CompressedBatchPassedThroughUnchanged) {
+    cluster::dedup_window_filter f(1000ms);
+
+    storage::record_batch_builder builder(
+      model::record_batch_type::raft_data, model::offset{0});
+    builder.set_timestamp(ts(1000));
+    builder.add_raw_kv(iobuf::from("k"), iobuf::from("v1"));
+    auto plain = std::move(builder).build();
+    auto compressed = model::compress_batch_sync(
+      model::compression::lz4, std::move(plain));
+
+    auto r = f.filter(std::move(compressed));
+    ASSERT_TRUE(r.has_value());
+    EXPECT_TRUE(r->compressed());
+}
+
+// A rebuilt (partially filtered) batch preserves the original batch timestamp
+// instead of defaulting to model::timestamp::now().
+TEST(DedupWindowFilter, RebuiltBatchPreservesTimestamp) {
+    cluster::dedup_window_filter f(1000ms);
+
+    // Seed key "a" so the next batch is partially filtered.
+    f.filter(make_batch("a", "v1", ts(5000)));
+
+    // Batch at t=5000 with keys "a" (dup) and "b" (new): "b" survives, forcing
+    // a rebuild.
+    auto b = make_multi_batch({{"a", "x"}, {"b", "y"}}, ts(5000));
+    auto r = f.filter(std::move(b));
+    ASSERT_TRUE(r.has_value());
+    EXPECT_EQ(record_count(*r), 1);
+    EXPECT_EQ(r->header().first_timestamp, ts(5000));
+}
+
+// evict_expired() removes entries older than the window relative to the most
+// recent timestamp seen, bounding memory.
+TEST(DedupWindowFilter, EvictExpiredDropsStaleEntries) {
+    cluster::dedup_window_filter f(1000ms);
+
+    // Key "a" seen at t=1000.
+    f.filter(make_batch("a", "v", ts(1000)));
+    EXPECT_EQ(f.map_size(), 1u);
+
+    // Key "b" seen at t=5000 advances the reference clock far past "a"'s
+    // window.
+    f.filter(make_batch("b", "v", ts(5000)));
+    EXPECT_EQ(f.map_size(), 2u);
+
+    // "a" (t=1000) is now 4000ms behind t=5000 (> 1000ms window): evicted.
+    // "b" (t=5000) is current: retained.
+    f.evict_expired();
+    EXPECT_EQ(f.map_size(), 1u);
+
+    // "a" is now unknown, so it is admitted again even within what would have
+    // been its original window relative to t=5000.
+    auto r = f.filter(make_batch("a", "v2", ts(5200)));
+    EXPECT_TRUE(r.has_value());
+}

@@ -430,9 +430,10 @@ kafka_stages partition::replicate_in_stages(
     if (_dedup_filter && !bid.is_idempotent() && !bid.is_transactional) {
         auto filtered = _dedup_filter->filter(std::move(batch));
         if (!filtered) {
-            // All records were duplicates. Ack with the current end offset so
-            // the producer sees a successful response without any replication.
-            auto end_offset = kafka::offset(
+            // All records were duplicates. Ack with the current committed
+            // offset so the producer sees a successful response without any
+            // replication.
+            auto committed_offset = kafka::offset(
               log()->from_log_offset(_raft->committed_offset())());
             auto term = _raft->term();
             ss::promise<> enqueued;
@@ -440,7 +441,8 @@ kafka_stages partition::replicate_in_stages(
             enqueued.set_value();
             return kafka_stages(
               std::move(enqueued_f),
-              ss::make_ready_future<ret_t>(kafka_result{end_offset, term}));
+              ss::make_ready_future<ret_t>(
+                kafka_result{committed_offset, term}));
         }
         batch = std::move(*filtered);
     }
@@ -961,6 +963,8 @@ ss::future<> partition::update_configuration(topic_properties new_properties) {
     if (const auto w = get_ntp_config().dedup_window_ms(); w) {
         if (!_dedup_filter) {
             _dedup_filter = std::make_unique<dedup_window_filter>(*w);
+        } else if (_dedup_filter->window() != *w) {
+            _dedup_filter->set_window(*w);
         }
     } else {
         _dedup_filter.reset();
