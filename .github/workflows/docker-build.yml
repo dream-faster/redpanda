@@ -77,22 +77,25 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "image_ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${TAG}" >> "$GITHUB_OUTPUT"
 
-      - name: Build redpanda package tarball
+      - name: Build redpanda binary only
         run: |
           unset CI
-          bazel build --spawn_strategy=local //bazel/packaging:redpanda_tar
+          bazel build --spawn_strategy=local --verbose_failures //:redpanda
 
       - name: Build and push Docker image
         if: inputs.push != false
         run: |
-          mkdir -p /tmp/image/opt/redpanda
-          tar xzf bazel-bin/bazel/packaging/redpanda.tar.gz -C /tmp/image/opt/redpanda
+          mkdir -p /tmp/image/opt/redpanda/bin
+
+          BAZEL_BIN=$(bazel info bazel-bin 2>/dev/null || echo "bazel-bin")
+          cp "$BAZEL_BIN/redpanda" /tmp/image/opt/redpanda/bin/redpanda
+          chmod +x /tmp/image/opt/redpanda/bin/redpanda
 
           cat > /tmp/image/Dockerfile <<'DOCKERFILE'
           FROM gcr.io/distroless/cc-debian12
           COPY opt/ /opt/
-          ENTRYPOINT ["/opt/redpanda/bin/rpk"]
-          CMD ["redpanda", "start", "--overprovisioned"]
+          ENTRYPOINT ["/opt/redpanda/bin/redpanda"]
+          CMD ["start", "--overprovisioned"]
           EXPOSE 9092 8081 8082 9644
           DOCKERFILE
 
