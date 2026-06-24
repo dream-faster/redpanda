@@ -45,6 +45,16 @@ jobs:
       - name: Install system dependencies
         run: sudo ./bazel/install-deps.sh
 
+      - name: Mount Bazel cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/bazel
+            ~/.cache/bazelisk
+          key: bazel-${{ runner.os }}-${{ hashFiles('.bazelversion', 'MODULE.bazel', 'MODULE.bazel.lock') }}
+          restore-keys: |
+            bazel-${{ runner.os }}-
+
       - name: Log in to ghcr.io
         if: inputs.push != false
         uses: docker/login-action@v3
@@ -66,24 +76,18 @@ jobs:
           else
             TAG="${{ github.sha }}"
           fi
-          # Sanitize tag for use as a Docker tag
           TAG=$(echo "$TAG" | sed 's/[^a-zA-Z0-9._-]/-/g')
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "image_ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${TAG}" >> "$GITHUB_OUTPUT"
 
-      - name: Build OCI image with Bazel
-        run: unset CI && bazel build --spawn_strategy=local //bazel/packaging:image_load
+      - name: Build OCI image layout with Bazel
+        run: unset CI && bazel build --spawn_strategy=local //bazel/packaging:image
 
-      - name: Load and push image
+      - name: Push image to ghcr.io
         if: inputs.push != false
         run: |
-          # The oci_load target loads into Docker's image store
-          # Re-tag and push to ghcr
-          docker tag redpandadata/redpanda-dev:latest "${{ steps.meta.outputs.image_ref }}"
-          docker push "${{ steps.meta.outputs.image_ref }}"
+          crane push bazel-bin/bazel/packaging/image "${{ steps.meta.outputs.image_ref }}"
 
-          # Also tag as latest if on the main branch of the PR
           if [[ "${{ github.ref_name }}" == "dev" ]] || [[ "${{ github.ref_name }}" == "main" ]]; then
-            docker tag redpandadata/redpanda-dev:latest "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
-            docker push "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
+            crane push bazel-bin/bazel/packaging/image "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
           fi
