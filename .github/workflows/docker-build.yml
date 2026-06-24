@@ -72,7 +72,7 @@ jobs:
           echo "image_ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${TAG}" >> "$GITHUB_OUTPUT"
 
       - name: Build OCI image with Bazel
-        run: bazel build //bazel/packaging:image_load
+        run: bazel build --spawn_strategy=local //bazel/packaging:image_load
 
       - name: Load and push image
         if: inputs.push != false
