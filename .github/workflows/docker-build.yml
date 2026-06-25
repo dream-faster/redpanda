@@ -83,7 +83,7 @@ jobs:
       - name: Build OCI image with Bazel
         run: |
           unset CI
-          bazel build --spawn_strategy=local --verbose_failures //bazel/packaging:image
+          bazel build --spawn_strategy=local --verbose_failures --lockfile_mode=update //bazel/packaging:image
 
       - name: Push image to ghcr.io
         if: inputs.push != false
