@@ -32,7 +32,7 @@ concurrency:
 
 jobs:
   build:
-    runs-on: ubuntu-24.04
+    runs-on: ubicloud-standard-4
     permissions:
       contents: read
       packages: write
@@ -42,28 +42,28 @@ jobs:
       - uses: actions/checkout@v6
 
       # A cold build of the full redpanda binary is heavy: the link step is
-      # RAM-hungry and the build tree is tens of GB. A stock runner can hit the
-      # OOM killer or run out of disk during the final link/packaging actions,
-      # which then fail by SIGKILL with no stderr (Bazel just says "failed to
-      # build"). Free disk + add swap defensively; the df/free output confirms
-      # headroom on each run.
-      - name: Free up disk space
+      # RAM-hungry and the default output base on / only has ~14GB free, which
+      # a full build exhausts. Redirect Bazel output to /mnt (large ephemeral
+      # volume, typically 60GB+), add swap, and free preinstalled tooling to
+      # give the root filesystem headroom for OS/toolchain files.
+      - name: Prepare build environment
         run: |
-          echo "Before cleanup:"
-          df -h /
+          echo "=== disk before cleanup ==="
+          df -h
+          # Free tooling we don't need to reclaim root filesystem space.
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
             /opt/hostedtoolcache/CodeQL /usr/local/share/boost
           sudo docker image prune --all --force || true
-          echo "After cleanup:"
-          df -h /
-
-      - name: Add swap space
-        run: |
-          sudo swapoff -a || true
-          sudo fallocate -l 16G /mnt/swapfile
+          # Swap on /mnt keeps the OOM killer away during parallel linking.
+          sudo fallocate -l 8G /mnt/swapfile
           sudo chmod 600 /mnt/swapfile
           sudo mkswap /mnt/swapfile
           sudo swapon /mnt/swapfile
+          # Bazel output base on /mnt where there is ample disk space.
+          sudo mkdir -p /mnt/bazel-output
+          sudo chown "$(id -u):$(id -g)" /mnt/bazel-output
+          echo "=== disk after cleanup ==="
+          df -h
           free -h
 
       - name: Install Bazelisk
@@ -114,21 +114,24 @@ jobs:
       - name: Build OCI image with Bazel
         run: |
           unset CI
-          # Reserve RAM headroom so Bazel doesn't schedule several memory-heavy
-          # link actions concurrently and push the box into the OOM killer.
-          bazel build \
+          bazel \
+            --output_base=/mnt/bazel-output \
+            build \
+            --config=release \
             --spawn_strategy=local \
             --verbose_failures \
             --lockfile_mode=update \
             --local_ram_resources=HOST_RAM*.8 \
             //bazel/packaging:image
-          echo "Post-build resources:"
-          df -h /
+          echo "=== post-build resources ==="
+          df -h
           free -h
 
       - name: Push image to ghcr.io
         if: inputs.push != false
         run: |
+          # bazel-bin/ is a symlink Bazel updates in the workspace root;
+          # it resolves correctly even with a custom --output_base.
           crane push bazel-bin/bazel/packaging/image "${{ steps.meta.outputs.image_ref }}"
 
           if [[ "${{ github.ref_name }}" == "dev" ]] || [[ "${{ github.ref_name }}" == "main" ]]; then
