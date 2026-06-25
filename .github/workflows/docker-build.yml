@@ -32,7 +32,7 @@ concurrency:
 
 jobs:
   build:
-    runs-on: ubicloud-standard-4
+    runs-on: ubicloud-standard-8
     permissions:
       contents: read
       packages: write
@@ -121,19 +121,16 @@ jobs:
           # and trip the OOM killer (the original silent build failure). Quoted
           # so the shell doesn't glob-expand the '*'.
           #
-          # --config=release sets `--copt -g --strip=never`, which keeps full
-          # DWARF debug info and makes the final redpanda link need 25-40GB of
-          # RAM to merge it -- that link was getting OOM-killed (silently, with
-          # no stderr) even with swap. A CI smoke-test image doesn't need debug
-          # symbols, so override with -g0 + --strip=always to drop the debug
-          # info the linker would otherwise hold in memory, slashing peak link
-          # RAM. Flags after --config win on the command line.
+          # --config=release keeps full DWARF debug info (`-g --strip=never`),
+          # so the final redpanda link needs ~25-40GB RAM to merge it. That
+          # link was getting OOM-killed (silently, no stderr) on the smaller
+          # runner; ubicloud-standard-8 (~32GB) plus swap gives it the headroom
+          # while preserving the debug symbols the release image is meant to
+          # ship.
           bazel \
             --output_base=/mnt/bazel-output \
             build \
             --config=release \
-            --copt=-g0 \
-            --strip=always \
             --spawn_strategy=local \
             --verbose_failures \
             --lockfile_mode=update \
