@@ -24,6 +24,12 @@ env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
 
+# A cold build takes ~3h of runner time; don't let pushes pile up overlapping
+# runs. Newer pushes to the same ref cancel the in-flight build.
+concurrency:
+  group: docker-build-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-24.04
@@ -34,6 +40,31 @@ jobs:
       image_ref: ${{ steps.meta.outputs.image_ref }}
     steps:
       - uses: actions/checkout@v6
+
+      # A cold build of the full redpanda binary is heavy: the link step is
+      # RAM-hungry and the build tree is tens of GB. A stock runner can hit the
+      # OOM killer or run out of disk during the final link/packaging actions,
+      # which then fail by SIGKILL with no stderr (Bazel just says "failed to
+      # build"). Free disk + add swap defensively; the df/free output confirms
+      # headroom on each run.
+      - name: Free up disk space
+        run: |
+          echo "Before cleanup:"
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          sudo docker image prune --all --force || true
+          echo "After cleanup:"
+          df -h /
+
+      - name: Add swap space
+        run: |
+          sudo swapoff -a || true
+          sudo fallocate -l 16G /mnt/swapfile
+          sudo chmod 600 /mnt/swapfile
+          sudo mkswap /mnt/swapfile
+          sudo swapon /mnt/swapfile
+          free -h
 
       - name: Install Bazelisk
         run: |
@@ -83,7 +114,17 @@ jobs:
       - name: Build OCI image with Bazel
         run: |
           unset CI
-          bazel build --spawn_strategy=local --verbose_failures --lockfile_mode=update //bazel/packaging:image
+          # Reserve RAM headroom so Bazel doesn't schedule several memory-heavy
+          # link actions concurrently and push the box into the OOM killer.
+          bazel build \
+            --spawn_strategy=local \
+            --verbose_failures \
+            --lockfile_mode=update \
+            --local_ram_resources=HOST_RAM*.8 \
+            //bazel/packaging:image
+          echo "Post-build resources:"
+          df -h /
+          free -h
 
       - name: Push image to ghcr.io
         if: inputs.push != false
