@@ -7,14 +7,9 @@ on:
   workflow_call:
     inputs:
       image_tag:
-        description: 'Tag for the Docker image (default: branch name or sha)'
+        description: 'Tag for the Docker image (default: commit sha)'
         required: false
         type: string
-      push:
-        description: 'Whether to push the image'
-        required: false
-        type: boolean
-        default: true
     outputs:
       image_ref:
         description: 'Full image reference pushed to ghcr'
@@ -101,7 +96,6 @@ jobs:
             bazel-${{ runner.os }}-
 
       - name: Log in to ghcr.io
-        if: inputs.push != false
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
@@ -114,12 +108,11 @@ jobs:
       - name: Determine image tag
         id: meta
         run: |
+          SHA_TAG="${{ github.sha }}"
           if [[ -n "${{ inputs.image_tag }}" ]]; then
             TAG="${{ inputs.image_tag }}"
-          elif [[ "${{ github.ref_type }}" == "branch" ]]; then
-            TAG="${{ github.ref_name }}"
           else
-            TAG="${{ github.sha }}"
+            TAG="${SHA_TAG}"
           fi
           TAG=$(echo "$TAG" | sed 's/[^a-zA-Z0-9._-]/-/g')
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
@@ -157,7 +150,6 @@ jobs:
           free -h
 
       - name: Push image to ghcr.io
-        if: inputs.push != false
         run: |
           # bazel-bin/ is a symlink Bazel updates in the workspace root;
           # it resolves correctly even with a custom --output_base.
