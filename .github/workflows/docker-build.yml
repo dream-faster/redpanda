@@ -114,6 +114,11 @@ jobs:
       - name: Build OCI image with Bazel
         run: |
           unset CI
+          # --local_resources=memory replaces the --local_ram_resources flag
+          # that Bazel removed in 8.x. Reserve 20% RAM headroom so Bazel
+          # doesn't schedule several memory-heavy link/compile actions at once
+          # and trip the OOM killer (the original silent build failure). Quoted
+          # so the shell doesn't glob-expand the '*'.
           bazel \
             --output_base=/mnt/bazel-output \
             build \
@@ -121,7 +126,7 @@ jobs:
             --spawn_strategy=local \
             --verbose_failures \
             --lockfile_mode=update \
-            --local_ram_resources=HOST_RAM*.8 \
+            '--local_resources=memory=HOST_RAM*.8' \
             //bazel/packaging:image
           echo "=== post-build resources ==="
           df -h
