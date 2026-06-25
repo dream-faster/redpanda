@@ -66,6 +66,19 @@ jobs:
           echo "=== disk after cleanup ==="
           df -h
           free -h
+          # linux-sandbox needs unprivileged user namespaces. The build runs
+          # non-sandboxed only because an earlier commit assumed these runners
+          # lack the capability; probe it directly so the log says definitively
+          # whether sandboxing (the real fix for the liburing hermeticity error)
+          # can run here.
+          echo "=== sandbox capability ==="
+          echo "unprivileged_userns_clone: $(cat /proc/sys/kernel/unprivileged_userns_clone 2>/dev/null || echo n/a)"
+          echo "max_user_namespaces: $(cat /proc/sys/user/max_user_namespaces 2>/dev/null || echo n/a)"
+          if unshare --user --map-root-user true 2>/dev/null; then
+            echo "unprivileged user namespaces: WORKING (linux-sandbox should run)"
+          else
+            echo "unprivileged user namespaces: BLOCKED (linux-sandbox will fail)"
+          fi
 
       - name: Install Bazelisk
         run: |
@@ -115,23 +128,26 @@ jobs:
       - name: Build OCI image with Bazel
         run: |
           unset CI
-          # --local_resources=memory replaces the --local_ram_resources flag
-          # that Bazel removed in 8.x. Reserve 20% RAM headroom so Bazel
-          # doesn't schedule several memory-heavy link/compile actions at once
-          # and trip the OOM killer (the original silent build failure). Quoted
-          # so the shell doesn't glob-expand the '*'.
+          # Prefer the sandbox, fall back to local only for actions that can't
+          # sandbox. The build used to fail with a Bazel hermeticity error --
+          # "undeclared inclusion(s) ... config-host.h" -- on liburing's
+          # generated, force-included config-host.h (see
+          # bazel/thirdparty/liburing.patch). That only trips under
+          # non-sandboxed (--spawn_strategy=local) execution, where strict .d
+          # include validation can't match the generated header's path; redpanda
+          # is designed to build sandboxed. The earlier OOM theory was wrong --
+          # the runner had 31Gi RAM + 19Gi swap and every compile succeeded; the
+          # lone liburing error was just buried ~2000 lines above the log tail.
           #
-          # --config=release keeps full DWARF debug info (`-g --strip=never`),
-          # so the final redpanda link needs ~25-40GB RAM to merge it. That
-          # link was getting OOM-killed (silently, no stderr) on the smaller
-          # runner; ubicloud-standard-8 (~32GB) plus swap gives it the headroom
-          # while preserving the debug symbols the release image is meant to
-          # ship.
+          # --local_resources=memory (replacing Bazel 8.x's removed
+          # --local_ram_resources) still reserves 20% RAM headroom so the
+          # RAM-heavy final link of the full-debug redpanda binary isn't
+          # over-scheduled. Quoted so the shell doesn't glob-expand the '*'.
           bazel \
             --output_base=/mnt/bazel-output \
             build \
             --config=release \
-            --spawn_strategy=local \
+            --spawn_strategy=sandboxed,local \
             --verbose_failures \
             --lockfile_mode=update \
             '--local_resources=memory=HOST_RAM*.8' \
