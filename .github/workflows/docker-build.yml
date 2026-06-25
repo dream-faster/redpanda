@@ -54,8 +54,9 @@ jobs:
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
             /opt/hostedtoolcache/CodeQL /usr/local/share/boost
           sudo docker image prune --all --force || true
-          # Swap on /mnt keeps the OOM killer away during parallel linking.
-          sudo fallocate -l 8G /mnt/swapfile
+          # Swap on /mnt keeps the OOM killer away during the RAM-heavy final
+          # link. /mnt has 60GB+, so size it generously as a backstop.
+          sudo fallocate -l 16G /mnt/swapfile
           sudo chmod 600 /mnt/swapfile
           sudo mkswap /mnt/swapfile
           sudo swapon /mnt/swapfile
@@ -119,10 +120,20 @@ jobs:
           # doesn't schedule several memory-heavy link/compile actions at once
           # and trip the OOM killer (the original silent build failure). Quoted
           # so the shell doesn't glob-expand the '*'.
+          #
+          # --config=release sets `--copt -g --strip=never`, which keeps full
+          # DWARF debug info and makes the final redpanda link need 25-40GB of
+          # RAM to merge it -- that link was getting OOM-killed (silently, with
+          # no stderr) even with swap. A CI smoke-test image doesn't need debug
+          # symbols, so override with -g0 + --strip=always to drop the debug
+          # info the linker would otherwise hold in memory, slashing peak link
+          # RAM. Flags after --config win on the command line.
           bazel \
             --output_base=/mnt/bazel-output \
             build \
             --config=release \
+            --copt=-g0 \
+            --strip=always \
             --spawn_strategy=local \
             --verbose_failures \
             --lockfile_mode=update \
