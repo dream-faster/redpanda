@@ -151,10 +151,14 @@ jobs:
 
       - name: Push image to ghcr.io
         run: |
-          # bazel-bin/ is a symlink Bazel updates in the workspace root;
-          # it resolves correctly even with a custom --output_base.
-          crane push bazel-bin/bazel/packaging/image "${{ steps.meta.outputs.image_ref }}"
+          # Bazel's OCI image directory stores layer blobs as symlinks into
+          # its content-addressable store; crane refuses to read symlinked
+          # blobs ("layout blob ... is a symlink"). Dereference into a temp
+          # directory with cp -rL first, then push the materialized layout.
+          OCI_IMAGE=$(mktemp -d)/image
+          cp -rL bazel-bin/bazel/packaging/image "$OCI_IMAGE"
+          crane push "$OCI_IMAGE" "${{ steps.meta.outputs.image_ref }}"
 
           if [[ "${{ github.ref_name }}" == "dev" ]] || [[ "${{ github.ref_name }}" == "main" ]]; then
-            crane push bazel-bin/bazel/packaging/image "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
+            crane push "$OCI_IMAGE" "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
           fi
