@@ -419,9 +419,10 @@ oci = use_extension("@rules_oci//oci:extensions.bzl", "oci", dev_dependency = Tr
 # libgcc1
 oci.pull(
     name = "distroless_cc_debian12",
-    # This is the latest nonroot tag
-    digest = "sha256:594b5200fd1f06d17a877ebee16d4af84a9a7ab83c898632a2d5609c0593cbab",
+    # debug variant: same as cc-debian12 + busybox (provides /bin/sh)
+    digest = "sha256:83cd6a79595b063961fc4c21814a7961e3f2741e94bfea8bde420898719e80c5",
     image = "gcr.io/distroless/cc-debian12",
+    tag = "debug",
     platforms = [
         "linux/amd64",
         "linux/arm64/v8",
