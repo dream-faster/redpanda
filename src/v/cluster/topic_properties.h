@@ -252,7 +252,8 @@ struct topic_properties
     // within the window. Idempotent and transactional produce bypass the
     // filter. The disabled tristate state turns dedup off explicitly; the
     // default of 3 minutes applies when the property is not set on the topic.
-    tristate<std::chrono::milliseconds> dedup_window_ms{std::chrono::minutes(3)};
+    tristate<std::chrono::milliseconds> dedup_window_ms{
+      std::chrono::minutes(3)};
 
     bool is_local_topic() const;
 
