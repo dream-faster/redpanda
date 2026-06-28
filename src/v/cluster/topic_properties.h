@@ -250,9 +250,9 @@ struct topic_properties
     // Windowed first-wins deduplication by record key. Applied at produce time
     // before Raft replication: a record is dropped if its key was already seen
     // within the window. Idempotent and transactional produce bypass the
-    // filter. Both the empty and disabled tristate states are treated as "dedup
-    // off" by the ntp_config accessor (dedup is not engaged in either case).
-    tristate<std::chrono::milliseconds> dedup_window_ms{disable_tristate};
+    // filter. The disabled tristate state turns dedup off explicitly; the
+    // default of 3 minutes applies when the property is not set on the topic.
+    tristate<std::chrono::milliseconds> dedup_window_ms{std::chrono::minutes(3)};
 
     bool is_local_topic() const;
 
