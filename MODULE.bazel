@@ -409,20 +409,14 @@ bazel_dep(name = "rules_oci", version = "2.3.0", dev_dependency = True)
 
 oci = use_extension("@rules_oci//oci:extensions.bzl", "oci", dev_dependency = True)
 
-# Use a distroless docker image that only comes with the following:
-#
-# ca-certificates
-# /etc/passwd entry for a root user
-# /tmp directory
-# tzdata
-# glibc
-# libgcc1
+# The slimmest official Debian base image. Unlike distroless, this includes a
+# real shell (bash, not just busybox sh) for debugging, at the cost of a
+# slightly larger base layer.
 oci.pull(
-    name = "distroless_cc_debian12",
-    # debug variant: same as cc-debian12 + busybox (provides /bin/sh)
-    digest = "sha256:83cd6a79595b063961fc4c21814a7961e3f2741e94bfea8bde420898719e80c5",
-    image = "gcr.io/distroless/cc-debian12",
-    tag = "debug",
+    name = "debian_bookworm_slim",
+    digest = "sha256:60eac759739651111db372c07be67863818726f754804b8707c90979bda511df",
+    image = "debian",
+    tag = "bookworm-slim",
     platforms = [
         "linux/amd64",
         "linux/arm64/v8",
@@ -430,9 +424,9 @@ oci.pull(
 )
 use_repo(
     oci,
-    "distroless_cc_debian12",
-    "distroless_cc_debian12_linux_amd64",
-    "distroless_cc_debian12_linux_arm64_v8",
+    "debian_bookworm_slim",
+    "debian_bookworm_slim_linux_amd64",
+    "debian_bookworm_slim_linux_arm64_v8",
 )
 
 http_file = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_file")
