@@ -152,42 +152,41 @@ jobs:
       - name: Push image to ghcr.io
         run: |
           # Bazel's OCI image directory stores layer blobs as symlinks into
-          # its content-addressable store; crane refuses to read symlinked
-          # blobs ("layout blob ... is a symlink"). Dereference into a temp
-          # directory with cp -rL first, then push the materialized layout.
+          # its content-addressable store. Dereference into a temp directory
+          # with cp -rL first so BuildKit can read the materialized layout.
           OCI_IMAGE=$(mktemp -d)/image
           cp -rL bazel-bin/bazel/packaging/image "$OCI_IMAGE"
 
-          # Build a tar layer with the tools required by Helm lifecycle scripts
-          # and startup probes (bash, curl, wget, grep, sed, coreutils for
-          # tee/touch/sleep, and ca-certificates for TLS).  bash/grep/sed/
-          # coreutils are already present in debian:bookworm-slim as required
-          # packages, so the dpkg diff ensures only genuinely new files (curl,
-          # wget, ca-certificates and their deps) end up in the delta layer.
-          # Run inside the same debian:bookworm-slim base so lib versions match.
-          docker run --rm debian:bookworm-slim sh -c '
-            set -e
-            apt-get update -qq
-            dpkg-query -W --showformat='"'"'${Package}\n'"'"' | sort > /before.txt
-            apt-get install -y --no-install-recommends \
-              bash \
-              ca-certificates \
-              coreutils \
-              curl \
-              grep \
-              sed \
-              wget
-            dpkg-query -W --showformat='"'"'${Package}\n'"'"' | sort > /after.txt
-            comm -13 /before.txt /after.txt | xargs dpkg -L | grep "^/" | sort -u | \
-              tar -c --no-recursion -T - 2>/dev/null
-          ' > /tmp/utils-layer.tar
+          # Write the Dockerfile to a temp file to avoid stdin/heredoc
+          # ambiguity with docker buildx build's PATH vs -f - argument.
+          # USER root / USER 65532 brackets the apt-get run because the Bazel
+          # oci_image already sets the default user to 65532 (nonroot).
+          cat > /tmp/Dockerfile.redpanda <<'EOF'
+          FROM base
+          USER root
+          RUN apt-get update && \
+              apt-get install -y --no-install-recommends \
+                bash ca-certificates coreutils curl grep sed wget && \
+              rm -rf /var/lib/apt/lists/*
+          USER 65532
+          EOF
 
-          # Append the utilities layer and push in one crane operation.
-          crane append \
-            --base oci://"$OCI_IMAGE" \
-            --new_layer /tmp/utils-layer.tar \
-            -t "${{ steps.meta.outputs.image_ref }}"
-
+          # Collect all tags; use an array for safe multi-value expansion.
+          TAGS=(-t "${{ steps.meta.outputs.image_ref }}")
           if [[ "${{ github.ref_name }}" == "dev" ]] || [[ "${{ github.ref_name }}" == "main" ]]; then
-            crane tag "${{ steps.meta.outputs.image_ref }}" latest
+            TAGS+=(-t "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest")
           fi
+
+          # Switch to a BuildKit builder so --build-context base=oci://...
+          # and --push are both supported in one operation.
+          docker buildx create --use --name redpanda-builder
+
+          # Layer the Helm lifecycle tools on top of the Bazel-built image.
+          # --build-context base=oci://<dir> feeds the local OCI layout
+          # directly into BuildKit without a separate push/pull round-trip.
+          docker buildx build \
+            --push \
+            --file /tmp/Dockerfile.redpanda \
+            --build-context base=oci://"$OCI_IMAGE" \
+            "${TAGS[@]}" \
+            /tmp
