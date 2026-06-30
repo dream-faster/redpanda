@@ -158,15 +158,25 @@ jobs:
           OCI_IMAGE=$(mktemp -d)/image
           cp -rL bazel-bin/bazel/packaging/image "$OCI_IMAGE"
 
-          # Build a tar layer containing curl, wget, and ca-certificates.
-          # Run inside the same debian:bookworm-slim base so library versions
-          # match what the image already has. We record which packages exist
-          # before and after so only the newly installed files are included.
+          # Build a tar layer with the tools required by Helm lifecycle scripts
+          # and startup probes (bash, curl, wget, grep, sed, coreutils for
+          # tee/touch/sleep, and ca-certificates for TLS).  bash/grep/sed/
+          # coreutils are already present in debian:bookworm-slim as required
+          # packages, so the dpkg diff ensures only genuinely new files (curl,
+          # wget, ca-certificates and their deps) end up in the delta layer.
+          # Run inside the same debian:bookworm-slim base so lib versions match.
           docker run --rm debian:bookworm-slim sh -c '
             set -e
             apt-get update -qq
             dpkg-query -W --showformat='"'"'${Package}\n'"'"' | sort > /before.txt
-            apt-get install -y --no-install-recommends curl wget ca-certificates
+            apt-get install -y --no-install-recommends \
+              bash \
+              ca-certificates \
+              coreutils \
+              curl \
+              grep \
+              sed \
+              wget
             dpkg-query -W --showformat='"'"'${Package}\n'"'"' | sort > /after.txt
             comm -13 /before.txt /after.txt | xargs dpkg -L | grep "^/" | sort -u | \
               tar -c --no-recursion -T - 2>/dev/null
