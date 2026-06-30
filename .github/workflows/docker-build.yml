@@ -157,8 +157,27 @@ jobs:
           # directory with cp -rL first, then push the materialized layout.
           OCI_IMAGE=$(mktemp -d)/image
           cp -rL bazel-bin/bazel/packaging/image "$OCI_IMAGE"
-          crane push "$OCI_IMAGE" "${{ steps.meta.outputs.image_ref }}"
+
+          # Build a tar layer containing curl, wget, and ca-certificates.
+          # Run inside the same debian:bookworm-slim base so library versions
+          # match what the image already has. We record which packages exist
+          # before and after so only the newly installed files are included.
+          docker run --rm debian:bookworm-slim sh -c '
+            set -e
+            apt-get update -qq
+            dpkg-query -W --showformat='"'"'${Package}\n'"'"' | sort > /before.txt
+            apt-get install -y --no-install-recommends curl wget ca-certificates
+            dpkg-query -W --showformat='"'"'${Package}\n'"'"' | sort > /after.txt
+            comm -13 /before.txt /after.txt | xargs dpkg -L | grep "^/" | sort -u | \
+              tar -c --no-recursion -T - 2>/dev/null
+          ' > /tmp/utils-layer.tar
+
+          # Append the utilities layer and push in one crane operation.
+          crane append \
+            --base oci://"$OCI_IMAGE" \
+            --new_layer /tmp/utils-layer.tar \
+            -t "${{ steps.meta.outputs.image_ref }}"
 
           if [[ "${{ github.ref_name }}" == "dev" ]] || [[ "${{ github.ref_name }}" == "main" ]]; then
-            crane push "$OCI_IMAGE" "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
+            crane tag "${{ steps.meta.outputs.image_ref }}" latest
           fi
