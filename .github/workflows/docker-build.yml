@@ -152,41 +152,34 @@ jobs:
       - name: Push image to ghcr.io
         run: |
           # Bazel's OCI image directory stores layer blobs as symlinks into
-          # its content-addressable store. Dereference into a temp directory
-          # with cp -rL first so BuildKit can read the materialized layout.
+          # its content-addressable store; crane refuses to read symlinked
+          # blobs. Dereference into a temp directory with cp -rL first.
           OCI_IMAGE=$(mktemp -d)/image
           cp -rL bazel-bin/bazel/packaging/image "$OCI_IMAGE"
 
-          # Write the Dockerfile to a temp file to avoid stdin/heredoc
-          # ambiguity with docker buildx build's PATH vs -f - argument.
-          # USER root / USER 65532 brackets the apt-get run because the Bazel
-          # oci_image already sets the default user to 65532 (nonroot).
-          cat > /tmp/Dockerfile.redpanda <<'EOF'
-          FROM base
+          FINAL_REF="${{ steps.meta.outputs.image_ref }}"
+
+          # Push the Bazel-built image to a staging tag so that docker build
+          # can FROM it. The docker-container BuildKit driver cannot reach the
+          # runner filesystem (causing "stat oci://... no such file"), so we
+          # push to the registry first and pull implicitly via FROM.
+          crane push "$OCI_IMAGE" "${FINAL_REF}-base"
+
+          # Add Helm lifecycle tools on top with a plain docker build.
+          # USER root/65532 brackets the apt-get because the Bazel oci_image
+          # already sets the default container user to 65532 (nonroot).
+          docker build -t "$FINAL_REF" - <<HEREDOC
+          FROM ${FINAL_REF}-base
           USER root
           RUN apt-get update && \
               apt-get install -y --no-install-recommends \
                 bash ca-certificates coreutils curl grep sed wget && \
               rm -rf /var/lib/apt/lists/*
           USER 65532
-          EOF
+          HEREDOC
+          docker push "$FINAL_REF"
 
-          # Collect all tags; use an array for safe multi-value expansion.
-          TAGS=(-t "${{ steps.meta.outputs.image_ref }}")
           if [[ "${{ github.ref_name }}" == "dev" ]] || [[ "${{ github.ref_name }}" == "main" ]]; then
-            TAGS+=(-t "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest")
+            docker tag "$FINAL_REF" "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
+            docker push "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
           fi
-
-          # Switch to a BuildKit builder so --build-context base=oci://...
-          # and --push are both supported in one operation.
-          docker buildx create --use --name redpanda-builder
-
-          # Layer the Helm lifecycle tools on top of the Bazel-built image.
-          # --build-context base=oci://<dir> feeds the local OCI layout
-          # directly into BuildKit without a separate push/pull round-trip.
-          docker buildx build \
-            --push \
-            --file /tmp/Dockerfile.redpanda \
-            --build-context base=oci://"$OCI_IMAGE" \
-            "${TAGS[@]}" \
-            /tmp
