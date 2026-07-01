@@ -102,9 +102,6 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install crane
-        uses: imjasonh/setup-crane@v0.4
-
       - name: Determine image tag
         id: meta
         run: |
@@ -151,32 +148,34 @@ jobs:
 
       - name: Push image to ghcr.io
         run: |
-          # Bazel's OCI image directory stores layer blobs as symlinks into
-          # its content-addressable store; crane refuses to read symlinked
-          # blobs. Dereference into a temp directory with cp -rL first.
-          OCI_IMAGE=$(mktemp -d)/image
-          cp -rL bazel-bin/bazel/packaging/image "$OCI_IMAGE"
-
           FINAL_REF="${{ steps.meta.outputs.image_ref }}"
 
-          # Push the Bazel-built image to a staging tag so that docker build
-          # can FROM it. The docker-container BuildKit driver cannot reach the
-          # runner filesystem (causing "stat oci://... no such file"), so we
-          # push to the registry first and pull implicitly via FROM.
-          crane push "$OCI_IMAGE" "${FINAL_REF}-base"
+          # Copy the Bazel-built redpanda package into a staging directory
+          # that serves as the Docker build context. The tarball extracts to
+          # /opt/redpanda/, /etc/redpanda/, and /var/lib/redpanda/data/.
+          STAGING=$(mktemp -d)
+          cp bazel-bin/bazel/packaging/redpanda_nonroot.tar.gz "$STAGING/"
 
-          # Add Helm lifecycle tools on top with a plain docker build.
-          # USER root/65532 brackets the apt-get because the Bazel oci_image
-          # already sets the default container user to 65532 (nonroot).
-          docker build -t "$FINAL_REF" - <<HEREDOC
-          FROM ${FINAL_REF}-base
-          USER root
+          # Build the image from a plain Dockerfile: install bash and Helm
+          # lifecycle tools first (apt-get), then ADD the redpanda tarball
+          # (Docker auto-extracts .tar.gz into the destination directory).
+          # -f - reads the Dockerfile from stdin; the positional $STAGING path
+          # is the build context, so ADD can reference the tarball.
+          # <<'EOF' prevents bash from expanding $(...) inside the Dockerfile.
+          docker build -t "$FINAL_REF" -f - "$STAGING" <<'EOF'
+          FROM debian:bookworm-slim
           RUN apt-get update && \
               apt-get install -y --no-install-recommends \
                 bash ca-certificates coreutils curl grep sed wget && \
               rm -rf /var/lib/apt/lists/*
+          ADD redpanda_nonroot.tar.gz /
+          EXPOSE 8081 8082 9092 9644
+          VOLUME ["/var/lib/redpanda/data"]
+          LABEL org.opencontainers.image.authors="Redpanda Data <hi@redpanda.com>"
           USER 65532
-          HEREDOC
+          ENTRYPOINT ["/opt/redpanda/bin/rpk"]
+          CMD ["redpanda", "start", "--overprovisioned"]
+          EOF
           docker push "$FINAL_REF"
 
           if [[ "${{ github.ref_name }}" == "dev" ]] || [[ "${{ github.ref_name }}" == "main" ]]; then
