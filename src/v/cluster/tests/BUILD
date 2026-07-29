@@ -1705,7 +1705,28 @@ redpanda_cc_gtest(
         "//src/v/bytes:iobuf",
         "//src/v/cluster",
         "//src/v/model",
+        "//src/v/model:batch_builder",
         "//src/v/model:batch_compression",
+        "//src/v/storage:record_batch_builder",
+        "//src/v/test_utils:gtest",
+        "@googletest//:gtest",
+        "@seastar",
+    ],
+)
+
+redpanda_cc_gtest(
+    name = "dedup_stm_test",
+    timeout = "short",
+    srcs = [
+        "dedup_stm_test.cc",
+    ],
+    cpu = 3,
+    deps = [
+        "//src/v/cluster",
+        "//src/v/cluster:logger",
+        "//src/v/config",
+        "//src/v/raft",
+        "//src/v/raft/tests:raft_fixture",
         "//src/v/storage:record_batch_builder",
         "//src/v/test_utils:gtest",
         "@googletest//:gtest",

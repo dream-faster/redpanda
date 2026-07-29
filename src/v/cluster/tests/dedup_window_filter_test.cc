@@ -15,6 +15,7 @@
 
 #include "bytes/iobuf.h"
 #include "cluster/dedup_window_filter.h"
+#include "model/batch_builder.h"
 #include "model/batch_compression.h"
 #include "model/record.h"
 #include "storage/record_batch_builder.h"
@@ -95,6 +96,48 @@ TEST(DedupWindowFilter, FirstWinsWithinWindow) {
     EXPECT_EQ(record_count(*r3), 1);
 }
 
+// Fully-deduplicated records are true state no-ops. In particular, a
+// future-timestamp duplicate must not advance the eviction clock because no
+// Raft state update is emitted for an all-dropped request.
+TEST(DedupWindowFilter, DuplicateDoesNotAdvanceEvictionClock) {
+    cluster::dedup_window_filter f(1000ms);
+
+    auto admitted = f.filter(make_batch("k", "v1", ts(1000)));
+    ASSERT_TRUE(admitted.has_value());
+    EXPECT_EQ(f.max_timestamp(), ts(1000));
+
+    auto duplicate = f.filter(make_batch("k", "v2", ts(1500)));
+    EXPECT_FALSE(duplicate.has_value());
+    EXPECT_EQ(f.max_timestamp(), ts(1000));
+}
+
+TEST(DedupWindowFilter, ReplicatedUpdateCanBeReverted) {
+    cluster::dedup_window_filter leader(1000ms);
+    auto filtered = leader.filter_with_updates(
+      make_multi_batch({{"a", "1"}, {"b", "2"}}, ts(1000)));
+    ASSERT_TRUE(filtered.batch.has_value());
+    ASSERT_EQ(filtered.admitted.size(), 2);
+
+    cluster::dedup_window_filter follower(1000ms);
+    auto before = follower.snapshot();
+    auto undo = follower.apply(filtered.admitted, 1000ms);
+    EXPECT_EQ(follower.map_size(), leader.map_size());
+    EXPECT_FALSE(
+      follower.filter(make_batch("a", "duplicate", ts(1500))).has_value());
+
+    follower.revert(undo);
+    EXPECT_EQ(follower.snapshot(), before);
+}
+
+TEST(DedupWindowFilter, RevertingUpdateRestoresWindow) {
+    cluster::dedup_window_filter f(1000ms);
+    const auto undo = f.apply({}, 2000ms);
+    EXPECT_EQ(f.window(), 2000ms);
+
+    f.revert(undo);
+    EXPECT_EQ(f.window(), 1000ms);
+}
+
 // Records with null keys are always kept (cannot dedup without a key).
 TEST(DedupWindowFilter, NullKeyAlwaysKept) {
     cluster::dedup_window_filter f(1000ms);
@@ -128,6 +171,36 @@ TEST(DedupWindowFilter, MultiRecordPartialFilter) {
     auto r2 = f.filter(std::move(b2));
     ASSERT_TRUE(r2.has_value());
     EXPECT_EQ(record_count(*r2), 2);
+}
+
+TEST(DedupWindowFilter, PartialFilterPreservesRecordMetadata) {
+    cluster::dedup_window_filter f(1000ms);
+    ASSERT_TRUE(f.filter(make_batch("a", "seed", ts(1000))).has_value());
+
+    model::batch_builder builder;
+    builder.set_batch_timestamp(model::timestamp_type::create_time, ts(1000));
+    builder.set_compression(model::compression::lz4);
+    builder.add_record(
+      model::record({}, 10, 0, iobuf::from("a"), iobuf::from("duplicate"), {}));
+    chunked_vector<model::record_header> headers;
+    headers.emplace_back(iobuf::from("header"), iobuf::from("value"));
+    builder.add_record(
+      model::record(
+        {}, 20, 1, iobuf::from("b"), iobuf::from("kept"), std::move(headers)));
+
+    auto filtered = f.filter(std::move(builder).build_sync());
+    ASSERT_TRUE(filtered.has_value());
+    EXPECT_TRUE(filtered->compressed());
+    EXPECT_EQ(filtered->header().first_timestamp, ts(1000));
+    EXPECT_EQ(filtered->header().max_timestamp, ts(1020));
+    EXPECT_EQ(filtered->header().last_offset_delta, 0);
+
+    auto readable = model::decompress_batch_sync(*filtered);
+    readable.for_each_record([](model::record record) {
+        EXPECT_EQ(record.timestamp_delta(), 20);
+        EXPECT_EQ(record.offset_delta(), 0);
+        EXPECT_EQ(record.headers().size(), 1);
+    });
 }
 
 // When every record in a batch is a duplicate, filter returns nullopt.

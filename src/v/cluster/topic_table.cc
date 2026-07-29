@@ -1235,6 +1235,10 @@ topic_properties topic_table::update_topic_properties(
     incremental_update(
       updated_properties.schema_registry_context,
       overrides.schema_registry_context);
+    incremental_update(
+      updated_properties.dedup_window_ms,
+      overrides.dedup_window_ms,
+      tristate<std::chrono::milliseconds>{std::chrono::minutes(3)});
     return updated_properties;
 }
 
@@ -1269,8 +1273,16 @@ topic_table::apply(update_topic_properties_cmd cmd, model::offset o) {
         });
     }
 
+    const auto& old_properties = tp->second.get_configuration().properties;
     auto updated_properties = update_topic_properties(
-      tp->second.get_configuration().properties, std::move(cmd));
+      old_properties, std::move(cmd));
+    const bool was_enabled
+      = old_properties.dedup_window_ms.has_optional_value();
+    const bool is_enabled
+      = updated_properties.dedup_window_ms.has_optional_value();
+    if (was_enabled && !is_enabled) {
+        updated_properties.dedup_generation = o();
+    }
 
     auto& properties = tp->second.get_configuration_properties();
     // no configuration change, no need to generate delta

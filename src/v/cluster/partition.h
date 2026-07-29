@@ -15,7 +15,6 @@
 #include "cloud_storage/fwd.h"
 #include "cluster/archival/archival_metadata_stm.h"
 #include "cluster/archival/fwd.h"
-#include "cluster/dedup_window_filter.h"
 #include "cluster/fwd.h"
 #include "cluster/partition_probe.h"
 #include "cluster/partition_properties_stm.h"
@@ -405,11 +404,6 @@ public:
 
     fmt::iterator format_to(fmt::iterator it) const;
 
-    /// Notify the partition of a leadership change. Called by partition_manager
-    /// on every term change. Clears the dedup map on any leader/follower
-    /// transition to avoid carrying stale state across them.
-    void on_leader_change();
-
 private:
     ss::future<>
     replicate_unsafe_reset(cloud_storage::partition_manifest manifest);
@@ -435,6 +429,7 @@ private:
     ss::shared_ptr<cluster::rm_stm> _rm_stm;
     ss::shared_ptr<archival_metadata_stm> _archival_meta_stm;
     ss::shared_ptr<partition_properties_stm> _partition_properties_stm;
+    ss::shared_ptr<dedup_stm> _dedup_stm;
     ss::sharded<cloud_topics::state_accessors>* _cloud_topics_state;
     ss::abort_source _as;
     partition_probe _probe;
@@ -475,11 +470,6 @@ private:
       = partition_flush_hook_id_invalid;
 
     bool _started{false};
-
-    // Non-null when redpanda.dedup.window.ms is configured for this topic.
-    // Filters duplicate records from plain (non-idempotent, non-transactional)
-    // produce requests before Raft replication.
-    std::unique_ptr<dedup_window_filter> _dedup_filter;
 };
 } // namespace cluster
 namespace std {

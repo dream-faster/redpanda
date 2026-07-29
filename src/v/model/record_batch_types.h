@@ -64,7 +64,8 @@ enum class record_batch_type : int8_t {
     group_block = 40, // (un)blocks group names in a consumer offsets partition
     l1_stm = 41,      // cloud_topics::l1::*
     ct_read_replica_stm = 42, // cloud_topics::read_replica::*
-    MAX = ct_read_replica_stm,
+    dedup_state_update = 43,  // write-path deduplication state update
+    MAX = dedup_state_update,
 };
 
 fmt::iterator format_to(record_batch_type bt, fmt::iterator out);
@@ -84,7 +85,8 @@ inline std::vector<model::record_batch_type> offset_translator_batch_types() {
       model::record_batch_type::partition_properties_update,
       model::record_batch_type::datalake_translation_state,
       model::record_batch_type::group_block,
-      model::record_batch_type::ctp_stm_command};
+      model::record_batch_type::ctp_stm_command,
+      model::record_batch_type::dedup_state_update};
 }
 
 } // namespace model

@@ -11,6 +11,7 @@
 
 #include "bytes/bytes.h"
 #include "container/chunked_hash_map.h"
+#include "container/chunked_vector.h"
 #include "model/record.h"
 #include "model/timestamp.h"
 
@@ -18,6 +19,42 @@
 #include <optional>
 
 namespace cluster {
+
+struct dedup_index_entry {
+    bytes key;
+    model::timestamp timestamp;
+
+    friend bool
+    operator==(const dedup_index_entry&, const dedup_index_entry&) = default;
+};
+
+struct dedup_filter_result {
+    std::optional<model::record_batch> batch;
+    chunked_vector<dedup_index_entry> admitted;
+};
+
+struct dedup_index_snapshot {
+    chunked_vector<dedup_index_entry> entries;
+    model::timestamp max_timestamp{model::timestamp::min()};
+    size_t inserts_since_evict{0};
+
+    friend bool operator==(
+      const dedup_index_snapshot&, const dedup_index_snapshot&) = default;
+};
+
+struct dedup_index_undo {
+    struct entry {
+        bytes key;
+        std::optional<model::timestamp> previous_timestamp;
+
+        friend bool operator==(const entry&, const entry&) = default;
+    };
+
+    chunked_vector<entry> entries;
+    std::chrono::milliseconds previous_window{0};
+    model::timestamp previous_max_timestamp{model::timestamp::min()};
+    size_t previous_inserts_since_evict{0};
+};
 
 /// \brief Write-path, first-wins per-key deduplication.
 ///
@@ -30,8 +67,8 @@ namespace cluster {
 /// batches. Idempotent and transactional batches must bypass this filter so
 /// their producer sequence numbers remain intact.
 ///
-/// On leadership change, call clear() to reset the in-memory map. A future
-/// improvement is to rebuild the map from the log tail on becoming leader.
+/// The replicated dedup STM owns this filter. Leaders use a speculative copy
+/// while followers apply admitted-key updates from the Raft log.
 ///
 /// Memory is bounded: entries older than the window (relative to the most
 /// recent timestamp seen) can never cause a drop again and are swept
@@ -44,17 +81,35 @@ public:
     ///
     /// Returns the original batch unchanged if no records are filtered (fast
     /// path; preserves the original compression, attrs, and timestamps).
-    /// Returns a rebuilt, uncompressed batch with duplicates removed if some
-    /// are filtered. Returns std::nullopt if every record is a duplicate.
+    /// Returns a rebuilt batch, preserving the original compression and record
+    /// metadata, with duplicates removed if some are filtered. Returns
+    /// std::nullopt if every record is a duplicate.
     ///
     /// Compressed batches are decompressed into a temporary for inspection; the
     /// original compressed batch is left untouched.
     std::optional<model::record_batch> filter(model::record_batch batch);
 
+    /// Filter a batch and return the admitted keyed records in their original
+    /// order. The admitted records are sufficient to deterministically apply
+    /// the same index transition on followers.
+    dedup_filter_result filter_with_updates(model::record_batch batch);
+
+    /// Apply already-admitted records from a replicated state update.
+    /// Returns an undo delta used to create Raft snapshots at older offsets.
+    dedup_index_undo apply(
+      const chunked_vector<dedup_index_entry>&,
+      std::chrono::milliseconds window);
+
+    /// Undo a transition previously returned by apply().
+    void revert(const dedup_index_undo&);
+
+    dedup_index_snapshot snapshot() const;
+    void restore(const dedup_index_snapshot&);
+
     /// \brief Seed the map with a key and its timestamp.
     ///
-    /// Used to pre-populate the map from the committed log tail after a
-    /// leadership change. Keeps the most recent timestamp per key.
+    /// Used by tests and state restoration helpers. Keeps the most recent
+    /// timestamp per key.
     void populate(const iobuf& key, model::timestamp ts);
 
     /// \brief Drop entries older than the window relative to the most recent
@@ -62,7 +117,7 @@ public:
     /// exposed for testing.
     void evict_expired();
 
-    /// \brief Reset state (e.g., on leadership change).
+    /// \brief Reset all index state.
     void clear();
 
     std::chrono::milliseconds window() const { return _window; }
@@ -73,10 +128,16 @@ public:
     void set_window(std::chrono::milliseconds w) { _window = w; }
 
     size_t map_size() const { return _map.size(); }
+    model::timestamp max_timestamp() const { return _max_ts; }
 
 private:
-    bool is_duplicate(const iobuf& key, model::timestamp ts);
-    void maybe_evict();
+    bool is_duplicate(
+      const iobuf& key,
+      model::timestamp ts,
+      chunked_vector<dedup_index_entry>* admitted);
+    void apply_admitted(const dedup_index_entry&, dedup_index_undo*);
+    void maybe_evict(dedup_index_undo* = nullptr);
+    void evict_expired(dedup_index_undo*);
 
     // Number of new-key insertions between opportunistic eviction sweeps.
     static constexpr size_t evict_after_inserts = 10000;

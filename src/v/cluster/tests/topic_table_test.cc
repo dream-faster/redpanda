@@ -615,6 +615,70 @@ FIXTURE_TEST(test_topic_with_schema_id_validation_ops, topic_table_fixture) {
       !cfg->properties.record_key_schema_id_validation_compat.has_value());
 }
 
+FIXTURE_TEST(test_dedup_generation_tracks_disable_enable, topic_table_fixture) {
+    auto& topics = table.local();
+    auto create = make_create_topic_cmd("test_dedup_generation", 1, 1);
+    const auto tp_ns = create.value.cfg.tp_ns;
+    auto ec = topics.apply(create, model::offset{10}).get();
+    BOOST_REQUIRE_EQUAL(ec, cluster::errc::success);
+
+    auto cfg = topics.get_topic_cfg(tp_ns);
+    BOOST_REQUIRE(cfg.has_value());
+    BOOST_REQUIRE(!cfg->properties.dedup_window_ms.is_disabled());
+    BOOST_REQUIRE_EQUAL(cfg->properties.dedup_generation, 0);
+
+    cluster::incremental_topic_updates disable;
+    disable.dedup_window_ms.op = cluster::incremental_update_operation::set;
+    disable.dedup_window_ms.value = tristate<std::chrono::milliseconds>{
+      disable_tristate};
+    ec = topics
+           .apply(
+             cluster::update_topic_properties_cmd{tp_ns, disable},
+             model::offset{11})
+           .get();
+    BOOST_REQUIRE_EQUAL(ec, cluster::errc::success);
+    cfg = topics.get_topic_cfg(tp_ns);
+    BOOST_REQUIRE(cfg->properties.dedup_window_ms.is_disabled());
+    BOOST_REQUIRE_EQUAL(cfg->properties.dedup_generation, 11);
+
+    cluster::incremental_topic_updates enable;
+    enable.dedup_window_ms.op = cluster::incremental_update_operation::set;
+    enable.dedup_window_ms.value = tristate<std::chrono::milliseconds>{2s};
+    ec = topics
+           .apply(
+             cluster::update_topic_properties_cmd{tp_ns, enable},
+             model::offset{12})
+           .get();
+    BOOST_REQUIRE_EQUAL(ec, cluster::errc::success);
+    cfg = topics.get_topic_cfg(tp_ns);
+    BOOST_REQUIRE_EQUAL(cfg->properties.dedup_window_ms.value(), 2s);
+    BOOST_REQUIRE_EQUAL(cfg->properties.dedup_generation, 11);
+
+    disable.dedup_window_ms.value = tristate<std::chrono::milliseconds>{
+      disable_tristate};
+    ec = topics
+           .apply(
+             cluster::update_topic_properties_cmd{tp_ns, disable},
+             model::offset{13})
+           .get();
+    BOOST_REQUIRE_EQUAL(ec, cluster::errc::success);
+    cfg = topics.get_topic_cfg(tp_ns);
+    BOOST_REQUIRE_EQUAL(cfg->properties.dedup_generation, 13);
+
+    cluster::incremental_topic_updates restore_default;
+    restore_default.dedup_window_ms.op
+      = cluster::incremental_update_operation::remove;
+    ec = topics
+           .apply(
+             cluster::update_topic_properties_cmd{tp_ns, restore_default},
+             model::offset{14})
+           .get();
+    BOOST_REQUIRE_EQUAL(ec, cluster::errc::success);
+    cfg = topics.get_topic_cfg(tp_ns);
+    BOOST_REQUIRE_EQUAL(cfg->properties.dedup_window_ms.value(), 3min);
+    BOOST_REQUIRE_EQUAL(cfg->properties.dedup_generation, 13);
+}
+
 FIXTURE_TEST(test_topic_id_assignment, topic_table_fixture) {
     auto& topics = table.local();
 

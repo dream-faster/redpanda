@@ -101,6 +101,7 @@ public:
         // override); both the empty and disabled states are treated as "dedup
         // off" by the dedup_window_ms() accessor.
         tristate<std::chrono::milliseconds> dedup_window_ms{std::nullopt};
+        int64_t dedup_generation{0};
 
         fmt::iterator format_to(fmt::iterator it) const;
     };
@@ -494,6 +495,10 @@ public:
             }
         }
         return std::nullopt;
+    }
+
+    int64_t dedup_generation() const {
+        return _overrides ? _overrides->dedup_generation : 0;
     }
 
     ntp_config copy() const {

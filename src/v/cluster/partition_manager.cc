@@ -73,7 +73,6 @@ partition_manager::partition_manager(
                 if (a) {
                     a.value().get().notify_leadership(leader_id);
                 }
-                p->on_leader_change();
             }
         });
     _shutdown_watchdog.set_callback(

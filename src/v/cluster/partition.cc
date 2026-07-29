@@ -16,7 +16,7 @@
 #include "cluster/archival/archival_metadata_stm.h"
 #include "cluster/archival/ntp_archiver_service.h"
 #include "cluster/archival/upload_housekeeping_service.h"
-#include "cluster/dedup_window_filter.h"
+#include "cluster/dedup_stm.h"
 #include "cluster/id_allocator_stm.h"
 #include "cluster/log_eviction_stm.h"
 #include "cluster/logger.h"
@@ -424,36 +424,24 @@ kafka_stages partition::replicate_in_stages(
         }
     }
 
-    // Apply write-path dedup for plain (non-idempotent, non-transactional)
-    // batches. Idempotent and transactional batches bypass the filter so their
-    // producer sequence numbers remain intact.
-    //
-    // When records are dropped, the produce response must report base_offset
-    // using the post-filter record count, so the admitted count is stamped onto
-    // the kafka_result below and propagated through to the produce handler.
-    std::optional<int32_t> admitted_record_count;
-    if (_dedup_filter && !bid.is_idempotent() && !bid.is_transactional) {
-        const auto original_count = batch.record_count();
-        auto filtered = _dedup_filter->filter(std::move(batch));
-        if (!filtered) {
-            // All records were duplicates. Ack with the current committed
-            // offset and a zero record count so the producer sees a successful
-            // response without any replication.
-            auto committed_offset = kafka::offset(
-              log()->from_log_offset(_raft->committed_offset())());
-            auto term = _raft->term();
-            ss::promise<> enqueued;
-            auto enqueued_f = enqueued.get_future();
-            enqueued.set_value();
-            return kafka_stages(
-              std::move(enqueued_f),
-              ss::make_ready_future<ret_t>(
-                kafka_result{committed_offset, term, 0}));
-        }
-        if (filtered->record_count() != original_count) {
-            admitted_record_count = filtered->record_count();
-        }
-        batch = std::move(*filtered);
+    // Plain produces use the replicated dedup state machine when the topic
+    // window is enabled. Idempotent and transactional batches bypass it so
+    // their producer sequence numbers remain intact.
+    if (
+      _dedup_stm && !bid.is_idempotent() && !bid.is_transactional
+      && get_ntp_config().dedup_window_ms()) {
+        auto window = *get_ntp_config().dedup_window_ms();
+        auto generation = get_ntp_config().dedup_generation();
+        return stages_with_units(
+          hold_writes_enabled(),
+          [this,
+           batch = std::move(batch),
+           opts = std::move(opts),
+           window,
+           generation]() mutable {
+              return _dedup_stm->replicate_in_stages(
+                std::move(batch), opts, window, generation);
+          });
     }
 
     auto stages = stages_with_units(
@@ -481,19 +469,6 @@ kafka_stages partition::replicate_in_stages(
             std::move(res.request_enqueued), std::move(replicate_finished));
       });
 
-    // Stamp the post-filter record count onto the result so the produce
-    // handler computes base_offset from the number of records actually
-    // appended rather than the original request count.
-    if (admitted_record_count) {
-        stages.replicate_finished
-          = std::move(stages.replicate_finished)
-              .then([n = *admitted_record_count](ret_t r) {
-                  if (r) {
-                      r.value().replicated_record_count = n;
-                  }
-                  return r;
-              });
-    }
     return stages;
 }
 
@@ -520,6 +495,7 @@ ss::future<> partition::start(
     // store partition properties stm offset for fast access
     _partition_properties_stm
       = _raft->stm_manager()->get<cluster::partition_properties_stm>();
+    _dedup_stm = _raft->stm_manager()->get<cluster::dedup_stm>();
 
     // Start the probe after the partition is fully initialised
     _probe.setup_metrics(ntp);
@@ -590,16 +566,6 @@ ss::future<> partition::start(
         std::optional<std::reference_wrapper<ss::abort_source>>) {
           return flush_archiver();
       });
-
-    if (const auto w = get_ntp_config().dedup_window_ms(); w) {
-        _dedup_filter = std::make_unique<dedup_window_filter>(*w);
-    }
-}
-
-void partition::on_leader_change() {
-    if (_dedup_filter) {
-        _dedup_filter->clear();
-    }
 }
 
 ss::future<> partition::stop() {
@@ -980,18 +946,6 @@ ss::future<> partition::update_configuration(topic_properties new_properties) {
             // configuration changes.
             _archiver->notify_topic_config();
         }
-    }
-
-    // Refresh the dedup filter from the new ntp_config. Done after
-    // set_overrides so get_ntp_config() reflects the updated window.
-    if (const auto w = get_ntp_config().dedup_window_ms(); w) {
-        if (!_dedup_filter) {
-            _dedup_filter = std::make_unique<dedup_window_filter>(*w);
-        } else if (_dedup_filter->window() != *w) {
-            _dedup_filter->set_window(*w);
-        }
-    } else {
-        _dedup_filter.reset();
     }
 }
 

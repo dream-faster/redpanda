@@ -1236,8 +1236,8 @@ config_response_container_t make_topic_configs(
         "produce time before replication: a record is dropped if its key was "
         "already produced within the window. This is best-effort: it does not "
         "apply to idempotent or transactional produce or to records without a "
-        "key, and the in-memory window is reset on leadership changes. "
-        "Set to -1 to disable."));
+        "key. Deduplication state is replicated and survives leadership "
+        "changes. Set to -1 to disable."));
 
     return result;
 }
