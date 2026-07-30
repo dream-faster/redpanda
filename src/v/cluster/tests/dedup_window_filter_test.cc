@@ -24,7 +24,6 @@
 
 #include <chrono>
 #include <optional>
-#include <random>
 #include <string>
 #include <string_view>
 
@@ -99,8 +98,8 @@ TEST(DedupWindowFilter, FirstWinsWithinWindow) {
 }
 
 // Fully-deduplicated records are true state no-ops. In particular, a
-// future-timestamp duplicate must not advance the eviction clock because no
-// Raft state update is emitted for an all-dropped request.
+// future-timestamp duplicate must not advance the eviction clock because
+// nothing is written to the log for an all-dropped request.
 TEST(DedupWindowFilter, DuplicateDoesNotAdvanceEvictionClock) {
     cluster::dedup_window_filter f(1000ms);
 
@@ -113,146 +112,100 @@ TEST(DedupWindowFilter, DuplicateDoesNotAdvanceEvictionClock) {
     EXPECT_EQ(f.max_timestamp(), ts(1000));
 }
 
-TEST(DedupWindowFilter, ReplicatedUpdateCanBeReverted) {
-    cluster::dedup_window_filter leader(1000ms);
-    auto filtered = leader.filter_with_updates(
-      make_multi_batch({{"a", "1"}, {"b", "2"}}, ts(1000)));
-    ASSERT_TRUE(filtered.batch.has_value());
-    ASSERT_EQ(filtered.admitted.size(), 2);
-
-    cluster::dedup_window_filter follower(1000ms);
-    auto before = follower.snapshot();
-    auto undo = follower.apply(filtered.admitted, 1000ms);
-    EXPECT_EQ(follower.map_size(), leader.map_size());
-    EXPECT_FALSE(
-      follower.filter(make_batch("a", "duplicate", ts(1500))).has_value());
-
-    follower.revert(undo);
-    EXPECT_EQ(follower.snapshot(), before);
-}
-
-TEST(DedupWindowFilter, ForwardMutationsPreserveEvictThenReadmitOrder) {
-    cluster::dedup_window_filter leader(1000ms);
-    leader.populate(iobuf::from("stale"), ts(0));
-    auto initial = leader.snapshot();
-    // Arrange for the first new key to trigger the opportunistic sweep.
-    initial.inserts_since_evict = 9'999;
-    leader.restore(initial);
-
-    cluster::dedup_window_filter follower(1000ms);
-    follower.restore(initial);
-
-    auto filtered = leader.filter_with_updates(
-      make_multi_batch({{"trigger", "1"}, {"stale", "2"}}, ts(5000)));
-    ASSERT_TRUE(filtered.batch.has_value());
-    ASSERT_EQ(filtered.mutations.size(), 3);
-    EXPECT_EQ(filtered.mutations[0].key, bytes::from_string("trigger"));
-    EXPECT_TRUE(filtered.mutations[0].timestamp.has_value());
-    EXPECT_EQ(filtered.mutations[1].key, bytes::from_string("stale"));
-    EXPECT_FALSE(filtered.mutations[1].timestamp.has_value());
-    EXPECT_EQ(filtered.mutations[2].key, bytes::from_string("stale"));
-    EXPECT_TRUE(filtered.mutations[2].timestamp.has_value());
-
-    auto undo = follower.apply_forward(
-      filtered.mutations,
-      1000ms,
-      filtered.max_timestamp,
-      filtered.inserts_since_evict);
-    EXPECT_EQ(follower.snapshot(), leader.snapshot());
-
-    follower.revert(undo);
-    EXPECT_EQ(follower.snapshot(), initial);
-}
-
-TEST(DedupWindowFilter, ForwardAndLegacyApplicationConverge) {
-    cluster::dedup_window_filter leader(1000ms);
-    cluster::dedup_window_filter legacy_follower(1000ms);
-    cluster::dedup_window_filter forward_follower(1000ms);
-
-    // Exercise an eviction early without making the randomized test large.
-    auto initial = leader.snapshot();
-    initial.inserts_since_evict = 9'990;
-    leader.restore(initial);
-    legacy_follower.restore(initial);
-    forward_follower.restore(initial);
-
-    std::mt19937 rng(0xD3D'0B);
-    for (size_t iteration = 0; iteration < 2'000; ++iteration) {
-        if (iteration != 0 && iteration % 503 == 0) {
-            // Model a generation change.
-            leader.clear();
-            legacy_follower.clear();
-            forward_follower.clear();
-        }
-
-        const auto window = std::chrono::milliseconds{
-          100 + static_cast<int64_t>(rng() % 2'000)};
-        leader.set_window(window);
-        const auto key = "key-" + std::to_string(rng() % 128);
-        // Deliberately permit timestamps to move backwards.
-        const auto timestamp = ts(static_cast<int64_t>(rng() % 10'000));
-        auto filtered = leader.filter_with_updates(
-          make_batch(key, "value", timestamp));
-        if (filtered.admitted.empty()) {
-            continue;
-        }
-
-        legacy_follower.apply(filtered.admitted, window);
-        forward_follower.apply_forward(
-          filtered.mutations,
-          window,
-          filtered.max_timestamp,
-          filtered.inserts_since_evict);
-
-        EXPECT_EQ(legacy_follower.snapshot(), leader.snapshot())
-          << "legacy iteration " << iteration;
-        EXPECT_EQ(forward_follower.snapshot(), leader.snapshot())
-          << "forward iteration " << iteration;
-        EXPECT_EQ(legacy_follower.window(), leader.window());
-        EXPECT_EQ(forward_follower.window(), leader.window());
-    }
-}
-
-TEST(DedupWindowFilter, LargeReplicatedUpdateAndEvictionCanBeReverted) {
-    constexpr size_t key_count = 10'000;
-    cluster::dedup_window_filter follower(1000ms);
-
-    // populate() does not advance the opportunistic insertion counter. These
-    // keys are all stale by the time the replicated update below is applied.
-    for (size_t i = 0; i < key_count; ++i) {
-        follower.populate(
-          iobuf::from("old-" + std::to_string(i)), model::timestamp{0});
-    }
-
-    chunked_vector<cluster::dedup_index_entry> admitted;
-    admitted.reserve(key_count);
-    for (size_t i = 0; i < key_count; ++i) {
-        admitted.push_back(
-          {.key = bytes::from_string("new-" + std::to_string(i)),
-           .timestamp = model::timestamp{5000}});
-    }
-
-    auto undo = follower.apply(admitted, 1000ms);
-    EXPECT_EQ(follower.map_size(), key_count);
-    // The undo contains one entry for every inserted key and every stale key
-    // removed by the sweep. Building it must remain linear in this count.
-    EXPECT_EQ(undo.entries.size(), key_count * 2);
-
-    follower.revert(undo);
-    EXPECT_EQ(follower.map_size(), key_count);
-    EXPECT_FALSE(
-      follower.filter(make_batch("old-0", "duplicate", ts(500))).has_value());
-    EXPECT_TRUE(
-      follower.filter(make_batch("new-0", "new", ts(500))).has_value());
-}
-
-TEST(DedupWindowFilter, RevertingUpdateRestoresWindow) {
+TEST(DedupWindowFilter, FilterRequestReturnsUndoForAdmittedKeys) {
     cluster::dedup_window_filter f(1000ms);
-    const auto undo = f.apply({}, 2000ms);
-    EXPECT_EQ(f.window(), 2000ms);
 
-    f.revert(undo);
-    EXPECT_EQ(f.window(), 1000ms);
+    // "a" is new; "b" is new; the second "a" is a duplicate (no undo entry).
+    auto result = f.filter_request(
+      make_multi_batch({{"a", "1"}, {"b", "2"}, {"a", "3"}}, ts(1000)));
+    ASSERT_TRUE(result.batch.has_value());
+    EXPECT_EQ(record_count(*result.batch), 2);
+    ASSERT_EQ(result.undo.entries.size(), 2);
+    EXPECT_EQ(result.undo.entries[0].key, bytes::from_string("a"));
+    EXPECT_EQ(result.undo.entries[0].applied_timestamp, ts(1000));
+    EXPECT_FALSE(result.undo.entries[0].previous_timestamp.has_value());
+    EXPECT_EQ(result.undo.entries[1].key, bytes::from_string("b"));
+
+    // Re-admission outside the window records the previous timestamp.
+    auto readmitted = f.filter_request(make_batch("a", "4", ts(2500)));
+    ASSERT_TRUE(readmitted.batch.has_value());
+    ASSERT_EQ(readmitted.undo.entries.size(), 1);
+    EXPECT_EQ(readmitted.undo.entries[0].applied_timestamp, ts(2500));
+    EXPECT_EQ(readmitted.undo.entries[0].previous_timestamp, ts(1000));
+}
+
+TEST(DedupWindowFilter, RevertRequestRestoresPreRequestState) {
+    cluster::dedup_window_filter f(1000ms);
+    ASSERT_TRUE(f.filter(make_batch("a", "seed", ts(1000))).has_value());
+
+    // One request that inserts a new key and re-admits an existing one.
+    auto result = f.filter_request(
+      make_multi_batch({{"a", "1"}, {"b", "2"}}, ts(2500)));
+    ASSERT_TRUE(result.batch.has_value());
+    EXPECT_EQ(f.map_size(), 2u);
+
+    f.revert_request(result.undo);
+    EXPECT_EQ(f.map_size(), 1u);
+    // "a" is back at its pre-request timestamp: a record within the original
+    // window is a duplicate again.
+    EXPECT_FALSE(f.filter(make_batch("a", "dup", ts(1500))).has_value());
+    // "b" was erased: it is admitted as new.
+    EXPECT_TRUE(f.filter(make_batch("b", "new", ts(1500))).has_value());
+}
+
+TEST(DedupWindowFilter, RevertRequestLeavesNewerOverwritesUntouched) {
+    cluster::dedup_window_filter f(1000ms);
+
+    auto first = f.filter_request(make_batch("k", "1", ts(1000)));
+    ASSERT_TRUE(first.batch.has_value());
+
+    // A later request re-admits the same key outside the window before the
+    // first request's replication outcome is known.
+    auto second = f.filter_request(make_batch("k", "2", ts(2500)));
+    ASSERT_TRUE(second.batch.has_value());
+
+    // Reverting the first request must not clobber the second request's
+    // newer state (compare-and-revert).
+    f.revert_request(first.undo);
+    EXPECT_EQ(f.map_size(), 1u);
+    EXPECT_FALSE(f.filter(make_batch("k", "dup", ts(3000))).has_value());
+}
+
+TEST(DedupWindowFilter, RevertRequestUnwindsSameKeyMutations) {
+    cluster::dedup_window_filter f(1000ms);
+
+    // One batch mutating the same key twice: the second record's timestamp
+    // delta puts it outside the window relative to the first, so both are
+    // admitted and the undo carries two entries for the key.
+    model::batch_builder builder;
+    builder.set_batch_timestamp(model::timestamp_type::create_time, ts(1000));
+    builder.add_record(
+      model::record({}, 0, 0, iobuf::from("k"), iobuf::from("v1"), {}));
+    builder.add_record(
+      model::record({}, 1500, 1, iobuf::from("k"), iobuf::from("v2"), {}));
+
+    auto result = f.filter_request(std::move(builder).build_sync());
+    ASSERT_TRUE(result.batch.has_value());
+    EXPECT_EQ(record_count(*result.batch), 2);
+    ASSERT_EQ(result.undo.entries.size(), 2);
+
+    f.revert_request(result.undo);
+    EXPECT_EQ(f.map_size(), 0u);
+}
+
+TEST(DedupWindowFilter, PopulateTriggersEvictionSweep) {
+    cluster::dedup_window_filter f(1000ms);
+    f.populate(iobuf::from("stale"), ts(0));
+
+    // Arrange for the next insertion to trigger the opportunistic sweep.
+    auto snapshot = f.snapshot();
+    snapshot.inserts_since_evict = 9'999;
+    f.restore(snapshot);
+
+    // The new key advances the clock far past "stale"'s window and its
+    // insertion crosses the sweep threshold.
+    f.populate(iobuf::from("fresh"), ts(5000));
+    EXPECT_EQ(f.map_size(), 1u);
 }
 
 // Records with null keys are always kept (cannot dedup without a key).
@@ -384,6 +337,20 @@ TEST(DedupWindowFilter, PopulateSeedsMap) {
     EXPECT_FALSE(r.has_value());
 }
 
+// populate() keeps the most recent timestamp per key, making log replay
+// idempotent: applying the same prefix repeatedly converges.
+TEST(DedupWindowFilter, PopulateIsIdempotentMaxWins) {
+    cluster::dedup_window_filter f(1000ms);
+
+    f.populate(iobuf::from("k"), ts(2000));
+    f.populate(iobuf::from("k"), ts(1000));
+    f.populate(iobuf::from("k"), ts(2000));
+    EXPECT_EQ(f.map_size(), 1u);
+
+    // The stored timestamp is 2000: t=2900 is within the window.
+    EXPECT_FALSE(f.filter(make_batch("k", "v", ts(2900))).has_value());
+}
+
 // A compressed batch is correctly decompressed before key inspection.
 TEST(DedupWindowFilter, CompressedBatch) {
     cluster::dedup_window_filter f(1000ms);
@@ -466,4 +433,17 @@ TEST(DedupWindowFilter, EvictExpiredDropsStaleEntries) {
     // been its original window relative to t=5000.
     auto r = f.filter(make_batch("a", "v2", ts(5200)));
     EXPECT_TRUE(r.has_value());
+}
+
+// snapshot()/restore() round-trip the full index state.
+TEST(DedupWindowFilter, SnapshotRestoreRoundTrip) {
+    cluster::dedup_window_filter f(1000ms);
+    f.filter(make_batch("a", "1", ts(1000)));
+    f.filter(make_batch("b", "2", ts(1200)));
+    auto snapshot = f.snapshot();
+
+    cluster::dedup_window_filter restored(1000ms);
+    restored.restore(snapshot);
+    EXPECT_EQ(restored.snapshot(), snapshot);
+    EXPECT_FALSE(restored.filter(make_batch("a", "dup", ts(1500))).has_value());
 }

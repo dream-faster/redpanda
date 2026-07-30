@@ -28,22 +28,28 @@ struct dedup_index_entry {
     operator==(const dedup_index_entry&, const dedup_index_entry&) = default;
 };
 
-/// An ordered, forward mutation to the dedup index. A timestamp is a put and
-/// std::nullopt is a delete.
-struct dedup_index_mutation {
-    bytes key;
-    std::optional<model::timestamp> timestamp;
+/// Per-request record of the index mutations performed while classifying one
+/// produce request, sufficient to undo exactly this request's insertions if
+/// its replication fails. This is not a general history: it lives only for
+/// the duration of one replicate call on the leader.
+struct dedup_request_undo {
+    struct entry {
+        bytes key;
+        /// The timestamp this request wrote into the index for the key.
+        model::timestamp applied_timestamp;
+        /// The timestamp the key held before, or std::nullopt if the key was
+        /// newly inserted.
+        std::optional<model::timestamp> previous_timestamp;
 
-    friend bool operator==(
-      const dedup_index_mutation&, const dedup_index_mutation&) = default;
+        friend bool operator==(const entry&, const entry&) = default;
+    };
+
+    chunked_vector<entry> entries;
 };
 
 struct dedup_filter_result {
     std::optional<model::record_batch> batch;
-    chunked_vector<dedup_index_entry> admitted;
-    chunked_vector<dedup_index_mutation> mutations;
-    model::timestamp max_timestamp{model::timestamp::min()};
-    size_t inserts_since_evict{0};
+    dedup_request_undo undo;
 };
 
 struct dedup_index_snapshot {
@@ -53,20 +59,6 @@ struct dedup_index_snapshot {
 
     friend bool operator==(
       const dedup_index_snapshot&, const dedup_index_snapshot&) = default;
-};
-
-struct dedup_index_undo {
-    struct entry {
-        bytes key;
-        std::optional<model::timestamp> previous_timestamp;
-
-        friend bool operator==(const entry&, const entry&) = default;
-    };
-
-    chunked_vector<entry> entries;
-    std::chrono::milliseconds previous_window{0};
-    model::timestamp previous_max_timestamp{model::timestamp::min()};
-    size_t previous_inserts_since_evict{0};
 };
 
 /// \brief Write-path, first-wins per-key deduplication.
@@ -80,8 +72,11 @@ struct dedup_index_undo {
 /// batches. Idempotent and transactional batches must bypass this filter so
 /// their producer sequence numbers remain intact.
 ///
-/// The replicated dedup STM owns this filter. Leaders use a speculative copy
-/// while followers apply admitted-key updates from the Raft log.
+/// The index is a deterministic function of the data batches in the Raft
+/// log: the replicated dedup STM rebuilds it on every replica by calling
+/// populate() for each keyed record it applies. Leaders mutate the same map
+/// directly at classification time (filter_request) and undo exactly one
+/// request's mutations if its replication fails (revert_request).
 ///
 /// Memory is bounded: entries older than the window (relative to the most
 /// recent timestamp seen) can never cause a drop again and are swept
@@ -102,51 +97,28 @@ public:
     /// original compressed batch is left untouched.
     std::optional<model::record_batch> filter(model::record_batch batch);
 
-    /// Filter a batch and return both the admitted keyed records and the
-    /// ordered forward mutations. Admitted records retain v0 compatibility;
-    /// mutations let current followers apply the exact physical transition
-    /// without re-running eviction policy.
-    dedup_filter_result filter_with_updates(model::record_batch batch);
+    /// Filter a batch and additionally return this request's undo list so the
+    /// caller can revert the index mutations if replication fails.
+    dedup_filter_result filter_request(model::record_batch batch);
 
-    /// Apply already-admitted records from a replicated state update.
-    /// Returns an undo delta used to create Raft snapshots at older offsets.
-    dedup_index_undo apply(
-      const chunked_vector<dedup_index_entry>&,
-      std::chrono::milliseconds window);
-
-    /// Apply a legacy admitted-key update without retaining reverse history.
-    void apply_no_undo(
-      const chunked_vector<dedup_index_entry>&,
-      std::chrono::milliseconds window);
-
-    /// Apply an ordered forward mutation emitted by a leader. Unlike apply(),
-    /// this does not re-run eviction policy on the follower: the leader's
-    /// explicit puts, deletes, and resulting scalar state are authoritative.
-    /// The returned undo is temporary compatibility state for historical Raft
-    /// snapshots and is removed once checkpoint-based snapshots are enabled.
-    dedup_index_undo apply_forward(
-      const chunked_vector<dedup_index_mutation>&,
-      std::chrono::milliseconds window,
-      model::timestamp max_timestamp,
-      size_t inserts_since_evict);
-
-    /// Apply an ordered forward mutation without retaining reverse history.
-    void apply_forward_no_undo(
-      const chunked_vector<dedup_index_mutation>&,
-      std::chrono::milliseconds window,
-      model::timestamp max_timestamp,
-      size_t inserts_since_evict);
-
-    /// Undo a transition previously returned by apply().
-    void revert(const dedup_index_undo&);
+    /// Undo the index mutations of one request previously returned by
+    /// filter_request(). Compare-and-revert: an entry is only restored or
+    /// erased when the map still holds the timestamp this request wrote; keys
+    /// overwritten by a later request are left untouched. Eviction sweeps and
+    /// the max-timestamp watermark are never reverted (expired entries cannot
+    /// influence future decisions, and a monotonically advanced watermark
+    /// only sharpens eviction).
+    void revert_request(const dedup_request_undo&);
 
     dedup_index_snapshot snapshot() const;
     void restore(const dedup_index_snapshot&);
 
-    /// \brief Seed the map with a key and its timestamp.
+    /// \brief Record a key admitted into the log.
     ///
-    /// Used by tests and state restoration helpers. Keeps the most recent
-    /// timestamp per key.
+    /// Keeps the most recent timestamp per key (idempotent, max-wins), so
+    /// applying the same log prefix any number of times converges. Used by
+    /// the STM apply path and by state restoration helpers. Participates in
+    /// eviction accounting so follower maps stay bounded.
     void populate(const iobuf& key, model::timestamp ts);
 
     /// \brief Drop entries older than the window relative to the most recent
@@ -168,20 +140,9 @@ public:
     model::timestamp max_timestamp() const { return _max_ts; }
 
 private:
-    using undo_entry_map
-      = chunked_hash_map<bytes, std::optional<model::timestamp>>;
-
     bool is_duplicate(
-      const iobuf& key,
-      model::timestamp ts,
-      chunked_vector<dedup_index_entry>* admitted,
-      chunked_vector<dedup_index_mutation>* mutations);
-    void apply_admitted(const dedup_index_entry&, undo_entry_map*);
-    void maybe_evict(
-      undo_entry_map* = nullptr,
-      chunked_vector<dedup_index_mutation>* = nullptr);
-    void evict_expired(
-      undo_entry_map*, chunked_vector<dedup_index_mutation>* = nullptr);
+      const iobuf& key, model::timestamp ts, dedup_request_undo* undo);
+    void maybe_evict();
 
     // Number of new-key insertions between opportunistic eviction sweeps.
     static constexpr size_t evict_after_inserts = 10000;

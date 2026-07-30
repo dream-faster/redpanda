@@ -9,7 +9,6 @@
 
 #pragma once
 
-#include "base/units.h"
 #include "cluster/dedup_window_filter.h"
 #include "cluster/state_machine_registry.h"
 #include "cluster/types.h"
@@ -18,11 +17,8 @@
 #include "serde/envelope.h"
 #include "serde/rw/bytes.h"
 #include "serde/rw/chrono.h"
-#include "serde/rw/optional.h"
-#include "serde/rw/uuid.h"
 #include "serde/rw/vector.h"
 #include "utils/available_promise.h"
-#include "utils/uuid.h"
 
 #include <seastar/core/shared_future.hh>
 #include <seastar/core/shared_ptr.hh>
@@ -32,6 +28,17 @@ namespace cluster {
 struct dedup_stm_test_accessor;
 
 /// Replicated state machine for write-path, first-wins deduplication.
+///
+/// The dedup index is a deterministic function of the data batches already in
+/// the Raft log: do_apply() reads each committed raft_data batch and records
+/// its keyed records in the window filter. Nothing dedup-specific is ever
+/// written to the log.
+///
+/// The index is advisory: only the leader consults it, and only before
+/// replication, so index state can never affect log consistency. Snapshots
+/// are therefore convergent rather than byte-exact — serializing the current
+/// state for an older target offset is safe because populate() is idempotent
+/// (max-timestamp-wins), so snapshot-plus-replay converges to the same state.
 class dedup_stm
   : public raft::persisted_stm<raft::kvstore_backed_stm_snapshot> {
 public:
@@ -51,10 +58,9 @@ public:
 
     size_t map_size() const { return _state.map_size(); }
 
-    raft::stm_initial_recovery_policy
-    get_initial_recovery_policy() const final {
-        return raft::stm_initial_recovery_policy::read_everything;
-    }
+    /// Partitions without dedup configured skip log recovery entirely; the
+    /// index then covers records written from the point dedup was enabled.
+    raft::stm_initial_recovery_policy get_initial_recovery_policy() const final;
 
     ss::future<iobuf> take_raft_snapshot(model::offset) final;
 
@@ -80,62 +86,6 @@ private:
         auto serde_fields() { return std::tie(key, timestamp); }
     };
 
-    struct wire_mutation
-      : serde::
-          envelope<wire_mutation, serde::version<0>, serde::compat_version<0>> {
-        bytes key;
-        std::optional<model::timestamp> timestamp;
-
-        auto serde_fields() { return std::tie(key, timestamp); }
-    };
-
-    enum class state_update_kind : int8_t {
-        mutation = 0,
-        checkpoint_begin = 1,
-        checkpoint_chunk = 2,
-        checkpoint_end = 3,
-    };
-
-    struct state_update
-      : serde::
-          envelope<state_update, serde::version<2>, serde::compat_version<0>> {
-        int64_t window_ms{0};
-        int64_t generation{0};
-        // Retained in v1 so a v0 reader can deterministically apply the update.
-        chunked_vector<wire_entry> admitted;
-        bool has_forward_mutations{false};
-        bool reset{false};
-        chunked_vector<wire_mutation> mutations;
-        model::timestamp resulting_max_timestamp{model::timestamp::min()};
-        uint64_t resulting_inserts_since_evict{0};
-        state_update_kind kind{state_update_kind::mutation};
-        uuid_t checkpoint_id{};
-        uint32_t checkpoint_sequence{0};
-        uint32_t checkpoint_chunk_count{0};
-        uint64_t checkpoint_entry_count{0};
-        uint32_t checkpoint_checksum{0};
-        chunked_vector<wire_entry> checkpoint_entries;
-
-        auto serde_fields() {
-            return std::tie(
-              window_ms,
-              generation,
-              admitted,
-              has_forward_mutations,
-              reset,
-              mutations,
-              resulting_max_timestamp,
-              resulting_inserts_since_evict,
-              kind,
-              checkpoint_id,
-              checkpoint_sequence,
-              checkpoint_chunk_count,
-              checkpoint_entry_count,
-              checkpoint_checksum,
-              checkpoint_entries);
-        }
-    };
-
     struct state_snapshot
       : serde::envelope<
           state_snapshot,
@@ -157,107 +107,6 @@ private:
         }
     };
 
-    struct wire_undo_entry
-      : serde::envelope<
-          wire_undo_entry,
-          serde::version<0>,
-          serde::compat_version<0>> {
-        bytes key;
-        std::optional<model::timestamp> previous_timestamp;
-
-        auto serde_fields() { return std::tie(key, previous_timestamp); }
-    };
-
-    struct undo_record
-      : serde::
-          envelope<undo_record, serde::version<0>, serde::compat_version<0>> {
-        model::offset offset;
-        int64_t previous_window_ms{0};
-        model::timestamp previous_max_timestamp{model::timestamp::min()};
-        uint64_t previous_inserts_since_evict{0};
-        chunked_vector<wire_undo_entry> entries;
-        std::optional<state_snapshot> reset_state;
-
-        auto serde_fields() {
-            return std::tie(
-              offset,
-              previous_window_ms,
-              previous_max_timestamp,
-              previous_inserts_since_evict,
-              entries,
-              reset_state);
-        }
-    };
-
-    struct snapshot_at_offset
-      : serde::envelope<
-          snapshot_at_offset,
-          serde::version<0>,
-          serde::compat_version<0>> {
-        model::offset offset;
-        state_snapshot state;
-
-        auto serde_fields() { return std::tie(offset, state); }
-    };
-
-    struct local_snapshot
-      : serde::envelope<
-          local_snapshot,
-          serde::version<1>,
-          serde::compat_version<0>> {
-        state_snapshot state;
-        // V0 snapshots stored reverse deltas here. V1 keeps the field empty so
-        // old readers remain able to restore the current state.
-        chunked_vector<undo_record> undo_history;
-        std::optional<snapshot_at_offset> replay_base;
-        std::optional<snapshot_at_offset> latest_checkpoint;
-        std::optional<snapshot_at_offset> snapshot_cache;
-        uint64_t mutations_since_checkpoint{0};
-        uint64_t mutation_bytes_since_checkpoint{0};
-
-        auto serde_fields() {
-            return std::tie(
-              state,
-              undo_history,
-              replay_base,
-              latest_checkpoint,
-              snapshot_cache,
-              mutations_since_checkpoint,
-              mutation_bytes_since_checkpoint);
-        }
-    };
-
-    struct checkpoint_assembly {
-        uuid_t id;
-        state_snapshot state;
-        uint32_t expected_chunks{0};
-        uint64_t expected_entries{0};
-        uint32_t expected_checksum{0};
-        uint32_t next_sequence{0};
-    };
-
-    // A conservative dependency fence for requests classified from the
-    // speculative state. It is global for now: that may wait for an unrelated
-    // preceding request, but it never lets a duplicate acknowledge before the
-    // Raft request that made the speculative decision durable.
-    struct inflight_request {
-        ss::shared_promise<std::optional<model::offset>> finished;
-        raft::consistency_level consistency{raft::consistency_level::no_ack};
-        model::term_id term{model::term_id{-1}};
-    };
-
-    class replay_consumer {
-    public:
-        replay_consumer(dedup_window_filter&, int64_t&);
-
-        ss::future<ss::stop_iteration> operator()(model::record_batch&);
-        void end_of_stream() {}
-
-    private:
-        dedup_window_filter& _state;
-        int64_t& _generation;
-    };
-
     ss::future<result<kafka_result>> do_replicate(
       model::record_batch,
       raft::replicate_options,
@@ -265,59 +114,23 @@ private:
       int64_t,
       ss::lw_shared_ptr<available_promise<>>);
 
-    static model::record_batch
-      make_state_update_batch(state_update, model::timestamp);
-    static chunked_vector<model::record_batch>
-      make_checkpoint_batches(state_snapshot, model::timestamp);
     static state_snapshot
     to_snapshot(const dedup_window_filter&, int64_t generation);
-    static state_snapshot copy_snapshot(const state_snapshot&);
-    static snapshot_at_offset copy_snapshot_at(const snapshot_at_offset&);
-    static uint32_t snapshot_checksum(const state_snapshot&);
-    static std::pair<size_t, size_t> mutation_usage(const state_update&);
     static void restore_snapshot(
       dedup_window_filter&, int64_t& generation, const state_snapshot&);
-    static dedup_index_undo from_wire(const undo_record&);
-    static chunked_vector<dedup_index_entry>
-    from_wire(const chunked_vector<wire_entry>&);
-    static chunked_vector<wire_entry>
-    to_wire(const chunked_vector<dedup_index_entry>&);
-    static chunked_vector<dedup_index_mutation>
-    from_wire(const chunked_vector<wire_mutation>&);
-    static chunked_vector<wire_mutation>
-    to_wire(const chunked_vector<dedup_index_mutation>&);
 
-    void apply_update(const state_update&, model::offset);
-    static void apply_mutation(
-      dedup_window_filter&, int64_t& generation, const state_update&);
-    void apply_checkpoint_record(const state_update&, model::offset);
-    ss::future<state_snapshot> reconstruct_at(model::offset);
-    const snapshot_at_offset* best_base_for(model::offset) const;
-    snapshot_at_offset migrate_legacy_snapshot(
-      const state_snapshot&,
-      const chunked_vector<undo_record>&,
-      model::offset target) const;
+    void adopt_config(std::chrono::milliseconds window, int64_t generation);
     kafka::offset from_log_offset(model::offset) const;
-
-    static constexpr size_t checkpoint_after_mutations = 10'000;
-    static constexpr size_t checkpoint_after_bytes = 16_MiB;
-    static constexpr size_t checkpoint_chunk_bytes = 512_KiB;
 
     config::binding<std::chrono::milliseconds> _sync_timeout;
     dedup_window_filter _state{std::chrono::milliseconds{0}};
     int64_t _generation{0};
-    std::optional<snapshot_at_offset> _replay_base;
-    std::optional<snapshot_at_offset> _latest_checkpoint;
-    std::optional<snapshot_at_offset> _snapshot_cache;
-    std::optional<checkpoint_assembly> _checkpoint_assembly;
-
-    dedup_window_filter _speculative_state{std::chrono::milliseconds{0}};
-    int64_t _speculative_generation{0};
-    model::term_id _speculative_term{model::term_id{-1}};
-    size_t _mutations_since_checkpoint{0};
-    size_t _mutation_bytes_since_checkpoint{0};
-    ss::lw_shared_ptr<inflight_request> _inflight_tail;
-    ssx::mutex _enqueue_mutex{"c/dedup_stm::enqueue_mutex"};
+    // Append-order fence: resolves once the most recently admitted request's
+    // batch has been appended to the leader log. A request that observed a
+    // duplicate waits on it before proceeding, so its own (possibly empty)
+    // replication is ordered after the append that introduced its keys and
+    // the Raft prefix property makes its acknowledgment safe.
+    ss::lw_shared_ptr<ss::shared_promise<>> _append_tail;
 };
 
 class dedup_stm_factory : public state_machine_factory {

@@ -69,16 +69,20 @@ Guarantees (unchanged from the current branch):
   log, and the log deterministically implies the index.
 - **G3** — Log consistency and Kafka offset translation never depend on
   filter state. There are no dedup batches in the log at all.
-- **G4** — For a request that is *partially* deduplicated and replicated with
-  `quorum_ack`, the Raft prefix property guarantees that the entries which
-  introduced the dropped keys are committed when the request's own batch
-  commits. The ack is never stronger than the introducing entries.
-- **G5** — For a request that is *entirely* deduplicated (nothing to
-  replicate) and requests `quorum_ack`, the leader waits until the committed
-  offset reaches the dirty offset captured at classification time before
-  acking. The introducing entries are therefore durable when the duplicate is
-  acknowledged. This closes the "acked duplicate, introducing write lost"
-  hole without per-key dependency tracking.
+- **G4** — Classification order does not imply log order (an introducing
+  request inserts into the map before its batch is appended), so any request
+  that observed a duplicate first waits on the **append-order fence**: a
+  shared promise resolved when the most recently admitted request's batch has
+  been appended. This is a conservative global fence, not per-key tracking.
+  After it, a *partially* deduplicated request replicates its own batch,
+  whose offset now follows the introducing appends — the Raft prefix
+  property makes its quorum ack cover them.
+- **G5** — A request that is *entirely* deduplicated (nothing to replicate)
+  and requests `quorum_ack` waits, after the append fence, for the committed
+  offset to reach the current dirty offset before acking. The introducing
+  entries are therefore durable when the duplicate is acknowledged. This
+  closes the "acked duplicate, introducing write lost" hole without per-key
+  dependency tracking.
 - **G6** — Idempotent and transactional producers bypass the filter
   (unchanged). Null-key records are always admitted and never indexed
   (unchanged).
@@ -137,21 +141,26 @@ read**.
 1. Hold the gate; `sync(_sync_timeout())` — on becoming leader this waits
    until the committed prefix is applied, i.e. the map reflects the log.
 2. Adopt generation and window as in apply.
-3. Capture `fence = _raft->dirty_offset()` *before* classification.
-4. `auto res = _state.filter_request(std::move(batch))` — classification and
+3. `auto res = _state.filter_request(std::move(batch))` — classification and
    insertion are synchronous (single reactor task), so concurrent produces
    serialize naturally per shard with no lock. `res` carries the filtered
    batch (or `nullopt` if everything was a duplicate) and this request's undo
    list: `{key, applied_timestamp, previous_timestamp}` per admitted key.
+4. If the request observed any duplicate, wait on the append-order fence
+   (`_append_tail`, G4) with the sync timeout, so everything below is ordered
+   after the appends that introduced the observed keys.
 5. **All-duplicate**: resolve `enqueued` immediately. If
-   `opts.consistency == quorum_ack`, wait on
+   `opts.consistency == quorum_ack`, capture `fence = dirty_offset()` (which
+   now covers the introducing appends) and wait on
    `visible_offset_monitor().wait(fence, now + sync_timeout, as)` (G5); on
    timeout return `errc::timeout`. Ack with the committed offset and
    `replicated_record_count = 0`.
 6. Otherwise `_raft->replicate_in_stages(std::move(*res.batch), opts)` — the
    data batch alone; there is no metadata batch to keep ordered, so Raft
    batching and pipelining across produce requests work exactly as for
-   non-dedup topics.
+   non-dedup topics. Install a fresh `_append_tail` promise and resolve it
+   when `request_enqueued` completes (success or failure), so later
+   duplicate-observers never hang.
 7. On enqueue or replication failure: `_state.revert_request(res.undo)` and
    return the error. **No step-down** — the map is repaired locally, and
    log-derived state means the next leader is correct by construction.
