@@ -430,17 +430,10 @@ kafka_stages partition::replicate_in_stages(
     if (
       _dedup_stm && !bid.is_idempotent() && !bid.is_transactional
       && get_ntp_config().dedup_window_ms()) {
-        auto window = *get_ntp_config().dedup_window_ms();
-        auto generation = get_ntp_config().dedup_generation();
         return stages_with_units(
           hold_writes_enabled(),
-          [this,
-           batch = std::move(batch),
-           opts = std::move(opts),
-           window,
-           generation]() mutable {
-              return _dedup_stm->replicate_in_stages(
-                std::move(batch), opts, window, generation);
+          [this, batch = std::move(batch), opts = std::move(opts)]() mutable {
+              return _dedup_stm->replicate_in_stages(std::move(batch), opts);
           });
     }
 

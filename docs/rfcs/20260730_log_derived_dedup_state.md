@@ -3,7 +3,8 @@
 - Start Date: 2026-07-30
 - Authors: @almostintuitive
 - Issue: dream-faster/redpanda#2
-- Supersedes: `20260730_bounded_raft_dedup_state.md`
+- Supersedes: `20260730_bounded_raft_dedup_state.md` (removed on this branch;
+  see git history)
 
 # Executive Summary
 
@@ -217,8 +218,9 @@ entries are expired by definition.
   `cluster::kafka_result::replicated_record_count`, and the `produce.cc` /
   `replicated_partition.cc` base-offset handling. (Needed by any design that
   drops records before replication.)
-- `partition.cc` dedup routing (plain produces only, window+generation from
-  config) and `partition_manager.cc` factory registration.
+- `partition.cc` dedup routing (plain produces only; the STM reads window and
+  generation from `ntp_config` itself) and `partition_manager.cc` factory
+  registration.
 - `cluster/snapshot.h` kvstore snapshot key.
 
 ## Rewritten
@@ -293,8 +295,8 @@ STM (`dedup_stm_test.cc`, single-node raft fixture as today):
 
 # Alternatives considered
 
-Retained in the superseded RFC: bounded reverse history, full-log replay per
-snapshot, kvstore history, per-key compaction, checkpoint protocol. The
-checkpoint design remains the correct follow-up **if** byte-exact historical
-state ever becomes a requirement (e.g. strict learner-recovery semantics);
-nothing in this design forecloses it.
+Analyzed in the superseded RFC (in git history): bounded reverse history,
+full-log replay per snapshot, kvstore history, per-key compaction, checkpoint
+protocol. The checkpoint design remains the correct follow-up **if**
+byte-exact historical state ever becomes a requirement (e.g. strict
+learner-recovery semantics); nothing in this design forecloses it.

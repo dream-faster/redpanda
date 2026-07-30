@@ -112,27 +112,21 @@ kafka::offset dedup_stm::from_log_offset(model::offset offset) const {
 }
 
 kafka_stages dedup_stm::replicate_in_stages(
-  model::record_batch batch,
-  raft::replicate_options opts,
-  std::chrono::milliseconds window,
-  int64_t generation) {
+  model::record_batch batch, raft::replicate_options opts) {
     auto enqueued = ss::make_lw_shared<available_promise<>>();
     auto enqueued_f = enqueued->get_future();
-    auto finished = do_replicate(
-                      std::move(batch), opts, window, generation, enqueued)
-                      .finally([enqueued] {
-                          if (!enqueued->available()) {
-                              enqueued->set_value();
-                          }
-                      });
+    auto finished
+      = do_replicate(std::move(batch), opts, enqueued).finally([enqueued] {
+            if (!enqueued->available()) {
+                enqueued->set_value();
+            }
+        });
     return {std::move(enqueued_f), std::move(finished)};
 }
 
 ss::future<result<kafka_result>> dedup_stm::do_replicate(
   model::record_batch batch,
   raft::replicate_options opts,
-  std::chrono::milliseconds window,
-  int64_t generation,
   ss::lw_shared_ptr<available_promise<>> enqueued) {
     auto gate_holder = _gate.hold();
 
@@ -142,10 +136,18 @@ ss::future<result<kafka_result>> dedup_stm::do_replicate(
     if (!opts.expected_term) {
         opts.expected_term = _insync_term;
     }
-    adopt_config(window, generation);
 
     const auto original_count = batch.record_count();
-    auto filtered = _state.filter_request(std::move(batch));
+    dedup_filter_result filtered;
+    const auto& cfg = _raft->log()->config();
+    if (auto window = cfg.dedup_window_ms(); window) {
+        adopt_config(*window, cfg.dedup_generation());
+        filtered = _state.filter_request(std::move(batch));
+    } else {
+        // Dedup was disabled between the partition's routing check and this
+        // point: replicate unfiltered.
+        filtered.batch = std::move(batch);
+    }
     const auto admitted_count = filtered.batch ? filtered.batch->record_count()
                                                : 0;
 

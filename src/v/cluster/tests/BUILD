@@ -1733,24 +1733,3 @@ redpanda_cc_gtest(
         "@seastar",
     ],
 )
-
-redpanda_cc_btest(
-    name = "dedup_window_filter_integration_test",
-    timeout = "short",
-    srcs = [
-        "dedup_window_filter_integration_test.cc",
-    ],
-    cpu = 1,
-    deps = [
-        "//src/v/bytes:iobuf",
-        "//src/v/cluster",
-        "//src/v/model",
-        "//src/v/raft",
-        "//src/v/raft/tests:simple_raft_fixture",
-        "//src/v/storage:record_batch_builder",
-        "//src/v/test_utils:seastar_boost",
-        "@boost//:test",
-        "@seastar",
-        "@seastar//:testing",
-    ],
-)

@@ -657,7 +657,6 @@ redpanda_cc_gtest(
     ],
 )
 
-
 redpanda_cc_gtest(
     name = "log_segment_reader_test",
     timeout = "short",

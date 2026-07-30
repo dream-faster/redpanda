@@ -16,7 +16,6 @@
 #include "raft/persisted_stm.h"
 #include "serde/envelope.h"
 #include "serde/rw/bytes.h"
-#include "serde/rw/chrono.h"
 #include "serde/rw/vector.h"
 #include "utils/available_promise.h"
 
@@ -50,11 +49,11 @@ public:
       storage::kvstore&,
       config::binding<std::chrono::milliseconds> sync_timeout);
 
-    kafka_stages replicate_in_stages(
-      model::record_batch,
-      raft::replicate_options,
-      std::chrono::milliseconds window,
-      int64_t generation);
+    /// Filter and replicate one plain produce batch. The dedup window and
+    /// generation are read from the partition's ntp_config, the same source
+    /// the apply path uses.
+    kafka_stages
+      replicate_in_stages(model::record_batch, raft::replicate_options);
 
     size_t map_size() const { return _state.map_size(); }
 
@@ -110,8 +109,6 @@ private:
     ss::future<result<kafka_result>> do_replicate(
       model::record_batch,
       raft::replicate_options,
-      std::chrono::milliseconds,
-      int64_t,
       ss::lw_shared_ptr<available_promise<>>);
 
     static state_snapshot

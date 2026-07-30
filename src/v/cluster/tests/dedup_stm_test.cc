@@ -70,14 +70,11 @@ struct dedup_stm_fixture : raft::stm_raft_fixture<dedup_stm> {
       model::node_id leader,
       std::string_view key,
       std::string_view value,
-      model::timestamp timestamp,
-      int64_t generation = 0) {
+      model::timestamp timestamp) {
         auto stm = get_stm<0>(node(leader));
         auto stages = stm->replicate_in_stages(
           make_batch(key, value, timestamp),
-          raft::replicate_options(raft::consistency_level::quorum_ack),
-          1000ms,
-          generation);
+          raft::replicate_options(raft::consistency_level::quorum_ack));
         co_await std::move(stages.request_enqueued);
         auto result = co_await std::move(stages.replicate_finished);
         EXPECT_TRUE(result.has_value());
@@ -170,17 +167,17 @@ TEST_F_CORO(dedup_stm_fixture, generation_change_invalidates_old_state) {
     auto leader = co_await wait_for_leader(10s);
 
     auto first = co_await produce(
-      leader, "key", "value-1", model::timestamp{1000}, 0);
+      leader, "key", "value-1", model::timestamp{1000});
     ASSERT_EQ_CORO(first.replicated_record_count, -1);
     auto duplicate = co_await produce(
-      leader, "key", "value-2", model::timestamp{1100}, 0);
+      leader, "key", "value-2", model::timestamp{1100});
     ASSERT_EQ_CORO(duplicate.replicated_record_count, 0);
 
     // A generation bump models disabling and re-enabling dedup: the old
     // index no longer applies and the same key is admitted again.
     set_dedup_config(1000ms, 1);
     auto after_reenable = co_await produce(
-      leader, "key", "value-3", model::timestamp{1200}, 1);
+      leader, "key", "value-3", model::timestamp{1200});
     ASSERT_EQ_CORO(after_reenable.replicated_record_count, -1);
     co_await wait_for_stms(node(leader).raft()->committed_offset());
 
@@ -192,7 +189,7 @@ TEST_F_CORO(dedup_stm_fixture, generation_change_invalidates_old_state) {
       model::timeout_clock::now() + 10s, old_term);
 
     duplicate = co_await produce(
-      new_leader, "key", "value-4", model::timestamp{1300}, 1);
+      new_leader, "key", "value-4", model::timestamp{1300});
     ASSERT_EQ_CORO(duplicate.replicated_record_count, 0);
 }
 
