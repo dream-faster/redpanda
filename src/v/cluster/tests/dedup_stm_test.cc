@@ -165,8 +165,9 @@ TEST(DedupStmUpdateSerde, LegacyUpdateIsReadableByForwardReader) {
       .generation = 7,
       .admitted = {
         {.key = bytes::from_string("key"), .timestamp = model::timestamp{42}}}};
-    EXPECT_TRUE(dedup_stm_test_accessor::reads_legacy_update(
-      serde::to_iobuf(std::move(legacy))));
+    EXPECT_TRUE(
+      dedup_stm_test_accessor::reads_legacy_update(
+        serde::to_iobuf(std::move(legacy))));
 }
 
 TEST_F_CORO(dedup_stm_fixture, state_survives_leadership_change) {

@@ -139,13 +139,14 @@ dedup_window_filter::filter_with_updates(model::record_batch batch) {
     int32_t output_offset_delta = 0;
     readable.for_each_record([&](model::record r) {
         if (keep[static_cast<size_t>(idx)]) {
-            builder.add_record(model::record(
-              r.attributes(),
-              r.timestamp_delta(),
-              output_offset_delta++,
-              r.share_key_opt(),
-              r.share_value_opt(),
-              std::move(r.headers())));
+            builder.add_record(
+              model::record(
+                r.attributes(),
+                r.timestamp_delta(),
+                output_offset_delta++,
+                r.share_key_opt(),
+                r.share_value_opt(),
+                std::move(r.headers())));
         }
         ++idx;
     });

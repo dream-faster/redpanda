@@ -143,11 +143,12 @@ void dedup_stm::restore_snapshot(
   int64_t& generation,
   const state_snapshot& snapshot) {
     state.set_window(std::chrono::milliseconds{snapshot.window_ms});
-    state.restore(dedup_index_snapshot{
-      .entries = from_wire(snapshot.entries),
-      .max_timestamp = snapshot.max_timestamp,
-      .inserts_since_evict = static_cast<size_t>(
-        snapshot.inserts_since_evict)});
+    state.restore(
+      dedup_index_snapshot{
+        .entries = from_wire(snapshot.entries),
+        .max_timestamp = snapshot.max_timestamp,
+        .inserts_since_evict = static_cast<size_t>(
+          snapshot.inserts_since_evict)});
     generation = snapshot.generation;
 }
 
@@ -581,10 +582,11 @@ dedup_stm::reconstruct_at(model::offset target) {
 
     const auto* base = best_base_for(target);
     if (!base) {
-        throw std::runtime_error(fmt::format(
-          "dedup state at offset {} is not reconstructible: no checkpoint at "
-          "or before the target",
-          target));
+        throw std::runtime_error(
+          fmt::format(
+            "dedup state at offset {} is not reconstructible: no checkpoint at "
+            "or before the target",
+            target));
     }
 
     dedup_window_filter state{std::chrono::milliseconds{0}};
@@ -593,12 +595,13 @@ dedup_stm::reconstruct_at(model::offset target) {
     const auto replay_start = model::next_offset(base->offset);
     if (replay_start <= target) {
         if (replay_start < _raft->start_offset()) {
-            throw std::runtime_error(fmt::format(
-              "dedup state at offset {} is not reconstructible: base {} "
-              "precedes Raft start offset {}",
-              target,
-              base->offset,
-              _raft->start_offset()));
+            throw std::runtime_error(
+              fmt::format(
+                "dedup state at offset {} is not reconstructible: base {} "
+                "precedes Raft start offset {}",
+                target,
+                base->offset,
+                _raft->start_offset()));
         }
         storage::local_log_reader_config config(replay_start, target);
         config.type_filter = model::record_batch_type::dedup_state_update;

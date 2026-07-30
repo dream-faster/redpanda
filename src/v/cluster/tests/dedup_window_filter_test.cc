@@ -301,8 +301,9 @@ TEST(DedupWindowFilter, PartialFilterPreservesRecordMetadata) {
       model::record({}, 10, 0, iobuf::from("a"), iobuf::from("duplicate"), {}));
     chunked_vector<model::record_header> headers;
     headers.emplace_back(iobuf::from("header"), iobuf::from("value"));
-    builder.add_record(model::record(
-      {}, 20, 1, iobuf::from("b"), iobuf::from("kept"), std::move(headers)));
+    builder.add_record(
+      model::record(
+        {}, 20, 1, iobuf::from("b"), iobuf::from("kept"), std::move(headers)));
 
     auto filtered = f.filter(std::move(builder).build_sync());
     ASSERT_TRUE(filtered.has_value());

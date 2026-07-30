@@ -124,16 +124,17 @@ void application::start_runtime_services(
         _rpc
           .invoke_on_all([this](rpc::rpc_server& s) {
               std::vector<std::unique_ptr<rpc::service>> runtime_services;
-              runtime_services.push_back(std::make_unique<raft::service<
-                                           cluster::partition_manager,
-                                           cluster::shard_table>>(
-                scheduling_groups::instance().raft_recv_sg(),
-                smp_service_groups.raft_smp_sg(),
-                scheduling_groups::instance().raft_heartbeats(),
-                partition_manager,
-                shard_table.local(),
-                config::shard_local_cfg().raft_heartbeat_interval_ms(),
-                config::node().node_id().value()));
+              runtime_services.push_back(
+                std::make_unique<raft::service<
+                  cluster::partition_manager,
+                  cluster::shard_table>>(
+                  scheduling_groups::instance().raft_recv_sg(),
+                  smp_service_groups.raft_smp_sg(),
+                  scheduling_groups::instance().raft_heartbeats(),
+                  partition_manager,
+                  shard_table.local(),
+                  config::shard_local_cfg().raft_heartbeat_interval_ms(),
+                  config::node().node_id().value()));
               s.add_services(std::move(runtime_services));
           })
           .get();

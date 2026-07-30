@@ -24,8 +24,8 @@ struct dedup_index_entry {
     bytes key;
     model::timestamp timestamp;
 
-    friend bool operator==(const dedup_index_entry&, const dedup_index_entry&)
-      = default;
+    friend bool
+    operator==(const dedup_index_entry&, const dedup_index_entry&) = default;
 };
 
 /// An ordered, forward mutation to the dedup index. A timestamp is a put and
@@ -34,9 +34,8 @@ struct dedup_index_mutation {
     bytes key;
     std::optional<model::timestamp> timestamp;
 
-    friend bool
-    operator==(const dedup_index_mutation&, const dedup_index_mutation&)
-      = default;
+    friend bool operator==(
+      const dedup_index_mutation&, const dedup_index_mutation&) = default;
 };
 
 struct dedup_filter_result {
@@ -52,9 +51,8 @@ struct dedup_index_snapshot {
     model::timestamp max_timestamp{model::timestamp::min()};
     size_t inserts_since_evict{0};
 
-    friend bool
-    operator==(const dedup_index_snapshot&, const dedup_index_snapshot&)
-      = default;
+    friend bool operator==(
+      const dedup_index_snapshot&, const dedup_index_snapshot&) = default;
 };
 
 struct dedup_index_undo {
