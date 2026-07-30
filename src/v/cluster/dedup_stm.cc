@@ -420,7 +420,38 @@ ss::future<result<kafka_result>> dedup_stm::do_replicate(
     const auto original_count = batch.record_count();
     auto filtered = _speculative_state.filter_with_updates(std::move(batch));
     if (!filtered.batch) {
+        auto dependency = _inflight_tail;
+        const auto expected_term = opts.expected_term.value();
+        units.return_all();
         enqueued->set_value();
+        if (dependency) {
+            auto dependency_result
+              = co_await dependency->finished.get_shared_future();
+            if (!dependency_result) {
+                co_return errc::replication_error;
+            }
+            // A quorum duplicate must not be acknowledged solely because the
+            // request that introduced its key used a weaker acknowledgment.
+            // Waiting for STM application also implies Raft commitment.
+            if (
+              opts.consistency == raft::consistency_level::quorum_ack
+              && dependency->consistency
+                   != raft::consistency_level::quorum_ack) {
+                try {
+                    co_await wait(
+                      *dependency_result,
+                      model::timeout_clock::now() + _sync_timeout(),
+                      opts.as);
+                } catch (...) {
+                    co_return errc::replication_error;
+                }
+            }
+            if (
+              !_raft->is_leader() || _raft->term() != expected_term
+              || _raft->committed_offset() < *dependency_result) {
+                co_return errc::not_leader;
+            }
+        }
         auto committed = from_log_offset(_raft->committed_offset());
         co_return kafka_result{committed, _raft->term(), 0};
     }
@@ -468,14 +499,20 @@ ss::future<result<kafka_result>> dedup_stm::do_replicate(
         co_return errc::replication_error;
     }
 
+    auto inflight = ss::make_lw_shared<inflight_request>();
+    inflight->consistency = opts.consistency;
+    inflight->term = opts.expected_term.value();
+    _inflight_tail = inflight;
     enqueued->set_value();
-
-    // Keep the enqueue mutex until replication finishes. In particular, a
-    // following all-duplicate request must not be acknowledged from
-    // speculative state until the request that introduced the key is durable.
+    // Classification and Raft enqueue remain ordered, but completion waits do
+    // not hold the mutex: independent producers can now enter the Raft
+    // batcher concurrently. All-duplicate requests wait on the dependency
+    // fence captured above instead.
+    units.return_all();
     auto replicated = co_await ss::coroutine::as_future(
       std::move(stages.replicate_finished));
     if (replicated.failed()) {
+        inflight->finished.set_value(std::nullopt);
         if (_raft->is_leader() && _raft->term() == opts.expected_term.value()) {
             co_await _raft->step_down("dedup_stm replication failure");
         }
@@ -483,13 +520,14 @@ ss::future<result<kafka_result>> dedup_stm::do_replicate(
     }
     auto result = replicated.get();
     if (!result) {
+        inflight->finished.set_value(std::nullopt);
         if (_raft->is_leader() && _raft->term() == opts.expected_term.value()) {
             co_await _raft->step_down("dedup_stm replication failure");
         }
         co_return result.error();
     }
 
-    units.return_all();
+    inflight->finished.set_value(result.value().last_offset);
     kafka_result response{
       .last_offset = from_log_offset(result.value().last_offset),
       .last_term = result.value().last_term};

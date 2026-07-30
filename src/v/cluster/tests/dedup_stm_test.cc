@@ -336,5 +336,23 @@ TEST_F_CORO(dedup_stm_fixture, concurrent_same_key_is_admitted_once) {
       node(leader).raft()->dirty_offset(), before + model::offset{2});
 }
 
+TEST_F_CORO(dedup_stm_fixture, concurrent_independent_keys_are_admitted) {
+    co_await initialize_state_machines();
+    auto leader = co_await wait_for_leader(10s);
+    const auto before = node(leader).raft()->dirty_offset();
+
+    auto [first, second] = co_await ss::when_all_succeed(
+      produce(leader, "key-a", "value-a", model::timestamp{1000}),
+      produce(leader, "key-b", "value-b", model::timestamp{1000}));
+
+    ASSERT_EQ_CORO(first.replicated_record_count, -1);
+    ASSERT_EQ_CORO(second.replicated_record_count, -1);
+    // Each request writes one metadata and one data batch. The important
+    // ordering guarantee is retained while neither request is dropped as a
+    // speculative duplicate of the other.
+    ASSERT_EQ_CORO(
+      node(leader).raft()->dirty_offset(), before + model::offset{4});
+}
+
 } // namespace
 } // namespace cluster

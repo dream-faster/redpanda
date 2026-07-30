@@ -24,6 +24,7 @@
 #include "utils/available_promise.h"
 #include "utils/uuid.h"
 
+#include <seastar/core/shared_future.hh>
 #include <seastar/core/shared_ptr.hh>
 
 namespace cluster {
@@ -235,6 +236,16 @@ private:
         uint32_t next_sequence{0};
     };
 
+    // A conservative dependency fence for requests classified from the
+    // speculative state. It is global for now: that may wait for an unrelated
+    // preceding request, but it never lets a duplicate acknowledge before the
+    // Raft request that made the speculative decision durable.
+    struct inflight_request {
+        ss::shared_promise<std::optional<model::offset>> finished;
+        raft::consistency_level consistency{raft::consistency_level::no_ack};
+        model::term_id term{model::term_id{-1}};
+    };
+
     class replay_consumer {
     public:
         replay_consumer(dedup_window_filter&, int64_t&);
@@ -305,6 +316,7 @@ private:
     model::term_id _speculative_term{model::term_id{-1}};
     size_t _mutations_since_checkpoint{0};
     size_t _mutation_bytes_since_checkpoint{0};
+    ss::lw_shared_ptr<inflight_request> _inflight_tail;
     ssx::mutex _enqueue_mutex{"c/dedup_stm::enqueue_mutex"};
 };
 
