@@ -54,11 +54,10 @@ void fill_response_with_errors(
 
         t.partitions.reserve(topic.partitions.size());
         for (const auto& partition : topic.partitions) {
-            t.partitions.push_back(
-              produce_response::partition{
-                .partition_index = partition.partition_index,
-                .error_code = error,
-                .error_message = error_msg});
+            t.partitions.push_back(produce_response::partition{
+              .partition_index = partition.partition_index,
+              .error_code = error,
+              .error_message = error_msg});
         }
     }
 }
@@ -427,10 +426,9 @@ topic_produce_error(const produce_request::topic& topic, error_code error) {
     partitions_produced.reserve(topic.partitions.size());
 
     for (const auto& topic_partition : topic.partitions) {
-        partitions_produced.push_back(
-          produce_response::partition{
-            .partition_index = topic_partition.partition_index,
-            .error_code = error});
+        partitions_produced.push_back(produce_response::partition{
+          .partition_index = topic_partition.partition_index,
+          .error_code = error});
     }
 
     return topic_produce_stages{
@@ -514,9 +512,9 @@ produce_topic(produce_ctx& octx, produce_request::topic& topic) {
                   .error_code = errc}));
         };
 
-        if (
-          unlikely(
-            disabled_set && disabled_set->is_disabled(part.partition_index))) {
+        if (unlikely(
+              disabled_set
+              && disabled_set->is_disabled(part.partition_index))) {
             push_error_response(error_code::replica_not_available);
             continue;
         }
@@ -545,9 +543,9 @@ produce_topic(produce_ctx& octx, produce_request::topic& topic) {
         // NOTE: for produce version 0 and 1 the adapter transparently converts
         // the batch into an v2 batch and sets the v2_format flag. conversion
         // also produces a single record batch by accumulating legacy messages.
-        if (
-          unlikely(
-            !part.records->adapter.v2_format || !part.records->adapter.batch)) {
+        if (unlikely(
+              !part.records->adapter.v2_format
+              || !part.records->adapter.batch)) {
             push_error_response(error_code::invalid_record);
             continue;
         }
@@ -876,11 +874,10 @@ produce_handler::handle(request_context ctx, ss::smp_service_group ssg) {
                           // request result in the connection being
                           // dropped to signal an issue to the client
                           return ss::make_exception_future<response_ptr>(
-                            std::runtime_error(
-                              fmt::format(
-                                "Closing connection due to error in produce "
-                                "response: {}",
-                                octx.response)));
+                            std::runtime_error(fmt::format(
+                              "Closing connection due to error in produce "
+                              "response: {}",
+                              octx.response)));
                       });
                 } catch (...) {
                     /*
@@ -897,9 +894,8 @@ produce_handler::handle(request_context ctx, ss::smp_service_group ssg) {
                       .discard_result()
                       .then([] {
                           return ss::make_exception_future<response_ptr>(
-                            std::runtime_error(
-                              "First stage produce failed but "
-                              "second stage succeeded."));
+                            std::runtime_error("First stage produce failed but "
+                                               "second stage succeeded."));
                       })
                       .handle_exception([](std::exception_ptr e) {
                           return ss::make_exception_future<response_ptr>(e);

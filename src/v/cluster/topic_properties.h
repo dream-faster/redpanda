@@ -345,8 +345,8 @@ struct topic_properties
           dedup_generation);
     }
 
-    friend bool
-    operator==(const topic_properties&, const topic_properties&) = default;
+    friend bool operator==(const topic_properties&, const topic_properties&)
+      = default;
 
 private:
     // This was deprecated in favour of redpanda.storage.mode, but is kept here

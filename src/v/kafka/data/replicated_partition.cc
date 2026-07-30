@@ -401,10 +401,9 @@ raft::replicate_stages replicated_partition::replicate(
           if (!r) {
               return ret_t(r.error());
           }
-          return ret_t(
-            raft::replicate_result{
-              .last_offset = model::offset(r.value().last_offset()),
-              .replicated_record_count = r.value().replicated_record_count});
+          return ret_t(raft::replicate_result{
+            .last_offset = model::offset(r.value().last_offset()),
+            .replicated_record_count = r.value().replicated_record_count});
       });
     return out;
 }
@@ -733,24 +732,22 @@ result<partition_info> replicated_partition::get_partition_info() const {
     };
 
     for (const auto& follower_metric : followers.value()) {
-        ret.replicas.push_back(
-          replica_info{
-            .id = follower_metric.id,
-            .high_watermark = model::next_offset(
-              clamped_translate(follower_metric.match_index)),
-            .log_end_offset = model::next_offset(
-              clamped_translate(follower_metric.dirty_log_index)),
-            .is_alive = follower_metric.is_live,
-          });
+        ret.replicas.push_back(replica_info{
+          .id = follower_metric.id,
+          .high_watermark = model::next_offset(
+            clamped_translate(follower_metric.match_index)),
+          .log_end_offset = model::next_offset(
+            clamped_translate(follower_metric.dirty_log_index)),
+          .is_alive = follower_metric.is_live,
+        });
     }
 
-    ret.replicas.push_back(
-      replica_info{
-        .id = _partition->raft()->self().id(),
-        .high_watermark = high_watermark(),
-        .log_end_offset = log_end_offset(),
-        .is_alive = true,
-      });
+    ret.replicas.push_back(replica_info{
+      .id = _partition->raft()->self().id(),
+      .high_watermark = high_watermark(),
+      .log_end_offset = log_end_offset(),
+      .is_alive = true,
+    });
 
     return {std::move(ret)};
 }

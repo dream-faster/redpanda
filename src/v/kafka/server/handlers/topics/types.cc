@@ -160,9 +160,8 @@ get_enum_value(const config_map_t& config, std::string_view key) {
 
 static std::optional<config::leaders_preference>
 get_leaders_preference(const config_map_t& config) {
-    if (
-      auto it = config.find(topic_property_leaders_preference);
-      it != config.end()) {
+    if (auto it = config.find(topic_property_leaders_preference);
+        it != config.end()) {
         return config::leaders_preference::parse(it->second);
     }
     return std::nullopt;
@@ -318,10 +317,9 @@ cluster::topic_configuration to_topic_config(
       = get_duration_value<std::chrono::milliseconds>(
         config_entries, topic_property_iceberg_target_lag_ms);
 
-    if (
-      auto s = get_string_value(
-        config_entries, topic_property_schema_registry_context);
-      s.has_value() && !s->empty()) {
+    if (auto s = get_string_value(
+          config_entries, topic_property_schema_registry_context);
+        s.has_value() && !s->empty()) {
         cfg.properties.schema_registry_context
           = pandaproxy::schema_registry::context{std::move(*s)};
     }

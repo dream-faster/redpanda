@@ -766,9 +766,8 @@ parse_extended_iceberg_mode(std::string_view str) {
                            .match("schema_latest", sm::schema_latest)
                            .default_match(std::nullopt);
                 if (!m) {
-                    return std::unexpected(
-                      fmt::format(
-                        "unknown mode '{}' in section '{}'", v, sec_name));
+                    return std::unexpected(fmt::format(
+                      "unknown mode '{}' in section '{}'", v, sec_name));
                 }
                 cfg.mode = *m;
             } else if (k == "subject") {
@@ -776,19 +775,17 @@ parse_extended_iceberg_mode(std::string_view str) {
             } else if (k == "protobuf_name") {
                 cfg.protobuf_name = ss::sstring(v);
             } else {
-                return std::unexpected(
-                  fmt::format(
-                    "unknown option '{}' in section '{}'", k, sec_name));
+                return std::unexpected(fmt::format(
+                  "unknown option '{}' in section '{}'", k, sec_name));
             }
         }
         if (
           cfg.mode != iceberg_mode::schema_mode::schema_latest
           && (!cfg.subject.empty() || !cfg.protobuf_name.empty())) {
-            return std::unexpected(
-              fmt::format(
-                "subject and protobuf_name require mode=schema_latest in "
-                "section '{}'",
-                sec_name));
+            return std::unexpected(fmt::format(
+              "subject and protobuf_name require mode=schema_latest in "
+              "section '{}'",
+              sec_name));
         }
         return {};
     };
@@ -799,8 +796,8 @@ parse_extended_iceberg_mode(std::string_view str) {
         }
     }
     if (value_opts) {
-        if (
-          auto r = parse_schema_opts(*value_opts, result.value, "value"); !r) {
+        if (auto r = parse_schema_opts(*value_opts, result.value, "value");
+            !r) {
             return std::unexpected(std::move(r.error()));
         }
     }
@@ -813,9 +810,8 @@ parse_extended_iceberg_mode(std::string_view str) {
                            .match("string", hsm::string)
                            .default_match(std::nullopt);
                 if (!t) {
-                    return std::unexpected(
-                      fmt::format(
-                        "unknown value_type '{}' in section 'headers'", v));
+                    return std::unexpected(fmt::format(
+                      "unknown value_type '{}' in section 'headers'", v));
                 }
                 result.headers.value_type = *t;
             } else {
@@ -888,10 +884,9 @@ void read_nested(
         read_nested(in, payload, bytes_left_limit);
         auto result = parse_iceberg_mode(payload.config);
         if (!result) {
-            throw serde::serde_exception(
-              fmt::format(
-                "invalid iceberg_mode config in wire format: {}",
-                result.error()));
+            throw serde::serde_exception(fmt::format(
+              "invalid iceberg_mode config in wire format: {}",
+              result.error()));
         }
         m = std::move(*result);
         return;
@@ -979,9 +974,8 @@ parse_legacy_schema_latest(std::string_view suffix) {
         return iceberg_mode::value_schema_latest("", "");
     }
     if (!absl::ConsumePrefix(&suffix, ":")) {
-        return std::unexpected(
-          ss::sstring(
-            "expected ':' or end of string after 'value_schema_latest'"));
+        return std::unexpected(ss::sstring(
+          "expected ':' or end of string after 'value_schema_latest'"));
     }
     if (suffix.empty()) {
         return std::unexpected(
