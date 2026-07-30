@@ -119,14 +119,13 @@ dedup_window_filter::filter_with_updates(model::record_batch batch) {
     int32_t output_offset_delta = 0;
     readable.for_each_record([&](model::record r) {
         if (keep[static_cast<size_t>(idx)]) {
-            builder.add_record(
-              model::record(
-                r.attributes(),
-                r.timestamp_delta(),
-                output_offset_delta++,
-                r.share_key_opt(),
-                r.share_value_opt(),
-                std::move(r.headers())));
+            builder.add_record(model::record(
+              r.attributes(),
+              r.timestamp_delta(),
+              output_offset_delta++,
+              r.share_key_opt(),
+              r.share_value_opt(),
+              std::move(r.headers())));
         }
         ++idx;
     });
@@ -149,7 +148,7 @@ void dedup_window_filter::populate(const iobuf& key, model::timestamp ts) {
 
 void dedup_window_filter::evict_expired() { evict_expired(nullptr); }
 
-void dedup_window_filter::evict_expired(dedup_index_undo* undo) {
+void dedup_window_filter::evict_expired(undo_entry_map* undo) {
     // An entry is only meaningful while a future record could still be within
     // _window of it. Once _max_ts has advanced beyond the window, the entry can
     // never cause a drop again (the next lookup would treat it as expired), so
@@ -160,22 +159,13 @@ void dedup_window_filter::evict_expired(dedup_index_undo* undo) {
             return false;
         }
         if (undo) {
-            auto found = std::find_if(
-              undo->entries.begin(),
-              undo->entries.end(),
-              [&kv](const dedup_index_undo::entry& e) {
-                  return e.key == kv.first;
-              });
-            if (found == undo->entries.end()) {
-                undo->entries.push_back(
-                  {.key = kv.first, .previous_timestamp = kv.second});
-            }
+            undo->try_emplace(kv.first, kv.second);
         }
         return true;
     });
 }
 
-void dedup_window_filter::maybe_evict(dedup_index_undo* undo) {
+void dedup_window_filter::maybe_evict(undo_entry_map* undo) {
     if (++_inserts_since_evict < evict_after_inserts) {
         return;
     }
@@ -184,22 +174,12 @@ void dedup_window_filter::maybe_evict(dedup_index_undo* undo) {
 }
 
 void dedup_window_filter::apply_admitted(
-  const dedup_index_entry& entry, dedup_index_undo* undo) {
+  const dedup_index_entry& entry, undo_entry_map* undo) {
     auto it = _map.find(entry.key);
     if (undo) {
-        auto found = std::find_if(
-          undo->entries.begin(),
-          undo->entries.end(),
-          [&entry](const dedup_index_undo::entry& e) {
-              return e.key == entry.key;
-          });
-        if (found == undo->entries.end()) {
-            undo->entries.push_back(
-              {.key = entry.key,
-               .previous_timestamp = it == _map.end()
-                                       ? std::nullopt
-                                       : std::optional(it->second)});
-        }
+        undo->try_emplace(
+          entry.key,
+          it == _map.end() ? std::nullopt : std::optional(it->second));
     }
 
     _max_ts = std::max(_max_ts, entry.timestamp);
@@ -214,15 +194,22 @@ void dedup_window_filter::apply_admitted(
 dedup_index_undo dedup_window_filter::apply(
   const chunked_vector<dedup_index_entry>& entries,
   std::chrono::milliseconds window) {
-    dedup_index_undo undo{
+    dedup_index_undo result{
       .previous_window = _window,
       .previous_max_timestamp = _max_ts,
       .previous_inserts_since_evict = _inserts_since_evict};
+    undo_entry_map undo;
+    undo.reserve(entries.size());
     _window = window;
     for (const auto& entry : entries) {
         apply_admitted(entry, &undo);
     }
-    return undo;
+    result.entries.reserve(undo.size());
+    for (const auto& [key, previous_timestamp] : undo) {
+        result.entries.push_back(
+          {.key = key, .previous_timestamp = previous_timestamp});
+    }
+    return result;
 }
 
 void dedup_window_filter::revert(const dedup_index_undo& undo) {

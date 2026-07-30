@@ -24,8 +24,8 @@ struct dedup_index_entry {
     bytes key;
     model::timestamp timestamp;
 
-    friend bool
-    operator==(const dedup_index_entry&, const dedup_index_entry&) = default;
+    friend bool operator==(const dedup_index_entry&, const dedup_index_entry&)
+      = default;
 };
 
 struct dedup_filter_result {
@@ -38,8 +38,9 @@ struct dedup_index_snapshot {
     model::timestamp max_timestamp{model::timestamp::min()};
     size_t inserts_since_evict{0};
 
-    friend bool operator==(
-      const dedup_index_snapshot&, const dedup_index_snapshot&) = default;
+    friend bool
+    operator==(const dedup_index_snapshot&, const dedup_index_snapshot&)
+      = default;
 };
 
 struct dedup_index_undo {
@@ -131,13 +132,16 @@ public:
     model::timestamp max_timestamp() const { return _max_ts; }
 
 private:
+    using undo_entry_map
+      = chunked_hash_map<bytes, std::optional<model::timestamp>>;
+
     bool is_duplicate(
       const iobuf& key,
       model::timestamp ts,
       chunked_vector<dedup_index_entry>* admitted);
-    void apply_admitted(const dedup_index_entry&, dedup_index_undo*);
-    void maybe_evict(dedup_index_undo* = nullptr);
-    void evict_expired(dedup_index_undo*);
+    void apply_admitted(const dedup_index_entry&, undo_entry_map*);
+    void maybe_evict(undo_entry_map* = nullptr);
+    void evict_expired(undo_entry_map*);
 
     // Number of new-key insertions between opportunistic eviction sweeps.
     static constexpr size_t evict_after_inserts = 10000;

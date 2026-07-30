@@ -24,6 +24,7 @@
 
 #include <chrono>
 #include <optional>
+#include <string>
 #include <string_view>
 
 using namespace std::chrono_literals;
@@ -129,6 +130,39 @@ TEST(DedupWindowFilter, ReplicatedUpdateCanBeReverted) {
     EXPECT_EQ(follower.snapshot(), before);
 }
 
+TEST(DedupWindowFilter, LargeReplicatedUpdateAndEvictionCanBeReverted) {
+    constexpr size_t key_count = 10'000;
+    cluster::dedup_window_filter follower(1000ms);
+
+    // populate() does not advance the opportunistic insertion counter. These
+    // keys are all stale by the time the replicated update below is applied.
+    for (size_t i = 0; i < key_count; ++i) {
+        follower.populate(
+          iobuf::from("old-" + std::to_string(i)), model::timestamp{0});
+    }
+
+    chunked_vector<cluster::dedup_index_entry> admitted;
+    admitted.reserve(key_count);
+    for (size_t i = 0; i < key_count; ++i) {
+        admitted.push_back(
+          {.key = bytes::from_string("new-" + std::to_string(i)),
+           .timestamp = model::timestamp{5000}});
+    }
+
+    auto undo = follower.apply(admitted, 1000ms);
+    EXPECT_EQ(follower.map_size(), key_count);
+    // The undo contains one entry for every inserted key and every stale key
+    // removed by the sweep. Building it must remain linear in this count.
+    EXPECT_EQ(undo.entries.size(), key_count * 2);
+
+    follower.revert(undo);
+    EXPECT_EQ(follower.map_size(), key_count);
+    EXPECT_FALSE(
+      follower.filter(make_batch("old-0", "duplicate", ts(500))).has_value());
+    EXPECT_TRUE(
+      follower.filter(make_batch("new-0", "new", ts(500))).has_value());
+}
+
 TEST(DedupWindowFilter, RevertingUpdateRestoresWindow) {
     cluster::dedup_window_filter f(1000ms);
     const auto undo = f.apply({}, 2000ms);
@@ -184,9 +218,8 @@ TEST(DedupWindowFilter, PartialFilterPreservesRecordMetadata) {
       model::record({}, 10, 0, iobuf::from("a"), iobuf::from("duplicate"), {}));
     chunked_vector<model::record_header> headers;
     headers.emplace_back(iobuf::from("header"), iobuf::from("value"));
-    builder.add_record(
-      model::record(
-        {}, 20, 1, iobuf::from("b"), iobuf::from("kept"), std::move(headers)));
+    builder.add_record(model::record(
+      {}, 20, 1, iobuf::from("b"), iobuf::from("kept"), std::move(headers)));
 
     auto filtered = f.filter(std::move(builder).build_sync());
     ASSERT_TRUE(filtered.has_value());
