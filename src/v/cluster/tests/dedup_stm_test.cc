@@ -77,6 +77,26 @@ struct dedup_stm_test_accessor {
                && !update.has_forward_mutations && !update.reset
                && update.mutations.empty();
     }
+
+    static void force_checkpoint_after_next_mutation(dedup_stm& stm) {
+        stm._mutations_since_checkpoint = dedup_stm::checkpoint_after_mutations
+                                          - 1;
+        stm._mutation_bytes_since_checkpoint = 0;
+    }
+
+    static std::optional<model::offset>
+    latest_checkpoint_offset(const dedup_stm& stm) {
+        if (!stm._latest_checkpoint) {
+            return std::nullopt;
+        }
+        return stm._latest_checkpoint->offset;
+    }
+
+    static size_t latest_checkpoint_size(const dedup_stm& stm) {
+        return stm._latest_checkpoint
+                 ? stm._latest_checkpoint->state.entries.size()
+                 : 0;
+    }
 };
 
 namespace {
@@ -254,6 +274,47 @@ TEST_F_CORO(dedup_stm_fixture, raft_snapshot_reflects_requested_offset) {
 
     // Snapshot construction must not mutate the live state.
     ASSERT_EQ_CORO(stm->map_size(), 2);
+}
+
+TEST_F_CORO(dedup_stm_fixture, checkpoint_reconstructs_historical_state) {
+    co_await initialize_state_machines();
+    auto leader = co_await wait_for_leader(10s);
+    auto stm = get_stm<0>(node(leader));
+
+    co_await produce(leader, "a", "value-a", model::timestamp{1000});
+    co_await wait_for_stms(node(leader).raft()->committed_offset());
+
+    // Keep the test small while exercising the normal count-based checkpoint
+    // trigger on the next replicated forward mutation.
+    dedup_stm_test_accessor::force_checkpoint_after_next_mutation(*stm);
+    co_await produce(leader, "b", "value-b", model::timestamp{1100});
+    const auto checkpoint_committed = node(leader).raft()->committed_offset();
+    co_await wait_for_stms(checkpoint_committed);
+
+    const auto checkpoint_offset
+      = dedup_stm_test_accessor::latest_checkpoint_offset(*stm);
+    ASSERT_TRUE_CORO(checkpoint_offset.has_value());
+    ASSERT_EQ_CORO(dedup_stm_test_accessor::latest_checkpoint_size(*stm), 2);
+
+    co_await produce(leader, "c", "value-c", model::timestamp{1200});
+    const auto latest_committed = node(leader).raft()->committed_offset();
+    co_await wait_for_stms(latest_committed);
+
+    auto historical = co_await stm->take_raft_snapshot(*checkpoint_offset);
+    ASSERT_EQ_CORO(
+      dedup_stm_test_accessor::snapshot_size(std::move(historical)), 2);
+    auto latest = co_await stm->take_raft_snapshot(latest_committed);
+    ASSERT_EQ_CORO(
+      dedup_stm_test_accessor::snapshot_size(std::move(latest)), 3);
+
+    for (auto& [_, n] : nodes()) {
+        co_await get_stm<0>(*n)->write_local_snapshot();
+    }
+    co_await restart_nodes();
+    leader = co_await wait_for_leader(10s);
+    auto duplicate = co_await produce(
+      leader, "b", "duplicate", model::timestamp{1500});
+    ASSERT_EQ_CORO(duplicate.replicated_record_count, 0);
 }
 
 TEST_F_CORO(dedup_stm_fixture, concurrent_same_key_is_admitted_once) {

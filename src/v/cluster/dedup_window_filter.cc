@@ -240,6 +240,15 @@ dedup_index_undo dedup_window_filter::apply(
     return result;
 }
 
+void dedup_window_filter::apply_no_undo(
+  const chunked_vector<dedup_index_entry>& entries,
+  std::chrono::milliseconds window) {
+    _window = window;
+    for (const auto& entry : entries) {
+        apply_admitted(entry, nullptr);
+    }
+}
+
 dedup_index_undo dedup_window_filter::apply_forward(
   const chunked_vector<dedup_index_mutation>& mutations,
   std::chrono::milliseconds window,
@@ -272,6 +281,23 @@ dedup_index_undo dedup_window_filter::apply_forward(
           {.key = key, .previous_timestamp = previous_timestamp});
     }
     return result;
+}
+
+void dedup_window_filter::apply_forward_no_undo(
+  const chunked_vector<dedup_index_mutation>& mutations,
+  std::chrono::milliseconds window,
+  model::timestamp max_timestamp,
+  size_t inserts_since_evict) {
+    for (const auto& mutation : mutations) {
+        if (mutation.timestamp) {
+            _map.insert_or_assign(mutation.key, *mutation.timestamp);
+        } else {
+            _map.erase(mutation.key);
+        }
+    }
+    _window = window;
+    _max_ts = max_timestamp;
+    _inserts_since_evict = inserts_since_evict;
 }
 
 void dedup_window_filter::revert(const dedup_index_undo& undo) {

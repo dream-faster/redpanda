@@ -116,12 +116,24 @@ public:
       const chunked_vector<dedup_index_entry>&,
       std::chrono::milliseconds window);
 
+    /// Apply a legacy admitted-key update without retaining reverse history.
+    void apply_no_undo(
+      const chunked_vector<dedup_index_entry>&,
+      std::chrono::milliseconds window);
+
     /// Apply an ordered forward mutation emitted by a leader. Unlike apply(),
     /// this does not re-run eviction policy on the follower: the leader's
     /// explicit puts, deletes, and resulting scalar state are authoritative.
     /// The returned undo is temporary compatibility state for historical Raft
     /// snapshots and is removed once checkpoint-based snapshots are enabled.
     dedup_index_undo apply_forward(
+      const chunked_vector<dedup_index_mutation>&,
+      std::chrono::milliseconds window,
+      model::timestamp max_timestamp,
+      size_t inserts_since_evict);
+
+    /// Apply an ordered forward mutation without retaining reverse history.
+    void apply_forward_no_undo(
       const chunked_vector<dedup_index_mutation>&,
       std::chrono::milliseconds window,
       model::timestamp max_timestamp,

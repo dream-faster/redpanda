@@ -2452,6 +2452,7 @@ redpanda_cc_library(
         "//src/v/features",
         "//src/v/features:enterprise_features",
         "//src/v/finjector",
+        "//src/v/hashing:crc32c",
         "//src/v/hashing:murmur",
         "//src/v/hashing:secure",
         "//src/v/hashing:xx",
