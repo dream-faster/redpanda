@@ -28,9 +28,23 @@ struct dedup_index_entry {
       = default;
 };
 
+/// An ordered, forward mutation to the dedup index. A timestamp is a put and
+/// std::nullopt is a delete.
+struct dedup_index_mutation {
+    bytes key;
+    std::optional<model::timestamp> timestamp;
+
+    friend bool
+    operator==(const dedup_index_mutation&, const dedup_index_mutation&)
+      = default;
+};
+
 struct dedup_filter_result {
     std::optional<model::record_batch> batch;
     chunked_vector<dedup_index_entry> admitted;
+    chunked_vector<dedup_index_mutation> mutations;
+    model::timestamp max_timestamp{model::timestamp::min()};
+    size_t inserts_since_evict{0};
 };
 
 struct dedup_index_snapshot {
@@ -90,9 +104,10 @@ public:
     /// original compressed batch is left untouched.
     std::optional<model::record_batch> filter(model::record_batch batch);
 
-    /// Filter a batch and return the admitted keyed records in their original
-    /// order. The admitted records are sufficient to deterministically apply
-    /// the same index transition on followers.
+    /// Filter a batch and return both the admitted keyed records and the
+    /// ordered forward mutations. Admitted records retain v0 compatibility;
+    /// mutations let current followers apply the exact physical transition
+    /// without re-running eviction policy.
     dedup_filter_result filter_with_updates(model::record_batch batch);
 
     /// Apply already-admitted records from a replicated state update.
@@ -100,6 +115,17 @@ public:
     dedup_index_undo apply(
       const chunked_vector<dedup_index_entry>&,
       std::chrono::milliseconds window);
+
+    /// Apply an ordered forward mutation emitted by a leader. Unlike apply(),
+    /// this does not re-run eviction policy on the follower: the leader's
+    /// explicit puts, deletes, and resulting scalar state are authoritative.
+    /// The returned undo is temporary compatibility state for historical Raft
+    /// snapshots and is removed once checkpoint-based snapshots are enabled.
+    dedup_index_undo apply_forward(
+      const chunked_vector<dedup_index_mutation>&,
+      std::chrono::milliseconds window,
+      model::timestamp max_timestamp,
+      size_t inserts_since_evict);
 
     /// Undo a transition previously returned by apply().
     void revert(const dedup_index_undo&);
@@ -138,10 +164,14 @@ private:
     bool is_duplicate(
       const iobuf& key,
       model::timestamp ts,
-      chunked_vector<dedup_index_entry>* admitted);
+      chunked_vector<dedup_index_entry>* admitted,
+      chunked_vector<dedup_index_mutation>* mutations);
     void apply_admitted(const dedup_index_entry&, undo_entry_map*);
-    void maybe_evict(undo_entry_map* = nullptr);
-    void evict_expired(undo_entry_map*);
+    void maybe_evict(
+      undo_entry_map* = nullptr,
+      chunked_vector<dedup_index_mutation>* = nullptr);
+    void evict_expired(
+      undo_entry_map*, chunked_vector<dedup_index_mutation>* = nullptr);
 
     // Number of new-key insertions between opportunistic eviction sweeps.
     static constexpr size_t evict_after_inserts = 10000;

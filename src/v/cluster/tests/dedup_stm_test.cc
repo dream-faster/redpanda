@@ -22,10 +22,60 @@ using namespace std::chrono_literals;
 
 namespace cluster {
 
+namespace {
+
+struct legacy_wire_entry
+  : serde::
+      envelope<legacy_wire_entry, serde::version<0>, serde::compat_version<0>> {
+    bytes key;
+    model::timestamp timestamp;
+
+    auto serde_fields() { return std::tie(key, timestamp); }
+};
+
+struct legacy_state_update
+  : serde::envelope<
+      legacy_state_update,
+      serde::version<0>,
+      serde::compat_version<0>> {
+    int64_t window_ms{0};
+    int64_t generation{0};
+    chunked_vector<legacy_wire_entry> admitted;
+
+    auto serde_fields() { return std::tie(window_ms, generation, admitted); }
+};
+
+} // namespace
+
 struct dedup_stm_test_accessor {
     static size_t snapshot_size(iobuf snapshot) {
         return serde::from_iobuf<dedup_stm::state_snapshot>(std::move(snapshot))
           .entries.size();
+    }
+
+    static iobuf make_forward_update() {
+        dedup_stm::state_update update{
+          .window_ms = 1234,
+          .generation = 7,
+          .admitted
+          = {{.key = bytes::from_string("key"), .timestamp = model::timestamp{42}}},
+          .has_forward_mutations = true,
+          .reset = true,
+          .mutations
+          = {{.key = bytes::from_string("key"), .timestamp = model::timestamp{42}}},
+          .resulting_max_timestamp = model::timestamp{42},
+          .resulting_inserts_since_evict = 9};
+        return serde::to_iobuf(std::move(update));
+    }
+
+    static bool reads_legacy_update(iobuf payload) {
+        auto update = serde::from_iobuf<dedup_stm::state_update>(
+          std::move(payload));
+        return update.window_ms == 1234 && update.generation == 7
+               && update.admitted.size() == 1
+               && update.admitted.front().key == bytes::from_string("key")
+               && !update.has_forward_mutations && !update.reset
+               && update.mutations.empty();
     }
 };
 
@@ -78,6 +128,26 @@ struct dedup_stm_fixture : raft::stm_raft_fixture<dedup_stm> {
 
     config::mock_property<std::chrono::milliseconds> sync_timeout{10s};
 };
+
+TEST(DedupStmUpdateSerde, ForwardUpdateIsReadableByLegacyReader) {
+    auto legacy = serde::from_iobuf<legacy_state_update>(
+      dedup_stm_test_accessor::make_forward_update());
+    EXPECT_EQ(legacy.window_ms, 1234);
+    EXPECT_EQ(legacy.generation, 7);
+    ASSERT_EQ(legacy.admitted.size(), 1);
+    EXPECT_EQ(legacy.admitted.front().key, bytes::from_string("key"));
+    EXPECT_EQ(legacy.admitted.front().timestamp, model::timestamp{42});
+}
+
+TEST(DedupStmUpdateSerde, LegacyUpdateIsReadableByForwardReader) {
+    legacy_state_update legacy{
+      .window_ms = 1234,
+      .generation = 7,
+      .admitted = {
+        {.key = bytes::from_string("key"), .timestamp = model::timestamp{42}}}};
+    EXPECT_TRUE(dedup_stm_test_accessor::reads_legacy_update(
+      serde::to_iobuf(std::move(legacy))));
+}
 
 TEST_F_CORO(dedup_stm_fixture, state_survives_leadership_change) {
     co_await initialize_state_machines();

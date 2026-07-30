@@ -24,6 +24,7 @@
 
 #include <chrono>
 #include <optional>
+#include <random>
 #include <string>
 #include <string_view>
 
@@ -128,6 +129,88 @@ TEST(DedupWindowFilter, ReplicatedUpdateCanBeReverted) {
 
     follower.revert(undo);
     EXPECT_EQ(follower.snapshot(), before);
+}
+
+TEST(DedupWindowFilter, ForwardMutationsPreserveEvictThenReadmitOrder) {
+    cluster::dedup_window_filter leader(1000ms);
+    leader.populate(iobuf::from("stale"), ts(0));
+    auto initial = leader.snapshot();
+    // Arrange for the first new key to trigger the opportunistic sweep.
+    initial.inserts_since_evict = 9'999;
+    leader.restore(initial);
+
+    cluster::dedup_window_filter follower(1000ms);
+    follower.restore(initial);
+
+    auto filtered = leader.filter_with_updates(
+      make_multi_batch({{"trigger", "1"}, {"stale", "2"}}, ts(5000)));
+    ASSERT_TRUE(filtered.batch.has_value());
+    ASSERT_EQ(filtered.mutations.size(), 3);
+    EXPECT_EQ(filtered.mutations[0].key, bytes::from_string("trigger"));
+    EXPECT_TRUE(filtered.mutations[0].timestamp.has_value());
+    EXPECT_EQ(filtered.mutations[1].key, bytes::from_string("stale"));
+    EXPECT_FALSE(filtered.mutations[1].timestamp.has_value());
+    EXPECT_EQ(filtered.mutations[2].key, bytes::from_string("stale"));
+    EXPECT_TRUE(filtered.mutations[2].timestamp.has_value());
+
+    auto undo = follower.apply_forward(
+      filtered.mutations,
+      1000ms,
+      filtered.max_timestamp,
+      filtered.inserts_since_evict);
+    EXPECT_EQ(follower.snapshot(), leader.snapshot());
+
+    follower.revert(undo);
+    EXPECT_EQ(follower.snapshot(), initial);
+}
+
+TEST(DedupWindowFilter, ForwardAndLegacyApplicationConverge) {
+    cluster::dedup_window_filter leader(1000ms);
+    cluster::dedup_window_filter legacy_follower(1000ms);
+    cluster::dedup_window_filter forward_follower(1000ms);
+
+    // Exercise an eviction early without making the randomized test large.
+    auto initial = leader.snapshot();
+    initial.inserts_since_evict = 9'990;
+    leader.restore(initial);
+    legacy_follower.restore(initial);
+    forward_follower.restore(initial);
+
+    std::mt19937 rng(0xD3D'0B);
+    for (size_t iteration = 0; iteration < 2'000; ++iteration) {
+        if (iteration != 0 && iteration % 503 == 0) {
+            // Model a generation change.
+            leader.clear();
+            legacy_follower.clear();
+            forward_follower.clear();
+        }
+
+        const auto window = std::chrono::milliseconds{
+          100 + static_cast<int64_t>(rng() % 2'000)};
+        leader.set_window(window);
+        const auto key = "key-" + std::to_string(rng() % 128);
+        // Deliberately permit timestamps to move backwards.
+        const auto timestamp = ts(static_cast<int64_t>(rng() % 10'000));
+        auto filtered = leader.filter_with_updates(
+          make_batch(key, "value", timestamp));
+        if (filtered.admitted.empty()) {
+            continue;
+        }
+
+        legacy_follower.apply(filtered.admitted, window);
+        forward_follower.apply_forward(
+          filtered.mutations,
+          window,
+          filtered.max_timestamp,
+          filtered.inserts_since_evict);
+
+        EXPECT_EQ(legacy_follower.snapshot(), leader.snapshot())
+          << "legacy iteration " << iteration;
+        EXPECT_EQ(forward_follower.snapshot(), leader.snapshot())
+          << "forward iteration " << iteration;
+        EXPECT_EQ(legacy_follower.window(), leader.window());
+        EXPECT_EQ(forward_follower.window(), leader.window());
+    }
 }
 
 TEST(DedupWindowFilter, LargeReplicatedUpdateAndEvictionCanBeReverted) {

@@ -51,6 +51,27 @@ dedup_stm::to_wire(const chunked_vector<dedup_index_entry>& entries) {
     return result;
 }
 
+chunked_vector<dedup_index_mutation>
+dedup_stm::from_wire(const chunked_vector<wire_mutation>& mutations) {
+    chunked_vector<dedup_index_mutation> result;
+    result.reserve(mutations.size());
+    for (const auto& mutation : mutations) {
+        result.push_back({mutation.key, mutation.timestamp});
+    }
+    return result;
+}
+
+chunked_vector<dedup_stm::wire_mutation>
+dedup_stm::to_wire(const chunked_vector<dedup_index_mutation>& mutations) {
+    chunked_vector<wire_mutation> result;
+    result.reserve(mutations.size());
+    for (const auto& mutation : mutations) {
+        result.push_back(
+          {.key = mutation.key, .timestamp = mutation.timestamp});
+    }
+    return result;
+}
+
 dedup_stm::state_snapshot
 dedup_stm::to_snapshot(const dedup_window_filter& state, int64_t generation) {
     auto snapshot = state.snapshot();
@@ -100,12 +121,11 @@ void dedup_stm::restore_snapshot(
   int64_t& generation,
   const state_snapshot& snapshot) {
     state.set_window(std::chrono::milliseconds{snapshot.window_ms});
-    state.restore(
-      dedup_index_snapshot{
-        .entries = from_wire(snapshot.entries),
-        .max_timestamp = snapshot.max_timestamp,
-        .inserts_since_evict = static_cast<size_t>(
-          snapshot.inserts_since_evict)});
+    state.restore(dedup_index_snapshot{
+      .entries = from_wire(snapshot.entries),
+      .max_timestamp = snapshot.max_timestamp,
+      .inserts_since_evict = static_cast<size_t>(
+        snapshot.inserts_since_evict)});
     generation = snapshot.generation;
 }
 
@@ -142,13 +162,20 @@ dedup_index_undo dedup_stm::from_wire(const undo_record& undo) {
 
 void dedup_stm::apply_update(const state_update& update, model::offset offset) {
     std::optional<state_snapshot> reset_state;
-    if (_generation != update.generation) {
+    if (update.reset || _generation != update.generation) {
         reset_state = to_snapshot(_state, _generation);
         _state.clear();
         _generation = update.generation;
     }
-    auto undo = _state.apply(
-      from_wire(update.admitted), std::chrono::milliseconds{update.window_ms});
+    auto undo = update.has_forward_mutations
+                  ? _state.apply_forward(
+                      from_wire(update.mutations),
+                      std::chrono::milliseconds{update.window_ms},
+                      update.resulting_max_timestamp,
+                      static_cast<size_t>(update.resulting_inserts_since_evict))
+                  : _state.apply(
+                      from_wire(update.admitted),
+                      std::chrono::milliseconds{update.window_ms});
     auto record = to_wire(offset, std::move(undo));
     record.reset_state = std::move(reset_state);
     _undo_history.push_back(std::move(record));
@@ -217,6 +244,7 @@ ss::future<result<kafka_result>> dedup_stm::do_replicate(
         _speculative_generation = _generation;
         _speculative_term = _insync_term;
     }
+    const bool reset = _speculative_generation != generation;
     if (_speculative_generation != generation) {
         _speculative_state.clear();
         _speculative_generation = generation;
@@ -238,7 +266,13 @@ ss::future<result<kafka_result>> dedup_stm::do_replicate(
           state_update{
             .window_ms = window.count(),
             .generation = generation,
-            .admitted = to_wire(filtered.admitted)},
+            .admitted = to_wire(filtered.admitted),
+            .has_forward_mutations = true,
+            .reset = reset,
+            .mutations = to_wire(filtered.mutations),
+            .resulting_max_timestamp = filtered.max_timestamp,
+            .resulting_inserts_since_evict = static_cast<uint64_t>(
+              filtered.inserts_since_evict)},
           filtered.batch->header().first_timestamp));
     }
     batches.push_back(std::move(*filtered.batch));

@@ -76,15 +76,38 @@ private:
         auto serde_fields() { return std::tie(key, timestamp); }
     };
 
+    struct wire_mutation
+      : serde::
+          envelope<wire_mutation, serde::version<0>, serde::compat_version<0>> {
+        bytes key;
+        std::optional<model::timestamp> timestamp;
+
+        auto serde_fields() { return std::tie(key, timestamp); }
+    };
+
     struct state_update
       : serde::
-          envelope<state_update, serde::version<0>, serde::compat_version<0>> {
+          envelope<state_update, serde::version<1>, serde::compat_version<0>> {
         int64_t window_ms{0};
         int64_t generation{0};
+        // Retained in v1 so a v0 reader can deterministically apply the update.
         chunked_vector<wire_entry> admitted;
+        bool has_forward_mutations{false};
+        bool reset{false};
+        chunked_vector<wire_mutation> mutations;
+        model::timestamp resulting_max_timestamp{model::timestamp::min()};
+        uint64_t resulting_inserts_since_evict{0};
 
         auto serde_fields() {
-            return std::tie(window_ms, generation, admitted);
+            return std::tie(
+              window_ms,
+              generation,
+              admitted,
+              has_forward_mutations,
+              reset,
+              mutations,
+              resulting_max_timestamp,
+              resulting_inserts_since_evict);
         }
     };
 
@@ -173,6 +196,10 @@ private:
     from_wire(const chunked_vector<wire_entry>&);
     static chunked_vector<wire_entry>
     to_wire(const chunked_vector<dedup_index_entry>&);
+    static chunked_vector<dedup_index_mutation>
+    from_wire(const chunked_vector<wire_mutation>&);
+    static chunked_vector<wire_mutation>
+    to_wire(const chunked_vector<dedup_index_mutation>&);
 
     void apply_update(const state_update&, model::offset);
     kafka::offset from_log_offset(model::offset) const;

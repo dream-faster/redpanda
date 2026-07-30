@@ -24,7 +24,8 @@ dedup_window_filter::dedup_window_filter(std::chrono::milliseconds window)
 bool dedup_window_filter::is_duplicate(
   const iobuf& key,
   model::timestamp ts,
-  chunked_vector<dedup_index_entry>* admitted) {
+  chunked_vector<dedup_index_entry>* admitted,
+  chunked_vector<dedup_index_mutation>* mutations) {
     auto key_bytes = iobuf_to_bytes(key);
     auto it = _map.find(key_bytes);
     if (it != _map.end()) {
@@ -36,16 +37,23 @@ bool dedup_window_filter::is_duplicate(
         _max_ts = std::max(_max_ts, ts);
         it->second = ts;
         if (admitted) {
-            admitted->push_back({std::move(key_bytes), ts});
+            admitted->push_back({key_bytes, ts});
+        }
+        if (mutations) {
+            mutations->push_back(
+              {.key = std::move(key_bytes), .timestamp = ts});
         }
         return false;
     }
     _max_ts = std::max(_max_ts, ts);
     _map.emplace(key_bytes, ts);
-    maybe_evict();
     if (admitted) {
-        admitted->push_back({std::move(key_bytes), ts});
+        admitted->push_back({key_bytes, ts});
     }
+    if (mutations) {
+        mutations->push_back({.key = std::move(key_bytes), .timestamp = ts});
+    }
+    maybe_evict(nullptr, mutations);
     return false;
 }
 
@@ -71,12 +79,14 @@ dedup_window_filter::filter_with_updates(model::record_batch batch) {
     std::vector<bool> keep(static_cast<size_t>(total), true);
     chunked_vector<dedup_index_entry> admitted;
     admitted.reserve(static_cast<size_t>(total));
+    chunked_vector<dedup_index_mutation> mutations;
+    mutations.reserve(static_cast<size_t>(total));
     int32_t kept = 0;
     int32_t idx = 0;
     readable.for_each_record([&](model::record r) {
         if (r.has_key()) {
             model::timestamp ts{base_ts.value() + r.timestamp_delta()};
-            if (is_duplicate(r.key(), ts, &admitted)) {
+            if (is_duplicate(r.key(), ts, &admitted, &mutations)) {
                 keep[static_cast<size_t>(idx)] = false;
             } else {
                 ++kept;
@@ -90,10 +100,20 @@ dedup_window_filter::filter_with_updates(model::record_batch batch) {
     if (kept == total) {
         // Nothing filtered: return the original batch unchanged (preserving
         // its compression, attrs, and timestamps).
-        return {.batch = std::move(batch), .admitted = std::move(admitted)};
+        return {
+          .batch = std::move(batch),
+          .admitted = std::move(admitted),
+          .mutations = std::move(mutations),
+          .max_timestamp = _max_ts,
+          .inserts_since_evict = _inserts_since_evict};
     }
     if (kept == 0) {
-        return {.batch = std::nullopt, .admitted = std::move(admitted)};
+        return {
+          .batch = std::nullopt,
+          .admitted = std::move(admitted),
+          .mutations = std::move(mutations),
+          .max_timestamp = _max_ts,
+          .inserts_since_evict = _inserts_since_evict};
     }
 
     // Rebuild with surviving records while preserving batch and record
@@ -132,7 +152,10 @@ dedup_window_filter::filter_with_updates(model::record_batch batch) {
 
     return {
       .batch = std::move(builder).build_sync(),
-      .admitted = std::move(admitted)};
+      .admitted = std::move(admitted),
+      .mutations = std::move(mutations),
+      .max_timestamp = _max_ts,
+      .inserts_since_evict = _inserts_since_evict};
 }
 
 void dedup_window_filter::populate(const iobuf& key, model::timestamp ts) {
@@ -148,29 +171,34 @@ void dedup_window_filter::populate(const iobuf& key, model::timestamp ts) {
 
 void dedup_window_filter::evict_expired() { evict_expired(nullptr); }
 
-void dedup_window_filter::evict_expired(undo_entry_map* undo) {
+void dedup_window_filter::evict_expired(
+  undo_entry_map* undo, chunked_vector<dedup_index_mutation>* mutations) {
     // An entry is only meaningful while a future record could still be within
     // _window of it. Once _max_ts has advanced beyond the window, the entry can
     // never cause a drop again (the next lookup would treat it as expired), so
     // it is safe to remove.
     const int64_t cutoff = _max_ts.value() - _window.count();
-    std::erase_if(_map, [cutoff, undo](const auto& kv) {
+    std::erase_if(_map, [cutoff, undo, mutations](const auto& kv) {
         if (kv.second.value() >= cutoff) {
             return false;
         }
         if (undo) {
             undo->try_emplace(kv.first, kv.second);
         }
+        if (mutations) {
+            mutations->push_back({.key = kv.first, .timestamp = std::nullopt});
+        }
         return true;
     });
 }
 
-void dedup_window_filter::maybe_evict(undo_entry_map* undo) {
+void dedup_window_filter::maybe_evict(
+  undo_entry_map* undo, chunked_vector<dedup_index_mutation>* mutations) {
     if (++_inserts_since_evict < evict_after_inserts) {
         return;
     }
     _inserts_since_evict = 0;
-    evict_expired(undo);
+    evict_expired(undo, mutations);
 }
 
 void dedup_window_filter::apply_admitted(
@@ -204,6 +232,40 @@ dedup_index_undo dedup_window_filter::apply(
     for (const auto& entry : entries) {
         apply_admitted(entry, &undo);
     }
+    result.entries.reserve(undo.size());
+    for (const auto& [key, previous_timestamp] : undo) {
+        result.entries.push_back(
+          {.key = key, .previous_timestamp = previous_timestamp});
+    }
+    return result;
+}
+
+dedup_index_undo dedup_window_filter::apply_forward(
+  const chunked_vector<dedup_index_mutation>& mutations,
+  std::chrono::milliseconds window,
+  model::timestamp max_timestamp,
+  size_t inserts_since_evict) {
+    dedup_index_undo result{
+      .previous_window = _window,
+      .previous_max_timestamp = _max_ts,
+      .previous_inserts_since_evict = _inserts_since_evict};
+    undo_entry_map undo;
+    undo.reserve(mutations.size());
+    for (const auto& mutation : mutations) {
+        auto it = _map.find(mutation.key);
+        undo.try_emplace(
+          mutation.key,
+          it == _map.end() ? std::nullopt : std::optional(it->second));
+        if (mutation.timestamp) {
+            _map.insert_or_assign(mutation.key, *mutation.timestamp);
+        } else {
+            _map.erase(mutation.key);
+        }
+    }
+    _window = window;
+    _max_ts = max_timestamp;
+    _inserts_since_evict = inserts_since_evict;
+
     result.entries.reserve(undo.size());
     for (const auto& [key, previous_timestamp] : undo) {
         result.entries.push_back(
