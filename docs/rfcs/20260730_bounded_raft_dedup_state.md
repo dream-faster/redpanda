@@ -1,5 +1,5 @@
 - Feature Name: Bounded replicated write-path deduplication state
-- Status: in-progress
+- Status: superseded by `20260730_log_derived_dedup_state.md`
 - Start Date: 2026-07-30
 - Authors: @almostintuitive
 - Issue: dream-faster/redpanda#2
