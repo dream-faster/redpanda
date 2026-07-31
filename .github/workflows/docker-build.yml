@@ -4,6 +4,12 @@ on:
   push:
     branches:
       - 'claude/laughing-heisenberg-e7n54k'
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Tag for the Docker image (default: commit sha)'
+        required: false
+        type: string
   workflow_call:
     inputs:
       image_tag:
