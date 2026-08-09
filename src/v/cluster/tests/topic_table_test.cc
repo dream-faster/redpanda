@@ -679,6 +679,66 @@ FIXTURE_TEST(test_dedup_generation_tracks_disable_enable, topic_table_fixture) {
     BOOST_REQUIRE_EQUAL(cfg->properties.dedup_generation, 13);
 }
 
+FIXTURE_TEST(
+  test_dedup_generation_tracks_key_header_change, topic_table_fixture) {
+    auto& topics = table.local();
+    auto create = make_create_topic_cmd("test_dedup_key_header", 1, 1);
+    const auto tp_ns = create.value.cfg.tp_ns;
+    auto ec = topics.apply(create, model::offset{10}).get();
+    BOOST_REQUIRE_EQUAL(ec, cluster::errc::success);
+
+    auto cfg = topics.get_topic_cfg(tp_ns);
+    BOOST_REQUIRE(cfg.has_value());
+    BOOST_REQUIRE(!cfg->properties.dedup_key_header.has_value());
+    BOOST_REQUIRE_EQUAL(cfg->properties.dedup_generation, 0);
+
+    // Switching identity source while dedup remains enabled must bump the
+    // generation: stale key-keyed state must never be compared against
+    // header-keyed decisions.
+    cluster::incremental_topic_updates set_header;
+    set_header.dedup_key_header.op = cluster::incremental_update_operation::set;
+    set_header.dedup_key_header.value = ss::sstring{"redpanda-dedup-key"};
+    ec = topics
+           .apply(
+             cluster::update_topic_properties_cmd{tp_ns, set_header},
+             model::offset{11})
+           .get();
+    BOOST_REQUIRE_EQUAL(ec, cluster::errc::success);
+    cfg = topics.get_topic_cfg(tp_ns);
+    BOOST_REQUIRE_EQUAL(
+      cfg->properties.dedup_key_header.value(), "redpanda-dedup-key");
+    BOOST_REQUIRE_EQUAL(cfg->properties.dedup_generation, 11);
+
+    // Changing to a different header name is also an identity source change.
+    cluster::incremental_topic_updates change_header;
+    change_header.dedup_key_header.op
+      = cluster::incremental_update_operation::set;
+    change_header.dedup_key_header.value = ss::sstring{"other-header"};
+    ec = topics
+           .apply(
+             cluster::update_topic_properties_cmd{tp_ns, change_header},
+             model::offset{12})
+           .get();
+    BOOST_REQUIRE_EQUAL(ec, cluster::errc::success);
+    cfg = topics.get_topic_cfg(tp_ns);
+    BOOST_REQUIRE_EQUAL(cfg->properties.dedup_generation, 12);
+
+    // Removing the header (falling back to key-based dedup) is also a
+    // source change.
+    cluster::incremental_topic_updates remove_header;
+    remove_header.dedup_key_header.op
+      = cluster::incremental_update_operation::remove;
+    ec = topics
+           .apply(
+             cluster::update_topic_properties_cmd{tp_ns, remove_header},
+             model::offset{13})
+           .get();
+    BOOST_REQUIRE_EQUAL(ec, cluster::errc::success);
+    cfg = topics.get_topic_cfg(tp_ns);
+    BOOST_REQUIRE(!cfg->properties.dedup_key_header.has_value());
+    BOOST_REQUIRE_EQUAL(cfg->properties.dedup_generation, 13);
+}
+
 FIXTURE_TEST(test_topic_id_assignment, topic_table_fixture) {
     auto& topics = table.local();
 

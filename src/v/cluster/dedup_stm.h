@@ -116,7 +116,10 @@ private:
     static void restore_snapshot(
       dedup_window_filter&, int64_t& generation, const state_snapshot&);
 
-    void adopt_config(std::chrono::milliseconds window, int64_t generation);
+    void adopt_config(
+      std::chrono::milliseconds window,
+      int64_t generation,
+      const std::optional<ss::sstring>& key_header);
     kafka::offset from_log_offset(model::offset) const;
 
     config::binding<std::chrono::milliseconds> _sync_timeout;

@@ -72,6 +72,32 @@ make_null_key_batch(std::string_view value, model::timestamp batch_ts) {
 // Count records in a batch.
 int32_t record_count(const model::record_batch& b) { return b.record_count(); }
 
+// Build a single-record batch with an optional key, a list of headers, and an
+// explicit timestamp, for exercising header-based dedup identity.
+model::record_batch make_batch_with_headers(
+  std::optional<std::string_view> key,
+  std::string_view value,
+  model::timestamp batch_ts,
+  std::initializer_list<std::pair<std::string_view, std::string_view>>
+    headers) {
+    model::batch_builder builder;
+    builder.set_batch_type(model::record_batch_type::raft_data);
+    builder.set_batch_timestamp(model::timestamp_type::create_time, batch_ts);
+    chunked_vector<model::record_header> hdrs;
+    for (const auto& [hk, hv] : headers) {
+        hdrs.emplace_back(iobuf::from(hk), iobuf::from(hv));
+    }
+    builder.add_record(
+      model::record(
+        {},
+        0,
+        0,
+        key ? std::make_optional(iobuf::from(*key)) : std::nullopt,
+        iobuf::from(value),
+        std::move(hdrs)));
+    return std::move(builder).build_sync();
+}
+
 } // namespace
 
 // First record for a key passes through; a duplicate within the window is
@@ -446,4 +472,174 @@ TEST(DedupWindowFilter, SnapshotRestoreRoundTrip) {
     restored.restore(snapshot);
     EXPECT_EQ(restored.snapshot(), snapshot);
     EXPECT_FALSE(restored.filter(make_batch("a", "dup", ts(1500))).has_value());
+}
+
+// --- Header-based dedup identity (redpanda.dedup.key.header) ---
+
+// Legacy topics never call set_key_header(): the default is unset, so
+// filter() keeps deduplicating on the Kafka key exactly as before this
+// feature existed.
+TEST(DedupWindowFilterHeader, LegacyKeyBasedTopicsUnaffectedByDefault) {
+    cluster::dedup_window_filter f(1000ms);
+    EXPECT_FALSE(f.key_header().has_value());
+
+    EXPECT_TRUE(f.filter(make_batch("k", "v1", ts(1000))).has_value());
+    EXPECT_FALSE(f.filter(make_batch("k", "v2", ts(1500))).has_value());
+}
+
+// With a header configured, the header's value -- not the Kafka key -- is the
+// dedup identity: a duplicate header value within the window is dropped even
+// with a different Kafka key, and a distinct header value is kept even with
+// the same Kafka key.
+TEST(DedupWindowFilterHeader, DeduplicatesOnHeaderValue) {
+    cluster::dedup_window_filter f(1000ms);
+    f.set_key_header("redpanda-dedup-key");
+
+    auto r1 = f.filter(make_batch_with_headers(
+      "partition-key", "v1", ts(1000), {{"redpanda-dedup-key", "id-1"}}));
+    ASSERT_TRUE(r1.has_value());
+
+    // Same header value, different Kafka key, within the window: dropped.
+    auto r2 = f.filter(make_batch_with_headers(
+      "other-partition-key", "v2", ts(1500), {{"redpanda-dedup-key", "id-1"}}));
+    EXPECT_FALSE(r2.has_value());
+}
+
+// Two records can share a Kafka partition key while having distinct dedup
+// header values (e.g. co-partitioned entities with independent dedup
+// identities): both are admitted.
+TEST(DedupWindowFilterHeader, SamePartitionKeyDifferentDedupKeysBothAdmitted) {
+    cluster::dedup_window_filter f(1000ms);
+    f.set_key_header("redpanda-dedup-key");
+
+    model::batch_builder builder;
+    builder.set_batch_type(model::record_batch_type::raft_data);
+    builder.set_batch_timestamp(model::timestamp_type::create_time, ts(1000));
+    chunked_vector<model::record_header> h1;
+    h1.emplace_back(iobuf::from("redpanda-dedup-key"), iobuf::from("id-1"));
+    builder.add_record(
+      model::record(
+        {},
+        0,
+        0,
+        iobuf::from("same-partition-key"),
+        iobuf::from("v1"),
+        std::move(h1)));
+    chunked_vector<model::record_header> h2;
+    h2.emplace_back(iobuf::from("redpanda-dedup-key"), iobuf::from("id-2"));
+    builder.add_record(
+      model::record(
+        {},
+        0,
+        1,
+        iobuf::from("same-partition-key"),
+        iobuf::from("v2"),
+        std::move(h2)));
+
+    auto r = f.filter(std::move(builder).build_sync());
+    ASSERT_TRUE(r.has_value());
+    EXPECT_EQ(record_count(*r), 2);
+}
+
+// When a record carries the configured header more than once, the first
+// occurrence is the deterministic tie-breaker.
+TEST(DedupWindowFilterHeader, DuplicateHeaderKeysUseFirstOccurrence) {
+    cluster::dedup_window_filter f(1000ms);
+    f.set_key_header("redpanda-dedup-key");
+
+    model::batch_builder builder;
+    builder.set_batch_type(model::record_batch_type::raft_data);
+    builder.set_batch_timestamp(model::timestamp_type::create_time, ts(1000));
+    chunked_vector<model::record_header> hdrs;
+    hdrs.emplace_back(iobuf::from("redpanda-dedup-key"), iobuf::from("first"));
+    hdrs.emplace_back(iobuf::from("redpanda-dedup-key"), iobuf::from("second"));
+    builder.add_record(
+      model::record(
+        {}, 0, 0, iobuf::from("k"), iobuf::from("v1"), std::move(hdrs)));
+    ASSERT_TRUE(f.filter(std::move(builder).build_sync()).has_value());
+
+    // A later record whose single header matches the *first* occurrence's
+    // value is a duplicate; matching the second occurrence's value would not
+    // be, so this distinguishes which one was used.
+    EXPECT_FALSE(
+      f.filter(make_batch_with_headers(
+                 "k", "v2", ts(1500), {{"redpanda-dedup-key", "first"}}))
+        .has_value());
+    EXPECT_TRUE(
+      f.filter(make_batch_with_headers(
+                 "k", "v3", ts(1600), {{"redpanda-dedup-key", "second"}}))
+        .has_value());
+}
+
+// A record with no occurrence of the configured header rejects the whole
+// request: it is never silently admitted un-deduplicated by falling back to
+// the Kafka key.
+TEST(DedupWindowFilterHeader, AbsentHeaderRejectsRequest) {
+    cluster::dedup_window_filter f(1000ms);
+    f.set_key_header("redpanda-dedup-key");
+
+    auto result = f.filter_request(
+      make_batch_with_headers("k", "v1", ts(1000), {}));
+    EXPECT_TRUE(result.missing_required_header);
+    EXPECT_FALSE(result.batch.has_value());
+    EXPECT_EQ(f.map_size(), 0u);
+}
+
+// A batch with a mix of records carrying the header and one missing it is
+// rejected wholesale: none of the header-bearing records are admitted either,
+// and the index is left untouched.
+TEST(DedupWindowFilterHeader, PartiallyMissingHeaderRejectsWholeBatch) {
+    cluster::dedup_window_filter f(1000ms);
+    f.set_key_header("redpanda-dedup-key");
+
+    model::batch_builder builder;
+    builder.set_batch_type(model::record_batch_type::raft_data);
+    builder.set_batch_timestamp(model::timestamp_type::create_time, ts(1000));
+    chunked_vector<model::record_header> h1;
+    h1.emplace_back(iobuf::from("redpanda-dedup-key"), iobuf::from("id-1"));
+    builder.add_record(
+      model::record(
+        {}, 0, 0, iobuf::from("a"), iobuf::from("v1"), std::move(h1)));
+    builder.add_record(
+      model::record({}, 0, 1, iobuf::from("b"), iobuf::from("v2"), {}));
+
+    auto result = f.filter_request(std::move(builder).build_sync());
+    EXPECT_TRUE(result.missing_required_header);
+    EXPECT_FALSE(result.batch.has_value());
+    EXPECT_EQ(f.map_size(), 0u);
+}
+
+// Header-based dedup works on compressed batches: the header is inspected on
+// the decompressed temporary, same as key-based dedup.
+TEST(DedupWindowFilterHeader, CompressedBatch) {
+    cluster::dedup_window_filter f(1000ms);
+    f.set_key_header("redpanda-dedup-key");
+
+    auto plain = make_batch_with_headers(
+      "k", "v1", ts(1000), {{"redpanda-dedup-key", "id-1"}});
+    auto compressed = model::compress_batch_sync(
+      model::compression::lz4, std::move(plain));
+
+    auto r1 = f.filter(std::move(compressed));
+    ASSERT_TRUE(r1.has_value());
+    EXPECT_EQ(record_count(*r1), 1);
+
+    auto r2 = f.filter(make_batch_with_headers(
+      "k", "v2", ts(1500), {{"redpanda-dedup-key", "id-1"}}));
+    EXPECT_FALSE(r2.has_value());
+}
+
+// A null Kafka key is irrelevant in header mode: the record is deduplicated
+// on the header value regardless of whether it has a key.
+TEST(DedupWindowFilterHeader, NullKeyStillDeduplicatesOnHeader) {
+    cluster::dedup_window_filter f(1000ms);
+    f.set_key_header("redpanda-dedup-key");
+
+    auto r1 = f.filter(make_batch_with_headers(
+      std::nullopt, "v1", ts(1000), {{"redpanda-dedup-key", "id-1"}}));
+    ASSERT_TRUE(r1.has_value());
+
+    auto r2 = f.filter(make_batch_with_headers(
+      std::nullopt, "v2", ts(1500), {{"redpanda-dedup-key", "id-1"}}));
+    EXPECT_FALSE(r2.has_value());
 }

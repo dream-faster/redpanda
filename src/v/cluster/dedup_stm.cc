@@ -71,12 +71,15 @@ void dedup_stm::restore_snapshot(
 }
 
 void dedup_stm::adopt_config(
-  std::chrono::milliseconds window, int64_t generation) {
+  std::chrono::milliseconds window,
+  int64_t generation,
+  const std::optional<ss::sstring>& key_header) {
     if (_generation != generation) {
         _state.clear();
         _generation = generation;
     }
     _state.set_window(window);
+    _state.set_key_header(key_header);
 }
 
 ss::future<> dedup_stm::do_apply(const model::record_batch& batch) {
@@ -91,7 +94,7 @@ ss::future<> dedup_stm::do_apply(const model::record_batch& batch) {
     if (!window) {
         co_return;
     }
-    adopt_config(*window, cfg.dedup_generation());
+    adopt_config(*window, cfg.dedup_generation(), cfg.dedup_key_header());
 
     std::optional<model::record_batch> decompressed;
     if (batch.compressed()) {
@@ -99,10 +102,20 @@ ss::future<> dedup_stm::do_apply(const model::record_batch& batch) {
     }
     const model::record_batch& readable = decompressed ? *decompressed : batch;
     const auto base_ts = readable.header().first_timestamp;
-    readable.for_each_record([this, base_ts](model::record r) {
-        if (r.has_key()) {
+    const auto& key_header = _state.key_header();
+    readable.for_each_record([this, base_ts, &key_header](model::record r) {
+        const iobuf* identity = nullptr;
+        // Idempotent/transactional produce bypasses the leader-side filter
+        // (see partition.cc), so a record here may lack the configured
+        // header even though the leader would reject it on the filtered
+        // path; skip indexing that record rather than rejecting an already
+        // committed batch.
+        if (
+          dedup_identity_for_record(r, key_header, &identity)
+          == dedup_identity_lookup::identity) {
             _state.populate(
-              r.key(), model::timestamp{base_ts.value() + r.timestamp_delta()});
+              *identity,
+              model::timestamp{base_ts.value() + r.timestamp_delta()});
         }
     });
 }
@@ -141,12 +154,19 @@ ss::future<result<kafka_result>> dedup_stm::do_replicate(
     dedup_filter_result filtered;
     const auto& cfg = _raft->log()->config();
     if (auto window = cfg.dedup_window_ms(); window) {
-        adopt_config(*window, cfg.dedup_generation());
+        adopt_config(*window, cfg.dedup_generation(), cfg.dedup_key_header());
         filtered = _state.filter_request(std::move(batch));
     } else {
         // Dedup was disabled between the partition's routing check and this
         // point: replicate unfiltered.
         filtered.batch = std::move(batch);
+    }
+    if (filtered.missing_required_header) {
+        // Header mode is active and some record lacked the configured
+        // header. Nothing was mutated or replicated; the record is never
+        // silently admitted un-deduplicated.
+        enqueued->set_value();
+        co_return errc::invalid_request;
     }
     const auto admitted_count = filtered.batch ? filtered.batch->record_count()
                                                : 0;

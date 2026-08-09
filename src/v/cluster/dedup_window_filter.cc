@@ -19,13 +19,33 @@
 
 namespace cluster {
 
+dedup_identity_lookup dedup_identity_for_record(
+  model::record& r,
+  const std::optional<ss::sstring>& key_header,
+  const iobuf** out) {
+    if (key_header) {
+        for (auto& h : r.headers()) {
+            if (h.key() == std::string_view{*key_header}) {
+                *out = &h.value();
+                return dedup_identity_lookup::identity;
+            }
+        }
+        return dedup_identity_lookup::missing_header;
+    }
+    if (!r.has_key()) {
+        return dedup_identity_lookup::no_identity;
+    }
+    *out = &r.key();
+    return dedup_identity_lookup::identity;
+}
+
 dedup_window_filter::dedup_window_filter(std::chrono::milliseconds window)
   : _window(window) {}
 
 bool dedup_window_filter::is_duplicate(
-  const iobuf& key, model::timestamp ts, dedup_request_undo* undo) {
-    auto key_bytes = iobuf_to_bytes(key);
-    auto it = _map.find(key_bytes);
+  const iobuf& identity, model::timestamp ts, dedup_request_undo* undo) {
+    auto identity_bytes = iobuf_to_bytes(identity);
+    auto it = _map.find(identity_bytes);
     if (it != _map.end()) {
         auto stored_ts = it->second;
         auto diff_ms = ts.value() - stored_ts.value();
@@ -36,17 +56,17 @@ bool dedup_window_filter::is_duplicate(
         it->second = ts;
         if (undo) {
             undo->entries.push_back(
-              {.key = std::move(key_bytes),
+              {.key = std::move(identity_bytes),
                .applied_timestamp = ts,
                .previous_timestamp = stored_ts});
         }
         return false;
     }
     _max_ts = std::max(_max_ts, ts);
-    _map.emplace(key_bytes, ts);
+    _map.emplace(identity_bytes, ts);
     if (undo) {
         undo->entries.push_back(
-          {.key = std::move(key_bytes),
+          {.key = std::move(identity_bytes),
            .applied_timestamp = ts,
            .previous_timestamp = std::nullopt});
     }
@@ -72,16 +92,39 @@ dedup_window_filter::filter_request(model::record_batch batch) {
     const auto base_ts = readable.header().first_timestamp;
     const int32_t total = readable.record_count();
 
-    // First pass: identify which records survive.
+    // In header mode, a record missing the configured header rejects the
+    // whole request. Scan for that up front so nothing below can partially
+    // mutate the index before discovering a mid-batch rejection: the
+    // extraction itself never mutates state, so it is safe to run twice (once
+    // here, once per record in the mutating pass below).
+    if (_key_header) {
+        bool rejected = false;
+        readable.for_each_record([&](model::record r) {
+            const iobuf* unused = nullptr;
+            if (
+              dedup_identity_for_record(r, _key_header, &unused)
+              == dedup_identity_lookup::missing_header) {
+                rejected = true;
+            }
+        });
+        if (rejected) {
+            return {.missing_required_header = true};
+        }
+    }
+
+    // Second pass: identify which records survive.
     std::vector<bool> keep(static_cast<size_t>(total), true);
     dedup_request_undo undo;
     undo.entries.reserve(static_cast<size_t>(total));
     int32_t kept = 0;
     int32_t idx = 0;
     readable.for_each_record([&](model::record r) {
-        if (r.has_key()) {
+        const iobuf* identity = nullptr;
+        if (
+          dedup_identity_for_record(r, _key_header, &identity)
+          == dedup_identity_lookup::identity) {
             model::timestamp ts{base_ts.value() + r.timestamp_delta()};
-            if (is_duplicate(r.key(), ts, &undo)) {
+            if (is_duplicate(*identity, ts, &undo)) {
                 keep[static_cast<size_t>(idx)] = false;
             } else {
                 ++kept;

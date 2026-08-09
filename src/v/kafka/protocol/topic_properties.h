@@ -82,4 +82,7 @@ inline constexpr std::string_view topic_property_redpanda_storage_mode
 inline constexpr std::string_view topic_property_dedup_window_ms
   = "redpanda.dedup.window.ms";
 
+inline constexpr std::string_view topic_property_dedup_key_header
+  = "redpanda.dedup.key.header";
+
 } // namespace kafka

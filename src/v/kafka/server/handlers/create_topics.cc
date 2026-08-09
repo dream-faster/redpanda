@@ -87,7 +87,8 @@ bool is_supported(std::string_view name) {
        topic_property_message_timestamp_before_max_ms,
        topic_property_message_timestamp_after_max_ms,
        topic_property_redpanda_storage_mode,
-       topic_property_dedup_window_ms});
+       topic_property_dedup_window_ms,
+       topic_property_dedup_key_header});
 
     if (
       std::any_of(

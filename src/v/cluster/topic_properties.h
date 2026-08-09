@@ -35,7 +35,7 @@ namespace cluster {
  */
 struct topic_properties
   : serde::
-      envelope<topic_properties, serde::version<16>, serde::compat_version<0>> {
+      envelope<topic_properties, serde::version<17>, serde::compat_version<0>> {
     topic_properties() noexcept = default;
     topic_properties(
       std::optional<model::compression> compression,
@@ -255,8 +255,13 @@ struct topic_properties
     tristate<std::chrono::milliseconds> dedup_window_ms{
       std::chrono::minutes(3)};
     // Internal generation used to invalidate persisted dedup state after the
-    // property is disabled. It is not exposed as a Kafka topic property.
+    // property is disabled or the dedup identity source changes. It is not
+    // exposed as a Kafka topic property.
     int64_t dedup_generation{0};
+    // When set, the dedup identity for a record is the value of its first
+    // header with this name instead of the Kafka record key. Unset preserves
+    // the original key-based behavior.
+    std::optional<ss::sstring> dedup_key_header;
 
     bool is_local_topic() const;
 
@@ -342,7 +347,8 @@ struct topic_properties
           storage_mode,
           schema_registry_context,
           dedup_window_ms,
-          dedup_generation);
+          dedup_generation,
+          dedup_key_header);
     }
 
     friend bool

@@ -362,6 +362,9 @@ cluster::topic_configuration to_topic_config(
       = get_tristate_value<std::chrono::milliseconds>(
         config_entries, topic_property_dedup_window_ms);
 
+    cfg.properties.dedup_key_header = get_string_value(
+      config_entries, topic_property_dedup_key_header);
+
     schema_id_validation_config_parser schema_id_validation_config_parser{
       cfg.properties};
 

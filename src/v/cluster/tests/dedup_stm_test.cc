@@ -10,6 +10,7 @@
 #include "cluster/dedup_stm.h"
 #include "cluster/logger.h"
 #include "config/mock_property.h"
+#include "model/batch_builder.h"
 #include "raft/tests/raft_fixture.h"
 #include "storage/record_batch_builder.h"
 #include "test_utils/test.h"
@@ -40,6 +41,27 @@ model::record_batch make_batch(
     return std::move(builder).build();
 }
 
+// Build a single-record batch with a Kafka key and, optionally, one header
+// (name, value), for exercising header-based dedup identity end to end.
+model::record_batch make_batch_with_header(
+  std::string_view key,
+  std::string_view value,
+  model::timestamp timestamp,
+  std::optional<std::pair<std::string_view, std::string_view>> header) {
+    model::batch_builder builder;
+    builder.set_batch_type(model::record_batch_type::raft_data);
+    builder.set_batch_timestamp(model::timestamp_type::create_time, timestamp);
+    chunked_vector<model::record_header> hdrs;
+    if (header) {
+        hdrs.emplace_back(
+          iobuf::from(header->first), iobuf::from(header->second));
+    }
+    builder.add_record(
+      model::record(
+        {}, 0, 0, iobuf::from(key), iobuf::from(value), std::move(hdrs)));
+    return std::move(builder).build_sync();
+}
+
 struct dedup_stm_fixture : raft::stm_raft_fixture<dedup_stm> {
     stm_shptrs_t create_stms(
       raft::state_machine_manager_builder& builder,
@@ -51,19 +73,32 @@ struct dedup_stm_fixture : raft::stm_raft_fixture<dedup_stm> {
           sync_timeout.bind());
     }
 
-    // The STM apply path reads the dedup window and generation from the
-    // partition's ntp_config; in production these arrive via topic config
-    // propagation. Mirror that here by setting the log overrides on every
-    // node.
-    void
-    set_dedup_config(std::chrono::milliseconds window, int64_t generation = 0) {
+    // The STM apply path reads the dedup window, generation, and key header
+    // from the partition's ntp_config; in production these arrive via topic
+    // config propagation. Mirror that here by setting the log overrides on
+    // every node.
+    void set_dedup_config(
+      std::chrono::milliseconds window,
+      int64_t generation = 0,
+      std::optional<ss::sstring> key_header = std::nullopt) {
         for (auto& [_, n] : nodes()) {
             storage::ntp_config::default_overrides overrides;
             overrides.dedup_window_ms = tristate<std::chrono::milliseconds>(
               window);
             overrides.dedup_generation = generation;
+            overrides.dedup_key_header = key_header;
             n->raft()->log()->set_overrides(overrides);
         }
+    }
+
+    ss::future<result<kafka_result>>
+    produce_batch(model::node_id leader, model::record_batch batch) {
+        auto stm = get_stm<0>(node(leader));
+        auto stages = stm->replicate_in_stages(
+          std::move(batch),
+          raft::replicate_options(raft::consistency_level::quorum_ack));
+        co_await std::move(stages.request_enqueued);
+        co_return co_await std::move(stages.replicate_finished);
     }
 
     ss::future<kafka_result> produce(
@@ -71,12 +106,20 @@ struct dedup_stm_fixture : raft::stm_raft_fixture<dedup_stm> {
       std::string_view key,
       std::string_view value,
       model::timestamp timestamp) {
-        auto stm = get_stm<0>(node(leader));
-        auto stages = stm->replicate_in_stages(
-          make_batch(key, value, timestamp),
-          raft::replicate_options(raft::consistency_level::quorum_ack));
-        co_await std::move(stages.request_enqueued);
-        auto result = co_await std::move(stages.replicate_finished);
+        auto result = co_await produce_batch(
+          leader, make_batch(key, value, timestamp));
+        EXPECT_TRUE(result.has_value());
+        co_return result.value();
+    }
+
+    ss::future<kafka_result> produce_with_header(
+      model::node_id leader,
+      std::string_view key,
+      std::string_view value,
+      model::timestamp timestamp,
+      std::optional<std::pair<std::string_view, std::string_view>> header) {
+        auto result = co_await produce_batch(
+          leader, make_batch_with_header(key, value, timestamp, header));
         EXPECT_TRUE(result.has_value());
         co_return result.value();
     }
@@ -278,6 +321,116 @@ TEST_F_CORO(dedup_stm_fixture, concurrent_independent_keys_are_admitted) {
     // of the other and nothing serializes them.
     ASSERT_EQ_CORO(
       node(leader).raft()->dirty_offset(), before + model::offset{2});
+}
+
+// --- Header-based dedup identity (redpanda.dedup.key.header) ---
+
+TEST_F_CORO(dedup_stm_fixture, header_mode_deduplicates_on_header_value) {
+    co_await initialize_state_machines();
+    set_dedup_config(1000ms, 0, ss::sstring{"redpanda-dedup-key"});
+    auto leader = co_await wait_for_leader(10s);
+
+    auto first = co_await produce_with_header(
+      leader,
+      "partition-key-a",
+      "value-1",
+      model::timestamp{1000},
+      std::make_pair(
+        std::string_view{"redpanda-dedup-key"}, std::string_view{"id-1"}));
+    ASSERT_EQ_CORO(first.replicated_record_count, -1);
+
+    // Same header value, different Kafka key, within the window: dropped.
+    auto duplicate = co_await produce_with_header(
+      leader,
+      "partition-key-b",
+      "value-2",
+      model::timestamp{1500},
+      std::make_pair(
+        std::string_view{"redpanda-dedup-key"}, std::string_view{"id-1"}));
+    ASSERT_EQ_CORO(duplicate.replicated_record_count, 0);
+
+    // Every replica derives the header-based index from the data batch.
+    co_await wait_for_stms(node(leader).raft()->committed_offset());
+    for (auto& [_, n] : nodes()) {
+        ASSERT_EQ_CORO(get_stm<0>(*n)->map_size(), 1);
+    }
+}
+
+TEST_F_CORO(dedup_stm_fixture, header_mode_absent_header_rejects_produce) {
+    co_await initialize_state_machines();
+    set_dedup_config(1000ms, 0, ss::sstring{"redpanda-dedup-key"});
+    auto leader = co_await wait_for_leader(10s);
+
+    auto result = co_await produce_batch(
+      leader,
+      make_batch_with_header(
+        "key", "value", model::timestamp{1000}, std::nullopt));
+    ASSERT_FALSE_CORO(result.has_value());
+    ASSERT_EQ_CORO(result.error(), errc::invalid_request);
+
+    // Nothing was replicated or indexed.
+    ASSERT_EQ_CORO(
+      get_stm<0>(node(leader))->map_size(), static_cast<size_t>(0));
+}
+
+TEST_F_CORO(
+  dedup_stm_fixture, header_mode_state_survives_local_snapshot_restart) {
+    co_await initialize_state_machines();
+    set_dedup_config(1000ms, 0, ss::sstring{"redpanda-dedup-key"});
+    auto leader = co_await wait_for_leader(10s);
+
+    co_await produce_with_header(
+      leader,
+      "key",
+      "value-1",
+      model::timestamp{1000},
+      std::make_pair(
+        std::string_view{"redpanda-dedup-key"}, std::string_view{"id-1"}));
+    co_await wait_for_stms(node(leader).raft()->committed_offset());
+    for (auto& [_, n] : nodes()) {
+        co_await get_stm<0>(*n)->write_local_snapshot();
+    }
+
+    co_await restart_nodes();
+    set_dedup_config(1000ms, 0, ss::sstring{"redpanda-dedup-key"});
+    leader = co_await wait_for_leader(10s);
+
+    auto duplicate = co_await produce_with_header(
+      leader,
+      "key",
+      "value-2",
+      model::timestamp{1500},
+      std::make_pair(
+        std::string_view{"redpanda-dedup-key"}, std::string_view{"id-1"}));
+    ASSERT_EQ_CORO(duplicate.replicated_record_count, 0);
+    ASSERT_EQ_CORO(get_stm<0>(node(leader))->map_size(), 1);
+}
+
+TEST_F_CORO(
+  dedup_stm_fixture, switching_identity_source_invalidates_old_state) {
+    co_await initialize_state_machines();
+    set_dedup_config(1000ms, 0);
+    auto leader = co_await wait_for_leader(10s);
+
+    auto first = co_await produce(
+      leader, "key", "value-1", model::timestamp{1000});
+    ASSERT_EQ_CORO(first.replicated_record_count, -1);
+    co_await wait_for_stms(node(leader).raft()->committed_offset());
+
+    // Switching from key-based to header-based identity is modeled the same
+    // way as disabling dedup: a generation bump (topic_table::apply()) makes
+    // stale key-keyed state unreachable so it can never be compared against
+    // header-keyed decisions.
+    set_dedup_config(1000ms, 1, ss::sstring{"redpanda-dedup-key"});
+    auto after_switch = co_await produce_with_header(
+      leader,
+      "key",
+      "value-2",
+      model::timestamp{1100},
+      std::make_pair(
+        std::string_view{"redpanda-dedup-key"}, std::string_view{"id-1"}));
+    ASSERT_EQ_CORO(after_switch.replicated_record_count, -1);
+    ASSERT_EQ_CORO(get_stm<0>(node(leader))->map_size(), 1);
 }
 
 } // namespace

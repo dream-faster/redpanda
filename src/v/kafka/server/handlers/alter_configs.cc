@@ -578,6 +578,16 @@ create_topic_properties_update(
                 continue;
             }
 
+            if (cfg.name == topic_property_dedup_key_header) {
+                parse_and_set_optional(
+                  update.properties.dedup_key_header,
+                  cfg.value,
+                  kafka::config_resource_operation::set,
+                  dedup_key_header_validator{},
+                  std::identity{});
+                continue;
+            }
+
         } catch (const validation_error& e) {
             return make_error_alter_config_resource_response<
               alter_configs_resource_response>(

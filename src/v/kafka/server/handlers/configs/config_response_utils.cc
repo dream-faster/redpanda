@@ -1239,6 +1239,22 @@ config_response_container_t make_topic_configs(
         "key. Deduplication state is replicated and survives leadership "
         "changes. Set to -1 to disable."));
 
+    add_topic_config_if_requested(
+      config_keys,
+      result,
+      topic_property_dedup_key_header,
+      ss::sstring{},
+      topic_property_dedup_key_header,
+      topic_properties.dedup_key_header,
+      include_synonyms,
+      maybe_make_documentation(
+        include_documentation,
+        "Name of the record header whose value is used as the deduplication "
+        "identity instead of the Kafka record key. Unset (the default) "
+        "deduplicates on the record key."),
+      &describe_as_string<ss::sstring>,
+      /*hide_default_override=*/true);
+
     return result;
 }
 

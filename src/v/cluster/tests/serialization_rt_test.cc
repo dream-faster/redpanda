@@ -65,6 +65,7 @@ SEASTAR_THREAD_TEST_CASE(topic_config_rt_test) {
       10h);
     cfg.properties.dedup_window_ms = tristate<std::chrono::milliseconds>(2min);
     cfg.properties.dedup_generation = 42;
+    cfg.properties.dedup_key_header = ss::sstring{"redpanda-dedup-key"};
 
     auto d = serialize_roundtrip_rpc(std::move(cfg));
 
@@ -84,6 +85,8 @@ SEASTAR_THREAD_TEST_CASE(topic_config_rt_test) {
     BOOST_REQUIRE_EQUAL(tristate<size_t>{}, d.properties.retention_bytes);
     BOOST_CHECK(2min == d.properties.dedup_window_ms.value());
     BOOST_REQUIRE_EQUAL(42, d.properties.dedup_generation);
+    BOOST_REQUIRE_EQUAL(
+      ss::sstring{"redpanda-dedup-key"}, d.properties.dedup_key_header.value());
 }
 
 SEASTAR_THREAD_TEST_CASE(broker_metadata_rt_test) {
