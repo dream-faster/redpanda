@@ -101,13 +101,36 @@ Best-effort boundaries (all bounded by one dedup window, all documented):
   replay position. Self-corrects by idempotent replay; affects only
   window-edge eviction timing.
 - **B3** — Enabling dedup on an existing topic starts the index from the
-  enable point: records written before enablement are not indexed. (The STM's
-  initial recovery policy is `read_everything` only when dedup is configured
-  at partition start; otherwise `skip_to_end`, so topics without dedup pay
-  nothing.)
+  enable point *while the partition keeps running without a restart*:
+  `do_apply()` only calls `populate()` once dedup is configured, so older
+  batches applied before that point are never retroactively indexed. This
+  does **not** hold across a restart: `get_initial_recovery_policy()` decides
+  once, at STM (re)instantiation, whether to replay the whole log
+  (`read_everything`) based only on whether dedup is *currently* configured —
+  it has no notion of the offset dedup was actually enabled at. A broker
+  restart (or any other STM re-instantiation) on a topic that already had
+  dedup enabled therefore replays the entire log from the start, indexing
+  records written before enablement too. This is not window-bounded like the
+  other boundaries here: it can retroactively index a topic's full history.
 - **B4** — A `dedup_generation` bump clears the index on each replica as its
   config propagates, not atomically at a log offset. Replicas converge within
   config propagation delay; residual divergence is again window-bounded.
+- **B5** — The eviction watermark (`_max_ts`, the highest record timestamp
+  observed) is a client-supplied `CreateTime` value with no ordering
+  guarantee. A single anomalously-future-timestamped record — clock skew, a
+  misbehaving producer, or simple reordering — can advance `_max_ts` and
+  therefore the eviction cutoff (`_max_ts - window`) ahead of where it should
+  be, evicting entries a subsequent, correctly-ordered duplicate should still
+  have matched against. This predates log-derived state (the eviction
+  strategy is unchanged) and applies identically on the leader's speculative
+  path and the deterministic apply path, since both advance the same
+  `_max_ts`. A wall-clock-based watermark would avoid this but was rejected:
+  `populate()` runs on every replica, including during log replay at
+  arbitrary wall-clock times, so using wall-clock time there would make
+  eviction (and therefore index convergence, see B2) depend on replay timing
+  rather than being purely a function of the log. Bounded by one dedup
+  window, consistent with the feature's overall best-effort framing (point 3
+  above).
 
 # Design
 

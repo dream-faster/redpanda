@@ -123,7 +123,12 @@ struct dedup_index_snapshot {
 ///
 /// Memory is bounded: entries older than the window (relative to the most
 /// recent timestamp seen) can never cause a drop again and are swept
-/// opportunistically as new identities are inserted.
+/// opportunistically as new identities are inserted. The "most recent
+/// timestamp seen" is a client-supplied CreateTime with no ordering
+/// guarantee, so an anomalously future-timestamped record can advance the
+/// eviction cutoff early and evict an entry a later, correctly-ordered
+/// duplicate should still have matched -- see the log-derived dedup RFC,
+/// boundary B5.
 class dedup_window_filter {
 public:
     explicit dedup_window_filter(std::chrono::milliseconds window);

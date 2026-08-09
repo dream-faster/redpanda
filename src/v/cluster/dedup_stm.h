@@ -57,8 +57,13 @@ public:
 
     size_t map_size() const { return _state.map_size(); }
 
-    /// Partitions without dedup configured skip log recovery entirely; the
-    /// index then covers records written from the point dedup was enabled.
+    /// Partitions without dedup configured skip log recovery entirely.
+    /// Partitions *with* dedup configured replay the whole log from the
+    /// start on every STM (re)instantiation (e.g. a broker restart), not
+    /// just from the point dedup was enabled -- there is no way to resume
+    /// recovery from a historical offset, so a restart after enabling dedup
+    /// on a topic with pre-existing data retroactively indexes that older
+    /// data too. See the log-derived dedup RFC, boundary B3.
     raft::stm_initial_recovery_policy get_initial_recovery_policy() const final;
 
     ss::future<iobuf> take_raft_snapshot(model::offset) final;
