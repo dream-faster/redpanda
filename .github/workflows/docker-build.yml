@@ -3,7 +3,7 @@ name: docker-build
 on:
   push:
     branches:
-      - 'dev'
+      - 'claude/dedup-log-derived'
   workflow_dispatch:
     inputs:
       image_tag:
