@@ -624,7 +624,22 @@ FIXTURE_TEST(test_dedup_generation_tracks_disable_enable, topic_table_fixture) {
 
     auto cfg = topics.get_topic_cfg(tp_ns);
     BOOST_REQUIRE(cfg.has_value());
-    BOOST_REQUIRE(!cfg->properties.dedup_window_ms.is_disabled());
+    BOOST_REQUIRE(cfg->properties.dedup_window_ms.is_empty());
+    BOOST_REQUIRE_EQUAL(cfg->properties.dedup_generation, 0);
+
+    // Enabling from the unset default is not a "was enabled" transition, so
+    // it must not bump the generation.
+    cluster::incremental_topic_updates enable;
+    enable.dedup_window_ms.op = cluster::incremental_update_operation::set;
+    enable.dedup_window_ms.value = tristate<std::chrono::milliseconds>{2s};
+    ec = topics
+           .apply(
+             cluster::update_topic_properties_cmd{tp_ns, enable},
+             model::offset{11})
+           .get();
+    BOOST_REQUIRE_EQUAL(ec, cluster::errc::success);
+    cfg = topics.get_topic_cfg(tp_ns);
+    BOOST_REQUIRE_EQUAL(cfg->properties.dedup_window_ms.value(), 2s);
     BOOST_REQUIRE_EQUAL(cfg->properties.dedup_generation, 0);
 
     cluster::incremental_topic_updates disable;
@@ -634,49 +649,50 @@ FIXTURE_TEST(test_dedup_generation_tracks_disable_enable, topic_table_fixture) {
     ec = topics
            .apply(
              cluster::update_topic_properties_cmd{tp_ns, disable},
-             model::offset{11})
-           .get();
-    BOOST_REQUIRE_EQUAL(ec, cluster::errc::success);
-    cfg = topics.get_topic_cfg(tp_ns);
-    BOOST_REQUIRE(cfg->properties.dedup_window_ms.is_disabled());
-    BOOST_REQUIRE_EQUAL(cfg->properties.dedup_generation, 11);
-
-    cluster::incremental_topic_updates enable;
-    enable.dedup_window_ms.op = cluster::incremental_update_operation::set;
-    enable.dedup_window_ms.value = tristate<std::chrono::milliseconds>{2s};
-    ec = topics
-           .apply(
-             cluster::update_topic_properties_cmd{tp_ns, enable},
              model::offset{12})
            .get();
     BOOST_REQUIRE_EQUAL(ec, cluster::errc::success);
     cfg = topics.get_topic_cfg(tp_ns);
+    BOOST_REQUIRE(cfg->properties.dedup_window_ms.is_disabled());
+    BOOST_REQUIRE_EQUAL(cfg->properties.dedup_generation, 12);
+
+    // Re-enabling from disabled is not a "was enabled" transition either.
+    enable.dedup_window_ms.value = tristate<std::chrono::milliseconds>{2s};
+    ec = topics
+           .apply(
+             cluster::update_topic_properties_cmd{tp_ns, enable},
+             model::offset{13})
+           .get();
+    BOOST_REQUIRE_EQUAL(ec, cluster::errc::success);
+    cfg = topics.get_topic_cfg(tp_ns);
     BOOST_REQUIRE_EQUAL(cfg->properties.dedup_window_ms.value(), 2s);
-    BOOST_REQUIRE_EQUAL(cfg->properties.dedup_generation, 11);
+    BOOST_REQUIRE_EQUAL(cfg->properties.dedup_generation, 12);
 
     disable.dedup_window_ms.value = tristate<std::chrono::milliseconds>{
       disable_tristate};
     ec = topics
            .apply(
              cluster::update_topic_properties_cmd{tp_ns, disable},
-             model::offset{13})
+             model::offset{14})
            .get();
     BOOST_REQUIRE_EQUAL(ec, cluster::errc::success);
     cfg = topics.get_topic_cfg(tp_ns);
-    BOOST_REQUIRE_EQUAL(cfg->properties.dedup_generation, 13);
+    BOOST_REQUIRE_EQUAL(cfg->properties.dedup_generation, 14);
 
+    // Removing the override while already disabled restores the unset
+    // default; it is not a "was enabled" transition, so no generation bump.
     cluster::incremental_topic_updates restore_default;
     restore_default.dedup_window_ms.op
       = cluster::incremental_update_operation::remove;
     ec = topics
            .apply(
              cluster::update_topic_properties_cmd{tp_ns, restore_default},
-             model::offset{14})
+             model::offset{15})
            .get();
     BOOST_REQUIRE_EQUAL(ec, cluster::errc::success);
     cfg = topics.get_topic_cfg(tp_ns);
-    BOOST_REQUIRE_EQUAL(cfg->properties.dedup_window_ms.value(), 3min);
-    BOOST_REQUIRE_EQUAL(cfg->properties.dedup_generation, 13);
+    BOOST_REQUIRE(cfg->properties.dedup_window_ms.is_empty());
+    BOOST_REQUIRE_EQUAL(cfg->properties.dedup_generation, 14);
 }
 
 FIXTURE_TEST(

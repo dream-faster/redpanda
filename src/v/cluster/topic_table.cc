@@ -1236,9 +1236,7 @@ topic_properties topic_table::update_topic_properties(
       updated_properties.schema_registry_context,
       overrides.schema_registry_context);
     incremental_update(
-      updated_properties.dedup_window_ms,
-      overrides.dedup_window_ms,
-      tristate<std::chrono::milliseconds>{std::chrono::minutes(3)});
+      updated_properties.dedup_window_ms, overrides.dedup_window_ms);
     incremental_update(
       updated_properties.dedup_key_header, overrides.dedup_key_header);
     return updated_properties;
