@@ -99,7 +99,7 @@ create_topic_properties_update(
     std::apply(apply_op(op_t::none), update.custom_properties.serde_fields());
 
     static_assert(
-      std::tuple_size_v<decltype(update.properties.serde_fields())> == 46,
+      std::tuple_size_v<decltype(update.properties.serde_fields())> == 47,
       "If you add a property, decide on its default alter config "
       "policy, and handle the update in the loop below");
     static_assert(
