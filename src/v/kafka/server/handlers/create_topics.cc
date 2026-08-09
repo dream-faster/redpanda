@@ -124,7 +124,8 @@ using validators = make_validator_types<
   iceberg_target_lag_ms_validator,
   schema_registry_context_create_validator,
   min_max_compaction_lag_ms_validator,
-  storage_mode_config_validator>;
+  storage_mode_config_validator,
+  dedup_key_header_create_validator>;
 
 static void
 append_topic_configs(request_context& ctx, create_topics_response& response) {
