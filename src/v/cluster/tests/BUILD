@@ -1733,3 +1733,17 @@ redpanda_cc_gtest(
         "@seastar",
     ],
 )
+
+redpanda_cc_bench(
+    name = "dedup_window_filter_rpbench",
+    srcs = ["dedup_window_filter_bench.cc"],
+    deps = [
+        "//src/v/bytes:iobuf",
+        "//src/v/cluster",
+        "//src/v/model",
+        "//src/v/random:generators",
+        "//src/v/storage:record_batch_builder",
+        "@seastar",
+        "@seastar//:benchmark",
+    ],
+)
