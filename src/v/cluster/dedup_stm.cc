@@ -117,9 +117,33 @@ ss::future<> dedup_stm::do_apply(const model::record_batch& batch) {
     if (batch.header().attrs.is_control()) {
         co_return;
     }
+    if (batch.header().producer_id >= 0) {
+        // Idempotent and transactional data batches carry a real producer
+        // id; plain produce batches don't (see model::batch_builder's
+        // default of -1). G6 documents that idempotent/transactional
+        // produce bypasses dedup entirely, matching partition.cc's routing
+        // (only plain batches reach dedup_stm::replicate_in_stages on the
+        // leader). Indexing them here too -- which the leader-side check
+        // alone doesn't prevent, since do_apply sees every replica's
+        // committed batches regardless of which STM replicated them --
+        // would let a record from a transaction that later aborts poison
+        // the index against an ordinary record with the same identity,
+        // even though the aborted record is never visible to
+        // read_committed consumers.
+        co_return;
+    }
     const auto& cfg = _raft->log()->config();
     auto window = cfg.dedup_window_ms();
     if (!window) {
+        // adopt_config() (the only place that clears _state) is never
+        // reached while dedup stays disabled, so release the index here
+        // instead of holding a stale topic's worth of entries in memory --
+        // and serializing them into every snapshot -- until dedup happens
+        // to be re-enabled. map_size() guards against clearing (and
+        // resetting _max_ts) on every batch once already empty.
+        if (_state.map_size() > 0) {
+            _state.clear();
+        }
         co_return;
     }
     adopt_config(*window, cfg.dedup_generation(), cfg.dedup_key_header());
@@ -133,11 +157,10 @@ ss::future<> dedup_stm::do_apply(const model::record_batch& batch) {
     const auto& key_header = _state.key_header();
     readable.for_each_record([this, base_ts, &key_header](model::record r) {
         const iobuf* identity = nullptr;
-        // Idempotent/transactional produce bypasses the leader-side filter
-        // (see partition.cc), so a record here may lack the configured
-        // header even though the leader would reject it on the filtered
-        // path; skip indexing that record rather than rejecting an already
-        // committed batch.
+        // The header identity source can change after this batch was
+        // already validated and committed under an older config, so a
+        // record here may lack the *current* header; skip indexing that
+        // record rather than rejecting an already committed batch.
         if (
           dedup_identity_for_record(r, key_header, &identity)
           == dedup_identity_lookup::identity) {
@@ -220,6 +243,22 @@ ss::future<result<kafka_result>> dedup_stm::do_replicate(
             _state.revert_request(filtered.undo);
             co_return errc::timeout;
         }
+        if (!tail_wait.get()) {
+            // The introducing request's enqueue failed: no copy of the key
+            // that made this request observe a duplicate ever reached the
+            // log. Proceeding here would risk acknowledging a duplicate of
+            // a write that doesn't exist. Revert this request's own
+            // mutations and fail it so the producer retries the whole
+            // batch -- by then the introducer's reverted entry is gone, so
+            // the retry is classified fresh.
+            vlog(
+              clusterlog.debug,
+              "{} dedup append fence observed a failed introducing enqueue, "
+              "failing this request for retry",
+              _raft->ntp());
+            _state.revert_request(filtered.undo);
+            co_return errc::replication_error;
+        }
     }
 
     if (!filtered.batch) {
@@ -251,14 +290,15 @@ ss::future<result<kafka_result>> dedup_stm::do_replicate(
     }
 
     auto stages = _raft->replicate_in_stages(std::move(*filtered.batch), opts);
-    auto append_done = ss::make_lw_shared<ss::shared_promise<>>();
+    auto append_done = ss::make_lw_shared<ss::shared_promise<bool>>();
     _append_tail = append_done;
     auto enqueued_result = co_await ss::coroutine::as_future(
       std::move(stages.request_enqueued));
-    // Resolve the fence on failure too so waiters never hang. A waiter that
-    // classified against entries reverted below proceeds as best-effort; the
-    // window-bounded residue is documented in the log-derived dedup RFC.
-    append_done->set_value();
+    // Resolve the fence unconditionally so waiters never hang, but carry
+    // whether the enqueue actually succeeded: a waiter must not treat this
+    // introducer's failure as proof its own duplicate has a durable copy
+    // (see the check after the wait above).
+    append_done->set_value(!enqueued_result.failed());
     if (enqueued_result.failed()) {
         auto ex = enqueued_result.get_exception();
         vlog(

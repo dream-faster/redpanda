@@ -152,6 +152,47 @@ TEST_F_CORO(dedup_stm_fixture, follower_state_derived_from_data_batches) {
     }
 }
 
+// Idempotent/transactional data batches never go through
+// dedup_stm::replicate_in_stages on the leader (partition.cc routes them to
+// rm_stm instead), but do_apply() sees every committed raft_data batch
+// regardless of which STM replicated it. A batch carrying a real producer id
+// must not be indexed: otherwise a record that's part of a since-aborted
+// transaction (invisible to read_committed consumers) could still poison the
+// index against a later, ordinary record with the same identity.
+TEST_F_CORO(dedup_stm_fixture, producer_tracked_batch_bypasses_index) {
+    co_await initialize_state_machines();
+    set_dedup_config(1000ms);
+    auto leader = co_await wait_for_leader(10s);
+
+    model::batch_builder builder;
+    builder.set_batch_type(model::record_batch_type::raft_data);
+    builder.set_batch_timestamp(
+      model::timestamp_type::create_time, model::timestamp{1000});
+    builder.set_producer_id(42);
+    builder.set_producer_epoch(0);
+    builder.add_record(
+      model::record({}, 0, 0, iobuf::from("key"), iobuf::from("value-1"), {}));
+    auto batch = std::move(builder).build_sync();
+
+    auto stages = node(leader).raft()->replicate_in_stages(
+      std::move(batch),
+      raft::replicate_options(raft::consistency_level::quorum_ack));
+    co_await std::move(stages.request_enqueued);
+    auto replicated = co_await std::move(stages.replicate_finished);
+    ASSERT_TRUE_CORO(replicated.has_value());
+
+    co_await wait_for_stms(node(leader).raft()->committed_offset());
+    for (auto& [_, n] : nodes()) {
+        ASSERT_EQ_CORO(get_stm<0>(*n)->map_size(), 0);
+    }
+
+    // An ordinary produce with the same key afterward must not be treated as
+    // a duplicate of the producer-tracked batch above.
+    auto ordinary = co_await produce(
+      leader, "key", "value-2", model::timestamp{1500});
+    ASSERT_EQ_CORO(ordinary.replicated_record_count, -1);
+}
+
 TEST_F_CORO(dedup_stm_fixture, state_survives_leadership_change) {
     co_await initialize_state_machines();
     set_dedup_config(1000ms);

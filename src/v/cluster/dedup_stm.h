@@ -144,7 +144,11 @@ private:
     // duplicate waits on it before proceeding, so its own (possibly empty)
     // replication is ordered after the append that introduced its keys and
     // the Raft prefix property makes its acknowledgment safe.
-    ss::lw_shared_ptr<ss::shared_promise<>> _append_tail;
+    // Resolved with true once the fenced request's batch is durably
+    // enqueued to the local log, false if that enqueue failed -- so a
+    // waiter fenced on it can tell "safe to proceed" apart from "the
+    // introducing write never landed" instead of treating both as success.
+    ss::lw_shared_ptr<ss::shared_promise<bool>> _append_tail;
 };
 
 class dedup_stm_factory : public state_machine_factory {
