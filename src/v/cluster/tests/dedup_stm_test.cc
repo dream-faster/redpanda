@@ -30,8 +30,9 @@ struct dedup_stm_test_accessor {
           .entries.size();
     }
 
-    static ss::future<> apply_local_snapshot(dedup_stm& stm, iobuf buffer) {
-        co_await stm.apply_local_snapshot(
+    static ss::future<raft::local_snapshot_applied>
+    apply_local_snapshot(dedup_stm& stm, iobuf buffer) {
+        co_return co_await stm.apply_local_snapshot(
           raft::stm_snapshot_header{}, std::move(buffer));
     }
 };
@@ -515,9 +516,13 @@ TEST_F_CORO(dedup_stm_fixture, unreadable_snapshot_starts_from_an_empty_index) {
     auto downgraded = bytes_to_iobuf(raw);
 
     // Must not throw, and must leave the index empty rather than partially
-    // populated with entries decoded before the failure.
-    co_await dedup_stm_test_accessor::apply_local_snapshot(
+    // populated with entries decoded before the failure. Reporting `no` is
+    // what makes persisted_stm replay the log the snapshot covered instead
+    // of skipping past it, which is the difference between an index that
+    // rebuilds and one that stays empty.
+    auto applied = co_await dedup_stm_test_accessor::apply_local_snapshot(
       *stm, std::move(downgraded));
+    ASSERT_EQ_CORO(applied, raft::local_snapshot_applied::no);
     ASSERT_EQ_CORO(stm->map_size(), 0);
 
     // The STM is still usable afterwards: a fresh produce indexes normally.
@@ -545,8 +550,9 @@ TEST_F_CORO(dedup_stm_fixture, digest_snapshot_round_trips) {
       node(leader).raft()->committed_offset());
     ASSERT_EQ_CORO(dedup_stm_test_accessor::snapshot_size(snapshot.copy()), 1);
 
-    co_await dedup_stm_test_accessor::apply_local_snapshot(
+    auto applied = co_await dedup_stm_test_accessor::apply_local_snapshot(
       *stm, std::move(snapshot));
+    ASSERT_EQ_CORO(applied, raft::local_snapshot_applied::yes);
     ASSERT_EQ_CORO(stm->map_size(), 1);
 
     // The restored digest still matches the identity it came from, so a

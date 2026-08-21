@@ -15,6 +15,7 @@
 #include "model/namespace.h"
 #include "model/record_batch_types.h"
 #include "raft/consensus.h"
+#include "ssx/future-util.h"
 #include "storage/types.h"
 
 #include <seastar/core/with_timeout.hh>
@@ -369,7 +370,7 @@ bool dedup_stm::try_restore_snapshot(iobuf buffer) {
     // A snapshot written before the index switched to identity digests
     // (state_snapshot version 0) carries identities this build cannot
     // re-derive digests from, so serde rejects it on compat version. The
-    // index is advisory and log-derived, so starting empty and rebuilding
+    // index is advisory and log-derived, so discarding it and rebuilding
     // from the retained log is a correct -- if slower -- outcome, and a far
     // better one than refusing to start the partition.
     try {
@@ -378,6 +379,11 @@ bool dedup_stm::try_restore_snapshot(iobuf buffer) {
         return true;
     } catch (...) {
         auto ex = std::current_exception();
+        if (ssx::is_shutdown_exception(ex)) {
+            // Not a bad snapshot: the node is going away. Let it propagate
+            // rather than reporting a rebuild that will never happen.
+            std::rethrow_exception(ex);
+        }
         vlog(
           clusterlog.warn,
           "{} discarding unreadable dedup snapshot, rebuilding the index from "
@@ -401,8 +407,14 @@ ss::future<> dedup_stm::apply_raft_snapshot(const iobuf& buffer) {
 
 ss::future<raft::local_snapshot_applied>
 dedup_stm::apply_local_snapshot(raft::stm_snapshot_header, iobuf&& buffer) {
-    try_restore_snapshot(std::move(buffer));
-    co_return raft::local_snapshot_applied::yes;
+    // Reporting `no` for a snapshot we discarded is what actually makes the
+    // rebuild happen: persisted_stm only calls set_next(next_offset) -- i.e.
+    // skips the log the snapshot covered -- when the snapshot was applied.
+    // Answering `yes` here would leave the index empty *and* skip past the
+    // records it should have been rebuilt from.
+    co_return try_restore_snapshot(std::move(buffer))
+      ? raft::local_snapshot_applied::yes
+      : raft::local_snapshot_applied::no;
 }
 
 ss::future<raft::stm_snapshot>

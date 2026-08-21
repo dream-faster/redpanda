@@ -90,15 +90,15 @@ private:
     friend struct dedup_stm_test_accessor;
 
     /// The identity digest is written as its two halves rather than as a
-    /// nested envelope, so an entry costs 24 bytes on the wire with no
-    /// per-entry envelope header.
+    /// nested envelope, which would add a second serde header per entry.
     ///
     /// Version 1 replaced the full identity bytes with the digest. The
     /// compat version moves with it: a version 0 snapshot cannot be
     /// re-derived into digests without the identities it no longer carries.
     /// Discarding such a snapshot is safe -- the index is advisory and
     /// log-derived, so it rebuilds on replay -- and apply_local_snapshot()
-    /// does exactly that rather than failing to start.
+    /// does exactly that, reporting local_snapshot_applied::no so the
+    /// rebuild actually happens, rather than failing to start.
     struct wire_entry
       : serde::
           envelope<wire_entry, serde::version<1>, serde::compat_version<1>> {
