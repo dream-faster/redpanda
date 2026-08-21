@@ -310,7 +310,9 @@ ss::future<> state_machine_manager::apply_initial_recovery_policy() {
               "machine",
               *bounded,
               name);
-            snapshot->initial_recovery_next_offsets.emplace(name, *bounded);
+            entry->stm->set_next(*bounded);
+            snapshot->initial_recovery_next_offsets.emplace(
+              name, entry->stm->next());
             continue;
         }
         const auto policy = entry->stm->get_initial_recovery_policy();
