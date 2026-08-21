@@ -485,9 +485,6 @@ TEST_F_CORO(
     ASSERT_EQ_CORO(get_stm<0>(node(leader))->map_size(), 1);
 }
 
-} // namespace
-} // namespace cluster
-
 // The index switched from storing identity bytes to storing 128-bit digests,
 // which is an on-disk format change: a snapshot written by an older build
 // carries identities this build cannot re-derive digests from, and serde
@@ -700,3 +697,6 @@ TEST_F_CORO(dedup_stm_fixture, partial_filter_converges_across_replicas) {
         ASSERT_EQ_CORO(get_stm<0>(*n)->map_size(), 3);
     }
 }
+
+} // namespace
+} // namespace cluster

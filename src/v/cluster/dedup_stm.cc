@@ -21,6 +21,8 @@
 #include <seastar/core/with_timeout.hh>
 #include <seastar/coroutine/as_future.hh>
 
+#include <new>
+
 namespace cluster {
 
 dedup_stm::dedup_stm(
@@ -164,6 +166,12 @@ ss::future<> dedup_stm::do_apply(const model::record_batch& batch) {
     const model::record_batch& readable = decompressed ? *decompressed : batch;
     const auto base_ts = readable.header().first_timestamp;
     const auto& key_header = _state.key_header();
+    // Still the copying iterator, unlike filter_request()'s sharing passes,
+    // and this is the busier path -- it runs on every replica for every
+    // committed data batch. It cannot share: do_apply() takes the batch by
+    // const reference and both record_batch::share() and iobuf::share() are
+    // non-const, so sharing here needs a change to model/bytes rather than
+    // to dedup.
     readable.for_each_record([this, base_ts, &key_header](model::record r) {
         const iobuf* identity = nullptr;
         // The header identity source can change after this batch was
@@ -377,6 +385,11 @@ bool dedup_stm::try_restore_snapshot(iobuf buffer) {
         auto snapshot = serde::from_iobuf<state_snapshot>(std::move(buffer));
         restore_snapshot(_state, _generation, snapshot);
         return true;
+    } catch (const std::bad_alloc&) {
+        // Not a bad snapshot either, and the worst thing to answer with: a
+        // discard reports "rebuilding from the log", which allocates the
+        // same index again. Let it propagate instead of looping.
+        throw;
     } catch (...) {
         auto ex = std::current_exception();
         if (ssx::is_shutdown_exception(ex)) {
@@ -423,6 +436,11 @@ dedup_stm::take_local_snapshot(ssx::semaphore_units apply_units) {
     auto snapshot = to_snapshot(_state, _generation);
     auto offset = last_applied_offset();
     apply_units.return_all();
+    // The 0 here is stm_snapshot_header::version, a channel this STM does
+    // not use: unlike rm_stm/tm_stm, which dispatch between snapshot layouts
+    // on it, dedup_stm versions its payload through the serde envelope
+    // (state_snapshot's version/compat_version). Deliberately left at 0 so
+    // there is only one place the format is versioned.
     co_return raft::stm_snapshot::create(
       0, offset, serde::to_iobuf(std::move(snapshot)));
 }

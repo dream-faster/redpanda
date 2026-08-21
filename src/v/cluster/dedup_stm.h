@@ -99,6 +99,14 @@ private:
     /// log-derived, so it rebuilds on replay -- and apply_local_snapshot()
     /// does exactly that, reporting local_snapshot_applied::no so the
     /// rebuild actually happens, rather than failing to start.
+    ///
+    /// That tolerance only runs forward, and only matters for clusters
+    /// running an in-flight build of this branch: dedup is unreleased, so no
+    /// released version can hold a version 0 snapshot. Downgrading past this
+    /// commit is the direction that is not safe -- an older binary reading a
+    /// version 1 snapshot throws out of its own apply_local_snapshot(),
+    /// which persisted_stm does not guard, and the STM fails to start.
+    /// Removing the local snapshot lets such a node rebuild from the log.
     struct wire_entry
       : serde::
           envelope<wire_entry, serde::version<1>, serde::compat_version<1>> {

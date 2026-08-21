@@ -860,6 +860,16 @@ TEST(DedupWindowFilter, EvictionIntervalScalesWithMapSize) {
     }
     ASSERT_EQ(f.map_size(), seeded + added);
     EXPECT_EQ(f.snapshot().inserts_since_evict, added);
+
+    // The other half of the property: the sweep must still fire once the
+    // scaled interval is crossed, or an interval that had effectively become
+    // infinite would pass the check above. The counter can only fall below
+    // where it already stood by being reset, which only evict_expired() does.
+    constexpr size_t past_the_interval = 10'000;
+    for (size_t i = 0; i < past_the_interval; ++i) {
+        f.populate(iobuf::from(fmt::format("more-{}", i)), ts(1000));
+    }
+    EXPECT_LT(f.snapshot().inserts_since_evict, added);
 }
 
 // --- Record payload integrity across the sharing rewrite ---
@@ -904,6 +914,14 @@ TEST(DedupWindowFilter, FastPathReturnsOriginalBatchIntact) {
     ASSERT_TRUE(result.batch.has_value());
     EXPECT_EQ(keys_of(*result.batch), expected_keys);
     EXPECT_EQ(values_of(*result.batch), expected_values);
+
+    // Passing the batch through untouched must not mean skipping the index
+    // work: every record was still classified and inserted, so a failed
+    // replication can revert exactly this request.
+    ASSERT_EQ(result.undo.entries.size(), 3u);
+    EXPECT_EQ(f.map_size(), 3u);
+    f.revert_request(result.undo);
+    EXPECT_EQ(f.map_size(), 0u);
 }
 
 // --- Drop position within a batch ---

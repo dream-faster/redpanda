@@ -273,13 +273,16 @@ void dedup_window_filter::maybe_evict() {
     // sweep of N entries happens at most once per N/evict_size_divisor
     // insertions, i.e. evict_size_divisor scanned entries per insertion.
     //
-    // The cost is bounded slack: expired entries now linger for up to
-    // 1/evict_size_divisor of the index's worth of insertions rather than a
-    // flat 10k, so the map can carry that fraction above its steady-state
-    // working set. Bounding the sweep's CPU is worth bounded extra memory --
-    // and expired entries can never change a dedup decision, only occupy
-    // space. take_local_snapshot()/take_raft_snapshot() sweep unconditionally
-    // anyway, so a snapshot never carries the slack.
+    // The cost is slack, and it is bounded in insertions rather than in
+    // time: a sweep waits for map_size/evict_size_divisor *new identities*,
+    // so under a sustained arrival rate the map carries about that fraction
+    // above its steady-state working set. A partition that goes idle, or
+    // whose traffic turns into mostly-duplicates, stops inserting and so
+    // stops sweeping -- it holds its expired entries until traffic resumes.
+    // That was already true of the flat 10k interval; scaling makes the wait
+    // proportionally longer at large indexes. Expired entries can never
+    // change a dedup decision, only occupy space, and both snapshot paths
+    // sweep unconditionally, so a snapshot never carries the slack.
     const auto interval = std::max(
       min_evict_interval, _map.size() / evict_size_divisor);
     if (++_inserts_since_evict < interval) {
