@@ -682,19 +682,38 @@ TEST(DedupWindowFilterHeader, NullKeyStillDeduplicatesOnHeader) {
 // straight off the wire and a replica digesting the same identity after a
 // round trip through the log must land on the same entry.
 TEST(DedupIdentityDigest, IsIndependentOfFragmentation) {
-    iobuf contiguous;
-    contiguous.append("dedup-identity", 14);
+    // iobuf::append() packs into the previous fragment's spare capacity
+    // whenever it fits, so small appends produce a single fragment and would
+    // make this test vacuous. Chunks this size cannot be packed, so each is
+    // linked as its own fragment -- and the fragment count is asserted below
+    // so the test fails loudly rather than silently proving nothing if that
+    // ever stops being true.
+    const std::string payload(300'000, 'x');
+    constexpr size_t chunk_size = 100'000;
 
     iobuf fragmented;
-    fragmented.append("dedup-", 6);
-    fragmented.append("ident", 5);
-    fragmented.append("ity", 3);
-    ASSERT_GT(std::distance(fragmented.begin(), fragmented.end()), 1);
+    for (size_t off = 0; off < payload.size(); off += chunk_size) {
+        iobuf chunk;
+        chunk.append(payload.data() + off, chunk_size);
+        fragmented.append(std::move(chunk));
+    }
+    ASSERT_EQ(fragmented.size_bytes(), payload.size());
 
-    EXPECT_EQ(fragmented.size_bytes(), contiguous.size_bytes());
-    EXPECT_EQ(
-      cluster::dedup_digest_of(fragmented),
-      cluster::dedup_digest_of(contiguous));
+    size_t fragments = 0;
+    for (auto it = fragmented.begin(); it != fragmented.end(); ++it) {
+        ++fragments;
+    }
+    ASSERT_GT(fragments, 1u) << "test needs a genuinely fragmented iobuf";
+
+    // The expected values are the xxhash64 of the flat 300k-byte sequence
+    // under each seed, computed independently (python-xxhash). Matching them
+    // is exactly the property that matters: a digest taken over fragments
+    // equals the digest of the byte sequence those fragments spell out, so a
+    // leader classifying a wire-fragmented identity and a replica digesting
+    // the same identity after a round trip through the log agree.
+    const auto d = cluster::dedup_digest_of(fragmented);
+    EXPECT_EQ(d.hi, 0x6603e3319e7157bbULL);
+    EXPECT_EQ(d.lo, 0xc7c5a0e27b0d32daULL);
 }
 
 // Distinct identities must not share an entry. Prefixes are the case worth

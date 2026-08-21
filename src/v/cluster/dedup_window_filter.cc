@@ -130,6 +130,7 @@ dedup_window_filter::filter_request(model::record_batch batch) {
         model::record record;
         std::optional<dedup_identity_digest> identity;
         model::timestamp timestamp;
+        bool dropped{false};
     };
     chunked_vector<classified> records;
     records.reserve(static_cast<size_t>(total));
@@ -160,15 +161,13 @@ dedup_window_filter::filter_request(model::record_batch batch) {
     // requests.
     dedup_request_undo undo;
     undo.entries.reserve(static_cast<size_t>(total));
-    chunked_vector<model::record> survivors;
-    survivors.reserve(static_cast<size_t>(total));
+    int32_t kept = 0;
     for (auto& c : records) {
-        if (c.identity && is_duplicate(*c.identity, c.timestamp, &undo)) {
-            continue;
+        c.dropped = c.identity && is_duplicate(*c.identity, c.timestamp, &undo);
+        if (!c.dropped) {
+            ++kept;
         }
-        survivors.push_back(std::move(c.record));
     }
-    const auto kept = static_cast<int32_t>(survivors.size());
 
     if (kept == total) {
         // Nothing filtered: return the original batch unchanged (preserving
@@ -201,7 +200,11 @@ dedup_window_filter::filter_request(model::record_batch batch) {
     }
 
     int32_t output_offset_delta = 0;
-    for (auto& r : survivors) {
+    for (auto& c : records) {
+        if (c.dropped) {
+            continue;
+        }
+        auto& r = c.record;
         builder.add_record(
           model::record(
             r.attributes(),
