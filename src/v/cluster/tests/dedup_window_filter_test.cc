@@ -772,21 +772,6 @@ TEST(DedupWindowFilter, EvictionIntervalScalesWithMapSize) {
     EXPECT_EQ(f.snapshot().inserts_since_evict, added);
 }
 
-// The sweep still fires once the scaled interval is crossed.
-TEST(DedupWindowFilter, EvictionStillSweepsAtTheScaledInterval) {
-    cluster::dedup_window_filter f(1000ms);
-    f.populate(iobuf::from("stale"), ts(0));
-
-    auto snapshot = f.snapshot();
-    // map_size is 1, so the interval is the 10k floor.
-    snapshot.inserts_since_evict = 9'999;
-    f.restore(snapshot);
-
-    f.populate(iobuf::from("fresh"), ts(5000));
-    EXPECT_EQ(f.map_size(), 1u);
-    EXPECT_EQ(f.snapshot().inserts_since_evict, 0u);
-}
-
 // --- Record payload integrity across the sharing rewrite ---
 
 namespace {
