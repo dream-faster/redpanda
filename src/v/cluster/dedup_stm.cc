@@ -286,8 +286,9 @@ ss::future<result<kafka_result>> dedup_stm::do_replicate(
             // cancellation signal, timeout still enforced below.
             ss::abort_source local_as;
             ss::abort_source& as = opts.as ? opts.as->get() : local_as;
-            auto waited = co_await ss::coroutine::as_future(_raft->events().wait(
-              fence, model::timeout_clock::now() + _sync_timeout(), as));
+            auto waited = co_await ss::coroutine::as_future(
+              _raft->events().wait(
+                fence, model::timeout_clock::now() + _sync_timeout(), as));
             if (waited.failed()) {
                 auto ex = waited.get_exception();
                 vlog(
