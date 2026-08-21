@@ -310,7 +310,13 @@ ss::future<> state_machine_manager::apply_initial_recovery_policy() {
               "machine",
               *bounded,
               name);
-            entry->stm->set_next(*bounded);
+            // stm->start() (already run above) restores any surviving local
+            // snapshot, so next() can already be > *bounded here -- e.g. the
+            // initial-recovery snapshot is missing/unreadable while this
+            // STM's own local snapshot survived. set_next() asserts against
+            // moving backward, so clamp exactly like the read_everything/
+            // skip_to_end branches below do.
+            entry->stm->set_next(std::max(*bounded, entry->stm->next()));
             snapshot->initial_recovery_next_offsets.emplace(
               name, entry->stm->next());
             continue;
