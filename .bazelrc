@@ -309,19 +309,28 @@ build:secure --config=relro
 # =================================
 # Release
 # =================================
-# Enables full optimization, and other release features. Simply using
-# --config=release doesn't create a _true_ release binary, that needs at
-# least --stamp=full and PGO-specific compile steps (outside of bazel).
-build:release --compilation_mode opt
-build:release --config=secure
-build:release --@seastar//:stack_guards=False --@seastar//:debug=False
-build:release --copt -g --strip=never
+# Shared optimized runtime profile. Simply using this profile does not create
+# a _true_ release binary: that needs at least --stamp=full and PGO-specific
+# compile steps (outside of Bazel).
+build:release-base --compilation_mode opt
+build:release-base --config=secure
+build:release-base --@seastar//:stack_guards=False --@seastar//:debug=False
 # For now, disable the hardened libc++ for release builds for maximum perf 🚀
-build:release --cxxopt=-U_LIBCPP_ASSERTION_SEMANTIC
-build:release --cxxopt=-U_LIBCPP_HARDENING_MODE
-build:release --host_cxxopt=-U_LIBCPP_HARDENING_MODE
-build:release --cxxopt=-D_LIBCPP_HARDENING_MODE=_LIBCPP_HARDENING_MODE_NONE
-build:release --host_cxxopt=-D_LIBCPP_HARDENING_MODE=_LIBCPP_HARDENING_MODE_NONE
+build:release-base --cxxopt=-U_LIBCPP_ASSERTION_SEMANTIC
+build:release-base --cxxopt=-U_LIBCPP_HARDENING_MODE
+build:release-base --host_cxxopt=-U_LIBCPP_HARDENING_MODE
+build:release-base --cxxopt=-D_LIBCPP_HARDENING_MODE=_LIBCPP_HARDENING_MODE_NONE
+build:release-base --host_cxxopt=-D_LIBCPP_HARDENING_MODE=_LIBCPP_HARDENING_MODE_NONE
+
+# The general release profile keeps symbols for local debugging.
+build:release --config=release-base
+build:release --copt=-g --strip=never
+
+# Container images do not need embedded debug information. Keep the normal
+# release profile debuggable; this profile is intentionally only for runtime
+# container artifacts, which use separately published symbols when needed.
+build:container --config=release-base
+build:container --strip=always
 
 
 # Instrumentation/training step

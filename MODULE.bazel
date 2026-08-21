@@ -74,6 +74,7 @@ single_version_override(
         "//bazel/thirdparty:0001-patchelf-rename-version-file.patch",
     ],
 )
+
 bazel_dep(name = "bzip2", version = "1.0.8.bcr.2")
 bazel_dep(name = "googleapis", version = "0.0.0-20250703-f9d6fe4a")
 bazel_dep(name = "ragel", version = "26.04.0-20260414092900-8841e561489e")
@@ -401,33 +402,6 @@ crate.annotation(
     gen_build_script = "off",
 )
 use_repo(crate, "crates")
-
-# ====================================
-# OCI Base Images
-# ====================================
-bazel_dep(name = "rules_oci", version = "2.3.0", dev_dependency = True)
-
-oci = use_extension("@rules_oci//oci:extensions.bzl", "oci", dev_dependency = True)
-
-# The slimmest official Debian base image. Unlike distroless, this includes a
-# real shell (bash, not just busybox sh) for debugging, at the cost of a
-# slightly larger base layer.
-oci.pull(
-    name = "debian_bookworm_slim",
-    digest = "sha256:60eac759739651111db372c07be67863818726f754804b8707c90979bda511df",
-    image = "debian",
-    tag = "bookworm-slim",
-    platforms = [
-        "linux/amd64",
-        "linux/arm64/v8",
-    ],
-)
-use_repo(
-    oci,
-    "debian_bookworm_slim",
-    "debian_bookworm_slim_linux_amd64",
-    "debian_bookworm_slim_linux_arm64_v8",
-)
 
 http_file = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_file")
 
