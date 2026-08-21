@@ -7,6 +7,7 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0
 
+#include "bytes/bytes.h"
 #include "cluster/dedup_stm.h"
 #include "cluster/logger.h"
 #include "config/mock_property.h"
@@ -27,6 +28,11 @@ struct dedup_stm_test_accessor {
     static size_t snapshot_size(iobuf snapshot) {
         return serde::from_iobuf<dedup_stm::state_snapshot>(std::move(snapshot))
           .entries.size();
+    }
+
+    static ss::future<> apply_local_snapshot(dedup_stm& stm, iobuf buffer) {
+        co_await stm.apply_local_snapshot(
+          raft::stm_snapshot_header{}, std::move(buffer));
     }
 };
 
@@ -476,3 +482,77 @@ TEST_F_CORO(
 
 } // namespace
 } // namespace cluster
+
+// The index switched from storing identity bytes to storing 128-bit digests,
+// which is an on-disk format change: a snapshot written by an older build
+// carries identities this build cannot re-derive digests from, and serde
+// rejects it on the compat version. Because the index is advisory and
+// log-derived, the right response is to drop it and rebuild from the log --
+// never to fail to start the partition. Simulated by rewriting the serde
+// envelope's version bytes on a snapshot this build just produced, which is
+// exactly what such a buffer looks like at the point serde inspects it.
+TEST_F_CORO(dedup_stm_fixture, unreadable_snapshot_starts_from_an_empty_index) {
+    co_await initialize_state_machines();
+    set_dedup_config(1000ms);
+    auto leader = co_await wait_for_leader(10s);
+    auto stm = get_stm<0>(node(leader));
+
+    co_await produce(leader, "a", "value-a", model::timestamp{1000});
+    co_await stm->wait(
+      node(leader).raft()->committed_offset(),
+      model::timeout_clock::now() + 10s);
+    ASSERT_EQ_CORO(stm->map_size(), 1);
+
+    auto snapshot = co_await stm->take_raft_snapshot(
+      node(leader).raft()->committed_offset());
+    ASSERT_EQ_CORO(dedup_stm_test_accessor::snapshot_size(snapshot.copy()), 1);
+
+    // serde envelope header is {version:u8, compat_version:u8, size:u32};
+    // stamping version 0 makes it look like a pre-digest snapshot.
+    auto raw = iobuf_to_bytes(snapshot);
+    raw[0] = 0;
+    raw[1] = 0;
+    auto downgraded = bytes_to_iobuf(raw);
+
+    // Must not throw, and must leave the index empty rather than partially
+    // populated with entries decoded before the failure.
+    co_await dedup_stm_test_accessor::apply_local_snapshot(
+      *stm, std::move(downgraded));
+    ASSERT_EQ_CORO(stm->map_size(), 0);
+
+    // The STM is still usable afterwards: a fresh produce indexes normally.
+    co_await produce(leader, "b", "value-b", model::timestamp{2000});
+    co_await stm->wait(
+      node(leader).raft()->committed_offset(),
+      model::timeout_clock::now() + 10s);
+    ASSERT_GT_CORO(stm->map_size(), 0);
+}
+
+// A snapshot written by this build round-trips through the digest wire
+// format: entry count, and the dedup decisions the restored index makes.
+TEST_F_CORO(dedup_stm_fixture, digest_snapshot_round_trips) {
+    co_await initialize_state_machines();
+    set_dedup_config(1000ms);
+    auto leader = co_await wait_for_leader(10s);
+    auto stm = get_stm<0>(node(leader));
+
+    co_await produce(leader, "round-trip", "v1", model::timestamp{1000});
+    co_await stm->wait(
+      node(leader).raft()->committed_offset(),
+      model::timeout_clock::now() + 10s);
+
+    auto snapshot = co_await stm->take_raft_snapshot(
+      node(leader).raft()->committed_offset());
+    ASSERT_EQ_CORO(dedup_stm_test_accessor::snapshot_size(snapshot.copy()), 1);
+
+    co_await dedup_stm_test_accessor::apply_local_snapshot(
+      *stm, std::move(snapshot));
+    ASSERT_EQ_CORO(stm->map_size(), 1);
+
+    // The restored digest still matches the identity it came from, so a
+    // duplicate within the window is still caught.
+    auto duplicate = co_await produce_batch(
+      leader, make_batch("round-trip", "v2", model::timestamp{1500}));
+    ASSERT_TRUE_CORO(duplicate.has_value());
+    ASSERT_EQ_CORO(duplicate.value().replicated_record_count, 0);
+}

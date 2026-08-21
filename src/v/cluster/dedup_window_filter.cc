@@ -9,7 +9,7 @@
 
 #include "cluster/dedup_window_filter.h"
 
-#include "bytes/bytes.h"
+#include "hashing/xx.h"
 #include "model/batch_builder.h"
 #include "model/batch_compression.h"
 #include "model/record.h"
@@ -39,13 +39,26 @@ dedup_identity_lookup dedup_identity_for_record(
     return dedup_identity_lookup::identity;
 }
 
+dedup_identity_digest dedup_digest_of(const iobuf& identity) {
+    // Arbitrary distinct constants; they only need to differ from each other
+    // and stay fixed, since the digest is persisted in snapshots.
+    incremental_xxhash64 hi{0x9E3779B97F4A7C15ULL};
+    incremental_xxhash64 lo{0xC2B2AE3D27D4EB4FULL};
+    for (const auto& frag : identity) {
+        hi.update(frag.get(), frag.size());
+        lo.update(frag.get(), frag.size());
+    }
+    return {.hi = hi.digest(), .lo = lo.digest()};
+}
+
 dedup_window_filter::dedup_window_filter(std::chrono::milliseconds window)
   : _window(window) {}
 
 bool dedup_window_filter::is_duplicate(
-  const iobuf& identity, model::timestamp ts, dedup_request_undo* undo) {
-    auto identity_bytes = iobuf_to_bytes(identity);
-    auto it = _map.find(identity_bytes);
+  dedup_identity_digest identity,
+  model::timestamp ts,
+  dedup_request_undo* undo) {
+    auto it = _map.find(identity);
     if (it != _map.end()) {
         auto stored_ts = it->second;
         auto diff_ms = ts.value() - stored_ts.value();
@@ -62,17 +75,17 @@ bool dedup_window_filter::is_duplicate(
         }
         if (undo) {
             undo->entries.push_back(
-              {.key = std::move(identity_bytes),
+              {.identity = identity,
                .applied_timestamp = it->second,
                .previous_timestamp = stored_ts});
         }
         return false;
     }
     _max_ts = std::max(_max_ts, ts);
-    _map.emplace(identity_bytes, ts);
+    _map.emplace(identity, ts);
     if (undo) {
         undo->entries.push_back(
-          {.key = std::move(identity_bytes),
+          {.identity = identity,
            .applied_timestamp = ts,
            .previous_timestamp = std::nullopt});
     }
@@ -93,53 +106,69 @@ dedup_window_filter::filter_request(model::record_batch batch) {
     if (batch.compressed()) {
         decompressed = model::decompress_batch_sync(batch);
     }
-    const model::record_batch& readable = decompressed ? *decompressed : batch;
+    model::record_batch& readable = decompressed ? *decompressed : batch;
 
-    const auto base_ts = readable.header().first_timestamp;
+    // Copied, not referenced: the batch header is read again after the
+    // iterator below has taken a share of the records.
+    const auto header = readable.header();
+    const auto base_ts = header.first_timestamp;
     const int32_t total = readable.record_count();
 
-    // In header mode, a record missing the configured header rejects the
-    // whole request. Scan for that up front so nothing below can partially
-    // mutate the index before discovering a mid-batch rejection: the
-    // extraction itself never mutates state, so it is safe to run twice (once
-    // here, once per record in the mutating pass below).
-    if (_key_header) {
-        bool rejected = false;
-        readable.for_each_record([&](model::record r) {
-            const iobuf* unused = nullptr;
-            if (
-              dedup_identity_for_record(r, _key_header, &unused)
-              == dedup_identity_lookup::missing_header) {
-                rejected = true;
-            }
-        });
-        if (rejected) {
+    // One pass over the records, sharing rather than copying them.
+    // record_batch::for_each_record() yields records through
+    // record_batch_copy_iterator, which deep-copies every key, value, and
+    // header of every record; record_batch_iterator refcounts them instead.
+    // That matters here because this runs on every plain produce.
+    //
+    // Classification is deferred until the whole batch has been inspected:
+    // in header mode one record missing the configured header rejects the
+    // entire request, and the index must not have been mutated by then.
+    // Digesting each identity up front is what makes deferring cheap -- a
+    // digest is 16 trivially copyable bytes, so nothing needs to hold the
+    // identity iobufs alive to classify later.
+    struct classified {
+        model::record record;
+        std::optional<dedup_identity_digest> identity;
+        model::timestamp timestamp;
+    };
+    chunked_vector<classified> records;
+    records.reserve(static_cast<size_t>(total));
+
+    auto it = model::record_batch_iterator::create(readable.share());
+    while (it.has_next()) {
+        auto r = it.next();
+        const iobuf* identity = nullptr;
+        const auto lookup = dedup_identity_for_record(
+          r, _key_header, &identity);
+        if (lookup == dedup_identity_lookup::missing_header) {
+            // Nothing has been mutated yet, so the whole request can be
+            // rejected without unwinding anything.
             return {.missing_required_header = true};
         }
+        std::optional<dedup_identity_digest> digest;
+        if (lookup == dedup_identity_lookup::identity) {
+            digest = dedup_digest_of(*identity);
+        }
+        // Read the delta before moving the record out.
+        const model::timestamp ts{base_ts.value() + r.timestamp_delta()};
+        records.push_back(
+          {.record = std::move(r), .identity = digest, .timestamp = ts});
     }
 
-    // Second pass: identify which records survive.
-    std::vector<bool> keep(static_cast<size_t>(total), true);
+    // Classify in record order, so two records sharing an identity within
+    // one request resolve first-wins the same way they would across
+    // requests.
     dedup_request_undo undo;
     undo.entries.reserve(static_cast<size_t>(total));
-    int32_t kept = 0;
-    int32_t idx = 0;
-    readable.for_each_record([&](model::record r) {
-        const iobuf* identity = nullptr;
-        if (
-          dedup_identity_for_record(r, _key_header, &identity)
-          == dedup_identity_lookup::identity) {
-            model::timestamp ts{base_ts.value() + r.timestamp_delta()};
-            if (is_duplicate(*identity, ts, &undo)) {
-                keep[static_cast<size_t>(idx)] = false;
-            } else {
-                ++kept;
-            }
-        } else {
-            ++kept;
+    chunked_vector<model::record> survivors;
+    survivors.reserve(static_cast<size_t>(total));
+    for (auto& c : records) {
+        if (c.identity && is_duplicate(*c.identity, c.timestamp, &undo)) {
+            continue;
         }
-        ++idx;
-    });
+        survivors.push_back(std::move(c.record));
+    }
+    const auto kept = static_cast<int32_t>(survivors.size());
 
     if (kept == total) {
         // Nothing filtered: return the original batch unchanged (preserving
@@ -154,36 +183,34 @@ dedup_window_filter::filter_request(model::record_batch batch) {
     // metadata. Offset deltas are made contiguous because this is a produce
     // batch, not a compacted batch with intentional offset gaps.
     model::batch_builder builder;
-    builder.set_batch_type(readable.header().type);
-    builder.set_base_offset(readable.header().base_offset);
-    builder.set_batch_timestamp(
-      readable.header().attrs.timestamp_type(), base_ts);
+    builder.set_batch_type(header.type);
+    builder.set_base_offset(header.base_offset);
+    builder.set_batch_timestamp(header.attrs.timestamp_type(), base_ts);
+    // From the original batch, not `header`: `readable` may be the
+    // decompressed temporary, whose attrs no longer name the compression the
+    // rebuilt batch should be written back with.
     builder.set_compression(batch.header().attrs.compression());
-    builder.set_producer_id(readable.header().producer_id);
-    builder.set_producer_epoch(readable.header().producer_epoch);
-    builder.set_base_sequence(readable.header().base_sequence);
-    if (readable.header().attrs.is_transactional()) {
+    builder.set_producer_id(header.producer_id);
+    builder.set_producer_epoch(header.producer_epoch);
+    builder.set_base_sequence(header.base_sequence);
+    if (header.attrs.is_transactional()) {
         builder.set_transactional();
     }
-    if (readable.header().attrs.is_control()) {
+    if (header.attrs.is_control()) {
         builder.set_control();
     }
 
-    idx = 0;
     int32_t output_offset_delta = 0;
-    readable.for_each_record([&](model::record r) {
-        if (keep[static_cast<size_t>(idx)]) {
-            builder.add_record(
-              model::record(
-                r.attributes(),
-                r.timestamp_delta(),
-                output_offset_delta++,
-                r.share_key_opt(),
-                r.share_value_opt(),
-                std::move(r.headers())));
-        }
-        ++idx;
-    });
+    for (auto& r : survivors) {
+        builder.add_record(
+          model::record(
+            r.attributes(),
+            r.timestamp_delta(),
+            output_offset_delta++,
+            r.share_key_opt(),
+            r.share_value_opt(),
+            std::move(r.headers())));
+    }
 
     return {.batch = std::move(builder).build_sync(), .undo = std::move(undo)};
 }
@@ -193,7 +220,7 @@ void dedup_window_filter::revert_request(const dedup_request_undo& undo) {
     // unwind correctly: the last entry restores the state the previous entry
     // wrote, and the first entry restores the pre-request state.
     for (const auto& entry : undo.entries | std::ranges::views::reverse) {
-        auto it = _map.find(entry.key);
+        auto it = _map.find(entry.identity);
         if (it == _map.end() || it->second != entry.applied_timestamp) {
             // A later request overwrote (or evicted) this key; its state wins.
             continue;
@@ -208,8 +235,7 @@ void dedup_window_filter::revert_request(const dedup_request_undo& undo) {
 
 void dedup_window_filter::populate(const iobuf& key, model::timestamp ts) {
     _max_ts = std::max(_max_ts, ts);
-    auto key_bytes = iobuf_to_bytes(key);
-    auto [it, inserted] = _map.emplace(key_bytes, ts);
+    auto [it, inserted] = _map.emplace(dedup_digest_of(key), ts);
     if (inserted) {
         maybe_evict();
     } else if (ts.value() > it->second.value()) {
@@ -228,7 +254,15 @@ void dedup_window_filter::evict_expired() {
 }
 
 void dedup_window_filter::maybe_evict() {
-    if (++_inserts_since_evict < evict_after_inserts) {
+    // evict_expired() scans the whole map, so a fixed interval makes the
+    // amortized per-insertion cost grow linearly with the index (at a million
+    // entries and a 10k interval, every insertion pays for ~100 scanned
+    // entries). Scaling the interval with the map keeps that cost flat: a
+    // sweep of N entries happens at most once per N/evict_size_divisor
+    // insertions, i.e. evict_size_divisor scanned entries per insertion.
+    const auto interval = std::max(
+      min_evict_interval, _map.size() / evict_size_divisor);
+    if (++_inserts_since_evict < interval) {
         return;
     }
     _inserts_since_evict = 0;
@@ -239,8 +273,8 @@ dedup_index_snapshot dedup_window_filter::snapshot() const {
     dedup_index_snapshot result{
       .max_timestamp = _max_ts, .inserts_since_evict = _inserts_since_evict};
     result.entries.reserve(_map.size());
-    for (const auto& [key, timestamp] : _map) {
-        result.entries.push_back({key, timestamp});
+    for (const auto& [identity, timestamp] : _map) {
+        result.entries.push_back({identity, timestamp});
     }
     return result;
 }
@@ -249,7 +283,7 @@ void dedup_window_filter::restore(const dedup_index_snapshot& snapshot) {
     _map.clear();
     _map.reserve(snapshot.entries.size());
     for (const auto& entry : snapshot.entries) {
-        _map.emplace(entry.key, entry.timestamp);
+        _map.emplace(entry.identity, entry.timestamp);
     }
     _max_ts = snapshot.max_timestamp;
     _inserts_since_evict = snapshot.inserts_since_evict;

@@ -14,12 +14,14 @@
 // verifies the first-wins dedup semantics.
 
 #include "bytes/iobuf.h"
+#include "bytes/iobuf_parser.h"
 #include "cluster/dedup_window_filter.h"
 #include "model/batch_builder.h"
 #include "model/batch_compression.h"
 #include "model/record.h"
 #include "storage/record_batch_builder.h"
 
+#include <fmt/format.h>
 #include <gtest/gtest.h>
 
 #include <chrono>
@@ -171,10 +173,14 @@ TEST(DedupWindowFilter, FilterRequestReturnsUndoForAdmittedKeys) {
     ASSERT_TRUE(result.batch.has_value());
     EXPECT_EQ(record_count(*result.batch), 2);
     ASSERT_EQ(result.undo.entries.size(), 2);
-    EXPECT_EQ(result.undo.entries[0].key, bytes::from_string("a"));
+    EXPECT_EQ(
+      result.undo.entries[0].identity,
+      cluster::dedup_digest_of(iobuf::from("a")));
     EXPECT_EQ(result.undo.entries[0].applied_timestamp, ts(1000));
     EXPECT_FALSE(result.undo.entries[0].previous_timestamp.has_value());
-    EXPECT_EQ(result.undo.entries[1].key, bytes::from_string("b"));
+    EXPECT_EQ(
+      result.undo.entries[1].identity,
+      cluster::dedup_digest_of(iobuf::from("b")));
 
     // Re-admission outside the window records the previous timestamp.
     auto readmitted = f.filter_request(make_batch("a", "4", ts(2500)));
@@ -666,4 +672,163 @@ TEST(DedupWindowFilterHeader, NullKeyStillDeduplicatesOnHeader) {
     auto r2 = f.filter(make_batch_with_headers(
       std::nullopt, "v2", ts(1500), {{"redpanda-dedup-key", "id-1"}}));
     EXPECT_FALSE(r2.has_value());
+}
+
+// --- Identity digests ---
+
+// The index stores a digest, not the identity bytes, so the digest must be a
+// pure function of the byte sequence -- not of how that sequence happens to
+// be split across iobuf fragments. A leader classifying a fragmented iobuf
+// straight off the wire and a replica digesting the same identity after a
+// round trip through the log must land on the same entry.
+TEST(DedupIdentityDigest, IsIndependentOfFragmentation) {
+    iobuf contiguous;
+    contiguous.append("dedup-identity", 14);
+
+    iobuf fragmented;
+    fragmented.append("dedup-", 6);
+    fragmented.append("ident", 5);
+    fragmented.append("ity", 3);
+    ASSERT_GT(std::distance(fragmented.begin(), fragmented.end()), 1);
+
+    EXPECT_EQ(fragmented.size_bytes(), contiguous.size_bytes());
+    EXPECT_EQ(
+      cluster::dedup_digest_of(fragmented),
+      cluster::dedup_digest_of(contiguous));
+}
+
+// Distinct identities must not share an entry. Prefixes are the case worth
+// pinning: a length-oblivious digest would let "ab" and "abc" collide.
+TEST(DedupIdentityDigest, SeparatesDistinctIdentities) {
+    const auto ab = cluster::dedup_digest_of(iobuf::from("ab"));
+    const auto abc = cluster::dedup_digest_of(iobuf::from("abc"));
+    const auto abd = cluster::dedup_digest_of(iobuf::from("abd"));
+    const auto empty = cluster::dedup_digest_of(iobuf{});
+
+    EXPECT_NE(ab, abc);
+    EXPECT_NE(abc, abd);
+    EXPECT_NE(ab, empty);
+    EXPECT_EQ(ab, cluster::dedup_digest_of(iobuf::from("ab")));
+}
+
+// The digest is persisted in snapshots and compared across replicas, so the
+// seeds and the algorithm are part of the on-disk format: changing either
+// silently invalidates every existing index without a serde version bump.
+// These constants were computed independently (python-xxhash, xxh64 with the
+// same two seeds), so this also cross-checks the implementation rather than
+// just pinning whatever it happens to produce.
+TEST(DedupIdentityDigest, IsPinnedForSnapshotCompatibility) {
+    const auto d = cluster::dedup_digest_of(iobuf::from("dedup-identity"));
+    EXPECT_EQ(d.hi, 0xa0e1ea34f71724b7ULL);
+    EXPECT_EQ(d.lo, 0x68a86e30b386534dULL);
+}
+
+// --- Eviction interval ---
+
+// evict_expired() scans the whole map, so a fixed sweep interval makes the
+// amortized cost per insertion grow linearly with the index. The interval
+// scales with the map instead: at 160k entries it is 20k insertions, so
+// 15k insertions must not have triggered a sweep. Under a fixed 10k interval
+// one would have fired and reset the counter to 5k.
+TEST(DedupWindowFilter, EvictionIntervalScalesWithMapSize) {
+    cluster::dedup_window_filter f(1000ms);
+
+    constexpr size_t seeded = 160'000;
+    constexpr size_t added = 15'000;
+    // A single timestamp for every entry: nothing is ever evictable, so the
+    // only thing that can change the counter is a sweep firing.
+    for (size_t i = 0; i < seeded; ++i) {
+        f.populate(iobuf::from(fmt::format("seed-{}", i)), ts(1000));
+    }
+    ASSERT_EQ(f.map_size(), seeded);
+
+    auto reset = f.snapshot();
+    reset.inserts_since_evict = 0;
+    f.restore(reset);
+
+    for (size_t i = 0; i < added; ++i) {
+        f.populate(iobuf::from(fmt::format("extra-{}", i)), ts(1000));
+    }
+    ASSERT_EQ(f.map_size(), seeded + added);
+    EXPECT_EQ(f.snapshot().inserts_since_evict, added);
+}
+
+// The sweep still fires once the scaled interval is crossed.
+TEST(DedupWindowFilter, EvictionStillSweepsAtTheScaledInterval) {
+    cluster::dedup_window_filter f(1000ms);
+    f.populate(iobuf::from("stale"), ts(0));
+
+    auto snapshot = f.snapshot();
+    // map_size is 1, so the interval is the 10k floor.
+    snapshot.inserts_since_evict = 9'999;
+    f.restore(snapshot);
+
+    f.populate(iobuf::from("fresh"), ts(5000));
+    EXPECT_EQ(f.map_size(), 1u);
+    EXPECT_EQ(f.snapshot().inserts_since_evict, 0u);
+}
+
+// --- Record payload integrity across the sharing rewrite ---
+
+namespace {
+
+ss::sstring to_string(const iobuf& b) {
+    iobuf_const_parser p(b);
+    return p.read_string(p.bytes_left());
+}
+
+// Collect (key, value) pairs from a batch, decompressing if needed.
+std::vector<std::pair<ss::sstring, ss::sstring>>
+key_values(const model::record_batch& b) {
+    std::vector<std::pair<ss::sstring, ss::sstring>> out;
+    auto readable = b.compressed() ? model::decompress_batch_sync(b) : b.copy();
+    readable.for_each_record([&out](model::record r) {
+        out.emplace_back(to_string(r.key()), to_string(r.value()));
+    });
+    return out;
+}
+
+} // namespace
+
+// filter_request() iterates records by sharing them out of the batch rather
+// than deep-copying each one. The rebuilt batch must still carry the exact
+// key and value bytes of the surviving records -- a mis-sized or misaligned
+// share would corrupt payloads while leaving record counts and metadata
+// looking correct.
+TEST(DedupWindowFilter, PartialFilterPreservesRecordPayloads) {
+    cluster::dedup_window_filter f(1000ms);
+    ASSERT_TRUE(f.filter(make_batch("dup", "seed", ts(1000))).has_value());
+
+    auto filtered = f.filter(make_multi_batch(
+      {{"keep-1", "value-one"},
+       {"dup", "dropped"},
+       {"keep-2", "value-two"},
+       {"keep-3", "value-three"}},
+      ts(1000)));
+    ASSERT_TRUE(filtered.has_value());
+
+    const auto kvs = key_values(*filtered);
+    ASSERT_EQ(kvs.size(), 3u);
+    EXPECT_EQ(
+      kvs[0], std::make_pair(ss::sstring("keep-1"), ss::sstring("value-one")));
+    EXPECT_EQ(
+      kvs[1], std::make_pair(ss::sstring("keep-2"), ss::sstring("value-two")));
+    EXPECT_EQ(
+      kvs[2],
+      std::make_pair(ss::sstring("keep-3"), ss::sstring("value-three")));
+}
+
+// The nothing-filtered fast path hands back the original batch object. The
+// shares taken during classification are released before that happens, so
+// the returned batch must be fully intact.
+TEST(DedupWindowFilter, FastPathReturnsOriginalBatchIntact) {
+    cluster::dedup_window_filter f(1000ms);
+
+    auto original = make_multi_batch(
+      {{"a", "value-a"}, {"b", "value-b"}, {"c", "value-c"}}, ts(1000));
+    const auto expected = key_values(original);
+
+    auto result = f.filter_request(std::move(original));
+    ASSERT_TRUE(result.batch.has_value());
+    EXPECT_EQ(key_values(*result.batch), expected);
 }

@@ -75,9 +75,11 @@ dedup_stm::to_snapshot(const dedup_window_filter& state, int64_t generation) {
       .inserts_since_evict = static_cast<uint64_t>(
         snapshot.inserts_since_evict)};
     result.entries.reserve(snapshot.entries.size());
-    for (auto& entry : snapshot.entries) {
+    for (const auto& entry : snapshot.entries) {
         result.entries.push_back(
-          {.key = std::move(entry.key), .timestamp = entry.timestamp});
+          {.identity_hi = entry.identity.hi,
+           .identity_lo = entry.identity.lo,
+           .timestamp = entry.timestamp});
     }
     return result;
 }
@@ -92,7 +94,9 @@ void dedup_stm::restore_snapshot(
       .inserts_since_evict = static_cast<size_t>(snapshot.inserts_since_evict)};
     restored.entries.reserve(snapshot.entries.size());
     for (const auto& entry : snapshot.entries) {
-        restored.entries.push_back({entry.key, entry.timestamp});
+        restored.entries.push_back(
+          {.identity = {.hi = entry.identity_hi, .lo = entry.identity_lo},
+           .timestamp = entry.timestamp});
     }
     state.restore(restored);
     generation = snapshot.generation;
@@ -361,20 +365,43 @@ ss::future<iobuf> dedup_stm::take_raft_snapshot(model::offset) {
     co_return serde::to_iobuf(to_snapshot(_state, _generation));
 }
 
+bool dedup_stm::try_restore_snapshot(iobuf buffer) {
+    // A snapshot written before the index switched to identity digests
+    // (state_snapshot version 0) carries identities this build cannot
+    // re-derive digests from, so serde rejects it on compat version. The
+    // index is advisory and log-derived, so starting empty and rebuilding
+    // from the retained log is a correct -- if slower -- outcome, and a far
+    // better one than refusing to start the partition.
+    try {
+        auto snapshot = serde::from_iobuf<state_snapshot>(std::move(buffer));
+        restore_snapshot(_state, _generation, snapshot);
+        return true;
+    } catch (...) {
+        auto ex = std::current_exception();
+        vlog(
+          clusterlog.warn,
+          "{} discarding unreadable dedup snapshot, rebuilding the index from "
+          "the log: {}",
+          _raft->ntp(),
+          ex);
+        _state.clear();
+        _generation = 0;
+        return false;
+    }
+}
+
 ss::future<> dedup_stm::apply_raft_snapshot(const iobuf& buffer) {
     _state.clear();
     _generation = 0;
     if (!buffer.empty()) {
-        auto snapshot = serde::from_iobuf<state_snapshot>(buffer.copy());
-        restore_snapshot(_state, _generation, snapshot);
+        try_restore_snapshot(buffer.copy());
     }
     co_return;
 }
 
 ss::future<raft::local_snapshot_applied>
 dedup_stm::apply_local_snapshot(raft::stm_snapshot_header, iobuf&& buffer) {
-    auto snapshot = serde::from_iobuf<state_snapshot>(std::move(buffer));
-    restore_snapshot(_state, _generation, snapshot);
+    try_restore_snapshot(std::move(buffer));
     co_return raft::local_snapshot_applied::yes;
 }
 

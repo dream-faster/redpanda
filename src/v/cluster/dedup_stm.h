@@ -15,7 +15,6 @@
 #include "model/fundamental.h"
 #include "raft/persisted_stm.h"
 #include "serde/envelope.h"
-#include "serde/rw/bytes.h"
 #include "serde/rw/vector.h"
 #include "utils/available_promise.h"
 
@@ -90,20 +89,33 @@ protected:
 private:
     friend struct dedup_stm_test_accessor;
 
+    /// The identity digest is written as its two halves rather than as a
+    /// nested envelope, so an entry costs 24 bytes on the wire with no
+    /// per-entry envelope header.
+    ///
+    /// Version 1 replaced the full identity bytes with the digest. The
+    /// compat version moves with it: a version 0 snapshot cannot be
+    /// re-derived into digests without the identities it no longer carries.
+    /// Discarding such a snapshot is safe -- the index is advisory and
+    /// log-derived, so it rebuilds on replay -- and apply_local_snapshot()
+    /// does exactly that rather than failing to start.
     struct wire_entry
       : serde::
-          envelope<wire_entry, serde::version<0>, serde::compat_version<0>> {
-        bytes key;
+          envelope<wire_entry, serde::version<1>, serde::compat_version<1>> {
+        uint64_t identity_hi{0};
+        uint64_t identity_lo{0};
         model::timestamp timestamp;
 
-        auto serde_fields() { return std::tie(key, timestamp); }
+        auto serde_fields() {
+            return std::tie(identity_hi, identity_lo, timestamp);
+        }
     };
 
     struct state_snapshot
       : serde::envelope<
           state_snapshot,
-          serde::version<0>,
-          serde::compat_version<0>> {
+          serde::version<1>,
+          serde::compat_version<1>> {
         int64_t window_ms{0};
         int64_t generation{0};
         model::timestamp max_timestamp{model::timestamp::min()};
@@ -129,6 +141,9 @@ private:
     to_snapshot(const dedup_window_filter&, int64_t generation);
     static void restore_snapshot(
       dedup_window_filter&, int64_t& generation, const state_snapshot&);
+    /// Deserialize and install a snapshot, or reset to an empty index if the
+    /// buffer cannot be read. Returns whether the snapshot was applied.
+    bool try_restore_snapshot(iobuf);
 
     void adopt_config(
       std::chrono::milliseconds window,

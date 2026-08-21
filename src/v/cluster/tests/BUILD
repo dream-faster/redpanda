@@ -1703,6 +1703,7 @@ redpanda_cc_gtest(
     cpu = 1,
     deps = [
         "//src/v/bytes:iobuf",
+        "//src/v/bytes:iobuf_parser",
         "//src/v/cluster",
         "//src/v/model",
         "//src/v/model:batch_builder",
@@ -1722,6 +1723,7 @@ redpanda_cc_gtest(
     ],
     cpu = 3,
     deps = [
+        "//src/v/bytes",
         "//src/v/cluster",
         "//src/v/cluster:logger",
         "//src/v/config",
