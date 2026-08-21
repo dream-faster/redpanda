@@ -4,6 +4,9 @@
 # Not intended to be merged.
 name: dedup-test-run
 on:
+  push:
+    branches:
+      - 'claude/dedup-perf-testrun'
   workflow_dispatch:
 
 jobs:
