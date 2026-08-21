@@ -49,15 +49,21 @@ bool dedup_window_filter::is_duplicate(
     if (it != _map.end()) {
         auto stored_ts = it->second;
         auto diff_ms = ts.value() - stored_ts.value();
-        if (diff_ms <= _window.count()) {
+        if (diff_ms >= -_window.count() && diff_ms <= _window.count()) {
             return true;
         }
         _max_ts = std::max(_max_ts, ts);
-        it->second = ts;
+        // Idempotent max-wins, matching populate(): never let a speculative,
+        // possibly out-of-order classification regress the stored timestamp
+        // below what a later deterministic apply() would compute for the
+        // same identity.
+        if (ts.value() > stored_ts.value()) {
+            it->second = ts;
+        }
         if (undo) {
             undo->entries.push_back(
               {.key = std::move(identity_bytes),
-               .applied_timestamp = ts,
+               .applied_timestamp = it->second,
                .previous_timestamp = stored_ts});
         }
         return false;

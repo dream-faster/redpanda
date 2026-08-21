@@ -123,6 +123,30 @@ TEST(DedupWindowFilter, FirstWinsWithinWindow) {
     EXPECT_EQ(record_count(*r3), 1);
 }
 
+// A record older than the stored timestamp for its key, but by more than one
+// window, must not be treated as a duplicate: a single future-timestamped
+// (clock-skewed) record for a key must not black-hole every subsequent
+// correctly-timestamped record for that key.
+TEST(DedupWindowFilter, RecordOlderThanStoredByMoreThanWindowIsNotDuplicate) {
+    cluster::dedup_window_filter f(1000ms);
+
+    // A clock-skewed record pins "k" far in the future.
+    auto skewed = f.filter(make_batch("k", "v1", ts(1'000'000)));
+    ASSERT_TRUE(skewed.has_value());
+
+    // A correctly-timestamped record for "k", far outside the window on the
+    // *older* side of the stored timestamp, must still be admitted.
+    auto later = f.filter(make_batch("k", "v2", ts(2000)));
+    ASSERT_TRUE(later.has_value());
+    EXPECT_EQ(record_count(*later), 1);
+
+    // The stored timestamp is max-wins: it does not regress below the
+    // clock-skewed value, so a true duplicate of the skewed record is still
+    // caught.
+    auto duplicate = f.filter(make_batch("k", "v3", ts(1'000'500)));
+    EXPECT_FALSE(duplicate.has_value());
+}
+
 // Fully-deduplicated records are true state no-ops. In particular, a
 // future-timestamp duplicate must not advance the eviction clock because
 // nothing is written to the log for an all-dropped request.
