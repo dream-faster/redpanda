@@ -84,6 +84,24 @@ Guarantees (unchanged from the current branch):
   entries are therefore durable when the duplicate is acknowledged. This
   closes the "acked duplicate, introducing write lost" hole without per-key
   dependency tracking.
+  **Known gap:** the wait is implemented against
+  `visible_offset_monitor()`/`last_visible_index()`, not
+  `committed_offset()`. Under relaxed-consistency traffic on the same
+  partition (e.g. a write-caching topic), `consensus::maybe_update_last_visible_index()`
+  can advance `last_visible_index()` to `_majority_replicated_index` --
+  majority-*replicated*, not flush-durable -- once no quorum-with-flush write
+  is pending, whereas `committed_offset()` stays clamped to
+  `_flushed_offset`. So `last_visible_index()` can exceed the true durable
+  commit point, meaning the duplicate can still be acked before the
+  introducing write is actually durable in that scenario -- the gap G5
+  claims to close. A correct fix needs a genuinely commit-based wait
+  (`raft::event_manager::wait()`, reachable via `consensus::events()`,
+  waits for the *commit* index) rather than the visibility monitor; doing
+  that safely also needs a real `ss::abort_source` to pass in; unlike
+  `offset_monitor::wait()`'s optional one, `event_manager::wait()` requires
+  one by reference, and no such source is currently threaded through
+  `dedup_stm::do_replicate()`'s call site. Left as a known gap rather than a
+  guessed-at fix to Raft's visibility/commit distinction.
 - **G6** — Idempotent and transactional producers bypass the filter
   (unchanged). Null-key records are always admitted and never indexed
   (unchanged).
@@ -121,6 +139,18 @@ Best-effort boundaries (all bounded by one dedup window, all documented):
   near the cutoff can shift the resolved start offset by a similar margin
   (see B5), which the existing eviction sweep in `do_apply()`'s replay
   absorbs the same way it absorbs window-edge slop during normal operation.
+  **Known gap:** the bounded replay window applies the *current* generation
+  and key header uniformly to every batch it replays (`do_apply()` reads
+  `ntp_config` fresh per call, not per historical offset). If the identity
+  source changed within the replayed window -- key to header, or one header
+  to another -- a restart can re-index pre-change records under the
+  post-change identity source, which is exactly what the `dedup_generation`
+  bump on that config change was meant to prevent (see B4). The log carries
+  no per-offset record of which generation/header was in effect when a
+  batch was originally written, so closing this fully would mean persisting
+  that boundary somewhere queryable at replay time -- a real design change,
+  not a small fix. Bounded to one dedup window's worth of possible
+  mis-indexing, consistent with B4's own framing, but not eliminated by it.
 - **B4** — A `dedup_generation` bump clears the index on each replica as its
   config propagates, not atomically at a log offset. Replicas converge within
   config propagation delay; residual divergence is again window-bounded.
@@ -140,6 +170,36 @@ Best-effort boundaries (all bounded by one dedup window, all documented):
   rather than being purely a function of the log. Bounded by one dedup
   window, consistent with the feature's overall best-effort framing (point 3
   above).
+- **B6** — Increasing `dedup_window_ms` on a live topic does not retroactively
+  widen coverage. `topic_table`'s generation-bump logic only bumps
+  `dedup_generation` on an enabled→disabled transition or an identity-source
+  change (see `topic_table.cc`'s `was_enabled`/`is_enabled`/
+  `identity_source_changed` matrix); a positive-to-larger-positive window
+  change bumps neither. Entries already evicted under the old, narrower
+  window are gone from `_map` and are not reconstructed, so duplicates that
+  would fall inside the *new*, larger window are admitted (not caught) until
+  a restart replays roughly the new window's worth of history (see B3) and
+  rebuilds fuller coverage. Bumping the generation on every window change
+  isn't a fix by itself -- `adopt_config()`'s generation-changed path only
+  `clear()`s the index, which would throw away entries the *old*, narrower
+  window had already caught, making coverage strictly worse until the next
+  restart. A real fix needs the same kind of on-demand catch-up replay this
+  PR's B3 fix does at startup, but triggered by a live config change instead
+  of STM (re)instantiation -- a genuine feature addition, not a small patch.
+- **B7** — Enabling dedup changes which STM mediates the write path for
+  *all* plain (non-idempotent, non-transactional) produces on the
+  partition: `partition.cc`'s routing sends them to
+  `dedup_stm::replicate_in_stages` instead of `rm_stm::do_replicate` (the
+  path they take when dedup is off, or when they're transactional/
+  idempotent). This bypasses `rm_stm`'s `_state_lock` read-lock and gate
+  unit, which fence plain writes while `rm_stm` is resetting producer state
+  or applying a Raft snapshot. Whether this is safe depends on `rm_stm`
+  invariants that this RFC's design didn't originally account for;
+  wrapping `dedup_stm`'s replicate call in `rm_stm`'s read lock (or
+  restructuring the routing so dedup-filtered batches still pass through
+  `rm_stm`) needs verification against `rm_stm`'s locking model before
+  changing it, since a wrong fix here risks a deadlock or a fencing hole
+  that's harder to detect than the status quo.
 
 # Design
 
