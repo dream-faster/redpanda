@@ -57,14 +57,23 @@ public:
 
     size_t map_size() const { return _state.map_size(); }
 
-    /// Partitions without dedup configured skip log recovery entirely.
-    /// Partitions *with* dedup configured replay the whole log from the
-    /// start on every STM (re)instantiation (e.g. a broker restart), not
-    /// just from the point dedup was enabled -- there is no way to resume
-    /// recovery from a historical offset, so a restart after enabling dedup
-    /// on a topic with pre-existing data retroactively indexes that older
-    /// data too. See the log-derived dedup RFC, boundary B3.
+    /// Partitions without dedup configured skip log recovery entirely; see
+    /// get_initial_recovery_start_offset() for the dedup-configured case,
+    /// which takes precedence over this policy.
     raft::stm_initial_recovery_policy get_initial_recovery_policy() const final;
+
+    /// Bounds recovery to approximately one dedup window instead of the
+    /// whole log: records older than `now - dedup_window_ms` can never
+    /// again cause a drop (see dedup_window_filter's eviction comment), so
+    /// replaying them just to immediately evict them wastes the read, the
+    /// decompression, and -- worse -- can transiently hold a full topic
+    /// history in memory while recovery catches up. Looks up the log offset
+    /// nearest that cutoff via a local timestamp index query (the same
+    /// mechanism Kafka's ListOffsets uses) and starts recovery there.
+    /// Returns std::nullopt when dedup isn't configured, deferring to
+    /// get_initial_recovery_policy()'s skip_to_end.
+    ss::future<std::optional<model::offset>>
+    get_initial_recovery_start_offset() final;
 
     ss::future<iobuf> take_raft_snapshot(model::offset) final;
 

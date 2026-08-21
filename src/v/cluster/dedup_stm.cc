@@ -15,6 +15,7 @@
 #include "model/namespace.h"
 #include "model/record_batch_types.h"
 #include "raft/consensus.h"
+#include "storage/types.h"
 
 #include <seastar/core/with_timeout.hh>
 #include <seastar/coroutine/as_future.hh>
@@ -32,9 +33,35 @@ dedup_stm::dedup_stm(
 
 raft::stm_initial_recovery_policy
 dedup_stm::get_initial_recovery_policy() const {
-    return _raft->log()->config().dedup_window_ms()
-             ? raft::stm_initial_recovery_policy::read_everything
-             : raft::stm_initial_recovery_policy::skip_to_end;
+    // Only reached when get_initial_recovery_start_offset() returned
+    // std::nullopt, i.e. dedup isn't configured: nothing to recover.
+    return raft::stm_initial_recovery_policy::skip_to_end;
+}
+
+ss::future<std::optional<model::offset>>
+dedup_stm::get_initial_recovery_start_offset() {
+    auto window = _raft->log()->config().dedup_window_ms();
+    if (!window) {
+        co_return std::nullopt;
+    }
+    const auto log_offsets = _raft->log()->offsets();
+    if (log_offsets.start_offset > log_offsets.committed_offset) {
+        // Empty log: nothing to bound.
+        co_return std::nullopt;
+    }
+    const auto cutoff = model::timestamp(
+      model::timestamp::now().value() - window->count());
+    auto result = co_await _raft->timequery(storage::timequery_config{
+      log_offsets.start_offset,
+      cutoff,
+      log_offsets.committed_offset,
+      model::record_batch_type::raft_data});
+    if (!result) {
+        // Nothing retained is within the window (e.g. the whole log
+        // predates it): nothing to index, skip straight to the tail.
+        co_return model::next_offset(log_offsets.committed_offset);
+    }
+    co_return result->offset;
 }
 
 dedup_stm::state_snapshot

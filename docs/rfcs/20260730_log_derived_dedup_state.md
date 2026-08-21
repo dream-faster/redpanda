@@ -103,15 +103,24 @@ Best-effort boundaries (all bounded by one dedup window, all documented):
 - **B3** — Enabling dedup on an existing topic starts the index from the
   enable point *while the partition keeps running without a restart*:
   `do_apply()` only calls `populate()` once dedup is configured, so older
-  batches applied before that point are never retroactively indexed. This
-  does **not** hold across a restart: `get_initial_recovery_policy()` decides
-  once, at STM (re)instantiation, whether to replay the whole log
-  (`read_everything`) based only on whether dedup is *currently* configured —
-  it has no notion of the offset dedup was actually enabled at. A broker
-  restart (or any other STM re-instantiation) on a topic that already had
-  dedup enabled therefore replays the entire log from the start, indexing
-  records written before enablement too. This is not window-bounded like the
-  other boundaries here: it can retroactively index a topic's full history.
+  batches applied before that point are never retroactively indexed. Across a
+  restart (or any other STM re-instantiation), `get_initial_recovery_policy()`
+  alone would have no notion of the offset dedup was actually enabled at —
+  `read_everything` unconditionally means "replay from offset 0" (see
+  `state_machine_manager::apply_initial_recovery_policy()`), which does not
+  fit in a shard's memory budget for a large topic with a long retention
+  window. `get_initial_recovery_start_offset()` (checked first, ahead of the
+  read_everything/skip_to_end policy) closes this: it resolves the log offset
+  nearest `now - dedup_window_ms` via a local timestamp index lookup
+  (`consensus::timequery`, the same mechanism Kafka's ListOffsets uses) and
+  starts recovery there instead of at offset 0. Recovery after a restart is
+  therefore bounded to approximately one dedup window, matching the
+  live-partition case above, rather than a topic's full retained history.
+  Like any timestamp-based offset lookup, this trusts client-supplied
+  `CreateTime` to be roughly monotonic with offset; out-of-order timestamps
+  near the cutoff can shift the resolved start offset by a similar margin
+  (see B5), which the existing eviction sweep in `do_apply()`'s replay
+  absorbs the same way it absorbs window-edge slop during normal operation.
 - **B4** — A `dedup_generation` bump clears the index on each replica as its
   config propagates, not atomically at a log offset. Replicas converge within
   config propagation delay; residual divergence is again window-bounded.
