@@ -83,25 +83,21 @@ Guarantees (unchanged from the current branch):
   offset to reach the current dirty offset before acking. The introducing
   entries are therefore durable when the duplicate is acknowledged. This
   closes the "acked duplicate, introducing write lost" hole without per-key
-  dependency tracking.
-  **Known gap:** the wait is implemented against
-  `visible_offset_monitor()`/`last_visible_index()`, not
-  `committed_offset()`. Under relaxed-consistency traffic on the same
-  partition (e.g. a write-caching topic), `consensus::maybe_update_last_visible_index()`
-  can advance `last_visible_index()` to `_majority_replicated_index` --
-  majority-*replicated*, not flush-durable -- once no quorum-with-flush write
-  is pending, whereas `committed_offset()` stays clamped to
-  `_flushed_offset`. So `last_visible_index()` can exceed the true durable
-  commit point, meaning the duplicate can still be acked before the
-  introducing write is actually durable in that scenario -- the gap G5
-  claims to close. A correct fix needs a genuinely commit-based wait
-  (`raft::event_manager::wait()`, reachable via `consensus::events()`,
-  waits for the *commit* index) rather than the visibility monitor; doing
-  that safely also needs a real `ss::abort_source` to pass in; unlike
-  `offset_monitor::wait()`'s optional one, `event_manager::wait()` requires
-  one by reference, and no such source is currently threaded through
-  `dedup_stm::do_replicate()`'s call site. Left as a known gap rather than a
-  guessed-at fix to Raft's visibility/commit distinction.
+  dependency tracking. The wait is against `consensus::events()`
+  (`raft::event_manager::wait()`), which waits on the real commit index --
+  not `visible_offset_monitor()`/`last_visible_index()`, which can advance
+  past the true flush-durable commit point under relaxed-consistency
+  traffic on the same partition (`consensus::maybe_update_last_visible_index()`
+  can raise `last_visible_index()` to `_majority_replicated_index` --
+  majority-*replicated*, not flush-durable -- once no quorum-with-flush
+  write is pending, whereas `committed_offset()` stays clamped to
+  `_flushed_offset`). `events().wait()` takes an `ss::abort_source&` by
+  reference rather than `offset_monitor::wait()`'s optional one; `opts.as`
+  (`do_replicate`'s own `replicate_options::as`) is used when the caller
+  supplied one, falling back to a throwaway, never-triggered local
+  `abort_source` otherwise -- equivalent to what passing `std::nullopt`
+  through the optional-typed wait already meant, since the timeout is
+  still enforced independently of the abort source either way.
 - **G6** — Idempotent and transactional producers bypass the filter
   (unchanged). Null-key records are always admitted and never indexed
   (unchanged).

@@ -111,6 +111,24 @@ void dedup_stm::adopt_config(
 }
 
 ss::future<> dedup_stm::do_apply(const model::record_batch& batch) {
+    // Checked first, ahead of every other early return below: the STM
+    // manager dispatches *every* committed batch on the partition to
+    // do_apply (not just plain raft_data ones), so this is the one point
+    // guaranteed to run regardless of what kind of traffic the partition
+    // carries. adopt_config() (the only other caller of _state.clear()) is
+    // never reached while dedup stays disabled, so a partition receiving
+    // only control, transactional, or idempotent traffic -- or no traffic
+    // at all -- after dedup is disabled would otherwise never release the
+    // index. map_size() guards against clearing (and resetting _max_ts) on
+    // every batch once already empty.
+    const auto& cfg = _raft->log()->config();
+    auto window = cfg.dedup_window_ms();
+    if (!window) {
+        if (_state.map_size() > 0) {
+            _state.clear();
+        }
+        co_return;
+    }
     if (batch.header().type != model::record_batch_type::raft_data) {
         co_return;
     }
@@ -130,20 +148,6 @@ ss::future<> dedup_stm::do_apply(const model::record_batch& batch) {
         // the index against an ordinary record with the same identity,
         // even though the aborted record is never visible to
         // read_committed consumers.
-        co_return;
-    }
-    const auto& cfg = _raft->log()->config();
-    auto window = cfg.dedup_window_ms();
-    if (!window) {
-        // adopt_config() (the only place that clears _state) is never
-        // reached while dedup stays disabled, so release the index here
-        // instead of holding a stale topic's worth of entries in memory --
-        // and serializing them into every snapshot -- until dedup happens
-        // to be re-enabled. map_size() guards against clearing (and
-        // resetting _max_ts) on every batch once already empty.
-        if (_state.map_size() > 0) {
-            _state.clear();
-        }
         co_return;
     }
     adopt_config(*window, cfg.dedup_generation(), cfg.dedup_key_header());
@@ -269,9 +273,21 @@ ss::future<result<kafka_result>> dedup_stm::do_replicate(
         enqueued->set_value();
         if (opts.consistency == raft::consistency_level::quorum_ack) {
             const auto fence = _raft->dirty_offset();
-            auto waited = co_await ss::coroutine::as_future(
-              _raft->visible_offset_monitor().wait(
-                fence, model::timeout_clock::now() + _sync_timeout(), opts.as));
+            // Commit-based, not visibility-based: last_visible_index() can
+            // advance past the true flush-durable commit point under
+            // relaxed-consistency traffic on the same partition (see
+            // maybe_update_last_visible_index()), which would let this wait
+            // resolve -- and the duplicate get acked -- before the
+            // introducing write is actually durable. events().wait() waits
+            // on the real commit index. Fall back to a throwaway,
+            // never-triggered abort_source when the caller didn't supply
+            // one, matching what passing std::nullopt to the previous
+            // optional-abort_source wait already meant: no external
+            // cancellation signal, timeout still enforced below.
+            ss::abort_source local_as;
+            ss::abort_source& as = opts.as ? opts.as->get() : local_as;
+            auto waited = co_await ss::coroutine::as_future(_raft->events().wait(
+              fence, model::timeout_clock::now() + _sync_timeout(), as));
             if (waited.failed()) {
                 auto ex = waited.get_exception();
                 vlog(
