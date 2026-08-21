@@ -51,11 +51,12 @@ dedup_stm::get_initial_recovery_start_offset() {
     }
     const auto cutoff = model::timestamp(
       model::timestamp::now().value() - window->count());
-    auto result = co_await _raft->timequery(storage::timequery_config{
-      log_offsets.start_offset,
-      cutoff,
-      log_offsets.committed_offset,
-      model::record_batch_type::raft_data});
+    auto result = co_await _raft->timequery(
+      storage::timequery_config{
+        log_offsets.start_offset,
+        cutoff,
+        log_offsets.committed_offset,
+        model::record_batch_type::raft_data});
     if (!result) {
         // Nothing retained is within the window (e.g. the whole log
         // predates it): nothing to index, skip straight to the tail.

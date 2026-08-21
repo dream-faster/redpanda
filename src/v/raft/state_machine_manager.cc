@@ -300,8 +300,10 @@ ss::future<> state_machine_manager::apply_initial_recovery_policy() {
             continue;
         }
         // Stm needs initial recovery
-        if (auto bounded = co_await entry->stm->get_initial_recovery_start_offset();
-            bounded) {
+        if (
+          auto bounded
+          = co_await entry->stm->get_initial_recovery_start_offset();
+          bounded) {
             vlog(
               _log.info,
               "Applying bounded initial recovery offset {} for '{}' state "
