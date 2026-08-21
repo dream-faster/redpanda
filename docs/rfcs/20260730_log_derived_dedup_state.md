@@ -130,6 +130,16 @@ Best-effort boundaries (all bounded by one dedup window, all documented):
   starts recovery there instead of at offset 0. Recovery after a restart is
   therefore bounded to approximately one dedup window, matching the
   live-partition case above, rather than a topic's full retained history.
+  `timequery()`'s result can land in the middle of a multi-record batch
+  (`storage::batch_timequery` walks into a batch for the first record at or
+  after the target timestamp), but `state_machine_manager`'s apply loop
+  requires `next()` to sit exactly on a batch's base offset -- an unaligned
+  `next()` reads the containing batch, sees its base offset below `next()`,
+  and permanently skips it (`batch_applicator::apply_to_stm()`), stalling
+  the STM. The resolved offset is rounded down to the nearest indexed batch
+  base offset (`log::index_batch_base_offset_lower_bound()`) before being
+  handed to `set_next()`, falling back to the log's start offset -- always a
+  valid boundary -- when nothing is indexed yet.
   Like any timestamp-based offset lookup, this trusts client-supplied
   `CreateTime` to be roughly monotonic with offset; out-of-order timestamps
   near the cutoff can shift the resolved start offset by a similar margin

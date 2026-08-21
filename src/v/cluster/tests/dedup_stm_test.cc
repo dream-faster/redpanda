@@ -245,6 +245,60 @@ TEST_F_CORO(dedup_stm_fixture, state_survives_local_snapshot_restart) {
     ASSERT_EQ_CORO(get_stm<0>(node(leader))->map_size(), 1);
 }
 
+// get_initial_recovery_start_offset() resolves a bounded recovery offset via
+// timequery(), which can land in the middle of a multi-record batch (see
+// storage::batch_timequery, which walks into a batch looking for the first
+// record at or after the target timestamp). The STM manager's apply loop
+// requires next() to land exactly on a batch's base offset:
+// batch_applicator::apply_to_stm() treats stm->next() > batch.base_offset()
+// as "already applied" and skips the batch without ever advancing next()
+// past it -- if get_initial_recovery_start_offset() ever returns an
+// unaligned offset, the STM is stuck there permanently and produces to that
+// partition never complete.
+TEST_F_CORO(dedup_stm_fixture, bounded_recovery_survives_mid_batch_timequery) {
+    co_await initialize_state_machines();
+    set_dedup_config(1000ms);
+    auto leader = co_await wait_for_leader(10s);
+
+    // One batch, two records: the first (t0 = now-5000) is meant to fall
+    // outside the eventual window, the second (t1 = now-1000) inside it, so
+    // timequery() must resolve to the second record's offset -- the middle
+    // of this batch, never its base.
+    const auto t0 = model::timestamp(model::timestamp::now().value() - 5000);
+    constexpr int64_t t1_delta = 4000;
+    model::batch_builder builder;
+    builder.set_batch_type(model::record_batch_type::raft_data);
+    builder.set_batch_timestamp(model::timestamp_type::create_time, t0);
+    builder.add_record(
+      model::record({}, 0, 0, iobuf::from("a"), iobuf::from("v1"), {}));
+    builder.add_record(model::record(
+      {}, t1_delta, 1, iobuf::from("b"), iobuf::from("v2"), {}));
+    auto batch = std::move(builder).build_sync();
+
+    auto stages = node(leader).raft()->replicate_in_stages(
+      std::move(batch),
+      raft::replicate_options(raft::consistency_level::quorum_ack));
+    co_await std::move(stages.request_enqueued);
+    auto replicated = co_await std::move(stages.replicate_finished);
+    ASSERT_TRUE_CORO(replicated.has_value());
+    co_await wait_for_stms(node(leader).raft()->committed_offset());
+
+    // window=3000ms puts the cutoff (now - 3000, evaluated at restart) a
+    // couple of seconds after t0 and a couple before t1, comfortably inside
+    // the margin either side even with test overhead.
+    co_await stop_and_recreate_nodes();
+    set_dedup_config(3000ms);
+    co_await start_nodes();
+
+    leader = co_await wait_for_leader(10s);
+    // If get_initial_recovery_start_offset() had returned the unaligned,
+    // mid-batch offset, the STM would never make progress and this produce
+    // would time out (sync() never returns) instead of completing.
+    auto after_restart = co_await produce(
+      leader, "c", "v3", model::timestamp(model::timestamp::now().value()));
+    ASSERT_EQ_CORO(after_restart.replicated_record_count, -1);
+}
+
 TEST_F_CORO(dedup_stm_fixture, generation_change_invalidates_old_state) {
     co_await initialize_state_machines();
     set_dedup_config(1000ms, 0);

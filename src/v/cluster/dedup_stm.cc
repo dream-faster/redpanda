@@ -62,7 +62,22 @@ dedup_stm::get_initial_recovery_start_offset() {
         // predates it): nothing to index, skip straight to the tail.
         co_return model::next_offset(log_offsets.committed_offset);
     }
-    co_return result->offset;
+    // timequery() can resolve to an offset in the middle of a multi-record
+    // batch (see storage::batch_timequery, which walks into a batch to find
+    // the first record at or after the target timestamp), but the STM
+    // manager's apply loop requires next() to land exactly on a batch's
+    // base offset: batch_applicator::apply_to_stm() treats
+    // stm->next() > batch.base_offset() as "already applied" and skips the
+    // batch without ever advancing next() past it, permanently stalling
+    // this STM if next() ends up mid-batch. Round down to the nearest
+    // indexed batch base offset at or before the resolved offset -- never
+    // past it, since replaying a little more than exactly one window is
+    // harmless but skipping into the window wouldn't be -- falling back to
+    // the log's start offset (itself always a valid batch boundary) if
+    // nothing is indexed yet.
+    auto aligned = _raft->log()->index_batch_base_offset_lower_bound(
+      result->offset);
+    co_return aligned.value_or(log_offsets.start_offset);
 }
 
 dedup_stm::state_snapshot
