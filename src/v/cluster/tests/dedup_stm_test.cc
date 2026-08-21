@@ -271,8 +271,8 @@ TEST_F_CORO(dedup_stm_fixture, bounded_recovery_survives_mid_batch_timequery) {
     builder.set_batch_timestamp(model::timestamp_type::create_time, t0);
     builder.add_record(
       model::record({}, 0, 0, iobuf::from("a"), iobuf::from("v1"), {}));
-    builder.add_record(model::record(
-      {}, t1_delta, 1, iobuf::from("b"), iobuf::from("v2"), {}));
+    builder.add_record(
+      model::record({}, t1_delta, 1, iobuf::from("b"), iobuf::from("v2"), {}));
     auto batch = std::move(builder).build_sync();
 
     auto stages = node(leader).raft()->replicate_in_stages(
