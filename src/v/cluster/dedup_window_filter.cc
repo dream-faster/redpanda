@@ -272,6 +272,14 @@ void dedup_window_filter::maybe_evict() {
     // entries). Scaling the interval with the map keeps that cost flat: a
     // sweep of N entries happens at most once per N/evict_size_divisor
     // insertions, i.e. evict_size_divisor scanned entries per insertion.
+    //
+    // The cost is bounded slack: expired entries now linger for up to
+    // 1/evict_size_divisor of the index's worth of insertions rather than a
+    // flat 10k, so the map can carry that fraction above its steady-state
+    // working set. Bounding the sweep's CPU is worth bounded extra memory --
+    // and expired entries can never change a dedup decision, only occupy
+    // space. take_local_snapshot()/take_raft_snapshot() sweep unconditionally
+    // anyway, so a snapshot never carries the slack.
     const auto interval = std::max(
       min_evict_interval, _map.size() / evict_size_divisor);
     if (++_inserts_since_evict < interval) {
