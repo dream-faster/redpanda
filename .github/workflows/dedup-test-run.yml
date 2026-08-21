@@ -1,0 +1,65 @@
+---
+# Throwaway: compiles and runs the dedup test targets, which no workflow in
+# this repository otherwise builds (docker-build only builds the binary).
+# Not intended to be merged.
+name: dedup-test-run
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubicloud-standard-4
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Prepare build environment
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          sudo docker image prune --all --force || true
+          sudo fallocate -l 16G /mnt/swapfile
+          sudo chmod 600 /mnt/swapfile
+          sudo mkswap /mnt/swapfile
+          sudo swapon /mnt/swapfile
+          sudo mkdir -p /mnt/bazel-output
+          sudo chown "$(id -u):$(id -g)" /mnt/bazel-output
+          df -h
+          free -h
+
+      - name: Install Bazelisk
+        run: |
+          mkdir -p ~/bin
+          wget -O ~/bin/bazel https://github.com/bazelbuild/bazelisk/releases/latest/download/bazelisk-linux-amd64
+          chmod +x ~/bin/bazel
+          echo "$HOME/bin" >> $GITHUB_PATH
+
+      - name: Install system dependencies
+        run: sudo ./bazel/install-deps.sh
+
+      # Same key as docker-build so the warm cache from that run is reused.
+      - name: Mount Bazel cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/bazel
+            ~/.cache/bazelisk
+          key: bazel-${{ runner.os }}-${{ hashFiles('.bazelversion', 'MODULE.bazel', 'MODULE.bazel.lock') }}
+          restore-keys: |
+            bazel-${{ runner.os }}-
+
+      - name: Build and run the dedup tests
+        run: |
+          unset CI
+          bazel \
+            --output_base=/mnt/bazel-output \
+            test \
+            --config=release \
+            --spawn_strategy=sandboxed,local \
+            --verbose_failures \
+            --lockfile_mode=update \
+            '--local_resources=memory=HOST_RAM*.8' \
+            --test_output=all \
+            //src/v/cluster/tests:dedup_window_filter_test \
+            //src/v/cluster/tests:dedup_stm_test
