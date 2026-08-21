@@ -114,46 +114,49 @@ dedup_window_filter::filter_request(model::record_batch batch) {
     const auto base_ts = header.first_timestamp;
     const int32_t total = readable.record_count();
 
-    // One pass over the records, sharing rather than copying them.
+    // Walk the records by sharing them rather than copying.
     // record_batch::for_each_record() yields records through
     // record_batch_copy_iterator, which deep-copies every key, value, and
     // header of every record; record_batch_iterator refcounts them instead.
-    // That matters here because this runs on every plain produce.
+    // That matters because this runs on every plain produce.
     //
     // Classification is deferred until the whole batch has been inspected:
     // in header mode one record missing the configured header rejects the
     // entire request, and the index must not have been mutated by then.
-    // Digesting each identity up front is what makes deferring cheap -- a
-    // digest is 16 trivially copyable bytes, so nothing needs to hold the
-    // identity iobufs alive to classify later.
+    // Digesting each identity up front is what makes deferring cheap -- what
+    // has to survive the pass is 32 bytes per record, not the records
+    // themselves, whose iobufs would otherwise pin a multiple of the batch
+    // size for the duration of the call.
     struct classified {
-        model::record record;
-        std::optional<dedup_identity_digest> identity;
+        dedup_identity_digest identity;
         model::timestamp timestamp;
+        bool has_identity{false};
         bool dropped{false};
     };
     chunked_vector<classified> records;
     records.reserve(static_cast<size_t>(total));
 
-    auto it = model::record_batch_iterator::create(readable.share());
-    while (it.has_next()) {
-        auto r = it.next();
-        const iobuf* identity = nullptr;
-        const auto lookup = dedup_identity_for_record(
-          r, _key_header, &identity);
-        if (lookup == dedup_identity_lookup::missing_header) {
-            // Nothing has been mutated yet, so the whole request can be
-            // rejected without unwinding anything.
-            return {.missing_required_header = true};
+    {
+        auto it = model::record_batch_iterator::create(readable.share());
+        while (it.has_next()) {
+            auto r = it.next();
+            const iobuf* identity = nullptr;
+            const auto lookup = dedup_identity_for_record(
+              r, _key_header, &identity);
+            if (lookup == dedup_identity_lookup::missing_header) {
+                // Nothing has been mutated yet, so the whole request can be
+                // rejected without unwinding anything.
+                return {.missing_required_header = true};
+            }
+            classified c{
+              .timestamp = model::timestamp{
+                base_ts.value() + r.timestamp_delta()}};
+            if (lookup == dedup_identity_lookup::identity) {
+                c.identity = dedup_digest_of(*identity);
+                c.has_identity = true;
+            }
+            records.push_back(c);
         }
-        std::optional<dedup_identity_digest> digest;
-        if (lookup == dedup_identity_lookup::identity) {
-            digest = dedup_digest_of(*identity);
-        }
-        // Read the delta before moving the record out.
-        const model::timestamp ts{base_ts.value() + r.timestamp_delta()};
-        records.push_back(
-          {.record = std::move(r), .identity = digest, .timestamp = ts});
     }
 
     // Classify in record order, so two records sharing an identity within
@@ -163,7 +166,8 @@ dedup_window_filter::filter_request(model::record_batch batch) {
     undo.entries.reserve(static_cast<size_t>(total));
     int32_t kept = 0;
     for (auto& c : records) {
-        c.dropped = c.identity && is_duplicate(*c.identity, c.timestamp, &undo);
+        c.dropped = c.has_identity
+                    && is_duplicate(c.identity, c.timestamp, &undo);
         if (!c.dropped) {
             ++kept;
         }
@@ -199,12 +203,17 @@ dedup_window_filter::filter_request(model::record_batch batch) {
         builder.set_control();
     }
 
+    // Second sharing pass, taken only when something was actually dropped.
+    // Re-parsing is cheap next to holding every record's iobufs alive across
+    // the classification above, and the fast path above never reaches here.
     int32_t output_offset_delta = 0;
-    for (auto& c : records) {
-        if (c.dropped) {
+    size_t idx = 0;
+    auto rebuild = model::record_batch_iterator::create(readable.share());
+    while (rebuild.has_next()) {
+        auto r = rebuild.next();
+        if (records[idx++].dropped) {
             continue;
         }
-        auto& r = c.record;
         builder.add_record(
           model::record(
             r.attributes(),
