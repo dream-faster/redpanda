@@ -402,7 +402,9 @@ raft::replicate_stages replicated_partition::replicate(
               return ret_t(r.error());
           }
           return ret_t(
-            raft::replicate_result{model::offset(r.value().last_offset())});
+            raft::replicate_result{
+              .last_offset = model::offset(r.value().last_offset()),
+              .replicated_record_count = r.value().replicated_record_count});
       });
     return out;
 }

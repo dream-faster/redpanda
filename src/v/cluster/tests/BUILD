@@ -1693,3 +1693,61 @@ redpanda_cc_gtest(
         "@seastar",
     ],
 )
+
+redpanda_cc_gtest(
+    name = "dedup_window_filter_test",
+    timeout = "short",
+    srcs = [
+        "dedup_window_filter_test.cc",
+    ],
+    cpu = 1,
+    deps = [
+        "//src/v/bytes:iobuf",
+        "//src/v/bytes:iobuf_parser",
+        "//src/v/cluster",
+        "//src/v/model",
+        "//src/v/model:batch_builder",
+        "//src/v/model:batch_compression",
+        "//src/v/storage:record_batch_builder",
+        "//src/v/test_utils:gtest",
+        "@fmt",
+        "@googletest//:gtest",
+        "@seastar",
+    ],
+)
+
+redpanda_cc_gtest(
+    name = "dedup_stm_test",
+    timeout = "short",
+    srcs = [
+        "dedup_stm_test.cc",
+    ],
+    cpu = 3,
+    deps = [
+        "//src/v/bytes",
+        "//src/v/cluster",
+        "//src/v/cluster:logger",
+        "//src/v/config",
+        "//src/v/model:batch_builder",
+        "//src/v/raft",
+        "//src/v/raft/tests:raft_fixture",
+        "//src/v/storage:record_batch_builder",
+        "//src/v/test_utils:gtest",
+        "@googletest//:gtest",
+        "@seastar",
+    ],
+)
+
+redpanda_cc_bench(
+    name = "dedup_window_filter_rpbench",
+    srcs = ["dedup_window_filter_bench.cc"],
+    deps = [
+        "//src/v/bytes:iobuf",
+        "//src/v/cluster",
+        "//src/v/model",
+        "//src/v/random:generators",
+        "//src/v/storage:record_batch_builder",
+        "@seastar",
+        "@seastar//:benchmark",
+    ],
+)

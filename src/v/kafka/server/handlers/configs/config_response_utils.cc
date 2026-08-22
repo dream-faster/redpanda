@@ -1220,6 +1220,41 @@ config_response_container_t make_topic_configs(
         config::shard_local_cfg().default_redpanda_storage_mode.desc()),
       &describe_as_string<model::redpanda_storage_mode>);
 
+    add_topic_config_if_requested(
+      config_keys,
+      result,
+      topic_property_dedup_window_ms,
+      std::optional<std::chrono::milliseconds>{},
+      topic_property_dedup_window_ms,
+      hide_disabled_tristate(
+        topic_properties.dedup_window_ms,
+        std::optional<std::chrono::milliseconds>{}),
+      include_synonyms,
+      maybe_make_documentation(
+        include_documentation,
+        "Windowed first-wins deduplication window in milliseconds. Applied at "
+        "produce time before replication: a record is dropped if its key was "
+        "already produced within the window. This is best-effort: it does not "
+        "apply to idempotent or transactional produce or to records without a "
+        "key. Deduplication state is replicated and survives leadership "
+        "changes. Set to -1 to disable."));
+
+    add_topic_config_if_requested(
+      config_keys,
+      result,
+      topic_property_dedup_key_header,
+      ss::sstring{},
+      topic_property_dedup_key_header,
+      topic_properties.dedup_key_header,
+      include_synonyms,
+      maybe_make_documentation(
+        include_documentation,
+        "Name of the record header whose value is used as the deduplication "
+        "identity instead of the Kafka record key. Unset (the default) "
+        "deduplicates on the record key."),
+      &describe_as_string<ss::sstring>,
+      /*hide_default_override=*/true);
+
     return result;
 }
 

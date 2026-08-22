@@ -536,6 +536,22 @@ create_topic_properties_update(
                   update.properties.storage_mode, cfg.value, op, validator);
                 continue;
             }
+
+            if (cfg.name == topic_property_dedup_window_ms) {
+                parse_and_set_tristate(
+                  update.properties.dedup_window_ms, cfg.value, op);
+                continue;
+            }
+
+            if (cfg.name == topic_property_dedup_key_header) {
+                parse_and_set_optional(
+                  update.properties.dedup_key_header,
+                  cfg.value,
+                  op,
+                  dedup_key_header_validator{},
+                  std::identity{});
+                continue;
+            }
         } catch (const validation_error& e) {
             vlog(
               klog.debug,

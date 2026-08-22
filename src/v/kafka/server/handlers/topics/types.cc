@@ -358,6 +358,13 @@ cluster::topic_configuration to_topic_config(
           config_entries, topic_property_redpanda_storage_mode)
           .value_or(config::shard_local_cfg().default_redpanda_storage_mode());
 
+    cfg.properties.dedup_window_ms
+      = get_tristate_value<std::chrono::milliseconds>(
+        config_entries, topic_property_dedup_window_ms);
+
+    cfg.properties.dedup_key_header = get_string_value(
+      config_entries, topic_property_dedup_key_header);
+
     schema_id_validation_config_parser schema_id_validation_config_parser{
       cfg.properties};
 
