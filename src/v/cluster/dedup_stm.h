@@ -15,7 +15,6 @@
 #include "model/fundamental.h"
 #include "raft/persisted_stm.h"
 #include "serde/envelope.h"
-#include "serde/rw/bytes.h"
 #include "serde/rw/vector.h"
 #include "utils/available_promise.h"
 
@@ -90,20 +89,41 @@ protected:
 private:
     friend struct dedup_stm_test_accessor;
 
+    /// The identity digest is written as its two halves rather than as a
+    /// nested envelope, which would add a second serde header per entry.
+    ///
+    /// Version 1 replaced the full identity bytes with the digest. The
+    /// compat version moves with it: a version 0 snapshot cannot be
+    /// re-derived into digests without the identities it no longer carries.
+    /// Discarding such a snapshot is safe -- the index is advisory and
+    /// log-derived, so it rebuilds on replay -- and apply_local_snapshot()
+    /// does exactly that, reporting local_snapshot_applied::no so the
+    /// rebuild actually happens, rather than failing to start.
+    ///
+    /// That tolerance only runs forward, and only matters for clusters
+    /// running an in-flight build of this branch: dedup is unreleased, so no
+    /// released version can hold a version 0 snapshot. Downgrading past this
+    /// commit is the direction that is not safe -- an older binary reading a
+    /// version 1 snapshot throws out of its own apply_local_snapshot(),
+    /// which persisted_stm does not guard, and the STM fails to start.
+    /// Removing the local snapshot lets such a node rebuild from the log.
     struct wire_entry
       : serde::
-          envelope<wire_entry, serde::version<0>, serde::compat_version<0>> {
-        bytes key;
+          envelope<wire_entry, serde::version<1>, serde::compat_version<1>> {
+        uint64_t identity_hi{0};
+        uint64_t identity_lo{0};
         model::timestamp timestamp;
 
-        auto serde_fields() { return std::tie(key, timestamp); }
+        auto serde_fields() {
+            return std::tie(identity_hi, identity_lo, timestamp);
+        }
     };
 
     struct state_snapshot
       : serde::envelope<
           state_snapshot,
-          serde::version<0>,
-          serde::compat_version<0>> {
+          serde::version<1>,
+          serde::compat_version<1>> {
         int64_t window_ms{0};
         int64_t generation{0};
         model::timestamp max_timestamp{model::timestamp::min()};
@@ -129,6 +149,9 @@ private:
     to_snapshot(const dedup_window_filter&, int64_t generation);
     static void restore_snapshot(
       dedup_window_filter&, int64_t& generation, const state_snapshot&);
+    /// Deserialize and install a snapshot, or reset to an empty index if the
+    /// buffer cannot be read. Returns whether the snapshot was applied.
+    bool try_restore_snapshot(iobuf);
 
     void adopt_config(
       std::chrono::milliseconds window,

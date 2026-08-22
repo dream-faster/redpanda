@@ -9,19 +9,64 @@
 
 #pragma once
 
-#include "bytes/bytes.h"
+#include "bytes/iobuf.h"
 #include "container/chunked_hash_map.h"
 #include "container/chunked_vector.h"
 #include "model/record.h"
 #include "model/timestamp.h"
 
 #include <chrono>
+#include <cstdint>
 #include <optional>
 
 namespace cluster {
 
+/// \brief A fixed-width, process-stable digest of a dedup identity.
+///
+/// The index stores this instead of the identity bytes, so an entry costs the
+/// same regardless of how large the Kafka key or header value is. Two
+/// independently seeded xxhash64 passes give 128 bits: at the ~10^7 live
+/// entries a wide dedup window can hold, the birthday collision probability
+/// is on the order of 10^-25, far below the window-edge and generation-change
+/// boundaries the feature already documents as best-effort.
+///
+/// xxhash64 is not collision-resistant against a chosen-input attacker, which
+/// is deliberate: a producer that wants to suppress another producer's
+/// identity can already do so directly by writing that identity first, since
+/// dedup is first-wins on whatever identity it is given. Digesting adds no
+/// capability an attacker does not already have.
+///
+/// Stability matters: the digest is serialized into snapshots and compared
+/// across replicas, so it must not depend on a per-process hash seed the way
+/// absl::Hash does.
+struct dedup_identity_digest {
+    uint64_t hi{0};
+    uint64_t lo{0};
+
+    friend bool operator==(
+      const dedup_identity_digest&, const dedup_identity_digest&) = default;
+};
+
+/// The digest is already avalanched by xxhash64, so the map takes one half
+/// verbatim rather than paying to re-mix it.
+struct dedup_identity_digest_hash {
+    using is_avalanching = void;
+
+    uint64_t operator()(const dedup_identity_digest& d) const noexcept {
+        return d.lo;
+    }
+};
+
+/// \brief Digest one dedup identity.
+///
+/// Consumes the iobuf fragment by fragment, so no contiguous copy of the
+/// identity is ever materialized. xxhash64's streaming API is independent of
+/// how the input is split across update() calls, so a fragmented and a
+/// contiguous iobuf holding the same bytes digest identically.
+dedup_identity_digest dedup_digest_of(const iobuf& identity);
+
 struct dedup_index_entry {
-    bytes key;
+    dedup_identity_digest identity;
     model::timestamp timestamp;
 
     friend bool
@@ -64,7 +109,7 @@ dedup_identity_lookup dedup_identity_for_record(
 /// the duration of one replicate call on the leader.
 struct dedup_request_undo {
     struct entry {
-        bytes key;
+        dedup_identity_digest identity;
         /// The timestamp this request wrote into the index for the key.
         model::timestamp applied_timestamp;
         /// The timestamp the key held before, or std::nullopt if the key was
@@ -121,9 +166,13 @@ struct dedup_index_snapshot {
 /// exactly one request's mutations if its replication fails
 /// (revert_request).
 ///
-/// Memory is bounded: entries older than the window (relative to the most
-/// recent timestamp seen) can never cause a drop again and are swept
-/// opportunistically as new identities are inserted. The "most recent
+/// Memory is bounded two ways. Each entry costs the same regardless of
+/// identity size, because the index stores a dedup_identity_digest rather
+/// than the identity bytes. And entries older than the window (relative to
+/// the most recent timestamp seen) can never cause a drop again and are
+/// swept opportunistically as new identities are inserted; the sweep
+/// interval scales with the index so that scanning it stays amortized O(1)
+/// per insertion. The "most recent
 /// timestamp seen" is a client-supplied CreateTime with no ordering
 /// guarantee, so an anomalously future-timestamped record can advance the
 /// eviction cutoff early and evict an entry a later, correctly-ordered
@@ -213,16 +262,27 @@ public:
 
 private:
     bool is_duplicate(
-      const iobuf& identity, model::timestamp ts, dedup_request_undo* undo);
+      dedup_identity_digest identity,
+      model::timestamp ts,
+      dedup_request_undo* undo);
     void maybe_evict();
 
-    // Number of new-identity insertions between opportunistic eviction
-    // sweeps.
-    static constexpr size_t evict_after_inserts = 10000;
+    // Floor on the number of new-identity insertions between opportunistic
+    // eviction sweeps. The actual interval scales with the map (see
+    // maybe_evict()) so that a sweep, which is O(map size), stays amortized
+    // O(1) per insertion instead of degrading linearly as the index grows.
+    static constexpr size_t min_evict_interval = 10000;
+    // Fraction of the map that must be newly inserted before sweeping again:
+    // interval = max(min_evict_interval, map_size / evict_size_divisor).
+    static constexpr size_t evict_size_divisor = 8;
 
     std::chrono::milliseconds _window;
     std::optional<ss::sstring> _key_header;
-    chunked_hash_map<bytes, model::timestamp> _map;
+    chunked_hash_map<
+      dedup_identity_digest,
+      model::timestamp,
+      dedup_identity_digest_hash>
+      _map;
     // Highest record timestamp seen; used as the reference "now" for eviction.
     model::timestamp _max_ts{model::timestamp::min()};
     size_t _inserts_since_evict{0};

@@ -15,10 +15,13 @@
 #include "model/namespace.h"
 #include "model/record_batch_types.h"
 #include "raft/consensus.h"
+#include "ssx/future-util.h"
 #include "storage/types.h"
 
 #include <seastar/core/with_timeout.hh>
 #include <seastar/coroutine/as_future.hh>
+
+#include <new>
 
 namespace cluster {
 
@@ -90,9 +93,11 @@ dedup_stm::to_snapshot(const dedup_window_filter& state, int64_t generation) {
       .inserts_since_evict = static_cast<uint64_t>(
         snapshot.inserts_since_evict)};
     result.entries.reserve(snapshot.entries.size());
-    for (auto& entry : snapshot.entries) {
+    for (const auto& entry : snapshot.entries) {
         result.entries.push_back(
-          {.key = std::move(entry.key), .timestamp = entry.timestamp});
+          {.identity_hi = entry.identity.hi,
+           .identity_lo = entry.identity.lo,
+           .timestamp = entry.timestamp});
     }
     return result;
 }
@@ -107,7 +112,9 @@ void dedup_stm::restore_snapshot(
       .inserts_since_evict = static_cast<size_t>(snapshot.inserts_since_evict)};
     restored.entries.reserve(snapshot.entries.size());
     for (const auto& entry : snapshot.entries) {
-        restored.entries.push_back({entry.key, entry.timestamp});
+        restored.entries.push_back(
+          {.identity = {.hi = entry.identity_hi, .lo = entry.identity_lo},
+           .timestamp = entry.timestamp});
     }
     state.restore(restored);
     generation = snapshot.generation;
@@ -174,6 +181,12 @@ ss::future<> dedup_stm::do_apply(const model::record_batch& batch) {
     const model::record_batch& readable = decompressed ? *decompressed : batch;
     const auto base_ts = readable.header().first_timestamp;
     const auto& key_header = _state.key_header();
+    // Still the copying iterator, unlike filter_request()'s sharing passes,
+    // and this is the busier path -- it runs on every replica for every
+    // committed data batch. It cannot share: do_apply() takes the batch by
+    // const reference and both record_batch::share() and iobuf::share() are
+    // non-const, so sharing here needs a change to model/bytes rather than
+    // to dedup.
     readable.for_each_record([this, base_ts, &key_header](model::record r) {
         const iobuf* identity = nullptr;
         // The header identity source can change after this batch was
@@ -376,21 +389,60 @@ ss::future<iobuf> dedup_stm::take_raft_snapshot(model::offset) {
     co_return serde::to_iobuf(to_snapshot(_state, _generation));
 }
 
+bool dedup_stm::try_restore_snapshot(iobuf buffer) {
+    // A snapshot written before the index switched to identity digests
+    // (state_snapshot version 0) carries identities this build cannot
+    // re-derive digests from, so serde rejects it on compat version. The
+    // index is advisory and log-derived, so discarding it and rebuilding
+    // from the retained log is a correct -- if slower -- outcome, and a far
+    // better one than refusing to start the partition.
+    try {
+        auto snapshot = serde::from_iobuf<state_snapshot>(std::move(buffer));
+        restore_snapshot(_state, _generation, snapshot);
+        return true;
+    } catch (const std::bad_alloc&) {
+        // Not a bad snapshot either, and the worst thing to answer with: a
+        // discard reports "rebuilding from the log", which allocates the
+        // same index again. Let it propagate instead of looping.
+        throw;
+    } catch (...) {
+        auto ex = std::current_exception();
+        if (ssx::is_shutdown_exception(ex)) {
+            // Not a bad snapshot: the node is going away. Let it propagate
+            // rather than reporting a rebuild that will never happen.
+            std::rethrow_exception(ex);
+        }
+        vlog(
+          clusterlog.warn,
+          "{} discarding unreadable dedup snapshot, rebuilding the index from "
+          "the log: {}",
+          _raft->ntp(),
+          ex);
+        _state.clear();
+        _generation = 0;
+        return false;
+    }
+}
+
 ss::future<> dedup_stm::apply_raft_snapshot(const iobuf& buffer) {
     _state.clear();
     _generation = 0;
     if (!buffer.empty()) {
-        auto snapshot = serde::from_iobuf<state_snapshot>(buffer.copy());
-        restore_snapshot(_state, _generation, snapshot);
+        try_restore_snapshot(buffer.copy());
     }
     co_return;
 }
 
 ss::future<raft::local_snapshot_applied>
 dedup_stm::apply_local_snapshot(raft::stm_snapshot_header, iobuf&& buffer) {
-    auto snapshot = serde::from_iobuf<state_snapshot>(std::move(buffer));
-    restore_snapshot(_state, _generation, snapshot);
-    co_return raft::local_snapshot_applied::yes;
+    // Reporting `no` for a snapshot we discarded is what actually makes the
+    // rebuild happen: persisted_stm only calls set_next(next_offset) -- i.e.
+    // skips the log the snapshot covered -- when the snapshot was applied.
+    // Answering `yes` here would leave the index empty *and* skip past the
+    // records it should have been rebuilt from.
+    co_return try_restore_snapshot(std::move(buffer))
+      ? raft::local_snapshot_applied::yes
+      : raft::local_snapshot_applied::no;
 }
 
 ss::future<raft::stm_snapshot>
@@ -399,6 +451,11 @@ dedup_stm::take_local_snapshot(ssx::semaphore_units apply_units) {
     auto snapshot = to_snapshot(_state, _generation);
     auto offset = last_applied_offset();
     apply_units.return_all();
+    // The 0 here is stm_snapshot_header::version, a channel this STM does
+    // not use: unlike rm_stm/tm_stm, which dispatch between snapshot layouts
+    // on it, dedup_stm versions its payload through the serde envelope
+    // (state_snapshot's version/compat_version). Deliberately left at 0 so
+    // there is only one place the format is versioned.
     co_return raft::stm_snapshot::create(
       0, offset, serde::to_iobuf(std::move(snapshot)));
 }
