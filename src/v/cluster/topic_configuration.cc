@@ -57,6 +57,9 @@ storage::ntp_config topic_configuration::make_ntp_config(
             .min_cleanable_dirty_ratio = properties.min_cleanable_dirty_ratio,
             .min_compaction_lag_ms = properties.min_compaction_lag_ms,
             .max_compaction_lag_ms = properties.max_compaction_lag_ms,
+            .dedup_window_ms = properties.dedup_window_ms,
+            .dedup_generation = properties.dedup_generation,
+            .dedup_key_header = properties.dedup_key_header,
           });
     }
     return {

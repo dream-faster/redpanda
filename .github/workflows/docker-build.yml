@@ -142,6 +142,9 @@ jobs:
             '--local_resources=memory=HOST_RAM*.8' \
             //src/v/cluster/tests:legacy_wire_test \
             //src/v/cluster/tests:topic_table_test \
+            //src/v/cluster/tests:dedup_window_filter_test \
+            //src/v/cluster/tests:dedup_stm_test \
+            //src/v/kafka/server/tests:validator_tests \
             //src/v/compression/tests:zstd_test
 
       - name: Build OCI image with Bazel

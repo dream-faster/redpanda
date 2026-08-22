@@ -70,6 +70,7 @@ class tx_topic_manager;
 class shard_placement_table;
 class shard_balancer;
 class id_allocator_stm;
+class dedup_stm;
 class tm_stm;
 class rm_stm;
 namespace tx {

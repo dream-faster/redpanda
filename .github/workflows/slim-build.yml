@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - 'claude/redpanda-slim'
+      - 'claude/dedup-v26.2'
   workflow_dispatch:
     inputs:
       analysis_only:
@@ -185,7 +186,7 @@ jobs:
       # A clean compile says nothing about whether the broker works. Boot it,
       # round-trip data through the Kafka API, restart on the same data
       # directory and check the log survived.
-      - name: Wire-layout tests
+      - name: Wire-layout and dedup tests
         if: ${{ inputs.analysis_only != true }}
         run: |
           bazel \
@@ -199,7 +200,12 @@ jobs:
             --lockfile_mode=update \
             --test_output=errors \
             '--local_resources=memory=HOST_RAM*.8' \
-            //src/v/cluster/tests:legacy_wire_test
+            //src/v/cluster/tests:legacy_wire_test \
+            //src/v/cluster/tests:topic_table_test \
+            //src/v/cluster/tests:dedup_window_filter_test \
+            //src/v/cluster/tests:dedup_stm_test \
+            //src/v/kafka/server/tests:validator_tests \
+            //src/v/compression/tests:zstd_test
 
       - name: Build rpk
         if: ${{ inputs.analysis_only != true }}

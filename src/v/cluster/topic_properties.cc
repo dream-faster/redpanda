@@ -28,7 +28,8 @@ fmt::iterator topic_properties::format_to(fmt::iterator it) const {
       "flush_bytes: {}leaders_preference: {}, delete_retention_ms: "
       "{}min_cleanable_dirty_ratio: {}, min_compaction_lag_ms: {}, "
       "max_compaction_lag_ms: {}, message_timestamp_before_max_ms: {}, "
-      "message_timestamp_after_max_ms: {}}}",
+      "message_timestamp_after_max_ms: {}, dedup_window_ms: {}, "
+      "dedup_generation: {}, dedup_key_header: {}}}",
       compression,
       cleanup_policy_bitflags,
       compaction_strategy,
@@ -52,7 +53,10 @@ fmt::iterator topic_properties::format_to(fmt::iterator it) const {
       min_compaction_lag_ms,
       max_compaction_lag_ms,
       message_timestamp_before_max_ms,
-      message_timestamp_after_max_ms);
+      message_timestamp_after_max_ms,
+      dedup_window_ms,
+      dedup_generation,
+      dedup_key_header);
 }
 
 bool topic_properties::is_local_topic() const { return true; }
@@ -84,7 +88,9 @@ bool topic_properties::has_overrides() const {
                            || min_compaction_lag_ms.has_value()
                            || max_compaction_lag_ms.has_value()
                            || message_timestamp_before_max_ms.has_value()
-                           || message_timestamp_after_max_ms.has_value();
+                           || message_timestamp_after_max_ms.has_value()
+                           || dedup_window_ms.is_engaged()
+                           || dedup_key_header.has_value();
 
     return overrides;
 }
@@ -110,6 +116,9 @@ topic_properties::get_ntp_cfg_overrides() const {
     ret.min_cleanable_dirty_ratio = min_cleanable_dirty_ratio;
     ret.min_compaction_lag_ms = min_compaction_lag_ms;
     ret.max_compaction_lag_ms = max_compaction_lag_ms;
+    ret.dedup_window_ms = dedup_window_ms;
+    ret.dedup_generation = dedup_generation;
+    ret.dedup_key_header = dedup_key_header;
     return ret;
 }
 

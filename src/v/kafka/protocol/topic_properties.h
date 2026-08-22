@@ -67,4 +67,11 @@ inline constexpr std::string_view topic_property_mpx_virtual_cluster_id
 inline constexpr std::string_view topic_property_leaders_preference
   = "redpanda.leaders.preference";
 
+inline constexpr std::string_view topic_property_dedup_window_ms
+  = "redpanda.dedup.window.ms";
+
+inline constexpr std::string_view topic_property_dedup_key_header
+  = "redpanda.dedup.key.header";
+
+
 } // namespace kafka

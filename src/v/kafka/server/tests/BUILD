@@ -1256,3 +1256,20 @@ redpanda_cc_btest(
         "@seastar//:testing",
     ],
 )
+
+redpanda_cc_btest(
+    name = "validator_tests",
+    timeout = "short",
+    srcs = [
+        "validator_tests.cc",
+    ],
+    deps = [
+        "//src/v/cluster:types",
+        "//src/v/kafka/protocol/schemata:create_topics_request",
+        "//src/v/kafka/server",
+        "//src/v/kafka/server:topic_config_utils",
+        "//src/v/test_utils:seastar_boost",
+        "@boost//:test",
+        "@seastar//:testing",
+    ],
+)
