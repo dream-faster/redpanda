@@ -24,6 +24,10 @@ on:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
+  # Set this repository variable to a shared Bazel remote-cache endpoint. The
+  # workflow remains usable without it, but ephemeral runners cannot reuse
+  # compiled C++ actions between jobs without a remote cache.
+  BAZEL_REMOTE_CACHE: ${{ vars.BAZEL_REMOTE_CACHE }}
 
 # A cold build takes ~3h of runner time; don't let pushes pile up overlapping
 # runs. Newer pushes to the same ref cancel the in-flight build.
@@ -91,11 +95,11 @@ jobs:
       - name: Install system dependencies
         run: sudo ./bazel/install-deps.sh
 
-      - name: Mount Bazel cache
+      - name: Restore Bazel repository cache
         uses: actions/cache@v4
         with:
           path: |
-            ~/.cache/bazel
+            ~/.cache/bazel-repository
             ~/.cache/bazelisk
           key: bazel-${{ runner.os }}-${{ hashFiles('.bazelversion', 'MODULE.bazel', 'MODULE.bazel.lock') }}
           restore-keys: |
@@ -124,6 +128,13 @@ jobs:
       - name: Build OCI image with Bazel
         run: |
           unset CI
+          CACHE_FLAGS=("--repository_cache=$HOME/.cache/bazel-repository")
+          if [[ -n "${BAZEL_REMOTE_CACHE:-}" ]]; then
+            CACHE_FLAGS+=(
+              "--remote_cache=$BAZEL_REMOTE_CACHE"
+              "--remote_upload_local_results=true"
+            )
+          fi
           # Prefer the sandbox, fall back to local only for actions that can't
           # sandbox. The build used to fail with a Bazel hermeticity error --
           # "undeclared inclusion(s) ... config-host.h" -- on liburing's
@@ -137,17 +148,18 @@ jobs:
           #
           # --local_resources=memory (replacing Bazel 8.x's removed
           # --local_ram_resources) still reserves 20% RAM headroom so the
-          # RAM-heavy final link of the full-debug redpanda binary isn't
+          # RAM-heavy final link of the Redpanda binary isn't
           # over-scheduled. Quoted so the shell doesn't glob-expand the '*'.
           bazel \
             --output_base=/mnt/bazel-output \
             build \
-            --config=release \
+            --config=container \
             --spawn_strategy=sandboxed,local \
             --verbose_failures \
-            --lockfile_mode=update \
+            --lockfile_mode=error \
             '--local_resources=memory=HOST_RAM*.8' \
-            //bazel/packaging:image
+            "${CACHE_FLAGS[@]}" \
+            //bazel/packaging:oci_image_contents
           echo "=== post-build resources ==="
           df -h
           free -h

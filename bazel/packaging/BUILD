@@ -1,5 +1,4 @@
 load("@rules_go//go:def.bzl", "go_binary", "go_library")
-load("@rules_oci//oci:defs.bzl", "oci_image", "oci_load")
 load(":packaging.bzl", "redpanda_deb_package", "redpanda_package", "script_package")
 
 # this is the real binary. the rpk alias at the root //:rpk is a wrapper.
@@ -17,6 +16,10 @@ alias(
         "@platforms//cpu:aarch64": "@aarch64_sysroot_runtime//:runtime",
     }),
 )
+
+# Runtime images execute as this numeric user; keep package contents writable
+# without requiring a passwd entry in the image base.
+NONROOT_USER = 65532
 
 redpanda_package(
     name = "redpanda_tar",
@@ -58,9 +61,6 @@ redpanda_package(
     rpk_binary = ":rpk",
     sysroot_runtime = ":sysroot_runtime",
 )
-
-# This is the ID for the nonroot user in the distroless containers.
-NONROOT_USER = 65532
 
 redpanda_package(
     name = "oci_image_contents",
@@ -136,38 +136,6 @@ script_package(
     scripts = {
         "//tools/controller_forced_reconfiguration:invoke_controller_reconfiguration.py": "invoke_controller_reconfiguration",
     },
-)
-
-# NOTE: this image is currently experimental, don't use this for production.
-oci_image(
-    name = "image",
-    base = "@debian_bookworm_slim",
-    cmd = [
-        "redpanda",
-        "start",
-        "--overprovisioned",
-    ],
-    entrypoint = ["/opt/redpanda/bin/rpk"],
-    exposed_ports = [
-        "8081",
-        "8082",
-        "9092",
-        "9644",
-    ],
-    labels = {"org.opencontainers.image.authors": "Redpanda Data <hi@redpanda.com>"},
-    tars = [
-        ":oci_image_contents",
-    ],
-    # Plain debian has no "nonroot" passwd entry like distroless does; use the
-    # numeric UID directly (it owns the files in oci_image_contents).
-    user = str(NONROOT_USER),
-    volumes = ["/var/lib/redpanda/data"],
-)
-
-oci_load(
-    name = "image_load",
-    image = ":image",
-    repo_tags = ["redpandadata/redpanda-dev:latest"],
 )
 
 go_binary(
