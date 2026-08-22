@@ -64,6 +64,9 @@ storage::ntp_config topic_configuration::make_ntp_config(
             .max_compaction_lag_ms = properties.max_compaction_lag_ms,
             .remote_allow_gaps = properties.remote_topic_allow_gaps,
             .storage_mode = properties.storage_mode,
+            .dedup_window_ms = properties.dedup_window_ms,
+            .dedup_generation = properties.dedup_generation,
+            .dedup_key_header = properties.dedup_key_header,
           });
     }
     return {

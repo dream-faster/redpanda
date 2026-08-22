@@ -430,6 +430,7 @@ private:
     ss::shared_ptr<cluster::rm_stm> _rm_stm;
     ss::shared_ptr<archival_metadata_stm> _archival_meta_stm;
     ss::shared_ptr<partition_properties_stm> _partition_properties_stm;
+    ss::shared_ptr<dedup_stm> _dedup_stm;
     ss::sharded<cloud_topics::state_accessors>* _cloud_topics_state;
     ss::abort_source _as;
     partition_probe _probe;
