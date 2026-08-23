@@ -10,10 +10,6 @@
  */
 
 #pragma once
-#include "cloud_io/tests/s3_imposter.h"
-#include "cloud_storage/configuration.h"
-#include "cloud_storage_clients/configuration.h"
-#include "cluster/archival/types.h"
 #include "cluster/cluster_utils.h"
 #include "cluster/controller.h"      // IWYU pragma: keep; public member devex
 #include "cluster/topics_frontend.h" // IWYU pragma: keep; public member devex
@@ -75,39 +71,15 @@ public:
       std::vector<config::seed_server> seed_servers,
       ss::sstring base_dir,
       bool remove_on_shutdown,
-      std::optional<cloud_storage_clients::s3_configuration> s3_config
-      = std::nullopt,
-      std::optional<archival::configuration> archival_cfg = std::nullopt,
-      std::optional<cloud_storage::configuration> cloud_cfg = std::nullopt,
       configure_node_id use_node_id = configure_node_id::yes,
       const empty_seed_starts_cluster empty_seed_starts_cluster_val
-      = empty_seed_starts_cluster::yes,
-      bool enable_legacy_upload_mode = true);
+      = empty_seed_starts_cluster::yes);
 
     // creates single node with default configuration
     redpanda_thread_fixture();
 
     // Restart the fixture with an existing data directory
     explicit redpanda_thread_fixture(std::filesystem::path existing_data_dir);
-
-    struct init_cloud_storage_tag {};
-
-    // Start redpanda with shadow indexing enabled
-    explicit redpanda_thread_fixture(
-      init_cloud_storage_tag,
-      std::optional<uint16_t> port = std::nullopt,
-      cloud_storage_clients::s3_url_style url_style = default_url_style,
-      model::node_id node_id = model::node_id(1));
-
-    struct init_cloud_storage_no_archiver_tag {};
-
-    // Start redpanda with shadow indexing enabled, but do not enable
-    // tiered storage by default: this enables constructing topics without
-    // the upload code, to later set it up manually in a test.
-    explicit redpanda_thread_fixture(
-      init_cloud_storage_no_archiver_tag,
-      std::optional<uint16_t> port = std::nullopt,
-      cloud_storage_clients::s3_url_style url_style = default_url_style);
 
     ~redpanda_thread_fixture();
 
@@ -118,29 +90,14 @@ public:
 
     config::configuration& lconf();
 
-    static cloud_storage_clients::s3_configuration get_s3_config(
-      std::optional<uint16_t> port = std::nullopt,
-      cloud_storage_clients::s3_url_style url_style = default_url_style);
-
-    static archival::configuration get_archival_config();
-
-    static cloud_storage::configuration get_cloud_config(
-      std::optional<uint16_t> port = std::nullopt,
-      cloud_storage_clients::s3_url_style url_style = default_url_style);
-
     void configure(
       model::node_id node_id,
       int32_t kafka_port,
       int32_t rpc_port,
       std::vector<config::seed_server> seed_servers,
-      std::optional<cloud_storage_clients::s3_configuration> s3_config
-      = std::nullopt,
-      std::optional<archival::configuration> archival_cfg = std::nullopt,
-      std::optional<cloud_storage::configuration> cloud_cfg = std::nullopt,
       configure_node_id use_node_id = configure_node_id::yes,
       const empty_seed_starts_cluster empty_seed_starts_cluster_val
-      = empty_seed_starts_cluster::yes,
-      bool legacy_upload_mode_enabled = true);
+      = empty_seed_starts_cluster::yes);
 
     YAML::Node audit_log_client_config(
       uint16_t kafka_api_port = config::node().kafka_api()[0].address.port());

@@ -455,8 +455,10 @@ redpanda_cc_gtest(
     ],
     cpu = 1,
     deps = [
+        "//src/v/base",
         "//src/v/storage",
-        "//src/v/test_utils:archival",
+        "//src/v/storage/tests:disk_log_builder",
+        "//src/v/test_utils:tmp_dir",
         "//src/v/test_utils:gtest",
         "@googletest//:gtest",
         "@seastar",

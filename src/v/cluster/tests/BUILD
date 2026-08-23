@@ -358,22 +358,6 @@ redpanda_cc_gtest(
 )
 
 redpanda_cc_gtest(
-    name = "cluster_recovery_table_test",
-    timeout = "short",
-    srcs = [
-        "cluster_recovery_table_test.cc",
-    ],
-    deps = [
-        "//src/v/cluster:commands",
-        "//src/v/cluster:logger",
-        "//src/v/cluster:types",
-        "//src/v/test_utils:gtest",
-        "@googletest//:gtest",
-        "@seastar",
-    ],
-)
-
-redpanda_cc_gtest(
     name = "partition_leaders_table_test",
     timeout = "short",
     srcs = [

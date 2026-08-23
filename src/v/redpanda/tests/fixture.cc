@@ -11,10 +11,6 @@
 
 #include "redpanda/tests/fixture.h"
 
-#include "cloud_roles/types.h"
-#include "cloud_storage/configuration.h"
-#include "cloud_storage_clients/configuration.h"
-#include "cluster/archival/types.h"
 #include "cluster/cluster_utils.h"
 #include "cluster/config_frontend.h"
 #include "cluster/controller.h"
@@ -78,12 +74,8 @@ redpanda_thread_fixture::redpanda_thread_fixture(
   std::vector<config::seed_server> seed_servers,
   ss::sstring base_dir,
   bool remove_on_shutdown,
-  std::optional<cloud_storage_clients::s3_configuration> s3_config,
-  std::optional<archival::configuration> archival_cfg,
-  std::optional<cloud_storage::configuration> cloud_cfg,
   configure_node_id use_node_id,
-  const empty_seed_starts_cluster empty_seed_starts_cluster_val,
-  bool enable_legacy_upload_mode, )
+  const empty_seed_starts_cluster empty_seed_starts_cluster_val)
   : app(ssx::sformat("redpanda-{}", node_id()))
   , proxy_port(proxy_port)
   , schema_reg_port(schema_reg_port)
@@ -96,12 +88,8 @@ redpanda_thread_fixture::redpanda_thread_fixture(
       kafka_port,
       rpc_port,
       std::move(seed_servers),
-      std::move(s3_config),
-      std::move(archival_cfg),
-      std::move(cloud_cfg),
       use_node_id,
-      empty_seed_starts_cluster_val,
-      enable_legacy_upload_mode);
+      empty_seed_starts_cluster_val);
     try {
         app.initialize(audit_log_client_config(kafka_port));
         app.wire_up_and_start_crypto_services();
@@ -180,55 +168,6 @@ redpanda_thread_fixture::redpanda_thread_fixture(
       existing_data_dir.string(),
       true) {}
 
-struct init_cloud_storage_tag {};
-
-redpanda_thread_fixture::redpanda_thread_fixture(
-  init_cloud_storage_tag,
-  std::optional<uint16_t> port,
-  cloud_storage_clients::s3_url_style url_style,
-  model::node_id node_id, )
-  : redpanda_thread_fixture(
-      node_id,
-      9092,
-      33145,
-      8082,
-      8081,
-      {},
-      test_directory(),
-      true,
-      get_s3_config(port, url_style),
-      get_archival_config(),
-      get_cloud_config(port, url_style),
-      configure_node_id::yes,
-      empty_seed_starts_cluster::yes,
-      false,
-      true,
-      false,
-      false) {}
-
-redpanda_thread_fixture::redpanda_thread_fixture(
-  init_cloud_storage_no_archiver_tag,
-  std::optional<uint16_t> port,
-  cloud_storage_clients::s3_url_style url_style, )
-  : redpanda_thread_fixture(
-      model::node_id(1),
-      9092,
-      33145,
-      8082,
-      8081,
-      {},
-      test_directory(),
-      true,
-      get_s3_config(port, url_style),
-      get_archival_config(),
-      std::nullopt,
-      configure_node_id::yes,
-      empty_seed_starts_cluster::yes,
-      false,
-      true,
-      false,
-      false) {}
-
 redpanda_thread_fixture::~redpanda_thread_fixture() {
     shutdown();
     proto.stop().get();
@@ -246,44 +185,6 @@ void redpanda_thread_fixture::shutdown() {
 
 config::configuration& redpanda_thread_fixture::lconf() {
     return config::shard_local_cfg();
-}
-
-cloud_storage_clients::s3_configuration redpanda_thread_fixture::get_s3_config(
-  std::optional<uint16_t> port, cloud_storage_clients::s3_url_style url_style) {
-    net::unresolved_address server_addr("localhost", port.value_or(4430));
-    cloud_storage_clients::s3_configuration s3conf;
-    s3conf.uri = cloud_storage_clients::access_point_uri("localhost");
-    s3conf.access_key = cloud_roles::public_key_str("access-key");
-    s3conf.secret_key = cloud_roles::private_key_str("secret-key");
-    s3conf.region = cloud_roles::aws_region_name("us-east-1");
-    s3conf.url_style = url_style;
-    s3conf.server_addr = server_addr;
-    return s3conf;
-}
-
-archival::configuration redpanda_thread_fixture::get_archival_config() {
-    archival::configuration aconf{
-      .cloud_storage_initial_backoff = config::mock_binding(100ms),
-      .segment_upload_timeout = config::mock_binding(1000ms),
-      .manifest_upload_timeout = config::mock_binding(1000ms),
-      .garbage_collect_timeout = config::mock_binding(1000ms),
-      .upload_loop_initial_backoff = config::mock_binding(100ms),
-      .upload_loop_max_backoff = config::mock_binding(5000ms)};
-    aconf.bucket_name = cloud_storage_clients::bucket_name("test-bucket");
-    aconf.ntp_metrics_disabled = archival::per_ntp_metrics_disabled::yes;
-    aconf.svc_metrics_disabled = archival::service_metrics_disabled::yes;
-    aconf.time_limit = std::nullopt;
-    return aconf;
-}
-
-cloud_storage::configuration redpanda_thread_fixture::get_cloud_config(
-  std::optional<uint16_t> port, cloud_storage_clients::s3_url_style url_style) {
-    auto s3conf = get_s3_config(port, url_style);
-    cloud_storage::configuration cconf;
-    cconf.client_config = s3conf;
-    cconf.bucket_name = cloud_storage_clients::bucket_name("test-bucket");
-    cconf.connection_limit = archival::connection_limit(4);
-    return cconf;
 }
 
 void redpanda_thread_fixture::restart(should_wipe w) {
@@ -312,12 +213,8 @@ void redpanda_thread_fixture::configure(
   int32_t kafka_port,
   int32_t rpc_port,
   std::vector<config::seed_server> seed_servers,
-  std::optional<cloud_storage_clients::s3_configuration> s3_config,
-  std::optional<archival::configuration> archival_cfg,
-  std::optional<cloud_storage::configuration> cloud_cfg,
   configure_node_id use_node_id,
-  const empty_seed_starts_cluster empty_seed_starts_cluster_val,
-  bool legacy_upload_mode_enabled, ) {
+  const empty_seed_starts_cluster empty_seed_starts_cluster_val) {
     auto base_path = std::filesystem::path(data_dir);
     ss::smp::invoke_on_all([=]() {
         auto& config = config::shard_local_cfg();
@@ -350,80 +247,6 @@ void redpanda_thread_fixture::configure(
                 .address = net::unresolved_address("127.0.0.1", kafka_port)}});
         node_config.get("data_directory")
           .set_value(config::data_directory_path{.path = base_path});
-        if (s3_config) {
-            config.get("cloud_storage_enabled").set_value(true);
-            config.get("cloud_storage_region")
-              .set_value(std::make_optional(s3_config->region()));
-            config.get("cloud_storage_access_key")
-              .set_value(std::make_optional((*s3_config->access_key)()));
-            config.get("cloud_storage_secret_key")
-              .set_value(std::make_optional((*s3_config->secret_key)()));
-            config.get("cloud_storage_api_endpoint")
-              .set_value(std::make_optional(s3_config->server_addr.host()));
-            config.get("cloud_storage_url_style")
-              .set_value(std::make_optional([&] {
-                  if (!s3_config->url_style.has_value()) {
-                      return config::s3_url_style::virtual_host;
-                  }
-                  switch (*s3_config->url_style) {
-                  case cloud_storage_clients::s3_url_style::virtual_host:
-                      return config::s3_url_style::virtual_host;
-                  case cloud_storage_clients::s3_url_style::path:
-                      return config::s3_url_style::path;
-                  }
-              }()));
-            config.get("cloud_storage_api_endpoint_port")
-              .set_value(static_cast<int16_t>(s3_config->server_addr.port()));
-        }
-        if (archival_cfg) {
-            // Copy archival config to this shard to avoid `config::binding`
-            // asserting on cross-shard access.
-            // NOLINTNEXTLINE(performance-unnecessary-copy-initialization)
-            auto local_cfg = archival_cfg;
-
-            config.get("cloud_storage_disable_tls").set_value(true);
-            config.get("cloud_storage_bucket")
-              .set_value(std::make_optional(local_cfg->bucket_name()));
-            config.get("cloud_storage_initial_backoff_ms")
-              .set_value(
-                std::chrono::duration_cast<std::chrono::milliseconds>(
-                  local_cfg->cloud_storage_initial_backoff()));
-            config.get("cloud_storage_manifest_upload_timeout_ms")
-              .set_value(
-                std::chrono::duration_cast<std::chrono::milliseconds>(
-                  local_cfg->manifest_upload_timeout()));
-            config.get("cloud_storage_segment_upload_timeout_ms")
-              .set_value(
-                std::chrono::duration_cast<std::chrono::milliseconds>(
-                  local_cfg->segment_upload_timeout()));
-            config.get("cloud_storage_garbage_collect_timeout_ms")
-              .set_value(
-                std::chrono::duration_cast<std::chrono::milliseconds>(
-                  local_cfg->garbage_collect_timeout()));
-        }
-        if (cloud_cfg) {
-            config.get("cloud_storage_enable_remote_read").set_value(true);
-            config.get("cloud_storage_enable_remote_write").set_value(true);
-            config.get("cloud_storage_max_connections")
-              .set_value(static_cast<int16_t>(cloud_cfg->connection_limit()));
-            // Test fixtures run with single-digit pool capacities and
-            // exercise housekeeping (default_group) operations
-            // concurrently. The cluster default reservation
-            // ([2,2,2] = 6) would either trip the
-            // target_reserved-sum-fits-cap assertion or starve groups
-            // without their own lane; an empty reservation keeps the
-            // policy active while routing every admit through the
-            // common pool.
-            config.get("cloud_io_admission_control_reservation")
-              .set_value(std::vector<ss::sstring>{});
-        }
-
-        config.get("cloud_storage_disable_archiver_manager")
-          .set_value(legacy_upload_mode_enabled);
-
-        // Disable automatic cluster metadata uploads by default. Only tests
-        // that explicitly want it should enable it.
-        config.get("enable_cluster_metadata_upload_loop").set_value(false);
     }).get();
 }
 
