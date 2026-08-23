@@ -115,12 +115,6 @@ inline fmt::iterator format_to(tls_version v, fmt::iterator out) {
     return fmt::format_to(out, "{}", to_string_view(v));
 }
 
-
-
-
-
-
-
 enum class tls_name_format { legacy, rfc2253 };
 
 constexpr std::string_view to_string_view(tls_name_format format) {
