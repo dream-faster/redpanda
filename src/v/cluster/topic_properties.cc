@@ -25,17 +25,8 @@ fmt::iterator topic_properties::format_to(fmt::iterator it) const {
       "remote_topic_namespace_override: {}, remote_topic_properties: {}, "
       "remote_topic_allow_gaps: {}, batch_max_bytes: {}, "
       "retention_local_target_bytes: {}, retention_local_target_ms: {}, "
-      "remote_delete: {}, segment_ms: {}, schema_registry_context: {}, "
-      "record_key_schema_id_validation: {}, "
-      "record_key_schema_id_validation_compat: {}, "
-      "record_key_subject_name_strategy: {}, "
-      "record_key_subject_name_strategy_compat: {}, "
-      "record_value_schema_id_validation: {}, "
-      "record_value_schema_id_validation_compat: {}, "
-      "record_value_subject_name_strategy: {}, "
-      "record_value_subject_name_strategy_compat: {}, "
-      "initial_retention_local_target_bytes: {}, "
-      "initial_retention_local_target_ms: {}, mpx_virtual_cluster_id: {}, "
+      "remote_delete: {}, segment_ms: {}initial_retention_local_target_bytes: "
+      "{}, initial_retention_local_target_ms: {}, mpx_virtual_cluster_id: {}, "
       "write_caching: {}, flush_ms: {}, flush_bytes: {}, remote_label: "
       "{}leaders_preference: {}, delete_retention_ms: "
       "{}min_cleanable_dirty_ratio: {}, min_compaction_lag_ms: {}, "
@@ -60,15 +51,6 @@ fmt::iterator topic_properties::format_to(fmt::iterator it) const {
       retention_local_target_ms,
       remote_delete,
       segment_ms,
-      schema_registry_context,
-      record_key_schema_id_validation,
-      record_key_schema_id_validation_compat,
-      record_key_subject_name_strategy,
-      record_key_subject_name_strategy_compat,
-      record_value_schema_id_validation,
-      record_value_schema_id_validation_compat,
-      record_value_subject_name_strategy,
-      record_value_subject_name_strategy_compat,
       initial_retention_local_target_bytes,
       initial_retention_local_target_ms,
       mpx_virtual_cluster_id,
@@ -121,14 +103,6 @@ bool topic_properties::has_overrides() const {
         || retention_local_target_ms.is_engaged()
         || remote_delete != storage::ntp_config::default_remote_delete
         || segment_ms.is_engaged()
-        || record_key_schema_id_validation.has_value()
-        || record_key_schema_id_validation_compat.has_value()
-        || record_key_subject_name_strategy.has_value()
-        || record_key_subject_name_strategy_compat.has_value()
-        || record_value_schema_id_validation.has_value()
-        || record_value_schema_id_validation_compat.has_value()
-        || record_value_subject_name_strategy.has_value()
-        || record_value_subject_name_strategy_compat.has_value()
         || initial_retention_local_target_bytes.is_engaged()
         || initial_retention_local_target_ms.is_engaged()
         || write_caching.has_value() || flush_ms.has_value()
@@ -140,8 +114,7 @@ bool topic_properties::has_overrides() const {
         || remote_topic_allow_gaps.has_value()
         || message_timestamp_before_max_ms.has_value()
         || message_timestamp_after_max_ms.has_value()
-        || storage_mode != storage::ntp_config::default_storage_mode
-        || schema_registry_context.has_value();
+        || storage_mode != storage::ntp_config::default_storage_mode;
 
     return overrides;
 }

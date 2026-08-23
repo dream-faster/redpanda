@@ -18,7 +18,6 @@
 #include "model/metadata.h"
 #include "model/namespace.h"
 #include "model/timestamp.h"
-#include "pandaproxy/schema_registry/types.h"
 #include "strings/string_switch.h"
 #include "utils/tristate.h"
 
@@ -299,14 +298,6 @@ cluster::topic_configuration to_topic_config(
     cfg.properties.delete_retention_ms = get_delete_retention_ms(
       config_entries);
 
-    if (
-      auto s = get_string_value(
-        config_entries, topic_property_schema_registry_context);
-      s.has_value() && !s->empty()) {
-        cfg.properties.schema_registry_context
-          = pandaproxy::schema_registry::context{std::move(*s)};
-    }
-
     cfg.properties.min_cleanable_dirty_ratio = get_tristate_value<double>(
       config_entries, topic_property_min_cleanable_dirty_ratio);
 
@@ -341,41 +332,6 @@ cluster::topic_configuration to_topic_config(
           })
           .value_or(config::shard_local_cfg().default_redpanda_storage_mode());
 
-    schema_id_validation_config_parser schema_id_validation_config_parser{
-      cfg.properties};
-
-    for (const auto& [name, value] : config_entries) {
-        schema_id_validation_config_parser(
-          name, value, kafka::config_resource_operation::set);
-    }
-
-    return cfg;
-}
-
-cluster::topic_configuration
-schema_registry_topic_configuration(int16_t replication_factor) {
-    // Create the base topic configuration to get the cluster defaults
-    auto cfg = to_topic_config(
-      model::kafka_namespace,
-      model::schema_registry_internal_tp.topic,
-      /*partition_count=*/1,
-      replication_factor,
-      {});
-    // Now update the properties
-    cfg.properties.cleanup_policy_bitflags
-      = model::cleanup_policy_bitflags::compaction;
-    cfg.properties.compression = model::compression::none;
-    cfg.properties.retention_bytes = tristate<size_t>{disable_tristate};
-    cfg.properties.retention_duration = tristate<std::chrono::milliseconds>{
-      disable_tristate};
-    cfg.properties.retention_local_target_bytes = tristate<size_t>{
-      disable_tristate};
-    cfg.properties.retention_local_target_ms
-      = tristate<std::chrono::milliseconds>{disable_tristate};
-    cfg.properties.initial_retention_local_target_bytes = tristate<size_t>{
-      disable_tristate};
-    cfg.properties.initial_retention_local_target_ms
-      = tristate<std::chrono::milliseconds>{disable_tristate};
     return cfg;
 }
 

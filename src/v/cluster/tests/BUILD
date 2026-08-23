@@ -1410,7 +1410,6 @@ redpanda_cc_btest(
         "//src/v/container:chunked_vector",
         "//src/v/model",
         "//src/v/model/tests:random",
-        "//src/v/pandaproxy/schema_registry/test:random",
         "//src/v/raft",
         "//src/v/raft:fundamental",
         "//src/v/random:generators",

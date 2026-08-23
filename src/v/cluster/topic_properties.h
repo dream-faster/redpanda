@@ -16,8 +16,6 @@
 #include "model/fundamental.h"
 #include "model/metadata.h"
 #include "model/timestamp.h"
-#include "pandaproxy/schema_registry/subject_name_strategy.h"
-#include "pandaproxy/schema_registry/types.h"
 #include "reflection/adl.h"
 #include "serde/rw/chrono.h"
 #include "serde/rw/envelope.h"
@@ -56,18 +54,6 @@ struct topic_properties
       tristate<std::chrono::milliseconds> retention_local_target_ms,
       bool remote_delete,
       tristate<std::chrono::milliseconds> segment_ms,
-      std::optional<bool> record_key_schema_id_validation,
-      std::optional<bool> record_key_schema_id_validation_compat,
-      std::optional<pandaproxy::schema_registry::subject_name_strategy>
-        record_key_subject_name_strategy,
-      std::optional<pandaproxy::schema_registry::subject_name_strategy>
-        record_key_subject_name_strategy_compat,
-      std::optional<bool> record_value_schema_id_validation,
-      std::optional<bool> record_value_schema_id_validation_compat,
-      std::optional<pandaproxy::schema_registry::subject_name_strategy>
-        record_value_subject_name_strategy,
-      std::optional<pandaproxy::schema_registry::subject_name_strategy>
-        record_value_subject_name_strategy_compat,
       tristate<size_t> initial_retention_local_target_bytes,
       tristate<std::chrono::milliseconds> initial_retention_local_target_ms,
       std::optional<model::vcluster_id> mpx_virtual_cluster_id,
@@ -102,18 +88,6 @@ struct topic_properties
       , retention_local_target_ms(retention_local_target_ms)
       , remote_delete(remote_delete)
       , segment_ms(segment_ms)
-      , record_key_schema_id_validation(record_key_schema_id_validation)
-      , record_key_schema_id_validation_compat(
-          record_key_schema_id_validation_compat)
-      , record_key_subject_name_strategy(record_key_subject_name_strategy)
-      , record_key_subject_name_strategy_compat(
-          record_key_subject_name_strategy_compat)
-      , record_value_schema_id_validation(record_value_schema_id_validation)
-      , record_value_schema_id_validation_compat(
-          record_value_schema_id_validation_compat)
-      , record_value_subject_name_strategy(record_value_subject_name_strategy)
-      , record_value_subject_name_strategy_compat(
-          record_value_subject_name_strategy_compat)
       , initial_retention_local_target_bytes(
           initial_retention_local_target_bytes)
       , initial_retention_local_target_ms(initial_retention_local_target_ms)
@@ -165,29 +139,6 @@ struct topic_properties
     bool remote_delete{storage::ntp_config::default_remote_delete};
 
     tristate<std::chrono::milliseconds> segment_ms{std::nullopt};
-
-    // Schema Registry context — the namespace within which schema ids and
-    // subjects resolve for this topic. Contexts are a Schema Registry
-    // namespacing mechanism: schema ids are unique within a context but not
-    // across them. Consumed by the in-broker Iceberg translator (today) and
-    // intended to also cover record_{key,value}_schema_id_validation below
-    // in the future, since a given schema id on a given record can only
-    // resolve to one schema. std::nullopt means the SR default context (".");
-    // has_overrides/describe treat nullopt as unset.
-    std::optional<pandaproxy::schema_registry::context> schema_registry_context;
-
-    std::optional<bool> record_key_schema_id_validation;
-    std::optional<bool> record_key_schema_id_validation_compat;
-    std::optional<pandaproxy::schema_registry::subject_name_strategy>
-      record_key_subject_name_strategy;
-    std::optional<pandaproxy::schema_registry::subject_name_strategy>
-      record_key_subject_name_strategy_compat;
-    std::optional<bool> record_value_schema_id_validation;
-    std::optional<bool> record_value_schema_id_validation_compat;
-    std::optional<pandaproxy::schema_registry::subject_name_strategy>
-      record_value_subject_name_strategy;
-    std::optional<pandaproxy::schema_registry::subject_name_strategy>
-      record_value_subject_name_strategy_compat;
 
     tristate<size_t> initial_retention_local_target_bytes{std::nullopt};
     tristate<std::chrono::milliseconds> initial_retention_local_target_ms{
@@ -265,14 +216,6 @@ struct topic_properties
           retention_local_target_ms,
           remote_delete,
           segment_ms,
-          record_key_schema_id_validation,
-          record_key_schema_id_validation_compat,
-          record_key_subject_name_strategy,
-          record_key_subject_name_strategy_compat,
-          record_value_schema_id_validation,
-          record_value_schema_id_validation_compat,
-          record_value_subject_name_strategy,
-          record_value_subject_name_strategy_compat,
           initial_retention_local_target_bytes,
           initial_retention_local_target_ms,
           mpx_virtual_cluster_id,
@@ -290,8 +233,7 @@ struct topic_properties
           max_compaction_lag_ms,
           message_timestamp_before_max_ms,
           message_timestamp_after_max_ms,
-          storage_mode,
-          schema_registry_context);
+          storage_mode);
     }
 
     friend bool

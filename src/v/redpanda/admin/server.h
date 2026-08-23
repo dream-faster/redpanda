@@ -23,8 +23,6 @@
 #include "finjector/stress_fiber.h"
 #include "kafka/server/fwd.h"
 #include "model/metadata.h"
-#include "pandaproxy/rest/fwd.h"
-#include "pandaproxy/schema_registry/fwd.h"
 #include "redpanda/admin/debug_bundle.h"
 #include "redpanda/admin/kafka_connections_service.h"
 #include "resource_mgmt/cpu_profiler.h"
@@ -58,11 +56,6 @@ struct admin_server_cfg {
     size_t max_memory_usage_bytes;
 };
 
-enum class service_kind {
-    http_proxy,
-    schema_registry,
-};
-
 namespace cloud_storage {
 struct topic_recovery_service;
 }
@@ -83,8 +76,6 @@ public:
       ss::sharded<cluster::node_status_table>&,
       ss::sharded<cluster::self_test_frontend>&,
       ss::sharded<kafka::usage_manager>&,
-      pandaproxy::rest::api*,
-      pandaproxy::schema_registry::api*,
       ss::sharded<cloud_storage::topic_recovery_service>&,
       ss::sharded<cluster::topic_recovery_status_frontend>&,
       ss::sharded<storage::node>&,
@@ -670,8 +661,6 @@ private:
     ss::future<ss::json::json_return_type>
       cloud_storage_usage_handler(std::unique_ptr<ss::http::request>);
     ss::future<ss::json::json_return_type>
-      restart_service_handler(std::unique_ptr<ss::http::request>);
-    ss::future<ss::json::json_return_type>
       sampled_memory_profile_handler(std::unique_ptr<ss::http::request>);
 
     ss::future<ss::json::json_return_type> get_node_uuid_handler();
@@ -754,8 +743,6 @@ private:
     void rearm_log_level_timer();
     void log_level_timer_handler();
 
-    ss::future<> restart_redpanda_service(service_kind service);
-
     ss::httpd::http_server _server;
     admin_server_cfg _cfg;
     ss::sharded<stress_fiber_manager>& _stress_fiber_manager;
@@ -770,8 +757,6 @@ private:
     ss::sharded<cluster::node_status_table>& _node_status_table;
     ss::sharded<cluster::self_test_frontend>& _self_test_frontend;
     ss::sharded<kafka::usage_manager>& _usage_manager;
-    pandaproxy::rest::api* _http_proxy;
-    pandaproxy::schema_registry::api* _schema_registry;
     ss::sharded<cloud_storage::topic_recovery_service>& _topic_recovery_service;
     ss::sharded<cluster::topic_recovery_status_frontend>&
       _topic_recovery_status_frontend;

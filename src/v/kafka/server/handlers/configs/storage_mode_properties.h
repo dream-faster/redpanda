@@ -74,19 +74,6 @@ inline constexpr auto storage_mode_properties
     {topic_property_compaction_strategy, storage_mode_mask::all},
     {topic_property_redpanda_storage_mode, storage_mode_mask::all},
     // Schema validation properties - valid for all modes
-    {topic_property_record_key_schema_id_validation, storage_mode_mask::all},
-    {topic_property_record_key_subject_name_strategy, storage_mode_mask::all},
-    {topic_property_record_value_schema_id_validation, storage_mode_mask::all},
-    {topic_property_record_value_subject_name_strategy, storage_mode_mask::all},
-    {topic_property_record_key_schema_id_validation_compat,
-     storage_mode_mask::all},
-    {topic_property_record_key_subject_name_strategy_compat,
-     storage_mode_mask::all},
-    {topic_property_record_value_schema_id_validation_compat,
-     storage_mode_mask::all},
-    {topic_property_record_value_subject_name_strategy_compat,
-     storage_mode_mask::all},
-    {topic_property_schema_registry_context, storage_mode_mask::all},
 
     // Properties valid for local and tiered storage.
     {topic_property_flush_bytes, storage_mode_mask::local_tiered},

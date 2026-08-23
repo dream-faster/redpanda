@@ -151,8 +151,7 @@ server::server(
   ss::sharded<cluster::controller_api>& controller_api,
   ss::sharded<cluster::tx_gateway_frontend>& tx_gateway_frontend,
   std::optional<qdc_monitor_config> qdc_config,
-  ssx::singleton_thread_worker& tw,
-  const std::unique_ptr<pandaproxy::schema_registry::api>& sr) noexcept
+  ssx::singleton_thread_worker& tw, ) noexcept
   : net::server(cfg, klog)
   , _smp_group(smp)
   , _fetch_scheduling_group(fetch_sg)
@@ -213,8 +212,7 @@ server::server(
   , _read_dist_probe(std::make_unique<read_distribution_probe>())
   , _thread_worker(tw)
   , _replica_selector(
-      std::make_unique<rack_aware_replica_selector>(_metadata_cache.local()))
-  , _schema_registry(sr) {
+      std::make_unique<rack_aware_replica_selector>(_metadata_cache.local())) {
     vlog(
       klog.debug,
       "Starting kafka server with {} byte limit on fetch requests",

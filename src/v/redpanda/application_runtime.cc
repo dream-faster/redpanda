@@ -15,8 +15,6 @@
 #include "debug_bundle/debug_bundle_service.h"
 #include "kafka/data/rpc/client.h"
 #include "kafka/server/usage_manager.h"
-#include "pandaproxy/rest/api.h"
-#include "pandaproxy/schema_registry/api.h"
 #include "redpanda/admin/kafka_connections_service.h"
 #include "redpanda/application.h"
 #include "resource_mgmt/memory_groups.h"
@@ -29,18 +27,6 @@ void application::wire_up_runtime_services(
   model::node_id node_id, ::stop_signal& app_signal) {
     std::optional<cloud_storage_clients::bucket_name> bucket;
     wire_up_redpanda_services(node_id, app_signal, bucket);
-    if (_proxy_config) {
-        construct_single_service(
-          _proxy,
-          smp_service_groups.proxy_smp_sg(),
-          // TODO: Improve memory budget for services
-          // https://github.com/redpanda-data/redpanda/issues/1392
-          memory_groups().kafka_total_memory(),
-          *_proxy_client_config,
-          *_proxy_config,
-          controller.get());
-    }
-
     syschecks::systemd_message("Creating kafka usage manager frontend").get();
     construct_service(
       usage_manager,

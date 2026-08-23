@@ -76,21 +76,7 @@ public:
     get_default_delete_retention_ms() const override {
         return _config->tombstone_retention_ms();
     }
-    bool get_default_record_key_schema_id_validation() const override {
-        return false;
-    }
 
-    pandaproxy::schema_registry::subject_name_strategy
-    get_default_record_key_subject_name_strategy() const override {
-        return pandaproxy::schema_registry::subject_name_strategy::topic_name;
-    }
-    bool get_default_record_value_schema_id_validation() const override {
-        return false;
-    }
-    pandaproxy::schema_registry::subject_name_strategy
-    get_default_record_value_subject_name_strategy() const override {
-        return pandaproxy::schema_registry::subject_name_strategy::topic_name;
-    }
     std::optional<size_t>
     get_default_initial_retention_local_target_bytes() const override {
         return config::shard_local_cfg()

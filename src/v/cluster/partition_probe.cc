@@ -14,7 +14,6 @@
 #include "config/configuration.h"
 #include "metrics/metrics.h"
 #include "metrics/prometheus_sanitize.h"
-#include "pandaproxy/schema_registry/schema_id_validation.h"
 
 #include <seastar/core/metrics.hh>
 
@@ -28,9 +27,6 @@ replicated_partition_probe::replicated_partition_probe(
   : _partition(p)
   , _enable_scrubbing_bind(
       config::shard_local_cfg().cloud_storage_enable_scrubbing.bind()) {
-    config::shard_local_cfg().enable_schema_id_validation.bind().watch(
-      [this]() { reconfigure_metrics(); });
-
     _enable_scrubbing_bind.watch([this]() { reconfigure_metrics(); });
 }
 
@@ -171,22 +167,6 @@ void replicated_partition_probe::setup_internal_metrics(const model::ntp& ntp) {
       },
       {},
       {sm::shard_label, metrics::partition_label});
-
-    if (
-      config::shard_local_cfg().enable_schema_id_validation()
-      != pandaproxy::schema_registry::schema_id_validation_mode::none) {
-        _metrics.add_group(
-          cluster_metrics_name,
-          {
-            sm::make_counter(
-              "schema_id_validation_records_failed",
-              [this] { return _schema_id_validation_records_failed; },
-              sm::description(
-                "Number of records that failed schema ID validation"),
-              labels)
-              .aggregate({sm::shard_label, metrics::partition_label}),
-          });
-    }
 }
 
 void replicated_partition_probe::setup_public_metrics(const model::ntp& ntp) {
@@ -300,21 +280,6 @@ void replicated_partition_probe::setup_public_metrics(const model::ntp& ntp) {
            partition_label(ntp.tp.partition())})
           .aggregate({sm::shard_label, partition_label}),
       });
-    if (
-      config::shard_local_cfg().enable_schema_id_validation()
-      != pandaproxy::schema_registry::schema_id_validation_mode::none) {
-        _public_metrics.add_group(
-          cluster_metrics_name,
-          {
-            sm::make_counter(
-              "schema_id_validation_records_failed",
-              [this] { return _schema_id_validation_records_failed; },
-              sm::description(
-                "Number of records that failed schema ID validation"),
-              labels)
-              .aggregate({sm::shard_label, partition_label}),
-          });
-    }
     setup_public_scrubber_metric(ntp);
 }
 

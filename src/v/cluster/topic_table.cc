@@ -18,12 +18,10 @@
 #include "cluster/errc.h"
 #include "cluster/fwd.h"
 #include "cluster/logger.h"
-#include "cluster/topic_validators.h"
 #include "cluster/types.h"
 #include "container/chunked_hash_map.h"
 #include "model/fundamental.h"
 #include "model/metadata.h"
-#include "pandaproxy/schema_registry/types.h"
 #include "storage/ntp_config.h"
 
 #include <seastar/coroutine/maybe_yield.hh>
@@ -61,10 +59,6 @@ topic_table::apply(create_topic_cmd cmd, model::offset offset) {
            != data_migrations::migrated_resource_state::non_restricted) {
         vlog(clusterlog.debug, "topic {} already migrated", cmd.key);
         co_return errc::topic_already_exists;
-    }
-
-    if (!schema_id_validation_validator::is_valid(cmd.value.cfg.properties)) {
-        co_return schema_id_validation_validator::ec;
     }
 
     std::optional<model::initial_revision_id> remote_revision
@@ -1031,30 +1025,6 @@ topic_properties topic_table::update_topic_properties(
       storage::ntp_config::default_remote_delete);
     incremental_update(updated_properties.segment_ms, overrides.segment_ms);
     incremental_update(
-      updated_properties.record_key_schema_id_validation,
-      overrides.record_key_schema_id_validation);
-    incremental_update(
-      updated_properties.record_key_schema_id_validation_compat,
-      overrides.record_key_schema_id_validation_compat);
-    incremental_update(
-      updated_properties.record_key_subject_name_strategy,
-      overrides.record_key_subject_name_strategy);
-    incremental_update(
-      updated_properties.record_key_subject_name_strategy_compat,
-      overrides.record_key_subject_name_strategy_compat);
-    incremental_update(
-      updated_properties.record_value_schema_id_validation,
-      overrides.record_value_schema_id_validation);
-    incremental_update(
-      updated_properties.record_value_schema_id_validation_compat,
-      overrides.record_value_schema_id_validation_compat);
-    incremental_update(
-      updated_properties.record_value_subject_name_strategy,
-      overrides.record_value_subject_name_strategy);
-    incremental_update(
-      updated_properties.record_value_subject_name_strategy_compat,
-      overrides.record_value_subject_name_strategy_compat);
-    incremental_update(
       updated_properties.initial_retention_local_target_bytes,
       overrides.initial_retention_local_target_bytes);
     incremental_update(
@@ -1090,9 +1060,6 @@ topic_properties topic_table::update_topic_properties(
       updated_properties.storage_mode,
       overrides.storage_mode,
       storage::ntp_config::default_storage_mode);
-    incremental_update(
-      updated_properties.schema_registry_context,
-      overrides.schema_registry_context);
     return updated_properties;
 }
 
@@ -1134,10 +1101,6 @@ topic_table::apply(update_topic_properties_cmd cmd, model::offset o) {
     // no configuration change, no need to generate delta
     if (updated_properties == properties) {
         co_return errc::success;
-    }
-
-    if (!schema_id_validation_validator::is_valid(updated_properties)) {
-        co_return schema_id_validation_validator::ec;
     }
 
     // Apply the changes

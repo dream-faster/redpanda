@@ -27,8 +27,6 @@
 #include "net/dns.h"
 #include "net/server.h"
 #include "net/tls_certificate_probe.h"
-#include "pandaproxy/rest/api.h"
-#include "pandaproxy/schema_registry/api.h"
 #include "raft/group_manager.h"
 #include "redpanda/admin/server.h"
 #include "redpanda/application.h"
@@ -652,22 +650,6 @@ void application::wire_up_and_start(
     }
 
     start_runtime_services(app_signal);
-
-    if (_proxy_config && !config::node().recovery_mode_enabled) {
-        _proxy->start().get();
-        vlog(
-          _log.info,
-          "Started Pandaproxy listening at {}",
-          _proxy_config->pandaproxy_api());
-    }
-
-    if (_schema_reg_config && !config::node().recovery_mode_enabled) {
-        _schema_registry->start().get();
-        vlog(
-          _log.info,
-          "Started Schema Registry listening at {}",
-          _schema_reg_config->schema_registry_api());
-    }
 
     audit_mgr.invoke_on_all(&security::audit::audit_log_manager::start).get();
 

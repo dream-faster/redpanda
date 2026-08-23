@@ -93,7 +93,6 @@ redpanda_cc_gtest(
         "//src/v/config",
         "//src/v/container:chunked_vector",
         "//src/v/kafka/protocol",
-        "//src/v/pandaproxy/schema_registry:types",
         "//src/v/random:generators",
         "//src/v/security",
         "//src/v/test_utils:gtest",

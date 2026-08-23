@@ -43,7 +43,6 @@ struct feature_table_snapshot;
 enum class feature : std::uint64_t {
     validated_batch_timestamps = 1ULL << 1U,
     topic_locations_in_outbound_migrations = 1ULL << 2U,
-    schema_registry_authz = 1ULL << 3U,
     topic_ids_api = 1ULL << 4U,
     controller_forced_reconfiguration = 1ULL << 5U,
     user_based_client_quota = 1ULL << 6U,
@@ -462,12 +461,6 @@ inline constexpr std::array feature_schema{
     release_version::v25_2_1,
     "topic_locations_in_outbound_migrations",
     feature::topic_locations_in_outbound_migrations,
-    feature_spec::available_policy::always,
-    feature_spec::prepare_policy::always},
-  feature_spec{
-    release_version::v25_2_1,
-    "schema_registry_authz",
-    feature::schema_registry_authz,
     feature_spec::available_policy::always,
     feature_spec::prepare_policy::always},
   feature_spec{

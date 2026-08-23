@@ -32,8 +32,6 @@
 #include "model/fundamental.h"
 #include "model/metadata.h"
 #include "model/timeout_clock.h"
-#include "pandaproxy/schema_registry/subject_name_strategy.h"
-#include "pandaproxy/schema_registry/types.h"
 #include "raft/errc.h"
 #include "raft/fwd.h"
 #include "raft/transfer_leadership.h"
@@ -704,23 +702,6 @@ struct incremental_topic_updates
     property_update<bool> remote_delete{
       false, incremental_update_operation::none};
     property_update<tristate<std::chrono::milliseconds>> segment_ms;
-    property_update<std::optional<bool>> record_key_schema_id_validation;
-    property_update<std::optional<bool>> record_key_schema_id_validation_compat;
-    property_update<
-      std::optional<pandaproxy::schema_registry::subject_name_strategy>>
-      record_key_subject_name_strategy;
-    property_update<
-      std::optional<pandaproxy::schema_registry::subject_name_strategy>>
-      record_key_subject_name_strategy_compat;
-    property_update<std::optional<bool>> record_value_schema_id_validation;
-    property_update<std::optional<bool>>
-      record_value_schema_id_validation_compat;
-    property_update<
-      std::optional<pandaproxy::schema_registry::subject_name_strategy>>
-      record_value_subject_name_strategy;
-    property_update<
-      std::optional<pandaproxy::schema_registry::subject_name_strategy>>
-      record_value_subject_name_strategy_compat;
     property_update<tristate<size_t>> initial_retention_local_target_bytes;
     property_update<tristate<std::chrono::milliseconds>>
       initial_retention_local_target_ms;
@@ -742,9 +723,6 @@ struct incremental_topic_updates
     property_update<std::optional<std::chrono::milliseconds>>
       message_timestamp_after_max_ms;
     property_update<std::optional<model::redpanda_storage_mode>> storage_mode;
-
-    property_update<std::optional<pandaproxy::schema_registry::context>>
-      schema_registry_context;
 
     // Not a regular topic property. Used to assign topic UUIDs to pre-25-2
     // topics that were created without one.
@@ -778,14 +756,6 @@ struct incremental_topic_updates
           retention_local_target_ms,
           remote_delete,
           segment_ms,
-          record_key_schema_id_validation,
-          record_key_schema_id_validation_compat,
-          record_key_subject_name_strategy,
-          record_key_subject_name_strategy_compat,
-          record_value_schema_id_validation,
-          record_value_schema_id_validation_compat,
-          record_value_subject_name_strategy,
-          record_value_subject_name_strategy_compat,
           initial_retention_local_target_bytes,
           initial_retention_local_target_ms,
           write_caching,
@@ -803,8 +773,7 @@ struct incremental_topic_updates
           message_timestamp_before_max_ms,
           message_timestamp_after_max_ms,
           remote_label,
-          storage_mode,
-          schema_registry_context);
+          storage_mode);
     }
 
     fmt::iterator format_to(fmt::iterator it) const;
@@ -912,9 +881,6 @@ struct custom_assignable_topic_configuration {
     bool has_custom_assignment() const { return !custom_assignments.empty(); }
     bool is_read_replica() const { return cfg.is_read_replica(); }
     bool is_recovery_enabled() const { return cfg.is_recovery_enabled(); }
-    bool is_schema_id_validation_enabled() const {
-        return cfg.is_schema_id_validation_enabled();
-    }
 
     fmt::iterator format_to(fmt::iterator it) const;
 };

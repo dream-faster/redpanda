@@ -28,7 +28,6 @@
 #include "kafka/server/server.h"
 #include "kafka/server/usage_manager.h"
 #include "model/namespace.h"
-#include "pandaproxy/schema_registry/fwd.h"
 #include "security/acl.h"
 #include "security/audit/schemas/iam.h"
 #include "security/audit/schemas/types.h"
@@ -177,11 +176,6 @@ public:
 
     cluster::tx_gateway_frontend& tx_gateway_frontend() const {
         return _conn->server().tx_gateway_frontend();
-    }
-
-    const std::unique_ptr<pandaproxy::schema_registry::api>&
-    schema_registry() const {
-        return _conn->server().schema_registry();
     }
 
     std::chrono::milliseconds throttle_delay_ms() const {

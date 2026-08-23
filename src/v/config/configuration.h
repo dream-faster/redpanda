@@ -28,7 +28,6 @@
 #include "model/fundamental.h"
 #include "model/metadata.h"
 #include "model/timestamp.h"
-#include "pandaproxy/schema_registry/schema_id_validation.h"
 #include "security/config.h"
 #include "utils/unresolved_address.h"
 
@@ -367,7 +366,6 @@ struct configuration final : public config_store {
     property<std::vector<ss::sstring>> audit_excluded_principals;
     enum_property<audit_failure_policy> audit_failure_policy;
     property<bool> audit_use_rpc;
-    property<bool> schema_registry_use_rpc;
 
     // Archival storage
     enterprise<property<bool>> cloud_storage_enabled;
@@ -663,22 +661,8 @@ struct configuration final : public config_store {
     property<std::chrono::seconds> legacy_unsafe_log_warning_interval_sec;
 
     // schema id validation
-    enterprise<
-      enum_property<pandaproxy::schema_registry::schema_id_validation_mode>>
-      enable_schema_id_validation;
-    config::property<size_t> kafka_schema_id_validation_cache_capacity;
 
-    enterprise<property<bool>> schema_registry_enable_authorization;
-    property<bool> schema_registry_always_normalize;
-    property<bool> schema_registry_deferred_recovery;
-    property<bool> schema_registry_replay_on_startup;
-    deprecated_property schema_registry_avro_use_named_references;
-    property<bool> schema_registry_enable_qualified_subjects;
-    bounded_property<size_t> schema_registry_sync_memory_bytes;
-    bounded_property<size_t> schema_registry_sync_parallelism;
     property<std::optional<uint32_t>> pp_sr_smp_max_non_local_requests;
-    bounded_property<size_t> max_in_flight_schema_registry_requests_per_shard;
-    bounded_property<size_t> max_in_flight_pandaproxy_requests_per_shard;
 
     bounded_property<double, numeric_bounds> kafka_memory_share_for_fetch;
     // debug controls

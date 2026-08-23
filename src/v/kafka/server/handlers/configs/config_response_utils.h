@@ -18,7 +18,6 @@
 #include "kafka/protocol/schemata/create_topics_response.h"
 #include "model/compression.h"
 #include "model/fundamental.h"
-#include "pandaproxy/schema_registry/subject_name_strategy.h"
 #include "ssx/sformat.h"
 #include "utils/tristate.h"
 
@@ -93,12 +92,6 @@ struct metadata_cache_info {
     get_default_segment_ms() const = 0;
     virtual std::optional<std::chrono::milliseconds>
     get_default_delete_retention_ms() const = 0;
-    virtual bool get_default_record_key_schema_id_validation() const = 0;
-    virtual pandaproxy::schema_registry::subject_name_strategy
-    get_default_record_key_subject_name_strategy() const = 0;
-    virtual bool get_default_record_value_schema_id_validation() const = 0;
-    virtual pandaproxy::schema_registry::subject_name_strategy
-    get_default_record_value_subject_name_strategy() const = 0;
     virtual std::optional<size_t>
     get_default_initial_retention_local_target_bytes() const = 0;
     virtual std::optional<std::chrono::milliseconds>
@@ -141,12 +134,6 @@ public:
     get_default_segment_ms() const override;
     std::optional<std::chrono::milliseconds>
     get_default_delete_retention_ms() const override;
-    bool get_default_record_key_schema_id_validation() const override;
-    pandaproxy::schema_registry::subject_name_strategy
-    get_default_record_key_subject_name_strategy() const override;
-    bool get_default_record_value_schema_id_validation() const override;
-    pandaproxy::schema_registry::subject_name_strategy
-    get_default_record_value_subject_name_strategy() const override;
     std::optional<size_t>
     get_default_initial_retention_local_target_bytes() const override;
     std::optional<std::chrono::milliseconds>

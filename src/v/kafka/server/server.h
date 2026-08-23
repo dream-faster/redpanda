@@ -32,7 +32,6 @@
 #include "kafka/server/sasl_probe.h"
 #include "metrics/metrics.h"
 #include "net/server.h"
-#include "pandaproxy/schema_registry/fwd.h"
 #include "security/audit/audit_log_manager.h"
 #include "security/fwd.h"
 #include "security/gssapi_principal_mapper.h"
@@ -83,8 +82,7 @@ public:
       ss::sharded<cluster::controller_api>&,
       ss::sharded<cluster::tx_gateway_frontend>&,
       std::optional<qdc_monitor_config>,
-      ssx::singleton_thread_worker&,
-      const std::unique_ptr<pandaproxy::schema_registry::api>&) noexcept;
+      ssx::singleton_thread_worker&, ) noexcept;
 
     ~server() noexcept override = default;
     server(const server&) = delete;
@@ -202,10 +200,6 @@ public:
 
     ssx::singleton_thread_worker& thread_worker() { return _thread_worker; }
 
-    const std::unique_ptr<pandaproxy::schema_registry::api>& schema_registry() {
-        return _schema_registry;
-    }
-
     static bool enable_mpx_extensions() {
         return config::shard_local_cfg().enable_mpx_extensions();
     }
@@ -301,7 +295,6 @@ private:
     std::unique_ptr<read_distribution_probe> _read_dist_probe;
     ssx::singleton_thread_worker& _thread_worker;
     std::unique_ptr<replica_selector> _replica_selector;
-    const std::unique_ptr<pandaproxy::schema_registry::api>& _schema_registry;
     boost::intrusive::list<connection_context> _connections;
     closed_connections_t _closed_connections{};
 };

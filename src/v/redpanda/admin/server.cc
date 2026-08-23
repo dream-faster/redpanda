@@ -69,9 +69,6 @@
 #include "model/timeout_clock.h"
 #include "net/dns.h"
 #include "net/tls_certificate_probe.h"
-#include "pandaproxy/rest/api.h"
-#include "pandaproxy/schema_registry/api.h"
-#include "pandaproxy/schema_registry/schema_id_validation.h"
 #include "raft/types.h"
 #include "redpanda/admin/api-doc/broker.json.hh"
 #include "redpanda/admin/api-doc/cluster.json.hh"
@@ -289,8 +286,6 @@ admin_server::admin_server(
   ss::sharded<cluster::node_status_table>& node_status_table,
   ss::sharded<cluster::self_test_frontend>& self_test_frontend,
   ss::sharded<kafka::usage_manager>& usage_manager,
-  pandaproxy::rest::api* http_proxy,
-  pandaproxy::schema_registry::api* schema_registry,
   ss::sharded<cloud_storage::topic_recovery_service>& topic_recovery_svc,
   ss::sharded<cluster::topic_recovery_status_frontend>&
     topic_recovery_status_frontend,
@@ -321,8 +316,6 @@ admin_server::admin_server(
   , _node_status_table(node_status_table)
   , _self_test_frontend(self_test_frontend)
   , _usage_manager(usage_manager)
-  , _http_proxy(http_proxy)
-  , _schema_registry(schema_registry)
   , _topic_recovery_service(topic_recovery_svc)
   , _topic_recovery_status_frontend(topic_recovery_status_frontend)
   , _storage_node(storage_node)
@@ -1821,7 +1814,6 @@ ss::sstring join_properties(
  */
 void config_multi_property_validation(
   const ss::sstring& username,
-  pandaproxy::schema_registry::api* schema_registry,
   const cluster::config_update_request& req,
   const config::configuration& updated_config,
   std::map<ss::sstring, ss::sstring>& errors) {
@@ -1964,15 +1956,6 @@ void config_multi_property_validation(
             }
         } break;
         }
-    }
-
-    if (
-      updated_config.enable_schema_id_validation
-        != pandaproxy::schema_registry::schema_id_validation_mode::none
-      && !schema_registry) {
-        auto name = updated_config.enable_schema_id_validation.name();
-        errors[ss::sstring(name)] = ssx::sformat(
-          "{} requires schema_registry to be enabled in redpanda.yaml", name);
     }
 
     // cloud_storage_cache_size/size_percent validation
@@ -2266,7 +2249,7 @@ admin_server::patch_cluster_config_handler(
         // After checking each individual property, check for
         // any multi-property validation errors
         config_multi_property_validation(
-          auth_state.get_username(), _schema_registry, update, *cfg, errors);
+          auth_state.get_username(), update, *cfg, errors);
 
         if (!errors.empty()) {
             json::StringBuffer buf;
@@ -5008,87 +4991,4 @@ void admin_server::register_shadow_indexing_routes() {
     register_route<superuser>(
       ss::httpd::shadow_indexing_json::reset_scrubbing_metadata,
       [this](auto req) { return reset_scrubbing_metadata(std::move(req)); });
-}
-
-constexpr std::string_view to_string_view(service_kind kind) {
-    switch (kind) {
-    case service_kind::schema_registry:
-        return "schema-registry";
-    case service_kind::http_proxy:
-        return "http-proxy";
-    }
-    return "invalid";
-}
-
-fmt::iterator format_to(service_kind kind, fmt::iterator out) {
-    return fmt::format_to(out, "{}", to_string_view(kind));
-}
-
-template<typename E>
-std::enable_if_t<std::is_enum_v<E>, std::optional<E>>
-  from_string_view(std::string_view);
-
-template<>
-constexpr std::optional<service_kind>
-from_string_view<service_kind>(std::string_view sv) {
-    return string_switch<std::optional<service_kind>>(sv)
-      .match(
-        to_string_view(service_kind::schema_registry),
-        service_kind::schema_registry)
-      .match(to_string_view(service_kind::http_proxy), service_kind::http_proxy)
-      .default_match(std::nullopt);
-}
-
-namespace {
-template<typename service_t>
-ss::future<>
-try_service_restart(service_t* svc, std::string_view service_str_view) {
-    if (svc == nullptr) {
-        throw ss::httpd::server_error_exception(
-          fmt::format(
-            "{} is undefined. Is it set in the .yaml config file?",
-            service_str_view));
-    }
-
-    try {
-        co_await svc->restart();
-    } catch (const std::exception& ex) {
-        vlog(
-          adminlog.error,
-          "Unknown issue restarting {}: {}",
-          service_str_view,
-          ex.what());
-        throw ss::httpd::server_error_exception(
-          fmt::format("Unknown issue restarting {}", service_str_view));
-    }
-}
-} // namespace
-
-ss::future<> admin_server::restart_redpanda_service(service_kind service) {
-    switch (service) {
-    case service_kind::schema_registry:
-        co_await try_service_restart(_schema_registry, to_string_view(service));
-        break;
-    case service_kind::http_proxy:
-        co_await try_service_restart(_http_proxy, to_string_view(service));
-        break;
-    }
-}
-
-ss::future<ss::json::json_return_type>
-admin_server::restart_service_handler(std::unique_ptr<ss::http::request> req) {
-    auto service_param = req->get_query_param("service");
-    std::optional<service_kind> service = from_string_view<service_kind>(
-      service_param);
-    if (!service.has_value()) {
-        throw ss::httpd::not_found_exception(
-          fmt::format("Invalid service: {}", service_param));
-    }
-
-    vlog(
-      adminlog.info, "Restart redpanda service: {}", to_string_view(*service));
-    co_await container().invoke_on(0, [service](admin_server& server) {
-        return server.restart_redpanda_service(*service);
-    });
-    co_return ss::json::json_return_type(ss::json::json_void());
 }

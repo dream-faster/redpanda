@@ -734,11 +734,6 @@ void rjson_serialize(
         rjson_serialize(w, snapshot.kubernetes.value());
     }
 
-    if (snapshot.schema_registry.has_value()) {
-        w.Key("schema_registry");
-        rjson_serialize(w, snapshot.schema_registry.value());
-    }
-
     w.EndObject();
 }
 
@@ -812,12 +807,4 @@ void rjson_serialize(
     w.EndObject();
 }
 
-void rjson_serialize(
-  json::Writer<json::StringBuffer>& w,
-  const cluster::metrics_reporter::schema_registry_metrics& sr) {
-    w.StartObject();
-    w.Key("context_count");
-    w.Uint(sr.context_count);
-    w.EndObject();
-}
 } // namespace json

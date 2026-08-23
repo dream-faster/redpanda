@@ -222,11 +222,6 @@ autocreate_topic_configuration(request_context& ctx, model::topic topic) {
           cluster::internal_topic_replication(
             ctx.metadata_cache().node_count()));
     }
-    if (topic == model::schema_registry_internal_tp.topic) {
-        return schema_registry_topic_configuration(
-          cluster::internal_topic_replication(
-            ctx.metadata_cache().node_count()));
-    }
     if (topic == model::kafka_audit_logging_topic) {
         auto replication_factor
           = config::shard_local_cfg().audit_log_replication_factor().value_or(

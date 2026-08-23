@@ -24,9 +24,6 @@
 #include "model/fundamental.h"
 #include "model/metadata.h"
 #include "model/namespace.h"
-#include "pandaproxy/schema_registry/schema_id_validation.h"
-#include "pandaproxy/schema_registry/subject_name_strategy.h"
-#include "pandaproxy/schema_registry/types.h"
 #include "security/acl.h"
 #include "serde/rw/chrono.h"
 
@@ -268,18 +265,6 @@ struct delete_retention_ms_validator {
             }
         }
         return std::nullopt;
-    }
-};
-
-struct schema_registry_context_validator {
-    std::optional<ss::sstring> operator()(
-      model::topic_namespace_view /*tns*/,
-      const ss::sstring& raw,
-      const std::optional<pandaproxy::schema_registry::context>& value) {
-        if (!value) {
-            return std::nullopt;
-        }
-        return validate_sr_context(raw);
     }
 };
 
@@ -690,101 +675,5 @@ inline void parse_and_set_topic_replication_factor(
     }
     return;
 }
-
-///\brief Topic property parsing for schema id validation.
-///
-/// Handles parsing properties for create, alter and incremental_alter.
-template<typename Props>
-class schema_id_validation_config_parser {
-public:
-    explicit schema_id_validation_config_parser(Props& props)
-      : props(props) {}
-
-    ///\brief Parse a topic property from the supplied name and value
-    template<typename T, typename S>
-    bool operator()(
-      const T& name, const S& value, kafka::config_resource_operation op) {
-        using property_t = std::variant<
-          decltype(&props.record_key_schema_id_validation),
-          decltype(&props.record_key_subject_name_strategy)>;
-
-        auto matcher = string_switch<std::optional<property_t>>(name);
-        switch (config::shard_local_cfg().enable_schema_id_validation()) {
-        case pandaproxy::schema_registry::schema_id_validation_mode::compat:
-            matcher
-              .match(
-                topic_property_record_key_schema_id_validation_compat,
-                &props.record_key_schema_id_validation_compat)
-              .match(
-                topic_property_record_key_subject_name_strategy_compat,
-                &props.record_key_subject_name_strategy_compat)
-              .match(
-                topic_property_record_value_schema_id_validation_compat,
-                &props.record_value_schema_id_validation_compat)
-              .match(
-                topic_property_record_value_subject_name_strategy_compat,
-                &props.record_value_subject_name_strategy_compat);
-            [[fallthrough]];
-        case pandaproxy::schema_registry::schema_id_validation_mode::redpanda:
-            matcher
-              .match(
-                topic_property_record_key_schema_id_validation,
-                &props.record_key_schema_id_validation)
-              .match(
-                topic_property_record_key_subject_name_strategy,
-                &props.record_key_subject_name_strategy)
-              .match(
-                topic_property_record_value_schema_id_validation,
-                &props.record_value_schema_id_validation)
-              .match(
-                topic_property_record_value_subject_name_strategy,
-                &props.record_value_subject_name_strategy);
-            [[fallthrough]];
-        case pandaproxy::schema_registry::schema_id_validation_mode::none:
-            break;
-        }
-        auto prop = matcher.default_match(std::nullopt);
-        if (prop.has_value()) {
-            ss::visit(
-              prop.value(), [&value, op](auto& p) { apply(*p, value, op); });
-        }
-        return prop.has_value();
-    }
-
-    ///\brief Parse a topic property from the supplied cfg.
-    template<typename C>
-    bool operator()(const C& cfg, kafka::config_resource_operation op) {
-        return (*this)(cfg.name, cfg.value, op);
-    }
-
-private:
-    ///\brief Parse and set a boolean from 'true' or 'false'.
-    static void apply(
-      cluster::property_update<std::optional<bool>>& prop,
-      const std::optional<ss::sstring>& value,
-      kafka::config_resource_operation op) {
-        kafka::parse_and_set_optional_bool_alpha(prop, value, op);
-    }
-    ///\brief Parse and set the Subject Name Strategy
-    static void apply(
-      cluster::property_update<std::optional<
-        pandaproxy::schema_registry::subject_name_strategy>>& prop,
-      const std::optional<ss::sstring>& value,
-      kafka::config_resource_operation op) {
-        kafka::parse_and_set_optional(prop, value, op);
-    }
-    ///\brief Parse and set properties by wrapping them a property_update.
-    template<typename T>
-    static void apply(
-      std::optional<T>& prop,
-      std::optional<ss::sstring> value,
-      kafka::config_resource_operation op) {
-        cluster::property_update<std::optional<T>> up;
-        apply(up, value, op);
-        prop = up.value;
-    }
-
-    Props& props;
-};
 
 } // namespace kafka

@@ -51,8 +51,6 @@ void application::configure_admin_server(model::node_id node_id) {
       std::ref(node_status_table),
       std::ref(self_test_frontend),
       std::ref(usage_manager),
-      _proxy.get(),
-      _schema_registry.get(),
       std::ref(topic_recovery_service),
       std::ref(topic_recovery_status_frontend),
       std::ref(storage_node),

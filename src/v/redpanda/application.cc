@@ -33,9 +33,6 @@
 #include "metrics/prometheus_sanitize.h"
 #include "migrations/migrators.h"
 #include "net/tls_certificate_probe.h"
-#include "pandaproxy/rest/api.h"
-#include "pandaproxy/rest/configuration.h"
-#include "pandaproxy/schema_registry/api.h"
 #include "resource_mgmt/cpu_profiler.h"
 #include "resource_mgmt/memory_groups.h"
 #include "resource_mgmt/memory_sampling.h"
@@ -77,12 +74,6 @@
 void set_local_kafka_client_config(
   std::optional<kafka::client::configuration>& client_config,
   const config::node_config& config);
-
-void set_pp_kafka_client_defaults(
-  pandaproxy::rest::configuration& proxy_config,
-  kafka::client::configuration& client_config);
-
-void set_sr_kafka_client_defaults(kafka::client::configuration& client_config);
 
 void set_auditing_kafka_client_defaults(
   kafka::client::configuration& client_config);
@@ -356,12 +347,7 @@ int application::run(int ac, char** av) {
     });
 }
 
-void application::initialize(
-  std::optional<YAML::Node> proxy_cfg,
-  std::optional<YAML::Node> proxy_client_cfg,
-  std::optional<YAML::Node> schema_reg_cfg,
-  std::optional<YAML::Node> schema_reg_client_cfg,
-  std::optional<YAML::Node> audit_log_client_cfg) {
+void application::initialize(std::optional<YAML::Node> audit_log_client_cfg) {
     ss::smp::invoke_on_all([] {
         // initialize memory groups now that our configuration is loaded
         memory_groups();
@@ -445,31 +431,6 @@ void application::initialize(
       })
       .get();
 
-    if (proxy_cfg) {
-        _proxy_config.emplace(*proxy_cfg);
-        for (const auto& e : _proxy_config->errors()) {
-            vlog(
-              _log.warn,
-              "Pandaproxy property '{}' validation error: {}",
-              e.first,
-              e.second);
-        }
-        if (_proxy_config->errors().size() > 0) {
-            throw std::invalid_argument(
-              "Validation errors in pandaproxy config");
-        }
-    }
-
-    if (proxy_client_cfg) {
-        _proxy_client_config.emplace(*proxy_client_cfg);
-    }
-    if (schema_reg_cfg) {
-        _schema_reg_config.emplace(*schema_reg_cfg);
-    }
-
-    if (schema_reg_client_cfg) {
-        _schema_reg_client_config.emplace(*schema_reg_client_cfg);
-    }
     if (audit_log_client_cfg) {
         _audit_log_client_config.emplace(*audit_log_client_cfg);
     }
@@ -770,36 +731,6 @@ void application::hydrate_cluster_config(const YAML::Node& config) {
     // config file on first-start or upgrade cases.
     _config_preload = cluster::config_manager::preload(config).get();
 
-    if (config["pandaproxy"]) {
-        _proxy_config.emplace(config["pandaproxy"]);
-        for (const auto& e : _proxy_config->errors()) {
-            vlog(
-              _log.warn,
-              "Pandaproxy property '{}' validation error: {}",
-              e.first,
-              e.second);
-        }
-        if (_proxy_config->errors().size() > 0) {
-            throw std::invalid_argument(
-              "Validation errors in pandaproxy config");
-        }
-        if (config["pandaproxy_client"]) {
-            _proxy_client_config.emplace(config["pandaproxy_client"]);
-        } else {
-            set_local_kafka_client_config(_proxy_client_config, config::node());
-        }
-        set_pp_kafka_client_defaults(*_proxy_config, *_proxy_client_config);
-    }
-    if (config["schema_registry"]) {
-        _schema_reg_config.emplace(config["schema_registry"]);
-        if (config["schema_registry_client"]) {
-            _schema_reg_client_config.emplace(config["schema_registry_client"]);
-        } else {
-            set_local_kafka_client_config(
-              _schema_reg_client_config, config::node());
-        }
-        set_sr_kafka_client_defaults(*_schema_reg_client_config);
-    }
     /// Auditing will be toggled via cluster config settings, internal audit
     /// client options can be configured via local config properties
     if (config["audit_log_client"]) {
@@ -831,18 +762,6 @@ void application::log_cluster_config() {
     vlog(_log.info, "(use `rpk redpanda config set <cfg> <value>` to change)");
     config_printer("redpanda", config::node());
 
-    if (_proxy_config) {
-        config_printer("pandaproxy", *_proxy_config);
-    }
-    if (_proxy_client_config) {
-        config_printer("pandaproxy_client", *_proxy_client_config);
-    }
-    if (_schema_reg_config) {
-        config_printer("schema_registry", *_schema_reg_config);
-    }
-    if (_schema_reg_client_config) {
-        config_printer("schema_registry_client", *_schema_reg_client_config);
-    }
     if (_audit_log_client_config) {
         config_printer("audit_log_client", *_audit_log_client_config);
     }
@@ -963,20 +882,11 @@ void application::schedule_crash_tracker_file_cleanup() {
     });
 }
 
-ss::future<> application::set_proxy_config(ss::sstring name, std::any val) {
-    return _proxy->set_config(std::move(name), std::move(val));
-}
-
 bool application::requires_cloud_io() { return archival_storage_enabled(); }
 
 bool application::archival_storage_enabled() {
     const auto& cfg = config::shard_local_cfg();
     return cfg.cloud_storage_enabled();
-}
-
-ss::future<>
-application::set_proxy_client_config(ss::sstring name, std::any val) {
-    return _proxy->set_client_config(std::move(name), std::move(val));
 }
 
 void application::trigger_abort_source() {

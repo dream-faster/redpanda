@@ -18,7 +18,6 @@
 #include "kafka/protocol/timeout.h"
 #include "kafka/protocol/types.h"
 #include "kafka/server/connection_context.h"
-#include "kafka/server/handlers/topics/sr_context_validator.h"
 #include "kafka/server/handlers/topics/topic_utils.h"
 #include "kafka/server/handlers/topics/types.h"
 #include "kafka/server/handlers/topics/validators.h"
@@ -59,14 +58,6 @@ bool is_supported(std::string_view name) {
        topic_property_retention_local_target_bytes,
        topic_property_retention_local_target_ms,
        topic_property_segment_ms,
-       topic_property_record_key_schema_id_validation,
-       topic_property_record_key_schema_id_validation_compat,
-       topic_property_record_key_subject_name_strategy,
-       topic_property_record_key_subject_name_strategy_compat,
-       topic_property_record_value_schema_id_validation,
-       topic_property_record_value_schema_id_validation_compat,
-       topic_property_record_value_subject_name_strategy,
-       topic_property_record_value_subject_name_strategy_compat,
        topic_property_initial_retention_local_target_bytes,
        topic_property_initial_retention_local_target_ms,
        topic_property_write_caching,
@@ -74,7 +65,6 @@ bool is_supported(std::string_view name) {
        topic_property_flush_bytes,
        topic_property_leaders_preference,
        topic_property_delete_retention_ms,
-       topic_property_schema_registry_context,
        topic_property_min_cleanable_dirty_ratio,
        topic_property_min_compaction_lag_ms,
        topic_property_max_compaction_lag_ms,
@@ -108,11 +98,9 @@ using validators = make_validator_types<
   cleanup_policy_validator,
   remote_read_and_write_are_not_supported_for_read_replica,
   batch_max_bytes_limits,
-  subject_name_strategy_validator,
   replication_factor_must_be_greater_or_equal_to_minimum,
   vcluster_id_validator,
   write_caching_configs_validator,
-  schema_registry_context_create_validator,
   min_max_compaction_lag_ms_validator,
   storage_mode_config_validator>;
 

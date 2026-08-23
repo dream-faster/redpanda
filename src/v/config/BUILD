@@ -60,7 +60,6 @@ redpanda_cc_library(
         "//src/v/json",
         "//src/v/model",
         "//src/v/net:tls",
-        "//src/v/pandaproxy/schema_registry:config",
         "//src/v/security:config",
         "//src/v/serde",
         "//src/v/serde:chrono",

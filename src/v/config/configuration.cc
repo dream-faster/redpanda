@@ -1901,7 +1901,7 @@ configuration::configuration()
       "audit_enabled_event_types",
       "List of strings in JSON style identifying the event types to include in "
       "the audit log. This may include any of the following: `management, "
-      "produce, consume, describe, heartbeat, authenticate, schema_registry, "
+      "produce, consume, describe, heartbeat, authenticate, "
       "admin`.",
       {
         .needs_restart = needs_restart::no,
@@ -1946,14 +1946,6 @@ configuration::configuration()
       "audit_use_rpc",
       "Produce audit log messages using internal Redpanda RPCs. When disabled, "
       "produce audit log messages using a Kafka client instead.",
-      {.needs_restart = needs_restart::yes, .visibility = visibility::tunable},
-      true)
-  , schema_registry_use_rpc(
-      *this,
-      "schema_registry_use_rpc",
-      "Use internal Redpanda RPCs for schema registry internal topic I/O. "
-      "When disabled, use a Kafka client for schema registry internal topic "
-      "I/O instead.",
       {.needs_restart = needs_restart::yes, .visibility = visibility::tunable},
       true)
   , cloud_storage_enabled(
@@ -2899,7 +2891,7 @@ configuration::configuration()
       "deliver the full log to the new replica. Does not affect topic "
       "deletion via the Kafka API (see kafka_nodelete_topics).",
       {.needs_restart = needs_restart::yes, .visibility = visibility::user},
-      {model::schema_registry_internal_tp.topic()},
+      {},
       &validate_non_empty_string_vec)
   , initial_retention_local_target_bytes_default(
       *this,
@@ -3791,98 +3783,6 @@ configuration::configuration()
       "interval specified by this property.",
       {.needs_restart = needs_restart::no, .visibility = visibility::user},
       300s)
-  , enable_schema_id_validation(
-      *this,
-      std::vector<pandaproxy::schema_registry::schema_id_validation_mode>{
-        pandaproxy::schema_registry::schema_id_validation_mode::compat,
-        pandaproxy::schema_registry::schema_id_validation_mode::redpanda,
-      },
-      "enable_schema_id_validation",
-      "Mode to enable server-side schema ID validation. Accepted Values: * "
-      "`none`: Schema validation is disabled (no schema ID checks are done). "
-      "Associated topic properties cannot be modified. * `redpanda`: Schema "
-      "validation is enabled. Only Redpanda topic properties are accepted. * "
-      "`compat`: Schema validation is enabled. Both Redpanda and compatible "
-      "topic properties are accepted.",
-      meta{
-        .needs_restart = needs_restart::no,
-        .visibility = visibility::user,
-      },
-      pandaproxy::schema_registry::schema_id_validation_mode::none,
-      std::vector<pandaproxy::schema_registry::schema_id_validation_mode>{
-        pandaproxy::schema_registry::schema_id_validation_mode::none,
-        pandaproxy::schema_registry::schema_id_validation_mode::redpanda,
-        pandaproxy::schema_registry::schema_id_validation_mode::compat})
-  , kafka_schema_id_validation_cache_capacity(
-      *this,
-      "kafka_schema_id_validation_cache_capacity",
-      "Per-shard capacity of the cache for validating schema IDs.",
-      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
-      128)
-  , schema_registry_enable_authorization(
-      *this,
-      true,
-      "schema_registry_enable_authorization",
-      "Enable ACL-based authorization for Schema Registry requests. When true, "
-      "uses ACL-based authorization instead of the default "
-      "public/user/superuser authorization model. When false, uses the default "
-      "authorization model. Requires authentication to be enabled via "
-      "schema_registry_api.authn_method.",
-      meta{.needs_restart = needs_restart::no, .visibility = visibility::user},
-      false)
-  , schema_registry_always_normalize(
-      *this,
-      "schema_registry_always_normalize",
-      "Always normalize schemas. If set, this overrides the "
-      "normalize parameter in API requests.",
-      {.needs_restart = needs_restart::no,
-       .visibility = visibility::user,
-       .aliases = {"schema_registry_normalize_on_startup"}},
-      false)
-  , schema_registry_deferred_recovery(
-      *this,
-      "schema_registry_deferred_recovery",
-      "Defer schema compilation during Schema Registry startup, then compile "
-      "the loaded schemas in parallel across cores. If disabled, every "
-      "replayed record is compiled sequentially during the replay.",
-      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
-      true)
-  , schema_registry_replay_on_startup(
-      *this,
-      "schema_registry_replay_on_startup",
-      "Replay the internal `_schemas` topic into the store at Schema Registry "
-      "start-up instead of lazily on the first request. Makes recovery time "
-      "predictable and keeps the first request from blocking behind a full "
-      "replay.",
-      {.needs_restart = needs_restart::no, .visibility = visibility::user},
-      false)
-  , schema_registry_avro_use_named_references(
-      *this, "schema_registry_avro_use_named_references")
-  , schema_registry_enable_qualified_subjects(
-      *this,
-      "schema_registry_enable_qualified_subjects",
-      "Enable parsing of qualified subject syntax (:.context:subject). "
-      "When true, qualified syntax is parsed to extract context and subject. "
-      "When false, subjects are treated literally, as subjects in the default "
-      "context.",
-      {.needs_restart = needs_restart::yes, .visibility = visibility::user},
-      true)
-  , schema_registry_sync_memory_bytes(
-      *this,
-      "schema_registry_sync_memory_bytes",
-      "Maximum bytes of schema bodies held in memory at once while a schema "
-      "registry cluster link reconciles from the source.",
-      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
-      16_MiB,
-      {.min = 1_MiB})
-  , schema_registry_sync_parallelism(
-      *this,
-      "schema_registry_sync_parallelism",
-      "Maximum number of schemas imported concurrently while a schema registry "
-      "cluster link reconciles from the source.",
-      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
-      4,
-      {.min = 1, .max = 1024})
   , pp_sr_smp_max_non_local_requests(
       *this,
       "pp_sr_smp_max_non_local_requests",
@@ -3891,24 +3791,6 @@ configuration::configuration()
       "details, see the `seastar::smp_service_group` documentation).",
       {.needs_restart = needs_restart::yes, .visibility = visibility::tunable},
       std::nullopt)
-  , max_in_flight_schema_registry_requests_per_shard(
-      *this,
-      "max_in_flight_schema_registry_requests_per_shard",
-      "Maximum number of in-flight HTTP requests to Schema Registry permitted "
-      "per shard.  Any additional requests above this limit will be rejected "
-      "with a 429 error.",
-      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
-      500,
-      {.min = 1})
-  , max_in_flight_pandaproxy_requests_per_shard(
-      *this,
-      "max_in_flight_pandaproxy_requests_per_shard",
-      "Maximum number of in-flight HTTP requests to HTTP Proxy permitted per "
-      "shard.  Any additional requests above this limit will be rejected with "
-      "a 429 error.",
-      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
-      500,
-      {.min = 1})
   , kafka_memory_share_for_fetch(
       *this,
       "kafka_memory_share_for_fetch",

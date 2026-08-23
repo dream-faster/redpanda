@@ -23,7 +23,6 @@
 #include "model/namespace.h"
 #include "model/record.h"
 #include "model/timestamp.h"
-#include "pandaproxy/schema_registry/validation.h"
 #include "raft/errc.h"
 #include "ssx/future-util.h"
 
@@ -205,9 +204,6 @@ produce_response::partition finalize_request_with_error_code(
 struct ntp_produce_request {
     model::ntp ntp;
     std::unique_ptr<model::record_batch> batch;
-    std::optional<pandaproxy::schema_registry::schema_id_validator>
-      schema_id_validator;
-
     size_t batch_max_bytes;
     model::timestamp_type timestamp_type;
     std::chrono::milliseconds message_timestamp_before_max_ms;
@@ -249,28 +245,6 @@ ss::future<produce_response::partition> do_produce_topic_partition(
           req.ntp,
           ss::this_shard_id(),
           std::move(msg));
-    }
-
-    if (auto& validator = req.schema_id_validator) {
-        auto ec = co_await (*validator)(*req.batch);
-        if (ec != error_code::none) {
-            // TODO: It's a bit much to post this to the partition probe for
-            // this metric. We should probably move the metric.
-            auto shard = octx.rctx.shards().shard_for(req.ntp);
-            if (shard) {
-                co_await octx.rctx.partition_manager().invoke_on(
-                  *shard,
-                  [](cluster::partition_manager& pm, const model::ntp& ntp) {
-                      if (auto p = pm.get(ntp)) {
-                          p->probe().add_schema_id_validation_failed();
-                      }
-                      return ss::now();
-                  },
-                  req.ntp);
-            }
-            co_return finalize_request_with_error_code(
-              ec, std::move(dispatched), req.ntp, ss::this_shard_id());
-        }
     }
 
     // A single produce request may contain record batches for many
@@ -379,9 +353,6 @@ partition_produce_stages produce_topic_partition(
   const topic_configuration_context& cfg_ctx) {
     auto ntp = model::ntp(
       model::kafka_namespace, topic.name, part.partition_index);
-    auto validator
-      = pandaproxy::schema_registry::maybe_make_schema_id_validator(
-        octx.rctx.schema_registry(), topic.name, *cfg_ctx.properties);
     // steal the batch from the adapter
     auto batch = std::make_unique<model::record_batch>(
       std::move(part.records->adapter.batch.value()));
@@ -392,7 +363,6 @@ partition_produce_stages produce_topic_partition(
       ntp_produce_request{
         .ntp = std::move(ntp),
         .batch = std::move(batch),
-        .schema_id_validator = std::move(validator),
         .batch_max_bytes = cfg_ctx.batch_max_bytes,
         .timestamp_type = cfg_ctx.timestamp_type,
         .message_timestamp_before_max_ms

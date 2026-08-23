@@ -121,8 +121,6 @@ std::string_view to_string_view(feature f) {
         return "kafka_data_rpc";
     case feature::topic_locations_in_outbound_migrations:
         return "topic_locations_in_outbound_migrations";
-    case feature::schema_registry_authz:
-        return "schema_registry_authz";
     case feature::group_based_authorization:
         return "group_based_authorization";
     case feature::user_based_client_quota:

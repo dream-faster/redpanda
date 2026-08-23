@@ -57,39 +57,6 @@ inline constexpr std::string_view topic_property_flush_ms = "flush.ms";
 inline constexpr std::string_view topic_property_flush_bytes = "flush.bytes";
 
 // Server side schema registry context. Binds a topic to a specific Schema
-// Registry context; schema IDs are unique within a context but not across
-// contexts, so any per-topic resolution of schema ids (Iceberg translator
-// today, schema id validation in the future) must look schemas up here.
-inline constexpr std::string_view topic_property_schema_registry_context
-  = "redpanda.schema.registry.context";
-
-// Server side schema id validation
-inline constexpr std::string_view topic_property_record_key_schema_id_validation
-  = "redpanda.key.schema.id.validation";
-inline constexpr std::string_view
-  topic_property_record_key_subject_name_strategy
-  = "redpanda.key.subject.name.strategy";
-inline constexpr std::string_view
-  topic_property_record_value_schema_id_validation
-  = "redpanda.value.schema.id.validation";
-inline constexpr std::string_view
-  topic_property_record_value_subject_name_strategy
-  = "redpanda.value.subject.name.strategy";
-
-// Server side schema id validation (compat names)
-inline constexpr std::string_view
-  topic_property_record_key_schema_id_validation_compat
-  = "confluent.key.schema.validation";
-inline constexpr std::string_view
-  topic_property_record_key_subject_name_strategy_compat
-  = "confluent.key.subject.name.strategy";
-inline constexpr std::string_view
-  topic_property_record_value_schema_id_validation_compat
-  = "confluent.value.schema.validation";
-inline constexpr std::string_view
-  topic_property_record_value_subject_name_strategy_compat
-  = "confluent.value.subject.name.strategy";
-
 inline constexpr std::string_view topic_property_min_cleanable_dirty_ratio
   = "min.cleanable.dirty.ratio";
 
@@ -151,9 +118,6 @@ cluster::topic_configuration to_topic_config(
   const config_map_t& config_map);
 
 /// \brief The intended configuration of the schema registry's internal
-/// topic (_schemas): a single compacted partition with retention disabled.
-cluster::topic_configuration
-schema_registry_topic_configuration(int16_t replication_factor);
 
 std::vector<kafka::creatable_topic_configs> report_topic_configs(
   const cluster::metadata_cache& metadata_cache,

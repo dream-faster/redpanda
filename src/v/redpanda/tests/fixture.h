@@ -142,13 +142,6 @@ public:
       = empty_seed_starts_cluster::yes,
       bool legacy_upload_mode_enabled = true);
 
-    YAML::Node proxy_config(uint16_t proxy_port = 8082);
-
-    YAML::Node proxy_client_config(
-      uint16_t kafka_api_port = config::node().kafka_api()[0].address.port());
-
-    YAML::Node schema_reg_config(uint16_t listen_port = 8081);
-
     YAML::Node audit_log_client_config(
       uint16_t kafka_api_port = config::node().kafka_api()[0].address.port());
 

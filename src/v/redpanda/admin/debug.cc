@@ -458,12 +458,6 @@ void admin_server::register_debug_routes() {
       });
 
     register_route<user>(
-      ss::httpd::debug_json::restart_service,
-      [this](std::unique_ptr<ss::http::request> req) {
-          return restart_service_handler(std::move(req));
-      });
-
-    register_route<user>(
       seastar::httpd::debug_json::get_partition_state,
       [this](std::unique_ptr<ss::http::request> req)
         -> ss::future<ss::json::json_return_type> {

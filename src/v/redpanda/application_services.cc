@@ -1002,8 +1002,7 @@ void application::wire_up_redpanda_services(
         std::ref(controller->get_api()),
         std::ref(tx_gateway_frontend),
         qdc_config,
-        std::ref(*thread_worker),
-        std::ref(_schema_registry))
+        std::ref(*thread_worker), )
       .get();
     construct_service(
       _compaction_controller,

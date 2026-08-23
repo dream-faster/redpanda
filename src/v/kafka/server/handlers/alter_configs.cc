@@ -26,7 +26,6 @@
 #include "kafka/server/response.h"
 #include "model/fundamental.h"
 #include "model/metadata.h"
-#include "pandaproxy/schema_registry/types.h"
 #include "strings/string_switch.h"
 
 #include <seastar/core/coroutine.hh>
@@ -90,7 +89,7 @@ create_topic_properties_update(
     std::apply(apply_op(op_t::none), update.custom_properties.serde_fields());
 
     static_assert(
-      std::tuple_size_v<decltype(update.properties.serde_fields())> == 40,
+      std::tuple_size_v<decltype(update.properties.serde_fields())> == 31,
       "If you add a property, decide on its default alter config "
       "policy, and handle the update in the loop below");
     static_assert(
@@ -134,13 +133,9 @@ create_topic_properties_update(
     update.properties.delete_retention_ms.op = op_t::none;
 
     update.properties.storage_mode.op = op_t::none;
-    update.properties.schema_registry_context.op = op_t::none;
 
     // Now that the defaults are set, continue to set properties from the
     // request
-
-    schema_id_validation_config_parser schema_id_validation_config_parser{
-      update.properties};
 
     for (auto& cfg : resource.configs) {
         // Log warning if property is not relevant for the topic's storage mode
@@ -319,15 +314,6 @@ create_topic_properties_update(
                 continue;
             }
             if (
-              config::shard_local_cfg().enable_schema_id_validation()
-              != pandaproxy::schema_registry::schema_id_validation_mode::none) {
-                if (
-                  schema_id_validation_config_parser(
-                    cfg, kafka::config_resource_operation::set)) {
-                    continue;
-                }
-            }
-            if (
               std::find(
                 std::begin(allowlist_topic_noop_confs),
                 std::end(allowlist_topic_noop_confs),
@@ -385,25 +371,6 @@ create_topic_properties_update(
                   kafka::config_resource_operation::set,
                   feature_enabled_validator,
                   config::leaders_preference::parse);
-                continue;
-            }
-            if (cfg.name == topic_property_delete_retention_ms) {
-                parse_and_set_tristate(
-                  update.properties.delete_retention_ms,
-                  cfg.value,
-                  kafka::config_resource_operation::set);
-                continue;
-            }
-            if (cfg.name == topic_property_schema_registry_context) {
-                parse_and_set_property(
-                  tp_ns,
-                  update.properties.schema_registry_context,
-                  cfg.value,
-                  kafka::config_resource_operation::set,
-                  schema_registry_context_validator{},
-                  [](const ss::sstring& s) {
-                      return pandaproxy::schema_registry::context{s};
-                  });
                 continue;
             }
 

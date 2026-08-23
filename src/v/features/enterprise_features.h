@@ -27,7 +27,6 @@ enum class license_required_feature {
     core_balancing_continuous,
     gssapi,
     oidc,
-    schema_id_validation,
     rbac,
     fips,
     leadership_pinning,
@@ -48,8 +47,6 @@ inline fmt::iterator format_to(license_required_feature f, fmt::iterator out) {
         return fmt::format_to(out, "gssapi");
     case license_required_feature::oidc:
         return fmt::format_to(out, "oidc");
-    case license_required_feature::schema_id_validation:
-        return fmt::format_to(out, "schema_id_validation");
     case license_required_feature::rbac:
         return fmt::format_to(out, "rbac");
     case license_required_feature::fips:
@@ -87,8 +84,7 @@ public:
     // | Cluster     | `sasl_mechanisms`               | `GSSAPI`      |
     // | Cluster     | `sasl_mechanisms`               | `OAUTHBEARER` |
     // | Cluster     | `http_authentication`           | `OIDC`        |
-    // | Cluster     | `enable_schema_id_validation`   | `redpanda`    |
-    // | Cluster     | `enable_schema_id_validation`   | `compat`      |
+
     // | Cluster     | `delete_topic_enable`           | `false`       |
     // | Node        | `fips_mode`                     | `enabled`     |
     // | Node        | `fips_mode`                     | `permissive`  |

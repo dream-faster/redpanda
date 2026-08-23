@@ -36,8 +36,6 @@ redpanda_test_cc_library(
         "//src/v/model",
         "//src/v/model:timeout_clock",
         "//src/v/net",
-        "//src/v/pandaproxy/rest:server",
-        "//src/v/pandaproxy/schema_registry:configuration",
         "//src/v/random:generators",
         "//src/v/resource_mgmt:cpu_scheduling",
         "//src/v/resource_mgmt:memory_groups",

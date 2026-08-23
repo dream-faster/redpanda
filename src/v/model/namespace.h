@@ -68,18 +68,9 @@ inline const model::ntp id_allocator_ntp(
   model::id_allocator_topic,
   model::partition_id(0));
 
-inline const model::topic_partition schema_registry_internal_tp{
-  model::topic{"_schemas"}, model::partition_id{0}};
-
-inline const model::ntp schema_registry_internal_ntp(
-  model::kafka_namespace,
-  schema_registry_internal_tp.topic,
-  schema_registry_internal_tp.partition);
-
 // Topics in the Kafka namespace that are not user-created topics.
 inline const std::array non_user_topics{
   kafka_consumer_offsets_topic,
-  schema_registry_internal_tp.topic,
   kafka_audit_logging_topic,
 };
 

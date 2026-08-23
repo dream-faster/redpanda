@@ -11,7 +11,6 @@
 #include "config/configuration.h"
 #include "config/node_config.h"
 #include "kafka/client/configuration.h"
-#include "pandaproxy/rest/configuration.h"
 #include "resource_mgmt/scheduling_groups_probe.h"
 #include "storage/api.h"
 #include "storage/backlog_controller.h"
@@ -51,36 +50,6 @@ void set_local_kafka_client_config(
       });
     if (tls_it != kafka_api_tls.end()) {
         client_config->broker_tls.set_value(tls_it->config);
-    }
-}
-
-void set_pp_kafka_client_defaults(
-  pandaproxy::rest::configuration& proxy_config,
-  kafka::client::configuration& client_config) {
-    // override pandaparoxy_client.consumer_session_timeout_ms with
-    // pandaproxy.consumer_instance_timeout_ms
-    client_config.consumer_session_timeout.set_value(
-      proxy_config.consumer_instance_timeout.value());
-
-    if (!client_config.client_identifier.is_overriden()) {
-        client_config.client_identifier.set_value(
-          std::make_optional<ss::sstring>("pandaproxy_client"));
-    }
-}
-
-void set_sr_kafka_client_defaults(kafka::client::configuration& client_config) {
-    if (!client_config.produce_batch_delay.is_overriden()) {
-        client_config.produce_batch_delay.set_value(0ms);
-    }
-    if (!client_config.produce_batch_record_count.is_overriden()) {
-        client_config.produce_batch_record_count.set_value(int32_t(0));
-    }
-    if (!client_config.produce_batch_size_bytes.is_overriden()) {
-        client_config.produce_batch_size_bytes.set_value(int32_t(0));
-    }
-    if (!client_config.client_identifier.is_overriden()) {
-        client_config.client_identifier.set_value(
-          std::make_optional<ss::sstring>("schema_registry_client"));
     }
 }
 

@@ -290,7 +290,6 @@ redpanda_cc_btest(
         "//src/v/kafka/protocol:metadata",
         "//src/v/kafka/protocol:produce",
         "//src/v/model",
-        "//src/v/pandaproxy/test:utils",
         "//src/v/redpanda/tests:fixture",
         "//src/v/test_utils:seastar_boost",
         "//src/v/utils:unresolved_address",

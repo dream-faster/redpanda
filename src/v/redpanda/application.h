@@ -43,10 +43,6 @@
 #include "metrics/instance_metrics.h"
 #include "metrics/metrics.h"
 #include "net/conn_quota.h"
-#include "pandaproxy/rest/configuration.h"
-#include "pandaproxy/rest/fwd.h"
-#include "pandaproxy/schema_registry/configuration.h"
-#include "pandaproxy/schema_registry/fwd.h"
 #include "redpanda/admin/kafka_connections_service.h"
 #include "redpanda/monitor_unsafe.h"
 #include "resource_mgmt/cpu_profiler.h"
@@ -97,12 +93,8 @@ class application : public ssx::sharded_service_container {
 public:
     int run(int, char**);
 
-    void initialize(
-      std::optional<YAML::Node> proxy_cfg = std::nullopt,
-      std::optional<YAML::Node> proxy_client_cfg = std::nullopt,
-      std::optional<YAML::Node> schema_reg_cfg = std::nullopt,
-      std::optional<YAML::Node> schema_reg_client_cfg = std::nullopt,
-      std::optional<YAML::Node> audit_log_client_cfg = std::nullopt);
+    void
+    initialize(std::optional<YAML::Node> audit_log_client_cfg = std::nullopt);
     void check_environment();
     void wire_up_and_start(
       ::stop_signal&, bool test_mode = false, test_cfg cfg = {});
@@ -115,9 +107,6 @@ public:
     ~application();
 
     void shutdown();
-
-    ss::future<> set_proxy_config(ss::sstring name, std::any val);
-    ss::future<> set_proxy_client_config(ss::sstring name, std::any val);
 
     smp_groups smp_service_groups;
     ss::sharded<stress_fiber_manager> stress_fiber_manager;
@@ -202,10 +191,6 @@ public:
     kafka::server_app _kafka_server;
     ss::sharded<rpc::connection_cache> _connection_cache;
     ss::sharded<kafka::group_manager> _group_manager;
-
-    const std::unique_ptr<pandaproxy::schema_registry::api>& schema_registry() {
-        return _schema_registry;
-    }
 
     // At a minimum, we need to construct the feature table and storage systems
     // in order to properly bootstrap the system. Public for test fixture
@@ -365,12 +350,6 @@ private:
     // this offset to be replicated to our controller log before listening
     // for Kafka requests.
     std::optional<model::offset> _await_controller_last_applied;
-
-    std::optional<pandaproxy::rest::configuration> _proxy_config;
-    std::optional<kafka::client::configuration> _proxy_client_config;
-    std::optional<pandaproxy::schema_registry::configuration>
-      _schema_reg_config;
-    std::optional<kafka::client::configuration> _schema_reg_client_config;
     std::optional<kafka::client::configuration> _audit_log_client_config;
     ss::sharded<scheduling_groups_probe> _scheduling_groups_probe;
 
@@ -381,8 +360,6 @@ private:
     ss::sharded<rpc::rpc_server> _rpc;
     ss::sharded<admin_server> _admin;
     ss::sharded<net::conn_quota> _kafka_conn_quotas;
-    std::unique_ptr<pandaproxy::rest::api> _proxy;
-    std::unique_ptr<pandaproxy::schema_registry::api> _schema_registry;
     ss::sharded<storage::compaction_controller> _compaction_controller;
     ss::sharded<archival::upload_controller> _archival_upload_controller;
     std::unique_ptr<monitor_unsafe> _monitor_unsafe;

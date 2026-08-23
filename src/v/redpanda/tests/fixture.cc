@@ -45,8 +45,6 @@
 #include "model/metadata.h"
 #include "model/namespace.h"
 #include "model/timeout_clock.h"
-#include "pandaproxy/rest/configuration.h"
-#include "pandaproxy/schema_registry/configuration.h"
 #include "random/generators.h"
 #include "redpanda/application.h"
 #include "resource_mgmt/cpu_scheduling.h"
@@ -105,18 +103,7 @@ redpanda_thread_fixture::redpanda_thread_fixture(
       empty_seed_starts_cluster_val,
       enable_legacy_upload_mode);
     try {
-        app.initialize(
-          proxy_port.transform(
-            [this](auto port) { return proxy_config(port); }),
-          proxy_port.and_then([this, kafka_port](auto) {
-              return std::make_optional(proxy_client_config(kafka_port));
-          }),
-          schema_reg_port.transform(
-            [this](auto port) { return schema_reg_config(port); }),
-          schema_reg_port.and_then([this, kafka_port](auto) {
-              return std::make_optional(proxy_client_config(kafka_port));
-          }),
-          audit_log_client_config(kafka_port));
+        app.initialize(audit_log_client_config(kafka_port));
         app.wire_up_and_start_crypto_services();
         app.wire_up_bootstrap_services();
         app.hydrate_cluster_config(make_minimal_cfg());
@@ -169,8 +156,7 @@ redpanda_thread_fixture::redpanda_thread_fixture(
         std::ref(app.controller->get_api()),
         std::ref(app.tx_gateway_frontend),
         std::nullopt,
-        std::ref(*app.thread_worker),
-        std::ref(app.schema_registry()))
+        std::ref(*app.thread_worker), )
       .get();
 
     configs.stop().get();
@@ -310,7 +296,7 @@ void redpanda_thread_fixture::restart(should_wipe w) {
         auto& config = config::shard_local_cfg();
         config.get("disable_metrics").set_value(false);
     }).get();
-    app.initialize(proxy_config(), proxy_client_config());
+    app.initialize();
     app.wire_up_and_start_crypto_services();
     app.wire_up_bootstrap_services();
     app.hydrate_cluster_config(make_minimal_cfg());
@@ -439,35 +425,6 @@ void redpanda_thread_fixture::configure(
         // that explicitly want it should enable it.
         config.get("enable_cluster_metadata_upload_loop").set_value(false);
     }).get();
-}
-
-YAML::Node redpanda_thread_fixture::proxy_config(uint16_t proxy_port) {
-    pandaproxy::rest::configuration cfg;
-    cfg.get("pandaproxy_api")
-      .set_value(
-        std::vector<config::rest_authn_endpoint>{config::rest_authn_endpoint{
-          .address = net::unresolved_address("127.0.0.1", proxy_port)}});
-    return to_yaml(cfg, config::redact_secrets::no);
-}
-
-YAML::Node
-redpanda_thread_fixture::proxy_client_config(uint16_t kafka_api_port) {
-    kafka::client::configuration cfg;
-    net::unresolved_address kafka_api{
-      config::node().kafka_api()[0].address.host(), kafka_api_port};
-    cfg.brokers.set_value(std::vector<net::unresolved_address>({kafka_api}));
-    return to_yaml(cfg, config::redact_secrets::no);
-}
-
-YAML::Node redpanda_thread_fixture::schema_reg_config(uint16_t listen_port) {
-    pandaproxy::schema_registry::configuration cfg;
-    cfg.get("schema_registry_api")
-      .set_value(
-        std::vector<config::rest_authn_endpoint>{config::rest_authn_endpoint{
-          .address = net::unresolved_address("127.0.0.1", listen_port)}});
-    cfg.get("schema_registry_replication_factor")
-      .set_value(std::make_optional<int16_t>(1));
-    return to_yaml(cfg, config::redact_secrets::no);
 }
 
 YAML::Node

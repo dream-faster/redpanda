@@ -11,7 +11,6 @@
 #include "base/units.h"
 #include "cluster/types.h"
 #include "model/tests/randoms.h"
-#include "pandaproxy/schema_registry/types.h"
 #include "random/generators.h"
 #include "test_utils/randoms.h"
 
@@ -81,9 +80,6 @@ inline cluster::topic_properties random_topic_properties() {
 
     // Mix of default context and randomly generated non-default contexts.
     if (tests::random_bool()) {
-        properties.schema_registry_context
-          = pandaproxy::schema_registry::context{
-            "." + random_generators::gen_alphanum_string(8)};
     }
 
     return properties;

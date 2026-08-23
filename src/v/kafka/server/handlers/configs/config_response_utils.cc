@@ -18,7 +18,6 @@
 #include "config/node_config.h"
 #include "kafka/server/handlers/topics/types.h"
 #include "model/metadata.h"
-#include "pandaproxy/schema_registry/types.h"
 
 #include <chrono>
 
@@ -74,22 +73,6 @@ metadata_cache_adapter::get_default_segment_ms() const {
 std::optional<std::chrono::milliseconds>
 metadata_cache_adapter::get_default_delete_retention_ms() const {
     return _metadata_cache.get_default_delete_retention_ms();
-}
-bool metadata_cache_adapter::get_default_record_key_schema_id_validation()
-  const {
-    return _metadata_cache.get_default_record_key_schema_id_validation();
-}
-pandaproxy::schema_registry::subject_name_strategy
-metadata_cache_adapter::get_default_record_key_subject_name_strategy() const {
-    return _metadata_cache.get_default_record_key_subject_name_strategy();
-}
-bool metadata_cache_adapter::get_default_record_value_schema_id_validation()
-  const {
-    return _metadata_cache.get_default_record_value_schema_id_validation();
-}
-pandaproxy::schema_registry::subject_name_strategy
-metadata_cache_adapter::get_default_record_value_subject_name_strategy() const {
-    return _metadata_cache.get_default_record_value_subject_name_strategy();
 }
 std::optional<size_t>
 metadata_cache_adapter::get_default_initial_retention_local_target_bytes()
@@ -165,8 +148,6 @@ consteval describe_configs_type property_config_type() {
         std::is_same_v<T, model::cleanup_policy_bitflags> ||
         std::is_same_v<T, model::timestamp_type> ||
         std::is_same_v<T, config::data_directory_path> ||
-        std::is_same_v<T, pandaproxy::schema_registry::subject_name_strategy> ||
-        std::is_same_v<T, pandaproxy::schema_registry::context> ||
         std::is_same_v<T, model::vcluster_id> ||
         std::is_same_v<T, model::write_caching_mode> ||
         std::is_same_v<T, config::leaders_preference> ||
@@ -840,136 +821,6 @@ config_response_container_t make_topic_configs(
         include_documentation,
         config::shard_local_cfg().tombstone_retention_ms.desc()));
 
-    constexpr std::string_view key_validation
-      = "Enable validation of the schema id for keys on a record";
-    constexpr std::string_view val_validation
-      = "Enable validation of the schema id for values on a record";
-    constexpr bool validation_hide_default_override = true;
-
-    switch (config::shard_local_cfg().enable_schema_id_validation()) {
-    case pandaproxy::schema_registry::schema_id_validation_mode::compat: {
-        add_topic_config_if_requested(
-          config_keys,
-          result,
-          topic_property_record_key_schema_id_validation_compat,
-          metadata_cache.get_default_record_key_schema_id_validation(),
-          topic_property_record_key_schema_id_validation_compat,
-          topic_properties.record_key_schema_id_validation_compat,
-          include_synonyms,
-          maybe_make_documentation(include_documentation, key_validation),
-          &describe_as_string<bool>,
-          validation_hide_default_override);
-
-        add_topic_config_if_requested(
-          config_keys,
-          result,
-          topic_property_record_key_subject_name_strategy_compat,
-          metadata_cache.get_default_record_key_subject_name_strategy(),
-          topic_property_record_key_subject_name_strategy_compat,
-          topic_properties.record_key_subject_name_strategy_compat,
-          include_synonyms,
-          maybe_make_documentation(
-            include_documentation,
-            fmt::format(
-              "The subject name strategy for keys if {} is enabled",
-              topic_property_record_key_schema_id_validation_compat)),
-          [](auto sns) { return ss::sstring(to_string_view_compat(sns)); },
-          validation_hide_default_override);
-
-        add_topic_config_if_requested(
-          config_keys,
-          result,
-          topic_property_record_value_schema_id_validation_compat,
-          metadata_cache.get_default_record_value_schema_id_validation(),
-          topic_property_record_value_schema_id_validation_compat,
-          topic_properties.record_value_schema_id_validation_compat,
-          include_synonyms,
-          maybe_make_documentation(include_documentation, val_validation),
-          &describe_as_string<bool>,
-          validation_hide_default_override);
-
-        add_topic_config_if_requested(
-          config_keys,
-          result,
-          topic_property_record_value_subject_name_strategy_compat,
-          metadata_cache.get_default_record_value_subject_name_strategy(),
-          topic_property_record_value_subject_name_strategy_compat,
-          topic_properties.record_value_subject_name_strategy_compat,
-          include_synonyms,
-          maybe_make_documentation(
-            include_documentation,
-            fmt::format(
-              "The subject name strategy for values if {} is enabled",
-              topic_property_record_value_schema_id_validation_compat)),
-          [](auto sns) { return ss::sstring(to_string_view_compat(sns)); },
-          validation_hide_default_override);
-        [[fallthrough]];
-    }
-    case pandaproxy::schema_registry::schema_id_validation_mode::redpanda: {
-        add_topic_config_if_requested(
-          config_keys,
-          result,
-          topic_property_record_key_schema_id_validation,
-          metadata_cache.get_default_record_key_schema_id_validation(),
-          topic_property_record_key_schema_id_validation,
-          topic_properties.record_key_schema_id_validation,
-          include_synonyms,
-          maybe_make_documentation(include_documentation, key_validation),
-          &describe_as_string<bool>,
-          validation_hide_default_override);
-
-        add_topic_config_if_requested(
-          config_keys,
-          result,
-          topic_property_record_key_subject_name_strategy,
-          metadata_cache.get_default_record_key_subject_name_strategy(),
-          topic_property_record_key_subject_name_strategy,
-          topic_properties.record_key_subject_name_strategy,
-          include_synonyms,
-          maybe_make_documentation(
-            include_documentation,
-            fmt::format(
-              "The subject name strategy for keys if {} is enabled",
-              topic_property_record_key_schema_id_validation)),
-          &describe_as_string<
-            pandaproxy::schema_registry::subject_name_strategy>,
-          validation_hide_default_override);
-
-        add_topic_config_if_requested(
-          config_keys,
-          result,
-          topic_property_record_value_schema_id_validation,
-          metadata_cache.get_default_record_value_schema_id_validation(),
-          topic_property_record_value_schema_id_validation,
-          topic_properties.record_value_schema_id_validation,
-          include_synonyms,
-          maybe_make_documentation(include_documentation, val_validation),
-          &describe_as_string<bool>,
-          validation_hide_default_override);
-
-        add_topic_config_if_requested(
-          config_keys,
-          result,
-          topic_property_record_value_subject_name_strategy,
-          metadata_cache.get_default_record_value_subject_name_strategy(),
-          topic_property_record_value_subject_name_strategy,
-          topic_properties.record_value_subject_name_strategy,
-          include_synonyms,
-          maybe_make_documentation(
-            include_documentation,
-            fmt::format(
-              "The subject name strategy for values if {} is enabled",
-              topic_property_record_value_schema_id_validation)),
-          &describe_as_string<
-            pandaproxy::schema_registry::subject_name_strategy>,
-          validation_hide_default_override);
-        [[fallthrough]];
-    }
-    case pandaproxy::schema_registry::schema_id_validation_mode::none: {
-        break;
-    }
-    }
-
     add_topic_config_if_requested(
       config_keys,
       result,
@@ -1008,22 +859,6 @@ config_response_container_t make_topic_configs(
         include_documentation,
         "Preferred location (e.g. rack) for partition leaders of this topic."),
       &describe_as_string<config::leaders_preference>);
-
-    add_topic_config_if_requested(
-      config_keys,
-      result,
-      topic_property_schema_registry_context,
-      pandaproxy::schema_registry::default_context,
-      topic_property_schema_registry_context,
-      topic_properties.schema_registry_context,
-      include_synonyms,
-      maybe_make_documentation(
-        include_documentation,
-        "Schema Registry context used to look up schemas referenced by "
-        "records in this topic (e.g. by the in-broker Iceberg translator). "
-        "Defaults to the Schema Registry default context ('.')."),
-      &describe_as_string<pandaproxy::schema_registry::context>,
-      /*hide_default_override=*/true);
 
     add_topic_config_if_requested(
       config_keys,

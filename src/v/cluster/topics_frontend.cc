@@ -87,14 +87,6 @@ get_enterprise_features(const cluster::topic_configuration& cfg) {
         }
     }
 
-    // Only enforce schema ID validation topic configs if Schema ID validation
-    // is enabled for the cluster
-    if (config::shard_local_cfg().enable_schema_id_validation.is_restricted()) {
-        if (cfg.is_schema_id_validation_enabled()) {
-            features.emplace_back("schema ID validation");
-        }
-    }
-
     // We are always enforcing leadership preference restrictions
     if (
       const auto& leaders_pref = cfg.properties.leaders_preference;
@@ -137,63 +129,6 @@ std::vector<std::string_view> get_enterprise_features(
           || (old_storage_mode != tiered && new_storage_mode == tiered)
           || (properties.remote_delete < updated_properties.remote_delete)) {
             features.emplace_back("tiered storage");
-        }
-    }
-
-    static constexpr auto key_schema_id_validation_enabled =
-      [](const cluster::topic_properties& pp) -> bool {
-        return pp.record_key_schema_id_validation.value_or(false)
-               || pp.record_key_schema_id_validation_compat.value_or(false);
-    };
-
-    static constexpr auto value_schema_id_validation_enabled =
-      [](const cluster::topic_properties& pp) -> bool {
-        return pp.record_value_schema_id_validation.value_or(false)
-               || pp.record_value_schema_id_validation_compat.value_or(false);
-    };
-
-    static constexpr auto schema_id_validation_enabled =
-      [](const cluster::topic_properties& pp) -> bool {
-        return key_schema_id_validation_enabled(pp)
-               || value_schema_id_validation_enabled(pp);
-    };
-
-    constexpr auto unset_or_unchanged =
-      [](
-        const reflection::is_std_optional auto& curr,
-        const reflection::is_std_optional auto& nxt) -> bool {
-        // allow anything -> null
-        // allow non-null -> same non-null
-        return !nxt.has_value() || curr == nxt;
-    };
-
-    auto sns_modified = [&unset_or_unchanged,
-                         &pp = properties,
-                         &up = updated_properties]() -> bool {
-        return !(
-          unset_or_unchanged(
-            pp.record_key_subject_name_strategy,
-            up.record_key_subject_name_strategy)
-          && unset_or_unchanged(
-            pp.record_key_subject_name_strategy_compat,
-            up.record_key_subject_name_strategy_compat)
-          && unset_or_unchanged(
-            pp.record_value_subject_name_strategy,
-            up.record_value_subject_name_strategy)
-          && unset_or_unchanged(
-            pp.record_value_subject_name_strategy_compat,
-            up.record_value_subject_name_strategy_compat));
-    };
-
-    // Only enforce schema ID validation topic configs if Schema ID validation
-    // is enabled for the cluster
-    if (config::shard_local_cfg().enable_schema_id_validation.is_restricted()) {
-        if (
-          ((key_schema_id_validation_enabled(properties)
-            < key_schema_id_validation_enabled(updated_properties))
-           || (value_schema_id_validation_enabled(properties) < value_schema_id_validation_enabled(updated_properties)))
-          || (schema_id_validation_enabled(updated_properties) && sns_modified())) {
-            features.emplace_back("schema id validation");
         }
     }
 

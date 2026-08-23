@@ -314,16 +314,8 @@ fmt::iterator incremental_topic_updates::format_to(fmt::iterator it) const {
       "cleanup_policy_bitflags: {} compaction_strategy: {} timestamp_type: {} "
       "segment_size: {} retention_bytes: {} retention_duration: {} "
       "shadow_indexing: {}, batch_max_bytes: {}, retention_local_target_bytes: "
-      "{}, retention_local_target_ms: {}, remote_delete: {}, segment_ms: {}, "
-      "schema_registry_context: {}, record_key_schema_id_validation: "
-      "{}record_key_schema_id_validation_compat: "
-      "{}record_key_subject_name_strategy: "
-      "{}record_key_subject_name_strategy_compat: "
-      "{}record_value_schema_id_validation: "
-      "{}record_value_schema_id_validation_compat: "
-      "{}record_value_subject_name_strategy: "
-      "{}record_value_subject_name_strategy_compat: {}, "
-      "initial_retention_local_target_bytes: {}, "
+      "{}, retention_local_target_ms: {}, remote_delete: {}, segment_ms: "
+      "{}initial_retention_local_target_bytes: {}, "
       "initial_retention_local_target_ms: {}, write_caching: {}, flush_ms: {}, "
       "flush_bytes: {}leaders_preference: {}, remote_read: {}, remote_write: "
       "{}remote_allow_gaps: {}, topic_id: {}}}",
@@ -340,15 +332,6 @@ fmt::iterator incremental_topic_updates::format_to(fmt::iterator it) const {
       retention_local_target_ms,
       remote_delete,
       segment_ms,
-      schema_registry_context,
-      record_key_schema_id_validation,
-      record_key_schema_id_validation_compat,
-      record_key_subject_name_strategy,
-      record_key_subject_name_strategy_compat,
-      record_value_schema_id_validation,
-      record_value_schema_id_validation_compat,
-      record_value_subject_name_strategy,
-      record_value_subject_name_strategy_compat,
       initial_retention_local_target_bytes,
       initial_retention_local_target_ms,
       write_caching,
@@ -1107,14 +1090,6 @@ void adl<cluster::incremental_topic_updates>::to(
       t.retention_local_target_ms,
       t.remote_delete,
       t.segment_ms,
-      t.record_key_schema_id_validation,
-      t.record_key_schema_id_validation_compat,
-      t.record_key_subject_name_strategy,
-      t.record_key_subject_name_strategy_compat,
-      t.record_value_schema_id_validation,
-      t.record_value_schema_id_validation_compat,
-      t.record_value_subject_name_strategy,
-      t.record_value_subject_name_strategy_compat,
       t.initial_retention_local_target_bytes,
       t.initial_retention_local_target_ms,
       t.write_caching,
@@ -1200,34 +1175,6 @@ adl<cluster::incremental_topic_updates>::from(iobuf_parser& in) {
       version <= cluster::incremental_topic_updates::version_with_segment_ms) {
         updates.segment_ms
           = adl<cluster::property_update<tristate<std::chrono::milliseconds>>>{}
-              .from(in);
-    }
-
-    if (
-      version <= cluster::incremental_topic_updates::
-        version_with_schema_id_validation) {
-        updates.record_key_schema_id_validation
-          = adl<cluster::property_update<std::optional<bool>>>{}.from(in);
-        updates.record_key_schema_id_validation_compat
-          = adl<cluster::property_update<std::optional<bool>>>{}.from(in);
-        updates.record_key_subject_name_strategy = adl<cluster::property_update<
-          std::optional<pandaproxy::schema_registry::subject_name_strategy>>>{}
-                                                     .from(in);
-        updates.record_key_subject_name_strategy_compat
-          = adl<cluster::property_update<std::optional<
-            pandaproxy::schema_registry::subject_name_strategy>>>{}
-              .from(in);
-        updates.record_value_schema_id_validation
-          = adl<cluster::property_update<std::optional<bool>>>{}.from(in);
-        updates.record_value_schema_id_validation_compat
-          = adl<cluster::property_update<std::optional<bool>>>{}.from(in);
-        updates
-          .record_value_subject_name_strategy = adl<cluster::property_update<
-          std::optional<pandaproxy::schema_registry::subject_name_strategy>>>{}
-                                                  .from(in);
-        updates.record_value_subject_name_strategy_compat
-          = adl<cluster::property_update<std::optional<
-            pandaproxy::schema_registry::subject_name_strategy>>>{}
               .from(in);
     }
 

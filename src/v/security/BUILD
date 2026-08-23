@@ -144,7 +144,6 @@ redpanda_cc_library(
     ],
     implementation_deps = [
         "//src/v/kafka/protocol",
-        "//src/v/pandaproxy/schema_registry:types",
         "//src/v/random:secure_random",
         "//src/v/thirdparty/krb5",
         "@abseil-cpp//absl/strings",

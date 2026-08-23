@@ -24,7 +24,6 @@
 #include "kafka/server/response.h"
 #include "model/fundamental.h"
 #include "model/metadata.h"
-#include "pandaproxy/schema_registry/types.h"
 #include "storage/ntp_config.h"
 #include "strings/string_switch.h"
 
@@ -136,9 +135,6 @@ create_topic_properties_update(
     if (topic_cfg) {
         current_storage_mode = topic_cfg->properties.storage_mode;
     }
-
-    schema_id_validation_config_parser schema_id_validation_config_parser{
-      update.properties};
 
     /*
       As of v24.3, a new update path for shadow indexing properties should be
@@ -323,13 +319,6 @@ create_topic_properties_update(
                 continue;
             }
             if (
-              config::shard_local_cfg().enable_schema_id_validation()
-              != pandaproxy::schema_registry::schema_id_validation_mode::none) {
-                if (schema_id_validation_config_parser(cfg, op)) {
-                    continue;
-                }
-            }
-            if (
               std::find(
                 std::begin(allowlist_topic_noop_confs),
                 std::end(allowlist_topic_noop_confs),
@@ -374,23 +363,6 @@ create_topic_properties_update(
             if (cfg.name == topic_property_delete_retention_ms) {
                 parse_and_set_tristate(
                   update.properties.delete_retention_ms, cfg.value, op);
-                continue;
-            }
-            if (cfg.name == topic_property_remote_allow_gaps) {
-                parse_and_set_optional_bool_alpha(
-                  update.properties.remote_allow_gaps, cfg.value, op);
-                continue;
-            }
-            if (cfg.name == topic_property_schema_registry_context) {
-                parse_and_set_property(
-                  tp_ns,
-                  update.properties.schema_registry_context,
-                  cfg.value,
-                  op,
-                  schema_registry_context_validator{},
-                  [](const ss::sstring& s) {
-                      return pandaproxy::schema_registry::context{s};
-                  });
                 continue;
             }
 
