@@ -10,6 +10,18 @@ build round-trip.
 
 Run from the repository root.
 
+## Reading CI failures
+
+`gh run view <id> --log-failed` shows only the **last** failing action, which
+makes a build with twenty errors look like a single-file failure and sends you
+chasing one file per round-trip. Use the raw log archive instead:
+
+```
+tools/slim-checks/ci-errors.sh <run-id> [owner/repo]
+```
+
+It downloads the run's log zip and prints every unique compiler error.
+
 ## Pass/fail checks
 
 These print a count and exit non-zero when it is not zero.
