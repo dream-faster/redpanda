@@ -9,6 +9,7 @@
 
 #include "cluster/topics_frontend.h"
 
+#include "base/outcome.h"
 #include "base/type_traits.h"
 #include "cluster/cluster_utils.h"
 #include "cluster/commands.h"

@@ -10,6 +10,7 @@
  */
 #include "kafka/data/replicated_partition.h"
 
+#include "base/outcome.h"
 #include "cluster/partition.h"
 #include "cluster/partition_kafka_offsets.h"
 #include "cluster/rm_stm.h"

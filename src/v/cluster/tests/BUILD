@@ -441,6 +441,7 @@ redpanda_cc_btest(
         "partition_balancer_planner_test.cc",
     ],
     deps = [
+        "@abseil-cpp//absl/container:node_hash_set",
         ":partition_balancer_planner_fixture",
         "//src/v/base",
         "//src/v/cluster:commands",

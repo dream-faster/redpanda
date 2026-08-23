@@ -10,6 +10,7 @@
  */
 
 #pragma once
+#include "base/outcome.h"
 #include "cluster/cluster_utils.h"
 #include "cluster/controller.h"      // IWYU pragma: keep; public member devex
 #include "cluster/topics_frontend.h" // IWYU pragma: keep; public member devex

@@ -10,6 +10,7 @@
 #include "kafka/server/handlers/produce.h"
 
 #include "base/likely.h"
+#include "base/outcome.h"
 #include "cluster/metadata_cache.h"
 #include "cluster/partition_manager.h"
 #include "cluster/shard_table.h"

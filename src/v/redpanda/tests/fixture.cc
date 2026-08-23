@@ -11,6 +11,7 @@
 
 #include "redpanda/tests/fixture.h"
 
+#include "base/outcome.h"
 #include "cluster/cluster_utils.h"
 #include "cluster/config_frontend.h"
 #include "cluster/controller.h"

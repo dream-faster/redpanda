@@ -10,6 +10,7 @@
  */
 
 #pragma once
+#include "base/format_to.h"
 #include "base/vlog.h"
 #include "container/chunked_vector.h"
 #include "kafka/server/logger.h"

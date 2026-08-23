@@ -11,6 +11,7 @@
 
 #include "feature_manager.h"
 
+#include "base/outcome.h"
 #include "cluster/commands.h"
 #include "cluster/controller_service.h"
 #include "cluster/controller_utils.h"

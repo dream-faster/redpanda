@@ -7,6 +7,7 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0
 
+#include "absl/container/node_hash_set.h"
 #include "base/vlog.h"
 #include "cluster/controller_snapshot.h"
 #include "cluster/health_monitor_types.h"

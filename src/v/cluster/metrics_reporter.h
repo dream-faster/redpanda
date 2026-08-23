@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include "base/outcome.h"
 #include "cluster/fwd.h"
 #include "cluster/types.h"
 #include "features/enterprise_features.h"

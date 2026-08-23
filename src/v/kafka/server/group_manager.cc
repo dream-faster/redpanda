@@ -9,6 +9,7 @@
 
 #include "kafka/server/group_manager.h"
 
+#include "base/outcome.h"
 #include "cluster/health_monitor_frontend.h"
 #include "cluster/logger.h"
 #include "cluster/offsets_snapshot.h"

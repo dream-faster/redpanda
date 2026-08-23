@@ -9,6 +9,7 @@ redpanda_test_cc_library(
         "fixture.h",
     ],
     implementation_deps = [
+        "//src/v/base",
         "//src/v/cluster",
         "//src/v/cluster:cluster_utils",
         "//src/v/cluster:errc",

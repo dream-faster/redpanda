@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include "base/outcome.h"
 #include "cluster/controller_probe.h"
 #include "cluster/controller_stm.h"
 #include "cluster/fwd.h"

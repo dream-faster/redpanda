@@ -18,6 +18,7 @@
 #include "config/node_config.h"
 #include "kafka/server/handlers/topics/types.h"
 #include "model/metadata.h"
+#include "utils/tristate.h"
 
 #include <chrono>
 

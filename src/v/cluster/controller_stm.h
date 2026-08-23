@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include "base/outcome.h"
 #include "cluster/bootstrap_backend.h"
 #include "cluster/client_quota_backend.h"
 #include "cluster/config_manager.h"

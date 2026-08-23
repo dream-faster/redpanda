@@ -11,6 +11,7 @@
 
 #include "cluster/controller_stm.h"
 
+#include "base/outcome.h"
 #include "base/vlog.h"
 #include "bytes/iostream.h"
 #include "cluster/controller_snapshot.h"

@@ -11,6 +11,8 @@
 
 #include "redpanda/admin/server.h"
 
+#include "absl/container/flat_hash_set.h"
+#include "base/outcome.h"
 #include "base/vlog.h"
 #include "bytes/iostream.h"
 #include "cluster/cluster_utils.h"

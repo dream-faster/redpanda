@@ -10,6 +10,7 @@
  */
 #pragma once
 
+#include "base/outcome.h"
 #include "kafka/data/partition_proxy.h"
 #include "kafka/protocol/errors.h"
 #include "model/fundamental.h"

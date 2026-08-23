@@ -542,6 +542,7 @@ redpanda_cc_library(
         "types.h",
     ],
     implementation_deps = [
+        "//src/v/container:chunked_hash_map",
         "//src/v/base",
         "//src/v/reflection:adl",
         "//src/v/utils:to_string",
@@ -1480,6 +1481,7 @@ redpanda_cc_library(
         "topic_table.h",
     ],
     implementation_deps = [
+        "//src/v/utils:tristate",
         ":cluster_utils",
         ":controller_snapshot",
         ":errc",

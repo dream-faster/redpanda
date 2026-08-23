@@ -9,6 +9,8 @@
 
 #include "cluster/partition.h"
 
+#include "base/format_to.h"
+#include "base/outcome.h"
 #include "cluster/id_allocator_stm.h"
 #include "cluster/log_eviction_stm.h"
 #include "cluster/logger.h"

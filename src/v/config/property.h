@@ -10,6 +10,7 @@
  */
 
 #pragma once
+#include "base/format_to.h"
 #include "base/oncore.h"
 #include "base/type_traits.h"
 #include "config/base_property.h"

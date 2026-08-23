@@ -9,6 +9,7 @@
 
 #include "cluster/partition_manager.h"
 
+#include "base/format_to.h"
 #include "base/vlog.h"
 #include "cluster/fwd.h"
 #include "cluster/logger.h"

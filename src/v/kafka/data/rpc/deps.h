@@ -10,6 +10,7 @@
  */
 #pragma once
 
+#include "base/outcome.h"
 #include "cluster/fwd.h"
 #include "cluster/types.h"
 #include "kafka/data/partition_proxy.h"

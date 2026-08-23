@@ -8,6 +8,7 @@
  * the Business Source License, use of this software will be governed
  * by the Apache License, Version 2.0
  */
+#include "base/outcome.h"
 #include "base/vassert-register.h"
 #include "base/vassert.h"
 #include "cluster/controller.h"

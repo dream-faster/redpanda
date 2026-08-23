@@ -12,6 +12,7 @@
 #pragma once
 
 #include "base/format_to.h"
+#include "base/outcome.h"
 #include "cluster/fwd.h"
 #include "cluster/partition_probe.h"
 #include "cluster/partition_properties_stm.h"

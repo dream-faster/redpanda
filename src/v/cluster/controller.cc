@@ -9,6 +9,8 @@
 
 #include "cluster/controller.h"
 
+#include "absl/container/flat_hash_set.h"
+#include "base/outcome.h"
 #include "cluster/bootstrap_backend.h"
 #include "cluster/client_quota_backend.h"
 #include "cluster/client_quota_frontend.h"

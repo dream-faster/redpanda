@@ -9,6 +9,7 @@
 
 #include "cluster/service.h"
 
+#include "base/outcome.h"
 #include "base/vlog.h"
 #include "cluster/client_quota_frontend.h"
 #include "cluster/client_quota_serde.h"

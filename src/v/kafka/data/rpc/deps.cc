@@ -11,6 +11,7 @@
 
 #include "kafka/data/rpc/deps.h"
 
+#include "base/outcome.h"
 #include "cluster/controller.h"
 #include "cluster/metadata_cache.h"
 #include "cluster/partition_manager.h"

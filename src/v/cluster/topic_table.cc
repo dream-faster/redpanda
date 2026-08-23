@@ -21,6 +21,7 @@
 #include "model/fundamental.h"
 #include "model/metadata.h"
 #include "storage/ntp_config.h"
+#include "utils/tristate.h"
 
 #include <seastar/coroutine/maybe_yield.hh>
 

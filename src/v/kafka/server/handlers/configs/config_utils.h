@@ -25,6 +25,7 @@
 #include "model/namespace.h"
 #include "security/acl.h"
 #include "serde/rw/chrono.h"
+#include "utils/tristate.h"
 
 #include <seastar/core/coroutine.hh>
 #include <seastar/core/sstring.hh>

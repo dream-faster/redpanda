@@ -12,6 +12,7 @@
 #pragma once
 
 #include "absl/container/flat_hash_map.h"
+#include "base/outcome.h"
 #include "cluster/errc.h"
 #include "cluster/fwd.h"
 #include "cluster/partition_balancer_types.h"

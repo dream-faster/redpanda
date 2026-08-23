@@ -10,6 +10,7 @@
 #include "server.h"
 
 #include "absl/container/flat_hash_map.h"
+#include "absl/container/flat_hash_set.h"
 #include "base/vlog.h"
 #include "cluster/id_allocator_frontend.h"
 #include "cluster/security_frontend.h"

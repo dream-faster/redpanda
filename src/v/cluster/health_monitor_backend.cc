@@ -13,6 +13,7 @@
 #include "absl/container/node_hash_map.h"
 #include "absl/container/node_hash_set.h"
 #include "base/format_to.h"
+#include "base/outcome.h"
 #include "cluster/controller_service.h"
 #include "cluster/drain_manager.h"
 #include "cluster/errc.h"

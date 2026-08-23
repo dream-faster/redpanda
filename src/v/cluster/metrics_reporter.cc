@@ -12,6 +12,7 @@
 #include "cluster/metrics_reporter.h"
 
 #include "absl/container/node_hash_map.h"
+#include "base/outcome.h"
 #include "bytes/iobuf.h"
 #include "cluster/config_frontend.h"
 #include "cluster/controller_stm.h"
