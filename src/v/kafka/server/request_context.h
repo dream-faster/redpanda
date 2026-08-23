@@ -15,7 +15,6 @@
 #include "base/seastarx.h"
 #include "base/vlog.h"
 #include "bytes/iobuf.h"
-#include "cluster/cluster_link/frontend.h"
 #include "kafka/protocol/fetch.h"
 #include "kafka/protocol/fwd.h"
 #include "kafka/protocol/types.h"
@@ -29,7 +28,6 @@
 #include "kafka/server/server.h"
 #include "kafka/server/usage_manager.h"
 #include "model/namespace.h"
-#include "pandaproxy/schema_registry/fwd.h"
 #include "security/acl.h"
 #include "security/audit/schemas/iam.h"
 #include "security/audit/schemas/types.h"
@@ -180,11 +178,6 @@ public:
         return _conn->server().tx_gateway_frontend();
     }
 
-    const std::unique_ptr<pandaproxy::schema_registry::api>&
-    schema_registry() const {
-        return _conn->server().schema_registry();
-    }
-
     std::chrono::milliseconds throttle_delay_ms() const {
         return std::chrono::duration_cast<std::chrono::milliseconds>(
           _throttle_delay);
@@ -204,12 +197,6 @@ public:
 
     fetch_metadata_cache& get_fetch_metadata_cache() {
         return _conn->server().get_fetch_metadata_cache();
-    }
-
-    bool is_topic_mutable(const model::topic& topic) const {
-        return _conn->server()
-          .cluster_link_frontend()
-          .is_topic_mutable_for_kafka_api(topic);
     }
 
     template<typename ResponseType>
@@ -424,10 +411,6 @@ public:
     }
 
     ss::sharded<server>& server() { return _conn->server().container(); }
-
-    bool is_cluster_link_active() const {
-        return _conn->server().container().local().is_cluster_link_active();
-    }
 
     void add_response_resource_deleter(ss::deleter&& res) {
         _request_resources->response_resource_deleter = ss::make_object_deleter(

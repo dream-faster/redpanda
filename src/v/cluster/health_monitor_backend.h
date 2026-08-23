@@ -73,7 +73,6 @@ public:
       ss::sharded<node::local_monitor>&,
       ss::sharded<drain_manager>&,
       ss::sharded<features::feature_table>&,
-      ss::sharded<partition_leaders_table>&,
       ss::sharded<topic_table>&,
       ss::sharded<node_status_table>&);
 
@@ -239,7 +238,6 @@ private:
     ss::sharded<ss::abort_source>& _as;
     ss::sharded<drain_manager>& _drain_manager;
     ss::sharded<features::feature_table>& _feature_table;
-    ss::sharded<partition_leaders_table>& _partition_leaders_table;
     ss::sharded<topic_table>& _topic_table;
     ss::sharded<node_status_table>& _node_status_table;
 
@@ -257,7 +255,6 @@ private:
     storage::disk_space_alert _reports_data_disk_health
       = storage::disk_space_alert::ok;
     bool _restart_risks_collected = false;
-    std::optional<size_t> _bytes_in_cloud_storage;
 
     ss::gate _gate;
     ssx::mutex _refresh_mutex{"health_monitor_backend::refresh"};

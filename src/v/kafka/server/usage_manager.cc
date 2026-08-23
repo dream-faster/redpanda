@@ -21,12 +21,9 @@
 namespace kafka {
 
 usage_manager::usage_accounting_fiber::usage_accounting_fiber(
-  cluster::controller* controller,
   ss::sharded<usage_manager>& um,
   ss::sharded<cluster::health_monitor_frontend>& health_monitor,
   ss::sharded<storage::api>& storage,
-  ss::shared_ptr<datalake_usage_api> datalake_usage_api,
-  ss::abort_source& as,
   size_t usage_num_windows,
   std::chrono::seconds usage_window_width_interval,
   std::chrono::seconds usage_disk_persistance_interval)
@@ -35,11 +32,8 @@ usage_manager::usage_accounting_fiber::usage_accounting_fiber(
       usage_num_windows,
       usage_window_width_interval,
       usage_disk_persistance_interval)
-  , _controller(controller)
   , _health_monitor(health_monitor.local())
-  , _um(um)
-  , _datalake_usage_api(std::move(datalake_usage_api))
-  , _as(as) {}
+  , _um(um) {}
 
 /// The fiber running on the timer has a mutable effect when sample() is
 /// called, to prevent issues when open bucket is querying all shards for
@@ -48,43 +42,20 @@ ss::future<usage>
 usage_manager::usage_accounting_fiber::close_current_window() {
     auto u = co_await _um.map_reduce0(
       [](usage_manager& um) { return um.sample(); }, usage{}, std::plus<>());
-    u.bytes_cloud_storage = co_await get_cloud_usage_data();
-    u.datalake_usage = co_await _datalake_usage_api->compute_usage(_as);
     co_return u;
 }
 
-ss::future<std::optional<uint64_t>>
-usage_manager::usage_accounting_fiber::get_cloud_usage_data() {
-    vassert(
-      ss::this_shard_id() == usage_manager::usage_manager_main_shard
-        && ss::this_shard_id() == ss::shard_id(0),
-      "Usage manager accounting fiber must run on shard 0");
-    const auto is_leader = _controller->is_raft0_leader();
-    if (!is_leader) {
-        co_return std::nullopt;
-    }
-    const auto expiry = std::min<std::chrono::seconds>(
-      max_history(), std::chrono::seconds(10));
-    auto health_overview = co_await _health_monitor.get_cluster_health_overview(
-      ss::lowres_clock::now() + expiry);
-    co_return health_overview.bytes_in_cloud_storage;
-}
-
 usage_manager::usage_manager(
-  cluster::controller* controller,
   ss::sharded<cluster::health_monitor_frontend>& health_monitor,
-  ss::sharded<storage::api>& storage,
-  ss::shared_ptr<datalake_usage_api> datalake_usage_api)
+  ss::sharded<storage::api>& storage)
   : _usage_enabled(config::shard_local_cfg().enable_usage.bind())
   , _usage_num_windows(config::shard_local_cfg().usage_num_windows.bind())
   , _usage_window_width_interval(
       config::shard_local_cfg().usage_window_width_interval_sec.bind())
   , _usage_disk_persistance_interval(
       config::shard_local_cfg().usage_disk_persistance_interval_sec.bind())
-  , _controller(controller)
   , _health_monitor(health_monitor)
-  , _storage(storage)
-  , _datalake_usage_api(std::move(datalake_usage_api)) {}
+  , _storage(storage) {}
 
 ss::future<> usage_manager::reset() {
     oncore_debug_verify(_verify_shard);
@@ -112,12 +83,9 @@ ss::future<> usage_manager::start_accounting_fiber() {
         co_return; /// Double start called, do-nothing
     }
     _accounting_fiber = std::make_unique<usage_accounting_fiber>(
-      _controller,
       this->container(),
       _health_monitor,
       _storage,
-      _datalake_usage_api,
-      _as,
       _usage_num_windows(),
       _usage_window_width_interval(),
       _usage_disk_persistance_interval());

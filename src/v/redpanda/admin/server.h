@@ -14,7 +14,6 @@
 #include "absl/container/flat_hash_map.h"
 #include "base/seastarx.h"
 #include "base/type_traits.h"
-#include "cloud_storage/fwd.h"
 #include "cluster/fwd.h"
 #include "cluster/tx_gateway_frontend.h"
 #include "cluster/types.h"
@@ -23,8 +22,6 @@
 #include "finjector/stress_fiber.h"
 #include "kafka/server/fwd.h"
 #include "model/metadata.h"
-#include "pandaproxy/rest/fwd.h"
-#include "pandaproxy/schema_registry/fwd.h"
 #include "redpanda/admin/debug_bundle.h"
 #include "redpanda/admin/kafka_connections_service.h"
 #include "resource_mgmt/cpu_profiler.h"
@@ -37,7 +34,6 @@
 #include "security/types.h"
 #include "serde/protobuf/rpc.h"
 #include "storage/node.h"
-#include "transform/fwd.h"
 
 #include <seastar/core/do_with.hh>
 #include <seastar/core/scheduling.hh>
@@ -59,15 +55,6 @@ struct admin_server_cfg {
     size_t max_memory_usage_bytes;
 };
 
-enum class service_kind {
-    http_proxy,
-    schema_registry,
-};
-
-namespace cloud_storage {
-struct topic_recovery_service;
-}
-
 extern ss::logger adminlog;
 
 class admin_server : public ss::peering_sharded_service<admin_server> {
@@ -84,15 +71,9 @@ public:
       ss::sharded<cluster::node_status_table>&,
       ss::sharded<cluster::self_test_frontend>&,
       ss::sharded<kafka::usage_manager>&,
-      pandaproxy::rest::api*,
-      pandaproxy::schema_registry::api*,
-      ss::sharded<cloud_storage::topic_recovery_service>&,
-      ss::sharded<cluster::topic_recovery_status_frontend>&,
       ss::sharded<storage::node>&,
       ss::sharded<memory_sampling>&,
-      ss::sharded<cloud_io::cache>&,
       ss::sharded<resources::cpu_profiler>&,
-      ss::sharded<transform::service>*,
       ss::sharded<security::audit::audit_log_manager>&,
       std::unique_ptr<cluster::tx_manager_migrator>&,
       ss::sharded<kafka::server>&,
@@ -454,11 +435,7 @@ private:
     void register_self_test_routes();
     void register_cluster_routes();
     void register_cluster_partitions_routes();
-    void register_shadow_indexing_routes();
-    void register_wasm_transform_routes();
     void register_recovery_mode_routes();
-    void register_data_migration_routes();
-    void register_topic_routes();
     void register_debug_bundle_routes();
 
     ss::future<ss::json::json_return_type> patch_cluster_config_handler(
@@ -613,39 +590,6 @@ private:
     ss::future<ss::json::json_return_type>
       get_cluster_partitions_topic_handler(std::unique_ptr<ss::http::request>);
 
-    /// Shadow indexing routes
-    ss::future<ss::json::json_return_type>
-      sync_local_state_handler(std::unique_ptr<ss::http::request>);
-    ss::future<std::unique_ptr<ss::http::reply>> unsafe_reset_metadata(
-      std::unique_ptr<ss::http::request>, std::unique_ptr<ss::http::reply>);
-    ss::future<std::unique_ptr<ss::http::reply>>
-      unsafe_reset_metadata_from_cloud(
-        std::unique_ptr<ss::http::request>, std::unique_ptr<ss::http::reply>);
-    ss::future<std::unique_ptr<ss::http::reply>>
-      initiate_topic_scan_and_recovery(
-        std::unique_ptr<ss::http::request>, std::unique_ptr<ss::http::reply>);
-    ss::future<ss::json::json_return_type>
-    query_automated_recovery(std::unique_ptr<ss::http::request> req);
-    ss::future<std::unique_ptr<ss::http::reply>> initialize_cluster_recovery(
-      std::unique_ptr<ss::http::request>, std::unique_ptr<ss::http::reply>);
-    ss::future<ss::json::json_return_type>
-    get_cluster_recovery(std::unique_ptr<ss::http::request> req);
-    ss::future<ss::json::json_return_type>
-    get_partition_cloud_storage_status(std::unique_ptr<ss::http::request> req);
-    ss::future<ss::json::json_return_type>
-    get_cloud_storage_lifecycle(std::unique_ptr<ss::http::request> req);
-    ss::future<ss::json::json_return_type>
-    delete_cloud_storage_lifecycle(std::unique_ptr<ss::http::request> req);
-    ss::future<ss::json::json_return_type>
-    post_cloud_storage_cache_trim(std::unique_ptr<ss::http::request> req);
-    ss::future<std::unique_ptr<ss::http::reply>> get_manifest(
-      std::unique_ptr<ss::http::request> req,
-      std::unique_ptr<ss::http::reply> rep);
-    ss::future<ss::json::json_return_type>
-      get_cloud_storage_anomalies(std::unique_ptr<ss::http::request>);
-    ss::future<ss::json::json_return_type>
-      reset_scrubbing_metadata(std::unique_ptr<ss::http::request>);
-
     /// Self test routes
     ss::future<ss::json::json_return_type>
       self_test_start_handler(std::unique_ptr<ss::http::request>);
@@ -671,53 +615,11 @@ private:
     ss::future<ss::json::json_return_type>
       get_local_offsets_translated_handler(std::unique_ptr<ss::http::request>);
     ss::future<ss::json::json_return_type>
-      cloud_storage_usage_handler(std::unique_ptr<ss::http::request>);
-    ss::future<ss::json::json_return_type>
-      restart_service_handler(std::unique_ptr<ss::http::request>);
-    ss::future<ss::json::json_return_type>
       sampled_memory_profile_handler(std::unique_ptr<ss::http::request>);
 
     ss::future<ss::json::json_return_type> get_node_uuid_handler();
     ss::future<ss::json::json_return_type>
       override_node_uuid_handler(std::unique_ptr<ss::http::request>);
-
-    // Transform routes
-    ss::future<ss::json::json_return_type>
-      deploy_transform(std::unique_ptr<ss::http::request>);
-    ss::future<ss::json::json_return_type>
-      list_transforms(std::unique_ptr<ss::http::request>);
-    ss::future<ss::json::json_return_type>
-      delete_transform(std::unique_ptr<ss::http::request>);
-    ss::future<ss::json::json_return_type>
-      list_committed_offsets(std::unique_ptr<ss::http::request>);
-    ss::future<ss::json::json_return_type>
-      garbage_collect_committed_offsets(std::unique_ptr<ss::http::request>);
-    ss::future<ss::json::json_return_type>
-      patch_transform_metadata(std::unique_ptr<ss::http::request>);
-
-    // Data migration routes
-    ss::future<std::unique_ptr<ss::http::reply>> list_data_migrations(
-      std::unique_ptr<ss::http::request>, std::unique_ptr<ss::http::reply>);
-    ss::future<std::unique_ptr<ss::http::reply>> get_data_migration(
-      std::unique_ptr<ss::http::request>, std::unique_ptr<ss::http::reply>);
-    ss::future<std::unique_ptr<ss::http::reply>> add_data_migration(
-      std::unique_ptr<ss::http::request>, std::unique_ptr<ss::http::reply>);
-    ss::future<ss::json::json_return_type>
-      execute_migration_action(std::unique_ptr<ss::http::request>);
-    ss::future<ss::json::json_return_type>
-      delete_migration(std::unique_ptr<ss::http::request>);
-    ss::future<std::unique_ptr<ss::http::reply>> get_migrated_entities_status(
-      std::unique_ptr<ss::http::request>, std::unique_ptr<ss::http::reply>);
-    ss::future<std::unique_ptr<ss::http::reply>> set_migrated_entities_status(
-      std::unique_ptr<ss::http::request>, std::unique_ptr<ss::http::reply>);
-
-    // Topic routes
-    ss::future<std::unique_ptr<ss::http::reply>> list_mountable_topics(
-      std::unique_ptr<ss::http::request>, std::unique_ptr<ss::http::reply>);
-    ss::future<ss::json::json_return_type>
-      mount_topics(std::unique_ptr<ss::http::request>);
-    ss::future<ss::json::json_return_type>
-      unmount_topics(std::unique_ptr<ss::http::request>);
 
     // Debug Bundle routes
     ss::future<std::unique_ptr<ss::http::reply>> post_debug_bundle(
@@ -771,8 +673,6 @@ private:
     void rearm_log_level_timer();
     void log_level_timer_handler();
 
-    ss::future<> restart_redpanda_service(service_kind service);
-
     ss::httpd::http_server _server;
     admin_server_cfg _cfg;
     ss::sharded<stress_fiber_manager>& _stress_fiber_manager;
@@ -787,16 +687,9 @@ private:
     ss::sharded<cluster::node_status_table>& _node_status_table;
     ss::sharded<cluster::self_test_frontend>& _self_test_frontend;
     ss::sharded<kafka::usage_manager>& _usage_manager;
-    pandaproxy::rest::api* _http_proxy;
-    pandaproxy::schema_registry::api* _schema_registry;
-    ss::sharded<cloud_storage::topic_recovery_service>& _topic_recovery_service;
-    ss::sharded<cluster::topic_recovery_status_frontend>&
-      _topic_recovery_status_frontend;
     ss::sharded<storage::node>& _storage_node;
     ss::sharded<memory_sampling>& _memory_sampling_service;
-    ss::sharded<cloud_io::cache>& _cloud_storage_cache;
     ss::sharded<resources::cpu_profiler>& _cpu_profiler;
-    ss::sharded<transform::service>* _transform_service;
     ss::sharded<security::audit::audit_log_manager>& _audit_mgr;
     std::unique_ptr<cluster::tx_manager_migrator>& _tx_manager_migrator;
     ss::sharded<kafka::server>& _kafka_server;

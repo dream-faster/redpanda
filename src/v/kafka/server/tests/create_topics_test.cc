@@ -501,7 +501,6 @@ FIXTURE_TEST(case_insensitive_boolean_property, create_topic_fixture) {
 }
 
 FIXTURE_TEST(unlicensed_permit_if_config_disabled, create_topic_fixture) {
-    update_cluster_config(lconf().enable_schema_id_validation.name(), "none");
     update_cluster_config(lconf().cloud_storage_enabled.name(), "false");
 
     wait_for_license_init();
@@ -516,12 +515,7 @@ FIXTURE_TEST(unlicensed_permit_if_config_disabled, create_topic_fixture) {
       // si_props
       with(kafka::topic_property_remote_read, true),
       with(kafka::topic_property_remote_write, true),
-      // schema id validation
-      with(kafka::topic_property_record_key_schema_id_validation, true),
-      with(kafka::topic_property_record_key_schema_id_validation_compat, true),
-      with(kafka::topic_property_record_value_schema_id_validation, true),
-      with(
-        kafka::topic_property_record_value_schema_id_validation_compat, true)};
+    };
 
     auto client = make_kafka_client().get();
     auto deferred_close = ss::defer([&client] { client.stop().get(); });
@@ -543,12 +537,9 @@ FIXTURE_TEST(unlicensed_rejected, create_topic_fixture) {
     // NOTE(oren): w/o schema validation enabled at the cluster level, related
     // properties will be ignored on the topic create path. stick to COMPAT here
     // because it's a superset of REDPANDA.
-    update_cluster_config(lconf().enable_schema_id_validation.name(), "compat");
     update_cluster_config(lconf().cloud_storage_enabled.name(), "true");
 
     auto unset_cluster_config = ss::defer([&] {
-        update_cluster_config(
-          lconf().enable_schema_id_validation.name(), "none");
         update_cluster_config(lconf().cloud_storage_enabled.name(), "false");
     });
 
@@ -565,12 +556,6 @@ FIXTURE_TEST(unlicensed_rejected, create_topic_fixture) {
       with(kafka::topic_property_remote_write, true),
       with(kafka::topic_property_recovery, true),
       with(kafka::topic_property_read_replica, true),
-      // schema id validation
-      with(kafka::topic_property_record_key_schema_id_validation, true),
-      with(kafka::topic_property_record_key_schema_id_validation_compat, true),
-      with(kafka::topic_property_record_value_schema_id_validation, true),
-      with(
-        kafka::topic_property_record_value_schema_id_validation_compat, true),
       // pin_leadership_props
       with(
         kafka::topic_property_leaders_preference,

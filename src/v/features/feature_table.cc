@@ -37,22 +37,12 @@ namespace features {
 
 std::string_view to_string_view(feature f) {
     switch (f) {
-    case feature::iceberg_schema_merging:
-        return "iceberg_schema_merging";
     case feature::validated_batch_timestamps:
         return "validated_batch_timestamps";
     case feature::consumer_groups_migrations:
         return "consumer_groups_migrations";
-    case feature::shadow_linking:
-        return "shadow_linking";
     case feature::batch_mirror_topic_status:
         return "batch_mirror_topic_status";
-    case feature::shadow_link_sr_api_sync:
-        return "shadow_link_sr_api_sync";
-    case feature::shadow_link_role_sync:
-        return "shadow_link_role_sync";
-    case feature::iceberg_extended_mode_config:
-        return "iceberg_extended_mode_config";
     case feature::coordinated_compaction:
         return "coordinated_compaction";
     case feature::cloud_retention:
@@ -113,12 +103,8 @@ std::string_view to_string_view(feature f) {
         return "partition_properties_stm";
     case feature::shadow_indexing_split_topic_property_update:
         return "shadow_indexing_split_topic_property_update";
-    case feature::datalake_iceberg:
-        return "datalake_iceberg";
     case feature::raft_symmetric_reconfiguration_cancel:
         return "raft_symmetric_reconfiguration_cancel";
-    case feature::datalake_iceberg_ga:
-        return "datalake_iceberg_ga";
     case feature::cloud_storage_metadata_rw_fence:
         return "cloud_storage_metadata_rw_fence";
     case feature::node_restart_risk_assessment:
@@ -135,16 +121,10 @@ std::string_view to_string_view(feature f) {
         return "kafka_data_rpc";
     case feature::topic_locations_in_outbound_migrations:
         return "topic_locations_in_outbound_migrations";
-    case feature::schema_registry_authz:
-        return "schema_registry_authz";
     case feature::group_based_authorization:
         return "group_based_authorization";
     case feature::user_based_client_quota:
         return "user_based_client_quota";
-    case feature::cloud_topics:
-        return "cloud_topics";
-    case feature::tiered_cloud_topics:
-        return "tiered_cloud_topics";
     case feature::fetch_controller_snapshot_rpc:
         return "fetch_controller_snapshot_rpc";
 

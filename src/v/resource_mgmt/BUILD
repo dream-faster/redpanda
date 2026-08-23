@@ -16,34 +16,6 @@ redpanda_cc_library(
 )
 
 redpanda_cc_library(
-    name = "storage",
-    srcs = [
-        "storage.cc",
-    ],
-    hdrs = [
-        "storage.h",
-    ],
-    visibility = ["//visibility:public"],
-    deps = [
-        "//src/v/base",
-        "//src/v/cloud_io:cache",
-        "//src/v/cluster",
-        "//src/v/cluster:node_local_monitor",
-        "//src/v/cluster:ntp_callbacks",
-        "//src/v/cluster:partition_properties_stm",
-        "//src/v/config",
-        "//src/v/container:chunked_vector",
-        "//src/v/datalake:manager",
-        "//src/v/metrics",
-        "//src/v/raft",
-        "//src/v/ssx:semaphore",
-        "//src/v/storage",
-        "//src/v/utils:human",
-        "@seastar",
-    ],
-)
-
-redpanda_cc_library(
     name = "logger",
     srcs = [
         "logger.cc",

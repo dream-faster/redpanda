@@ -13,18 +13,15 @@
 #include "cluster/cluster_utils.h"
 #include "cluster/commands.h"
 #include "cluster/controller_snapshot.h"
-#include "cluster/data_migrated_resources.h"
-#include "cluster/data_migration_types.h"
 #include "cluster/errc.h"
 #include "cluster/fwd.h"
 #include "cluster/logger.h"
-#include "cluster/topic_validators.h"
 #include "cluster/types.h"
 #include "container/chunked_hash_map.h"
 #include "model/fundamental.h"
 #include "model/metadata.h"
-#include "pandaproxy/schema_registry/types.h"
 #include "storage/ntp_config.h"
+#include "utils/tristate.h"
 
 #include <seastar/coroutine/maybe_yield.hh>
 
@@ -35,11 +32,8 @@
 
 namespace cluster {
 
-topic_table::topic_table(
-  data_migrations::migrated_resources& migrated_resources,
-  model::node_id node_id)
-  : _probe(*this, node_id)
-  , _migrated_resources(migrated_resources) {}
+topic_table::topic_table(model::node_id node_id)
+  : _probe(*this, node_id) {}
 
 ss::future<std::error_code>
 topic_table::apply(create_topic_cmd cmd, model::offset offset) {
@@ -54,35 +48,8 @@ topic_table::apply(create_topic_cmd cmd, model::offset offset) {
         co_return errc::topic_id_already_exists;
     }
 
-    const auto migration_state = _migrated_resources.get_topic_state(cmd.key);
-    if (
-      !cmd.value.cfg.is_migrated
-      && migration_state
-           != data_migrations::migrated_resource_state::non_restricted) {
-        vlog(clusterlog.debug, "topic {} already migrated", cmd.key);
-        co_return errc::topic_already_exists;
-    }
-
-    if (!schema_id_validation_validator::is_valid(cmd.value.cfg.properties)) {
-        co_return schema_id_validation_validator::ec;
-    }
-
-    if (
-      cmd.value.cfg.properties.iceberg_mode != model::iceberg_mode::disabled
-      && !cmd.value.cfg.properties.iceberg_partition_spec) {
-        // Remember partition spec default at time of creation - i.e. make it a
-        // sticky config.
-        cmd.value.cfg.properties.iceberg_partition_spec
-          = config::shard_local_cfg().iceberg_default_partition_spec();
-    }
-
-    std::optional<model::initial_revision_id> remote_revision
-      = cmd.value.cfg.properties.remote_topic_properties
-          ? std::make_optional(
-              cmd.value.cfg.properties.remote_topic_properties->remote_revision)
-          : std::nullopt;
-    auto md = topic_metadata_item{topic_metadata(
-      std::move(cmd.value), model::revision_id(offset()), remote_revision)};
+    auto md = topic_metadata_item{
+      topic_metadata(std::move(cmd.value), model::revision_id(offset()))};
 
     // generate deltas
 
@@ -132,14 +99,7 @@ topic_table::apply(delete_topic_cmd cmd, model::offset offset) {
 }
 
 ss::future<std::error_code> topic_table::do_local_delete(
-  model::topic_namespace nt, model::offset offset, bool ignore_migration) {
-    const auto migration_state = _migrated_resources.get_topic_state(nt);
-    if (
-      !ignore_migration
-      && migration_state
-           != data_migrations::migrated_resource_state::non_restricted) {
-        co_return errc::resource_is_being_migrated;
-    }
+  model::topic_namespace nt, model::offset offset, bool) {
     auto tp = _topics.find(nt);
     if (tp == _topics.end()) {
         co_return errc::topic_not_exists;
@@ -185,67 +145,6 @@ topic_table::apply(topic_lifecycle_transition soft_del, model::offset offset) {
               errc::topic_not_exists);
         }
 
-        // Create lifecycle markers
-
-        const auto& topic_cfg = tp->second.get_configuration();
-        const auto& topic_properties = topic_cfg.properties;
-
-        if (topic_properties.requires_tiered_remote_erase()) {
-            auto tombstone = nt_lifecycle_marker{
-              .config = tp->second.get_configuration(),
-              .initial_revision_id = tp->second.get_remote_revision().value_or(
-                model::initial_revision_id(tp->second.get_revision())),
-              .timestamp = ss::lowres_system_clock::now()};
-
-            _lifecycle_markers.emplace(soft_del.topic, tombstone);
-            vlog(
-              clusterlog.debug,
-              "Created lifecycle marker for topic {} {}",
-              soft_del.topic.nt,
-              soft_del.topic.initial_revision_id);
-        }
-
-        if (topic_properties.requires_iceberg_remote_erase()) {
-            // Note that for iceberg tombstones we use topic.get_revision()
-            // (i.e. revision that got assigned to the topic at creation time)
-            // and not topic.get_remote_revision() (which may be an earlier
-            // revision if the topic was recovered from cloud storage).
-            auto tombstone = nt_iceberg_tombstone{
-              .last_deleted_revision = tp->second.get_revision()};
-            auto it = _iceberg_tombstones.emplace(tp->first, tombstone).first;
-            it->second.last_deleted_revision = std::max(
-              it->second.last_deleted_revision, tp->second.get_revision());
-
-            vlog(
-              clusterlog.debug,
-              "created iceberg tombstone for topic {} (revision: {})",
-              it->first,
-              it->second.last_deleted_revision);
-        }
-
-        if (topic_properties.requires_cloud_topic_remote_erase()) {
-            auto tp_id = topic_cfg.tp_id;
-            if (tp_id.has_value()) {
-                auto tombstone = nt_cloud_topic_tombstone{
-                  .topic_id = *tp_id,
-                };
-                _cloud_topic_tombstones.emplace(soft_del.topic, tombstone);
-                vlog(
-                  clusterlog.debug,
-                  "Created cloud topic {} (revision: {}) tombstone for "
-                  "topic_id {}",
-                  tp->first,
-                  tp->second.get_revision(),
-                  *tp_id);
-            } else {
-                vlog(
-                  clusterlog.error,
-                  "Cloud topic {} (revision: {}) does not have topic ID",
-                  tp->first,
-                  tp->second.get_revision());
-            }
-        }
-
         [[fallthrough]]; // proceed to local deletion
     }
     case topic_lifecycle_transition_mode::oneshot_delete:
@@ -277,51 +176,6 @@ topic_table::apply(topic_lifecycle_transition soft_del, model::offset offset) {
                   errc::topic_not_exists);
             }
         }
-        case topic_purge_domain::iceberg: {
-            auto tombstone_it = _iceberg_tombstones.find(soft_del.topic.nt);
-            if (tombstone_it == _iceberg_tombstones.end()) {
-                return ss::make_ready_future<std::error_code>(
-                  errc::topic_not_exists);
-            }
-
-            model::revision_id purged_revision{
-              soft_del.topic.initial_revision_id};
-            if (tombstone_it->second.last_deleted_revision > purged_revision) {
-                vlog(
-                  clusterlog.info,
-                  "[{}] unexpected iceberg tombstone revision {} (expected {})",
-                  soft_del.topic.nt,
-                  tombstone_it->second.last_deleted_revision,
-                  purged_revision);
-                return ss::make_ready_future<std::error_code>(
-                  errc::concurrent_modification_error);
-            }
-
-            vlog(
-              clusterlog.debug,
-              "Purged iceberg tombstone for {} {}",
-              tombstone_it->first,
-              tombstone_it->second.last_deleted_revision);
-
-            _iceberg_tombstones.erase(tombstone_it);
-            return ss::make_ready_future<std::error_code>(errc::success);
-        }
-        case topic_purge_domain::cloud_topic: {
-            auto tombstone_it = _cloud_topic_tombstones.find(soft_del.topic);
-            if (tombstone_it == _cloud_topic_tombstones.end()) {
-                return ss::make_ready_future<std::error_code>(
-                  errc::topic_not_exists);
-            }
-            const auto& [nt_rev, tombstone] = *tombstone_it;
-            vlog(
-              clusterlog.debug,
-              "Purged cloud topic tombstone for {}: {}",
-              nt_rev,
-              tombstone.topic_id);
-
-            _cloud_topic_tombstones.erase(tombstone_it);
-            return ss::make_ready_future<std::error_code>(errc::success);
-        }
         default:
             vlog(
               clusterlog.error,
@@ -338,18 +192,6 @@ topic_table::apply(topic_lifecycle_transition soft_del, model::offset offset) {
 
 ss::future<std::error_code>
 topic_table::apply(create_partition_cmd cmd, model::offset offset) {
-    const auto migration_state = _migrated_resources.get_topic_state(
-      cmd.value.cfg.tp_ns);
-    vlog(
-      clusterlog.trace,
-      "attempting to create a partition in {}, migration state = {}",
-      cmd.value.cfg.tp_ns,
-      migration_state);
-    if (
-      migration_state
-      != data_migrations::migrated_resource_state::non_restricted) {
-        co_return errc::resource_is_being_migrated;
-    }
     _last_applied_revision_id = model::revision_id(offset);
     auto tp = _topics.find(cmd.key);
     if (tp == _topics.end()) {
@@ -944,132 +786,6 @@ void incremental_update(
     }
 }
 
-// This is a deprecated (as of `v24.3`) function here for legacy purposes. Bug
-// prone. Utilize `incremental_update` overload below for `remote_read` and
-// `remote_write` updates. See:
-// https://github.com/redpanda-data/redpanda/issues/9191
-// https://github.com/redpanda-data/redpanda/pull/23220
-template<>
-void incremental_update(
-  std::optional<model::shadow_indexing_mode>& property,
-  property_update<std::optional<model::shadow_indexing_mode>> override) {
-    if (override.op != incremental_update_operation::none) {
-        vlog(
-          clusterlog.trace,
-          "Performing deprecated incremental_update to shadow_indexing_mode");
-    }
-    switch (override.op) {
-    case incremental_update_operation::remove:
-        if (!override.value || !property) {
-            break;
-        }
-        // It's guaranteed that the remove operation will only be
-        // used with one of the 'drop_' flags.
-        property = model::add_shadow_indexing_flag(*property, *override.value);
-        if (*property == model::shadow_indexing_mode::disabled) {
-            property = std::nullopt;
-        }
-        return;
-    case incremental_update_operation::set:
-        // set new value
-        if (!override.value) {
-            break;
-        }
-        property = model::add_shadow_indexing_flag(
-          property ? *property : model::shadow_indexing_mode::disabled,
-          *override.value);
-        return;
-    case incremental_update_operation::none:
-        // do nothing
-        return;
-    }
-}
-
-void incremental_update(
-  std::optional<model::shadow_indexing_mode>& property,
-  property_update<bool> overrides,
-  model::shadow_indexing_mode m) {
-    switch (overrides.op) {
-    case incremental_update_operation::remove: {
-        // This codepath is currently unused, as remove operation at Kafka layer
-        // causes a set operation to the default cluster value.
-        if (!property.has_value()) {
-            break;
-        }
-        auto simode = property.value();
-        property = model::add_shadow_indexing_flag(
-          simode, model::negate_shadow_indexing_flag(m));
-        return;
-    }
-    case incremental_update_operation::set: {
-        // set new value
-        auto simode = property.value_or(model::shadow_indexing_mode::disabled);
-        auto si_flag_update = overrides.value
-                                ? m
-                                : model::negate_shadow_indexing_flag(m);
-        property = model::add_shadow_indexing_flag(simode, si_flag_update);
-        return;
-    }
-    case incremental_update_operation::none:
-        // do nothing
-        return;
-    }
-}
-
-void incremental_update(
-  model::iceberg_mode& property,
-  std::optional<ss::sstring>& partition_spec_property,
-  property_update<model::iceberg_mode> override,
-  model::iceberg_mode default_value) {
-    switch (override.op) {
-    case incremental_update_operation::remove:
-        // remove override, fallback to default
-        property = default_value;
-        return;
-    case incremental_update_operation::set: {
-        // set new value and remember the current partition spec default if we
-        // are enabling iceberg.
-        auto old_property = property;
-        property = override.value;
-        if (
-          old_property == model::iceberg_mode::disabled
-          && property != old_property && !partition_spec_property) {
-            partition_spec_property
-              = config::shard_local_cfg().iceberg_default_partition_spec();
-        }
-        return;
-    }
-    case incremental_update_operation::none:
-        // do nothing
-        return;
-    }
-}
-
-void incremental_update(
-  model::redpanda_storage_mode& property,
-  property_update<std::optional<model::redpanda_storage_mode>> override,
-  model::redpanda_storage_mode /*default_value*/) {
-    // Validation of storage mode transitions is done at the kafka layer.
-    // This function only applies the update.
-    switch (override.op) {
-    case incremental_update_operation::remove:
-        // Cannot remove redpanda.storage.mode - it can only be set explicitly
-        vlog(
-          clusterlog.warn,
-          "Cannot remove property redpanda.storage.mode - it can only be set "
-          "explicitly. Current value: {}",
-          property);
-        return;
-    case incremental_update_operation::set:
-        if (override.value) {
-            property = *override.value;
-        }
-        return;
-    case incremental_update_operation::none:
-        return;
-    }
-}
-
 template<typename T>
 void incremental_update(
   tristate<T>& property, property_update<tristate<T>> override) {
@@ -1130,54 +846,7 @@ topic_properties topic_table::update_topic_properties(
     incremental_update(
       updated_properties.retention_local_target_ms,
       overrides.retention_local_target_ms);
-    // These tiered storage properties shouldn't be set at the
-    // same time, due to feature gating from
-    // `shadow_indexing_split_topic_property_update`, but still set the
-    // deprecated update to `none` as a sanity check.
-    if (
-      overrides.remote_read.op != incremental_update_operation::none
-      || overrides.remote_write.op != incremental_update_operation::none) {
-        overrides.get_shadow_indexing().op = incremental_update_operation::none;
-    }
-    incremental_update(
-      updated_properties.shadow_indexing, overrides.get_shadow_indexing());
-    incremental_update(
-      updated_properties.shadow_indexing,
-      overrides.remote_read,
-      model::shadow_indexing_mode::fetch);
-    incremental_update(
-      updated_properties.shadow_indexing,
-      overrides.remote_write,
-      model::shadow_indexing_mode::archival);
-    incremental_update(
-      updated_properties.remote_delete,
-      overrides.remote_delete,
-      storage::ntp_config::default_remote_delete);
     incremental_update(updated_properties.segment_ms, overrides.segment_ms);
-    incremental_update(
-      updated_properties.record_key_schema_id_validation,
-      overrides.record_key_schema_id_validation);
-    incremental_update(
-      updated_properties.record_key_schema_id_validation_compat,
-      overrides.record_key_schema_id_validation_compat);
-    incremental_update(
-      updated_properties.record_key_subject_name_strategy,
-      overrides.record_key_subject_name_strategy);
-    incremental_update(
-      updated_properties.record_key_subject_name_strategy_compat,
-      overrides.record_key_subject_name_strategy_compat);
-    incremental_update(
-      updated_properties.record_value_schema_id_validation,
-      overrides.record_value_schema_id_validation);
-    incremental_update(
-      updated_properties.record_value_schema_id_validation_compat,
-      overrides.record_value_schema_id_validation_compat);
-    incremental_update(
-      updated_properties.record_value_subject_name_strategy,
-      overrides.record_value_subject_name_strategy);
-    incremental_update(
-      updated_properties.record_value_subject_name_strategy_compat,
-      overrides.record_value_subject_name_strategy_compat);
     incremental_update(
       updated_properties.initial_retention_local_target_bytes,
       overrides.initial_retention_local_target_bytes);
@@ -1189,27 +858,9 @@ topic_properties topic_table::update_topic_properties(
     incremental_update(updated_properties.flush_ms, overrides.flush_ms);
     incremental_update(updated_properties.flush_bytes, overrides.flush_bytes);
     incremental_update(
-      updated_properties.iceberg_mode,
-      updated_properties.iceberg_partition_spec,
-      overrides.iceberg_mode,
-      storage::ntp_config::default_iceberg_mode);
-    incremental_update(
       updated_properties.leaders_preference, overrides.leaders_preference);
     incremental_update(
       updated_properties.delete_retention_ms, overrides.delete_retention_ms);
-    incremental_update(
-      updated_properties.iceberg_delete, overrides.iceberg_delete);
-    incremental_update(
-      updated_properties.iceberg_partition_spec,
-      overrides.iceberg_partition_spec,
-      std::optional(
-        config::shard_local_cfg().iceberg_default_partition_spec()));
-    incremental_update(
-      updated_properties.iceberg_invalid_record_action,
-      overrides.iceberg_invalid_record_action);
-    incremental_update(
-      updated_properties.iceberg_target_lag_ms,
-      overrides.iceberg_target_lag_ms);
     incremental_update(
       updated_properties.min_cleanable_dirty_ratio,
       overrides.min_cleanable_dirty_ratio);
@@ -1220,21 +871,11 @@ topic_properties topic_table::update_topic_properties(
       updated_properties.max_compaction_lag_ms,
       overrides.max_compaction_lag_ms);
     incremental_update(
-      updated_properties.remote_topic_allow_gaps, overrides.remote_allow_gaps);
-    incremental_update(
       updated_properties.message_timestamp_before_max_ms,
       overrides.message_timestamp_before_max_ms);
     incremental_update(
       updated_properties.message_timestamp_after_max_ms,
       overrides.message_timestamp_after_max_ms);
-    incremental_update(updated_properties.remote_label, overrides.remote_label);
-    incremental_update(
-      updated_properties.storage_mode,
-      overrides.storage_mode,
-      storage::ntp_config::default_storage_mode);
-    incremental_update(
-      updated_properties.schema_registry_context,
-      overrides.schema_registry_context);
     return updated_properties;
 }
 
@@ -1246,13 +887,6 @@ topic_table::apply(update_topic_properties_cmd cmd, model::offset o) {
     if (tp == _topics.end()) {
         co_return make_error_code(errc::topic_not_exists);
     }
-    const auto migration_state = _migrated_resources.get_topic_state(key);
-    if (
-      migration_state
-      != data_migrations::migrated_resource_state::non_restricted) {
-        co_return errc::resource_is_being_migrated;
-    }
-
     if (cmd.value.topic_id.op == incremental_update_operation::set) {
         auto& tp_id = cmd.value.topic_id.value;
         if (tp_id && _topics.get_name(*tp_id)) {
@@ -1276,10 +910,6 @@ topic_table::apply(update_topic_properties_cmd cmd, model::offset o) {
     // no configuration change, no need to generate delta
     if (updated_properties == properties) {
         co_return errc::success;
-    }
-
-    if (!schema_id_validation_validator::is_valid(updated_properties)) {
-        co_return schema_id_validation_validator::ec;
     }
 
     // Apply the changes
@@ -1758,12 +1388,6 @@ ss::future<> topic_table::apply_snapshot(
 
     reset_partitions_to_force_reconfigure(
       controller_snap.topics.partitions_to_force_recover);
-
-    _iceberg_tombstones.replace(
-      controller_snap.topics.iceberg_tombstones.values().copy());
-
-    _cloud_topic_tombstones.replace(
-      controller_snap.topics.cloud_topic_tombstones.values().copy());
 
     // 2. re-calculate derived state
 

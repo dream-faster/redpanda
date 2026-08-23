@@ -13,5 +13,4 @@ go_binary(
     embed = [":identity_logging_lib"],
     goarch = "wasm",
     goos = "wasip1",
-    visibility = ["//src/v/wasm/tests:__pkg__"],
 )

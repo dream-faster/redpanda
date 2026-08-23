@@ -11,7 +11,6 @@
 
 #pragma once
 #include "config/configuration.h"
-#include "datalake/partition_spec_parser.h"
 #include "features/feature_table.h"
 #include "kafka/protocol/schemata/create_topics_request.h"
 #include "kafka/protocol/schemata/create_topics_response.h"
@@ -159,30 +158,6 @@ struct replication_factor_must_be_greater_or_equal_to_minimum {
     }
 };
 
-struct remote_read_and_write_are_not_supported_for_read_replica {
-    static constexpr error_code ec = error_code::invalid_config;
-    static constexpr const char* error_message
-      = "remote read and write are not supported for read replicas";
-
-    static bool is_valid(const creatable_topic& c, features::feature_table*) {
-        auto config_entries = config_map(c.configs);
-        auto end = config_entries.end();
-        bool is_recovery
-          = (config_entries.find(topic_property_recovery) != end);
-        bool is_read_replica
-          = (config_entries.find(topic_property_read_replica) != end);
-        bool remote_read
-          = (config_entries.find(topic_property_remote_read) != end);
-        bool remote_write
-          = (config_entries.find(topic_property_remote_write) != end);
-
-        if (is_read_replica && (remote_read || remote_write || is_recovery)) {
-            return false;
-        }
-        return true;
-    }
-};
-
 struct batch_max_bytes_limits {
     static constexpr error_code ec = error_code::invalid_config;
     static constexpr const char* error_message
@@ -238,143 +213,6 @@ struct cleanup_policy_validator_details {
 
     static constexpr const char* error_message = "Unsupported cleanup policy ";
     static constexpr const auto config_name = topic_property_cleanup_policy;
-};
-
-struct subject_name_strategy_validator {
-    static constexpr const char* error_message
-      = "Unsupported subject name strategy ";
-    static constexpr error_code ec = error_code::invalid_config;
-
-    static bool is_valid(const creatable_topic& c, features::feature_table*) {
-        return std::all_of(
-          c.configs.begin(),
-          c.configs.end(),
-          [](const createable_topic_config& v) {
-              return !is_sns_config(v) || !v.value.has_value()
-                     || is_valid_sns(v.value.value());
-          });
-    }
-
-private:
-    static bool is_sns_config(const createable_topic_config& c) {
-        static constexpr const auto config_names = {
-          topic_property_record_key_subject_name_strategy,
-          topic_property_record_key_subject_name_strategy_compat,
-          topic_property_record_value_subject_name_strategy,
-          topic_property_record_value_subject_name_strategy_compat};
-        return std::any_of(
-          config_names.begin(), config_names.end(), [&c](const auto& v) {
-              return c.name == v;
-          });
-    }
-
-    static bool is_valid_sns(std::string_view sv) {
-        try {
-            boost::lexical_cast<
-              pandaproxy::schema_registry::subject_name_strategy>(sv);
-            return true;
-        } catch (...) {
-            return false;
-        }
-    }
-};
-
-struct iceberg_create_config_validator {
-    static constexpr const char* error_message
-      = "Invalid property value or Iceberg configuration disabled at cluster "
-        "level.";
-    static constexpr error_code ec = error_code::invalid_config;
-
-    static bool
-    is_valid(const creatable_topic& c, features::feature_table* ft) {
-        model::iceberg_mode parsed_mode = model::iceberg_mode::disabled;
-
-        auto mode_it = std::find_if(
-          c.configs.begin(),
-          c.configs.end(),
-          [](const createable_topic_config& cfg) {
-              return cfg.name == topic_property_iceberg_mode;
-          });
-        if (mode_it != c.configs.end() && mode_it->value.has_value()) {
-            auto parsed = model::parse_iceberg_mode(mode_it->value.value());
-            if (!parsed) {
-                return false;
-            }
-            parsed_mode = *parsed;
-        }
-
-        auto pspec_it = std::find_if(
-          c.configs.begin(),
-          c.configs.end(),
-          [](const createable_topic_config& cfg) {
-              return cfg.name == topic_property_iceberg_partition_spec;
-          });
-        if (pspec_it != c.configs.end() && pspec_it->value.has_value()) {
-            auto parsed = datalake::parse_partition_spec(
-              pspec_it->value.value());
-            if (!parsed.has_value()) {
-                return false;
-            }
-        }
-        bool is_iceberg_topic = parsed_mode != model::iceberg_mode::disabled;
-        if (!is_iceberg_topic) {
-            // Not an Iceberg topic, nothing more to validate.
-            return true;
-        }
-
-        bool is_read_replica = std::find_if(
-                                 c.configs.begin(),
-                                 c.configs.end(),
-                                 [](const createable_topic_config& cfg) {
-                                     return cfg.name
-                                            == topic_property_read_replica;
-                                 })
-                               != c.configs.end();
-        if (is_read_replica) {
-            // Not yet supported: read replicas must not be Iceberg topics.
-            return false;
-        }
-
-        // If iceberg is enabled at the cluster level, the topic can
-        // be created with any override. If it is disabled
-        // at the cluster level, it cannot be enabled with a topic
-        // override.
-        if (!config::shard_local_cfg().iceberg_enabled()) {
-            return false;
-        }
-        if (
-          parsed_mode.needs_extended_cluster_feature()
-          && (ft == nullptr || !ft->is_active(features::feature::iceberg_extended_mode_config))) {
-            return false;
-        }
-        return true;
-    }
-};
-
-struct iceberg_invalid_record_action_validator {
-    static constexpr const char* error_message = "Invalid property value.";
-
-    static constexpr error_code ec = error_code::invalid_config;
-
-    static bool is_valid(const creatable_topic& c, features::feature_table*) {
-        auto it = std::find_if(
-          c.configs.begin(),
-          c.configs.end(),
-          [](const createable_topic_config& cfg) {
-              return cfg.name == topic_property_iceberg_invalid_record_action;
-          });
-        if (it == c.configs.end() || !it->value.has_value()) {
-            return true;
-        }
-        try {
-            std::ignore
-              = boost::lexical_cast<model::iceberg_invalid_record_action>(
-                it->value.value());
-        } catch (const boost::bad_lexical_cast&) {
-            return false;
-        }
-        return true;
-    }
 };
 
 struct write_caching_configs_validator {
@@ -453,34 +291,6 @@ struct write_caching_configs_validator {
     }
 };
 
-struct iceberg_target_lag_ms_validator {
-    static constexpr const char* error_message
-      = "Unsupported redpanda.iceberg.target.lag.ms config";
-    static constexpr const auto config_name
-      = topic_property_iceberg_target_lag_ms;
-    static constexpr error_code ec = error_code::invalid_config;
-
-    static bool is_valid(const creatable_topic& c, features::feature_table*) {
-        if (
-          auto it = std::ranges::find(
-            c.configs,
-            topic_property_iceberg_target_lag_ms,
-            &createable_topic_config::name);
-          it != c.configs.end() && it->value.has_value()) {
-            try {
-                using namespace std::chrono_literals;
-                auto val = boost::lexical_cast<std::chrono::milliseconds::rep>(
-                  it->value.value());
-                return val >= std::chrono::milliseconds{10s}.count()
-                       && val <= serde::max_serializable_ms.count();
-            } catch (...) {
-                return false;
-            }
-        }
-        return true;
-    }
-};
-
 template<typename T>
 struct configuration_value_validator {
     static constexpr const char* error_message = T::error_message;
@@ -541,103 +351,6 @@ struct min_max_compaction_lag_ms_validator {
         const auto max_lag = get_config_value<int64_t>(
           entries, topic_property_max_compaction_lag_ms);
         return !(min_lag && max_lag && (min_lag > max_lag));
-    }
-};
-
-/*
- * Validates that storage_mode is compatible with the cluster configuration:
- * - 'cloud' mode requires cloud_storage_enabled()
- * - 'tiered' mode requires cloud_storage_enabled()
- * - 'local' mode is always allowed
- * The optional redpanda.storage.mode.impl property picks the tiered
- * variant and is only valid together with redpanda.storage.mode=tiered.
- */
-struct storage_mode_config_validator {
-    static constexpr const char* error_message
-      = "Invalid storage mode: redpanda.storage.mode accepts local, tiered, "
-        "cloud or unset; redpanda.storage.mode.impl accepts local, "
-        "tiered_v1, tiered_v2, cloud or unset and must agree with the mode "
-        "when both are set. Tiered and cloud modes require cloud storage, "
-        "'cloud' requires at least v26.1.1 and 'tiered_v2' at least "
-        "v26.2.1.";
-    static constexpr error_code ec = error_code::invalid_config;
-
-    static bool
-    is_valid(const creatable_topic& c, features::feature_table* ft) {
-        auto find_cfg = [&c](std::string_view name) {
-            auto it = std::find_if(
-              c.configs.begin(),
-              c.configs.end(),
-              [name](const createable_topic_config& cfg) {
-                  return cfg.name == name;
-              });
-            return it == c.configs.end() ? nullptr : &*it;
-        };
-        const auto* mode_cfg = find_cfg(topic_property_redpanda_storage_mode);
-        const auto* impl_cfg = find_cfg(
-          topic_property_redpanda_storage_mode_impl);
-
-        std::optional<model::redpanda_storage_mode> impl;
-        if (impl_cfg != nullptr && impl_cfg->value.has_value()) {
-            impl = model::redpanda_storage_mode_from_impl_string(
-              impl_cfg->value.value());
-            if (!impl) {
-                return false;
-            }
-        }
-        std::optional<model::redpanda_storage_mode> mode;
-        if (mode_cfg != nullptr && mode_cfg->value.has_value()) {
-            mode = model::redpanda_storage_mode_from_user_string(
-              mode_cfg->value.value(),
-              config::shard_local_cfg()
-                .default_redpanda_storage_mode_tiered_impl());
-            if (!mode) {
-                return false;
-            }
-        }
-        if (mode.has_value() && impl.has_value()) {
-            // The mode is the user-facing name of the implementation:
-            // when both are given they must agree ('tiered' matching both
-            // tiered variants).
-            if (
-              mode_cfg->value.value()
-              != model::redpanda_storage_mode_user_name(*impl)) {
-                return false;
-            }
-        }
-        // The implementation is exact, so it wins over the alias-resolved
-        // mode.
-        if (impl.has_value()) {
-            mode = impl;
-        }
-        if (!mode.has_value()) {
-            return true;
-        }
-        switch (*mode) {
-        case model::redpanda_storage_mode::local:
-            return true;
-        case model::redpanda_storage_mode::tiered:
-            return config::shard_local_cfg().cloud_storage_enabled();
-        case model::redpanda_storage_mode::cloud:
-            if (
-              ft == nullptr
-              || !ft->is_active(features::feature::cloud_topics)) {
-                return false;
-            }
-            return config::shard_local_cfg().cloud_storage_enabled();
-        case model::redpanda_storage_mode::tiered_cloud:
-            if (
-              ft == nullptr || !ft->is_active(features::feature::cloud_topics)
-              || !ft->is_active(features::feature::tiered_cloud_topics)) {
-                return false;
-            }
-            return config::shard_local_cfg().cloud_storage_enabled();
-        case model::redpanda_storage_mode::unset:
-            // unset is always valid - actual behavior depends on
-            // shadow_indexing
-            return true;
-        }
-        return false;
     }
 };
 

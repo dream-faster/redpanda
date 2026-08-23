@@ -17,14 +17,12 @@
 #include "kafka/protocol/schemata/incremental_alter_configs_request.h"
 #include "kafka/protocol/schemata/incremental_alter_configs_response.h"
 #include "kafka/server//handlers/configs/config_utils.h"
-#include "kafka/server/handlers/configs/storage_mode_properties.h"
 #include "kafka/server/handlers/details/alter_config_utils.h"
 #include "kafka/server/handlers/topics/types.h"
 #include "kafka/server/request_context.h"
 #include "kafka/server/response.h"
 #include "model/fundamental.h"
 #include "model/metadata.h"
-#include "pandaproxy/schema_registry/types.h"
 #include "storage/ntp_config.h"
 #include "strings/string_switch.h"
 
@@ -38,36 +36,6 @@ namespace kafka {
 using req_resource_t = incremental_alter_configs_resource;
 using resp_resource_t = incremental_alter_configs_resource_response;
 
-// Legacy function, bug prone for multiple property updates, i.e
-// alter-config --set redpanda.remote.read=true --set
-// redpanda.remote.write=false.
-// Used if feature flag shadow_indexing_split_topic_property_update (v24.3) is
-// not active.
-static void parse_and_set_shadow_indexing_mode(
-  cluster::property_update<std::optional<model::shadow_indexing_mode>>& simode,
-  const std::optional<ss::sstring>& value,
-  config_resource_operation op,
-  model::shadow_indexing_mode enabled_value) {
-    switch (op) {
-    case config_resource_operation::remove:
-        simode.op = cluster::incremental_update_operation::remove;
-        simode.value = model::negate_shadow_indexing_flag(enabled_value);
-        break;
-    case config_resource_operation::set:
-        simode.op = cluster::incremental_update_operation::set;
-        simode.value
-          = string_switch<model::shadow_indexing_mode>(*value)
-              .match("no", model::negate_shadow_indexing_flag(enabled_value))
-              .match("false", model::negate_shadow_indexing_flag(enabled_value))
-              .match("yes", enabled_value)
-              .match("true", enabled_value)
-              .default_match(model::shadow_indexing_mode::disabled);
-        break;
-    case config_resource_operation::append:
-    case config_resource_operation::subtract:
-        break;
-    }
-}
 /**
  * valides the optional config
  */
@@ -125,37 +93,10 @@ bool valid_config_resource_operation(uint8_t v) {
 
 checked<cluster::topic_properties_update, resp_resource_t>
 create_topic_properties_update(
-  const request_context& ctx, incremental_alter_configs_resource& resource) {
+  const request_context&, incremental_alter_configs_resource& resource) {
     model::topic_namespace tp_ns(
       model::kafka_namespace, model::topic(resource.resource_name));
     cluster::topic_properties_update update(tp_ns);
-
-    // Get the topic's current storage mode for validation warnings
-    auto topic_cfg = ctx.metadata_cache().get_topic_cfg(tp_ns);
-    std::optional<model::redpanda_storage_mode> current_storage_mode;
-    if (topic_cfg) {
-        current_storage_mode = topic_cfg->properties.storage_mode;
-    }
-
-    if (!ctx.is_topic_mutable(tp_ns.tp)) {
-        return make_error_alter_config_resource_response<resp_resource_t>(
-          resource,
-          error_code::policy_violation,
-          fmt::format(
-            "Topic cannot be altered because it belongs to an active "
-            "shadow link."));
-    }
-
-    schema_id_validation_config_parser schema_id_validation_config_parser{
-      update.properties};
-
-    /*
-      As of v24.3, a new update path for shadow indexing properties should be
-      used.
-    */
-    const auto shadow_indexing_split_update
-      = ctx.feature_table().local().is_active(
-        features::feature::shadow_indexing_split_topic_property_update);
 
     for (auto& cfg : resource.configs) {
         // Validate int8_t is within range of config_resource_operation
@@ -175,22 +116,6 @@ create_topic_properties_update(
         if (err) {
             // error case
             return *err;
-        }
-
-        // Log warning if property is not relevant for the topic's storage mode
-        if (
-          current_storage_mode
-          && !is_property_valid_for_storage_mode(
-            cfg.name, *current_storage_mode)) {
-            vlog(
-              klog.warn,
-              "{} is not a relevant property for topic {} with "
-              "redpanda.storage.mode={} - it is only supported for "
-              "topics of redpanda.storage.mode={{{}}}",
-              cfg.name,
-              tp_ns.tp,
-              *current_storage_mode,
-              get_valid_storage_modes_string(cfg.name));
         }
 
         try {
@@ -244,56 +169,6 @@ create_topic_properties_update(
                   update.properties.retention_local_target_ms, cfg.value, op);
                 continue;
             }
-            if (cfg.name == topic_property_remote_read) {
-                if (shadow_indexing_split_update) {
-                    parse_and_set_bool(
-                      tp_ns,
-                      update.properties.remote_read,
-                      cfg.value,
-                      op,
-                      config::shard_local_cfg()
-                        .cloud_storage_enable_remote_read());
-                } else {
-                    // Legacy update for shadow indexing field
-                    parse_and_set_shadow_indexing_mode(
-                      update.properties.get_shadow_indexing(),
-                      cfg.value,
-                      op,
-                      model::shadow_indexing_mode::fetch);
-                }
-
-                continue;
-            }
-            if (cfg.name == topic_property_remote_write) {
-                if (shadow_indexing_split_update) {
-                    parse_and_set_bool(
-                      tp_ns,
-                      update.properties.remote_write,
-                      cfg.value,
-                      op,
-                      config::shard_local_cfg()
-                        .cloud_storage_enable_remote_write());
-                } else {
-                    // Legacy update for shadow indexing field
-                    parse_and_set_shadow_indexing_mode(
-                      update.properties.get_shadow_indexing(),
-                      cfg.value,
-                      op,
-                      model::shadow_indexing_mode::archival);
-                }
-
-                continue;
-            }
-            if (cfg.name == topic_property_remote_delete) {
-                parse_and_set_bool(
-                  tp_ns,
-                  update.properties.remote_delete,
-                  cfg.value,
-                  op,
-                  // Topic deletion is enabled by default
-                  storage::ntp_config::default_remote_delete);
-                continue;
-            }
             if (cfg.name == topic_property_max_message_bytes) {
                 parse_and_set_optional(
                   update.properties.batch_max_bytes,
@@ -332,13 +207,6 @@ create_topic_properties_update(
                 continue;
             }
             if (
-              config::shard_local_cfg().enable_schema_id_validation()
-              != pandaproxy::schema_registry::schema_id_validation_mode::none) {
-                if (schema_id_validation_config_parser(cfg, op)) {
-                    continue;
-                }
-            }
-            if (
               std::find(
                 std::begin(allowlist_topic_noop_confs),
                 std::end(allowlist_topic_noop_confs),
@@ -371,24 +239,6 @@ create_topic_properties_update(
                   flush_bytes_validator{});
                 continue;
             }
-            if (cfg.name == topic_property_iceberg_mode) {
-                parse_and_set_property(
-                  tp_ns,
-                  update.properties.iceberg_mode,
-                  cfg.value,
-                  op,
-                  iceberg_config_validator{
-                    ctx.feature_table().local().is_active(
-                      features::feature::iceberg_extended_mode_config)},
-                  [](const ss::sstring& s) -> model::iceberg_mode {
-                      auto r = model::parse_iceberg_mode(s);
-                      if (!r) {
-                          throw validation_error(r.error());
-                      }
-                      return std::move(*r);
-                  });
-                continue;
-            }
             if (cfg.name == topic_property_leaders_preference) {
                 parse_and_set_optional(
                   update.properties.leaders_preference,
@@ -401,67 +251,6 @@ create_topic_properties_update(
             if (cfg.name == topic_property_delete_retention_ms) {
                 parse_and_set_tristate(
                   update.properties.delete_retention_ms, cfg.value, op);
-                continue;
-            }
-            if (cfg.name == topic_property_iceberg_delete) {
-                parse_and_set_optional_bool_alpha(
-                  update.properties.iceberg_delete, cfg.value, op);
-                continue;
-            }
-            if (cfg.name == topic_property_iceberg_partition_spec) {
-                // Use std::identity as the "parser function" (i.e. pass through
-                // the raw string) because boost::lexical_cast<ss::sstring> (the
-                // default) doesn't allow spaces in the config value.
-                parse_and_set_optional(
-                  update.properties.iceberg_partition_spec,
-                  cfg.value,
-                  op,
-                  iceberg_partition_spec_validator{},
-                  std::identity{});
-                continue;
-            }
-            if (cfg.name == topic_property_iceberg_invalid_record_action) {
-                parse_and_set_optional(
-                  update.properties.iceberg_invalid_record_action,
-                  cfg.value,
-                  op);
-                continue;
-            }
-            if (cfg.name == topic_property_remote_allow_gaps) {
-                parse_and_set_optional_bool_alpha(
-                  update.properties.remote_allow_gaps, cfg.value, op);
-                continue;
-            }
-            if (cfg.name == topic_property_iceberg_target_lag_ms) {
-                parse_and_set_optional_duration(
-                  update.properties.iceberg_target_lag_ms,
-                  cfg.value,
-                  op,
-                  iceberg_target_lag_ms_validator);
-                continue;
-            }
-            if (cfg.name == topic_property_schema_registry_context) {
-                if (
-                  topic_cfg
-                  && topic_cfg->properties.iceberg_mode
-                       != model::iceberg_mode::disabled) {
-                    return make_error_alter_config_resource_response<
-                      resp_resource_t>(
-                      resource,
-                      error_code::invalid_config,
-                      "Cannot change redpanda.schema.registry.context while "
-                      "Iceberg translation is enabled; set "
-                      "redpanda.iceberg.mode=disabled first");
-                }
-                parse_and_set_property(
-                  tp_ns,
-                  update.properties.schema_registry_context,
-                  cfg.value,
-                  op,
-                  schema_registry_context_validator{},
-                  [](const ss::sstring& s) {
-                      return pandaproxy::schema_registry::context{s};
-                  });
                 continue;
             }
 
@@ -502,73 +291,6 @@ create_topic_properties_update(
                 continue;
             }
 
-            if (cfg.name == topic_property_message_timestamp_after_max_ms) {
-                parse_and_set_optional_duration(
-                  update.properties.message_timestamp_after_max_ms,
-                  cfg.value,
-                  op,
-                  message_timestamp_after_max_ms_validator,
-                  /*clamp_to_duration_max=*/true);
-                continue;
-            }
-
-            if (cfg.name == topic_property_redpanda_storage_mode_impl) {
-                // Read-only, but tolerate idempotent sets: describe-then-
-                // alter round trips (e.g. kafka-configs.sh) replay every
-                // config, including this one.
-                if (
-                  op == config_resource_operation::set && cfg.value.has_value()
-                  && current_storage_mode.has_value()
-                  && cfg.value.value()
-                       == model::redpanda_storage_mode_impl_name(
-                         *current_storage_mode)) {
-                    continue;
-                }
-                throw validation_error(
-                  "redpanda.storage.mode.impl is read-only and can only be "
-                  "set on topic creation; to change a topic's storage mode, "
-                  "alter redpanda.storage.mode instead");
-            }
-
-            if (cfg.name == topic_property_redpanda_storage_mode) {
-                auto validator = [current_storage_mode,
-                                  &feature_table = ctx.feature_table().local()](
-                                   const ss::sstring& raw,
-                                   const model::redpanda_storage_mode& value)
-                  -> std::optional<ss::sstring> {
-                    auto transition_err = storage_mode_validator{
-                      current_storage_mode}(raw, value);
-                    if (transition_err) {
-                        return transition_err;
-                    }
-                    if (
-                      value == model::redpanda_storage_mode::tiered_cloud
-                      && !feature_table.is_active(
-                        features::feature::tiered_cloud_topics)) {
-                        return "Cannot use the tiered_v2 storage mode "
-                               "until the cluster is fully upgraded to at "
-                               "least v26.2.1";
-                    }
-                    return std::nullopt;
-                };
-                auto parse = [](const ss::sstring& raw) {
-                    auto mode = model::redpanda_storage_mode_from_user_string(
-                      raw,
-                      config::shard_local_cfg()
-                        .default_redpanda_storage_mode_tiered_impl());
-                    if (!mode) {
-                        throw boost::bad_lexical_cast();
-                    }
-                    return *mode;
-                };
-                parse_and_set_optional(
-                  update.properties.storage_mode,
-                  cfg.value,
-                  op,
-                  validator,
-                  parse);
-                continue;
-            }
         } catch (const validation_error& e) {
             vlog(
               klog.debug,

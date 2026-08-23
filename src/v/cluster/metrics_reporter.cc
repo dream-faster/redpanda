@@ -12,8 +12,8 @@
 #include "cluster/metrics_reporter.h"
 
 #include "absl/container/node_hash_map.h"
+#include "base/outcome.h"
 #include "bytes/iobuf.h"
-#include "cluster/cluster_link/frontend.h"
 #include "cluster/config_frontend.h"
 #include "cluster/controller_stm.h"
 #include "cluster/feature_manager.h"
@@ -175,10 +175,8 @@ metrics_reporter::metrics_reporter(
   ss::sharded<features::feature_table>& feature_table,
   ss::sharded<security::role_store>& role_store,
   ss::sharded<security::authorizer>& authorizer,
-  ss::sharded<plugin_table>* pt,
   ss::sharded<feature_manager>* fm,
   ss::sharded<storage::api>* storage,
-  ss::sharded<cluster_link::frontend>* clfe,
   ss::sharded<ss::abort_source>& as)
   : _raft0(std::move(raft0))
   , _cluster_info(controller_stm.local().get_metrics_reporter_cluster_info())
@@ -190,10 +188,8 @@ metrics_reporter::metrics_reporter(
   , _feature_table(feature_table)
   , _role_store(role_store)
   , _authorizer(authorizer)
-  , _plugin_table(pt)
   , _feature_manager(fm)
   , _storage(storage)
-  , _clfe(clfe)
   , _as(as)
   , _logger(logger, "metrics-reporter") {}
 
@@ -333,31 +329,8 @@ metrics_reporter::build_metrics_snapshot() {
 
         snapshot.topic_count++;
         snapshot.partition_count += md.get_configuration().partition_count;
-        const auto& iceberg = md.get_configuration().properties.iceberg_mode;
-        if (!iceberg.is_disabled()) {
-            switch (iceberg.value().mode) {
-            case model::iceberg_mode::schema_mode::binary:
-            case model::iceberg_mode::schema_mode::string:
-                ++snapshot.topics_with_iceberg_kv;
-                break;
-            case model::iceberg_mode::schema_mode::schema_id_prefix:
-                ++snapshot.topics_with_iceberg_schema_id;
-                break;
-            case model::iceberg_mode::schema_mode::schema_latest:
-                ++snapshot.topics_with_iceberg_schema_latest;
-                break;
-            }
-        }
-
         if (md.get_configuration_properties().is_local_topic()) {
             ++snapshot.local_topic_count;
-        }
-
-        if (
-          md.get_configuration().properties.storage_mode
-          == model::redpanda_storage_mode::cloud) {
-            // Count "pure" cloud topics and not the tiered cloud topics.
-            ++snapshot.cloud_topic_count;
         }
     }
 
@@ -414,8 +387,6 @@ metrics_reporter::build_metrics_snapshot() {
 
     snapshot.unique_group_count = unique_groups.size();
 
-    snapshot.data_transforms_count = _plugin_table->local().size();
-
     auto env_value = std::getenv("REDPANDA_ENVIRONMENT");
     if (env_value) {
         snapshot.redpanda_environment = ss::sstring(env_value).substr(
@@ -436,26 +407,6 @@ metrics_reporter::build_metrics_snapshot() {
     snapshot.host_name = get_hostname();
     snapshot.domain_name = get_domainname();
     snapshot.fqdns = co_await get_fqdns(snapshot.host_name);
-
-    auto link_ids = _clfe->local().get_all_link_ids();
-
-    snapshot.number_of_active_shadow_links = link_ids.size();
-
-    uint32_t total_shadow_topics = 0;
-    std::ranges::for_each(
-      link_ids, [this, &total_shadow_topics](const auto& link_id) {
-          auto mirror_topics = _clfe->local().get_mirror_topics_for_link(
-            link_id);
-          total_shadow_topics += mirror_topics.has_value()
-                                   ? mirror_topics->size()
-                                   : 0;
-      });
-
-    snapshot.number_of_shadow_topics = total_shadow_topics;
-
-    // Check if schema registry is shadowed
-    snapshot.schema_registry_shadowed
-      = _clfe->local().schema_registry_shadowing_active();
 
     if (auto km = get_kubernetes_metrics(); km) {
         snapshot.kubernetes.emplace(std::move(*km));
@@ -715,18 +666,9 @@ void rjson_serialize(
     w.Uint64(snapshot.cluster_creation_epoch);
     w.Key("topic_count");
     w.Uint64(snapshot.topic_count);
-    w.Key("topics_with_iceberg_key_value");
-    w.Uint64(snapshot.topics_with_iceberg_kv);
-    w.Key("topics_with_iceberg_value_schema_id_prefix");
-    w.Uint64(snapshot.topics_with_iceberg_schema_id);
-    w.Key("topics_with_iceberg_latest_protobuf_value");
-    w.Uint64(snapshot.topics_with_iceberg_schema_latest);
 
     w.Key("local_topic_count");
     w.Uint(snapshot.local_topic_count);
-
-    w.Key("cloud_topic_count");
-    w.Uint(snapshot.cloud_topic_count);
 
     w.Key("partition_count");
     w.Uint64(snapshot.partition_count);
@@ -754,9 +696,6 @@ void rjson_serialize(
 
     w.Key("unique_group_count");
     w.Uint(snapshot.unique_group_count);
-
-    w.Key("data_transforms_count");
-    w.Uint(snapshot.data_transforms_count);
 
     w.Key("config");
     config::shard_local_cfg().to_json_for_metrics(w);
@@ -794,20 +733,6 @@ void rjson_serialize(
     if (snapshot.kubernetes.has_value()) {
         w.Key("kubernetes");
         rjson_serialize(w, snapshot.kubernetes.value());
-    }
-
-    w.Key("number_of_active_shadow_links");
-    w.Uint64(snapshot.number_of_active_shadow_links);
-
-    w.Key("number_of_shadow_topics");
-    w.Uint64(snapshot.number_of_shadow_topics);
-
-    w.Key("schema_registry_shadowed");
-    w.Bool(snapshot.schema_registry_shadowed);
-
-    if (snapshot.schema_registry.has_value()) {
-        w.Key("schema_registry");
-        rjson_serialize(w, snapshot.schema_registry.value());
     }
 
     w.EndObject();
@@ -883,12 +808,4 @@ void rjson_serialize(
     w.EndObject();
 }
 
-void rjson_serialize(
-  json::Writer<json::StringBuffer>& w,
-  const cluster::metrics_reporter::schema_registry_metrics& sr) {
-    w.StartObject();
-    w.Key("context_count");
-    w.Uint(sr.context_count);
-    w.EndObject();
-}
 } // namespace json

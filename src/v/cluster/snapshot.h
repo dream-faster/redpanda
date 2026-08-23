@@ -17,13 +17,9 @@
 namespace cluster {
 
 /// Names of snapshot files used by stm's
-inline const ss::sstring archival_stm_snapshot = "archival_metadata.snapshot";
 inline const ss::sstring rm_stm_snapshot = "tx.snapshot";
 inline const ss::sstring tm_stm_snapshot = "tx.coordinator.snapshot";
 inline const ss::sstring id_allocator_snapshot = "id.snapshot";
 inline const ss::sstring partition_properties_stm_snapshot
   = "partition_properties.snapshot";
-inline const ss::sstring write_at_offset_stm_snapshot
-  = "write_at_offset.snapshot";
-
 } // namespace cluster

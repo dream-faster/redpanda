@@ -8,16 +8,6 @@
 // by the Apache License, Version 2.0
 
 #include "base/vlog.h"
-#include "cloud_topics/app.h"
-#include "cloud_topics/level_one/metastore/lsm/stm.h"
-#include "cloud_topics/level_one/metastore/simple_stm.h"
-#include "cloud_topics/level_zero/stm/ctp_stm_factory.h"
-#include "cloud_topics/read_replica/stm.h"
-#include "cluster/archival/archival_metadata_stm.h"
-#include "cluster/archival/archiver_manager.h"
-#include "cluster/archival/upload_controller.h"
-#include "cluster/cloud_metadata/offsets_recovery_manager.h"
-#include "cluster/cloud_metadata/offsets_upload_router.h"
 #include "cluster/cluster_discovery.h"
 #include "cluster/controller.h"
 #include "cluster/feature_manager.h"
@@ -32,16 +22,12 @@
 #include "cluster/tm_stm.h"
 #include "config/configuration.h"
 #include "config/node_config.h"
-#include "datalake/coordinator/coordinator_manager.h"
-#include "datalake/coordinator/state_machine.h"
-#include "datalake/translation/state_machine.h"
 #include "debug_bundle/debug_bundle_service.h"
 #include "kafka/server/group_manager.h"
 #include "kafka/server/group_tx_tracker_stm.h"
 #include "kafka/server/quota_manager.h"
 #include "kafka/server/snc_quota_manager.h"
 #include "kafka/server/usage_manager.h"
-#include "kafka/server/write_at_offset_stm.h"
 #include "migrations/migrators.h"
 #include "raft/group_manager.h"
 #include "raft/service.h"
@@ -51,21 +37,18 @@
 #include "resource_mgmt/scheduling_groups_probe.h"
 #include "storage/compaction_controller.h"
 #include "syschecks/syschecks.h"
-#include "transform/stm/transform_offsets_stm.h"
 
 #include <seastar/core/condition-variable.hh>
 
-void application::start_runtime_services(
-  ::stop_signal& app_signal, cloud_topics::test_fixture_cfg ct_test_cfg) {
+void application::start_runtime_services(::stop_signal& app_signal) {
     // single instance
     node_status_backend.invoke_on_all(&cluster::node_status_backend::start)
       .get();
     syschecks::systemd_message("Starting the partition manager").get();
     partition_manager
-      .invoke_on_all([this, ct_test_cfg](cluster::partition_manager& pm) {
+      .invoke_on_all([this](cluster::partition_manager& pm) {
           pm.register_factory<cluster::tm_stm_factory>();
           pm.register_factory<cluster::id_allocator_stm_factory>();
-          pm.register_factory<transform::transform_offsets_stm_factory>();
           pm.register_factory<cluster::rm_stm_factory>(
             config::shard_local_cfg().enable_transactions.value(),
             config::shard_local_cfg().enable_idempotence.value(),
@@ -74,31 +57,11 @@ void application::start_runtime_services(
             feature_table);
           pm.register_factory<cluster::log_eviction_stm_factory>(
             storage.local().kvs());
-          pm.register_factory<cluster::archival_metadata_stm_factory>(
-            config::shard_local_cfg().cloud_storage_enabled(),
-            cloud_storage_api,
-            feature_table);
           pm.register_factory<kafka::group_tx_tracker_stm_factory>(
             feature_table);
           pm.register_factory<cluster::partition_properties_stm_factory>(
             storage.local().kvs(),
             config::shard_local_cfg().internal_rpc_request_timeout_ms.bind());
-          pm.register_factory<datalake::coordinator::stm_factory>();
-          pm.register_factory<datalake::translation::stm_factory>(
-            config::shard_local_cfg().iceberg_enabled());
-          if (
-            config::shard_local_cfg().cloud_storage_enabled()
-            && !ct_test_cfg.disable_cloud_topics) {
-              pm.register_factory<cloud_topics::l0::ctp_stm_factory>();
-              pm.register_factory<cloud_topics::read_replica::stm_factory>();
-              if (ct_test_cfg.use_lsm_metastore) {
-                  pm.register_factory<cloud_topics::l1::lsm_stm_factory>();
-              } else {
-                  pm.register_factory<cloud_topics::l1::stm_factory>();
-              }
-          }
-          pm.register_factory<kafka::write_at_offset_stm_factory>(
-            storage.local().kvs(), model::offset_translator_batch_types());
       })
       .get();
     partition_manager.invoke_on_all(&cluster::partition_manager::start).get();
@@ -135,39 +98,10 @@ void application::start_runtime_services(
           .get();
     }
     syschecks::systemd_message("Starting controller").get();
-    ss::shared_ptr<cluster::cloud_metadata::offsets_upload_requestor>
-      offsets_upload_requestor;
-    if (offsets_upload_router.local_is_initialized()) {
-        offsets_upload_requestor = offsets_upload_router.local_shared();
-    }
-    ss::shared_ptr<cluster::cloud_metadata::offsets_recovery_requestor>
-      offsets_recovery_requestor;
-    if (offsets_recovery_router.local_is_initialized()) {
-        offsets_recovery_requestor = offsets_recovery_manager;
-    }
-    if (_datalake_coordinator_mgr.local_is_initialized()) {
-        // Before starting the controller, start the coordinator manager so we
-        // don't miss any partition/leadership notifications.
-        _datalake_coordinator_mgr
-          .invoke_on_all(&datalake::coordinator::coordinator_manager::start)
-          .get();
-    }
     controller
       ->start(
-        *_cluster_discovery,
-        app_signal.abort_source(),
-        std::move(offsets_upload_requestor),
-        producer_id_recovery_manager,
-        std::move(offsets_recovery_requestor),
-        redpanda_start_time,
-        _data_migrations_group_proxy,
-        cloud_topics_app ? cloud_topics_app->get_state() : nullptr)
+        *_cluster_discovery, app_signal.abort_source(), redpanda_start_time)
       .get();
-
-    if (archiver_manager.local_is_initialized()) {
-        archiver_manager.invoke_on_all(&archival::archiver_manager::start)
-          .get();
-    }
 
     // FIXME: in first patch explain why this is started after the
     // controller so the broker set will be available. Then next patch fix.
@@ -229,10 +163,6 @@ void application::start_runtime_services(
         })
       .get();
 
-    if (cloud_topics_app) {
-        cloud_topics_app->start().get();
-    }
-
     _debug_bundle_service.invoke_on_all(&debug_bundle::service::start).get();
 
     if (!config::node().admin().empty()) {
@@ -247,15 +177,10 @@ void application::start_runtime_services(
 
     _compaction_controller.invoke_on_all(&storage::compaction_controller::start)
       .get();
-    _archival_upload_controller
-      .invoke_on_all(&archival::upload_controller::start)
-      .get();
 
     for (const auto& m : _migrators) {
         m->start(controller->get_abort_source().local());
     }
-
-    space_manager->start().get();
 }
 
 /**

@@ -16,7 +16,6 @@
 #include "cluster/feature_manager.h"
 #include "cluster/members_manager.h"
 #include "cluster/types.h"
-#include "cluster_link/service.h"
 #include "config/configuration.h"
 #include "config/node_config.h"
 #include "config/tls_config.h"
@@ -28,8 +27,6 @@
 #include "net/dns.h"
 #include "net/server.h"
 #include "net/tls_certificate_probe.h"
-#include "pandaproxy/rest/api.h"
-#include "pandaproxy/schema_registry/api.h"
 #include "raft/group_manager.h"
 #include "redpanda/admin/server.h"
 #include "redpanda/application.h"
@@ -42,13 +39,10 @@
 #include "storage/chunk_cache.h"
 #include "storage/directories.h"
 #include "syschecks/syschecks.h"
-#include "transform/api.h"
-#include "transform/rpc/client.h"
-#include "wasm/cache.h"
-#include "wasm/engine.h"
 
 #include <seastar/core/memory.hh>
 #include <seastar/core/smp.hh>
+#include <seastar/core/thread.hh>
 
 #include <chrono>
 
@@ -100,7 +94,7 @@ void application::wire_up_storage_services() {
     construct_single_service_sharded(
       storage_node,
       config::node().data_directory().as_sstring(),
-      config::node().cloud_storage_cache_path().string())
+      config::node().data_directory().as_sstring())
       .get();
     construct_single_service_sharded(
       local_monitor,
@@ -620,7 +614,7 @@ void application::wire_up_and_start(
       "config::node().node_id() should have an assigned value at this point in "
       "the start-up process.");
     auto node_id = config::node().node_id().value();
-    wire_up_runtime_services(node_id, app_signal, cfg.ct_test_cfg);
+    wire_up_runtime_services(node_id, app_signal);
 
     if (test_mode) {
         // When running inside a unit test fixture, we may fast-forward
@@ -639,9 +633,6 @@ void application::wire_up_and_start(
     } else {
         // Only populate migrators in non-unit-test mode
         _migrators.push_back(
-          std::make_unique<features::migrators::cloud_storage_config>(
-            *controller));
-        _migrators.push_back(
           std::make_unique<features::migrators::rbac_migrator>(*controller));
         _migrators.push_back(
           std::make_unique<features::migrators::shard_placement_migrator>(
@@ -656,23 +647,7 @@ void application::wire_up_and_start(
         controller->set_ready().get();
     }
 
-    start_runtime_services(app_signal, cfg.ct_test_cfg);
-
-    if (_proxy_config && !config::node().recovery_mode_enabled) {
-        _proxy->start().get();
-        vlog(
-          _log.info,
-          "Started Pandaproxy listening at {}",
-          _proxy_config->pandaproxy_api());
-    }
-
-    if (_schema_reg_config && !config::node().recovery_mode_enabled) {
-        _schema_registry->start().get();
-        vlog(
-          _log.info,
-          "Started Schema Registry listening at {}",
-          _schema_reg_config->schema_registry_api());
-    }
+    start_runtime_services(app_signal);
 
     audit_mgr.invoke_on_all(&security::audit::audit_log_manager::start).get();
 
@@ -687,29 +662,6 @@ void application::wire_up_and_start(
 
     start_kafka(node_id, app_signal);
     controller->set_ready().get();
-
-    if (
-      wasm_data_transforms_enabled() && !config::node().recovery_mode_enabled) {
-        const auto& cluster = config::shard_local_cfg();
-        wasm::runtime::config config = {
-          .heap_memory = {
-            .per_core_pool_size_bytes = cluster.data_transforms_per_core_memory_reservation.value(),
-            .per_engine_memory_limit = cluster.data_transforms_per_function_memory_limit.value(),
-          },
-          .stack_memory = {
-            .debug_host_stack_usage = false,
-          },
-          .cpu = {
-            .per_invocation_timeout = cluster.data_transforms_runtime_limit_ms.value(),
-          },
-        };
-        _wasm_runtime->start(config).get();
-        _transform_rpc_client.invoke_on_all(&transform::rpc::client::start)
-          .get();
-        _transform_service.invoke_on_all(&transform::service::start).get();
-    }
-
-    _cluster_link_service.invoke_on_all(&cluster_link::service::start).get();
 
     construct_service(_aggregate_metrics_watcher).get();
 

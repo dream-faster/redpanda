@@ -10,9 +10,9 @@
  */
 
 #pragma once
+#include "base/format_to.h"
 #include "base/oncore.h"
 #include "base/type_traits.h"
-#include "cloud_io/admission_control_types.h"
 #include "config/base_property.h"
 #include "config/logger.h"
 #include "config/rjson_serialization.h"
@@ -23,7 +23,6 @@
 #include "json/stringbuffer.h"
 #include "json/writer.h"
 #include "model/metadata.h"
-#include "pandaproxy/schema_registry/schema_id_validation.h"
 #include "utils/to_string.h"
 
 #include <seastar/util/noncopyable_function.hh>
@@ -747,32 +746,14 @@ consteval std::string_view property_type_name() {
         return "number";
     } else if constexpr (std::is_integral_v<type>) {
         return "integer";
-    } else if constexpr (
-      std::is_same_v<type, model::cloud_credentials_source>) {
-        return "string";
-    } else if constexpr (std::is_same_v<type, s3_url_style>) {
-        return "string";
-    } else if constexpr (std::is_same_v<type, model::cloud_storage_backend>) {
-        return "string";
     } else if constexpr (std::is_same_v<type, std::filesystem::path>) {
         return "string";
-    } else if constexpr (
-      std::is_same_v<type, model::cloud_storage_chunk_eviction_strategy>) {
-        return "string";
     } else if constexpr (std::is_same_v<type, model::leader_balancer_mode>) {
-        return "string";
-    } else if constexpr (
-      std::is_same_v<
-        type,
-        pandaproxy::schema_registry::schema_id_validation_mode>) {
         return "string";
     } else if constexpr (std::is_same_v<type, model::fetch_read_strategy>) {
         return "string";
     } else if constexpr (std::is_same_v<type, model::write_caching_mode>) {
         return "string";
-    } else if constexpr (
-      std::is_same_v<type, model::recovery_validation_mode>) {
-        return "recovery_validation_mode";
     } else if constexpr (std::is_same_v<type, config::fips_mode_flag>) {
         return "string";
     } else if constexpr (std::is_same_v<type, config::tls_version>) {
@@ -783,17 +764,6 @@ consteval std::string_view property_type_name() {
         return "node_id_override";
     } else if constexpr (std::is_same_v<type, config::leaders_preference>) {
         return "leaders_preference";
-    } else if constexpr (std::is_same_v<type, config::datalake_catalog_type>) {
-        return "string";
-    } else if constexpr (
-      std::is_same_v<type, model::iceberg_invalid_record_action>) {
-        return "string";
-    } else if constexpr (
-      std::is_same_v<type, model::iceberg_schema_case_insensitive>) {
-        return "string";
-    } else if constexpr (
-      std::is_same_v<type, config::datalake_catalog_auth_mode>) {
-        return "string";
     } else if constexpr (std::is_same_v<type, config::tls_name_format>) {
         return "string";
     } else if constexpr (std::is_same_v<type, config::audit_failure_policy>) {
@@ -803,13 +773,6 @@ consteval std::string_view property_type_name() {
         return "string";
     } else if constexpr (
       std::is_same_v<type, security::oidc::nested_group_behavior>) {
-        return "string";
-    } else if constexpr (std::is_same_v<type, model::redpanda_storage_mode>) {
-        return "string";
-    } else if constexpr (
-      std::is_same_v<type, model::redpanda_storage_mode_tiered_impl>) {
-        return "string";
-    } else if constexpr (std::is_same_v<type, cloud_io::policy_type>) {
         return "string";
     } else {
         static_assert(

@@ -13,7 +13,6 @@
 #include "base/oncore.h"
 #include "cluster/fwd.h"
 #include "config/property.h"
-#include "kafka/server/datalake_usage_api.h"
 #include "kafka/server/usage_aggregator.h"
 #include "model/namespace.h"
 #include "storage/fwd.h"
@@ -39,12 +38,9 @@ public:
     class usage_accounting_fiber final : public usage_aggregator<> {
     public:
         usage_accounting_fiber(
-          cluster::controller* controller,
           ss::sharded<usage_manager>& um,
           ss::sharded<cluster::health_monitor_frontend>& health_monitor,
           ss::sharded<storage::api>& storage,
-          ss::shared_ptr<datalake_usage_api> datalake_usage_api,
-          ss::abort_source& as,
           size_t usage_num_windows,
           std::chrono::seconds usage_window_width_interval,
           std::chrono::seconds usage_disk_persistance_interval);
@@ -53,25 +49,17 @@ public:
         virtual ss::future<usage> close_current_window() final;
 
     private:
-        ss::future<std::optional<uint64_t>> get_cloud_usage_data();
-
-    private:
-        cluster::controller* _controller;
         cluster::health_monitor_frontend& _health_monitor;
         ss::sharded<usage_manager>& _um;
-        ss::shared_ptr<datalake_usage_api> _datalake_usage_api;
-        ss::abort_source& _as;
     };
 
     /// Class constructor
     ///
     /// Context is to be in a sharded service, will grab \ref usage_num_windows
     /// and \ref usage_window_sec configuration parameters from cluster config
-    explicit usage_manager(
-      cluster::controller* controller,
+    usage_manager(
       ss::sharded<cluster::health_monitor_frontend>& health_monitor,
-      ss::sharded<storage::api>& storage,
-      ss::shared_ptr<datalake_usage_api> datalake_usage_api);
+      ss::sharded<storage::api>& storage);
 
     /// Allocates and starts the accounting fiber
     ss::future<> start();
@@ -118,10 +106,8 @@ private:
     config::binding<std::chrono::seconds> _usage_window_width_interval;
     config::binding<std::chrono::seconds> _usage_disk_persistance_interval;
 
-    cluster::controller* _controller;
     ss::sharded<cluster::health_monitor_frontend>& _health_monitor;
     ss::sharded<storage::api>& _storage;
-    ss::shared_ptr<datalake_usage_api> _datalake_usage_api;
 
     /// Per-core metric, shard-0 aggregates these values across shards
     usage _current_bucket;

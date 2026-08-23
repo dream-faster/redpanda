@@ -10,9 +10,8 @@
 #include "server.h"
 
 #include "absl/container/flat_hash_map.h"
+#include "absl/container/flat_hash_set.h"
 #include "base/vlog.h"
-#include "cluster/cluster_link/frontend.h"
-#include "cluster/cluster_link/types.h"
 #include "cluster/id_allocator_frontend.h"
 #include "cluster/security_frontend.h"
 #include "cluster/topics_frontend.h"
@@ -30,7 +29,6 @@
 #include "kafka/protocol/schemata/list_groups_response.h"
 #include "kafka/server/connection_context.h"
 #include "kafka/server/coordinator_ntp_mapper.h"
-#include "kafka/server/datalake_throttle_manager.h"
 #include "kafka/server/errors.h"
 #include "kafka/server/group.h"
 #include "kafka/server/group_manager.h"
@@ -153,11 +151,8 @@ server::server(
   ss::sharded<cluster::security_frontend>& sec_fe,
   ss::sharded<cluster::controller_api>& controller_api,
   ss::sharded<cluster::tx_gateway_frontend>& tx_gateway_frontend,
-  ss::sharded<kafka::datalake_throttle_manager>& datalake_throttle_manager,
-  ss::sharded<cluster::cluster_link::frontend>& clfe,
   std::optional<qdc_monitor_config> qdc_config,
-  ssx::singleton_thread_worker& tw,
-  const std::unique_ptr<pandaproxy::schema_registry::api>& sr) noexcept
+  ssx::singleton_thread_worker& tw) noexcept
   : net::server(cfg, klog)
   , _smp_group(smp)
   , _fetch_scheduling_group(fetch_sg)
@@ -192,8 +187,6 @@ server::server(
   , _security_frontend(sec_fe)
   , _controller_api(controller_api)
   , _tx_gateway_frontend(tx_gateway_frontend)
-  , _datalake_throttle_manager(datalake_throttle_manager)
-  , _cluster_link_frontend(clfe)
   , _mtls_principal_mapper(
       config::shard_local_cfg().kafka_mtls_principal_mapping_rules.bind())
   , _gssapi_principal_mapper(
@@ -220,8 +213,7 @@ server::server(
   , _read_dist_probe(std::make_unique<read_distribution_probe>())
   , _thread_worker(tw)
   , _replica_selector(
-      std::make_unique<rack_aware_replica_selector>(_metadata_cache.local()))
-  , _schema_registry(sr) {
+      std::make_unique<rack_aware_replica_selector>(_metadata_cache.local())) {
     vlog(
       klog.debug,
       "Starting kafka server with {} byte limit on fetch requests",
@@ -240,11 +232,6 @@ server::server(
 ss::future<> server::stop() {
     co_await net::server::stop();
     co_await _fetch_units_manager.stop();
-}
-
-bool server::is_cluster_link_active() const {
-    const auto& clfe = _cluster_link_frontend.local();
-    return clfe.cluster_linking_enabled() && clfe.cluster_link_active();
 }
 
 chunked_vector<ss::lw_shared_ptr<const connection_context>>
@@ -473,27 +460,6 @@ ss::future<> server::apply(ss::lw_shared_ptr<net::connection> conn) {
     }
 }
 
-void server::mark_datalake_producer(
-  const std::optional<std::string_view>& client_id) {
-    if (
-      !config::shard_local_cfg().iceberg_enabled()
-      || !_datalake_throttle_manager.local_is_initialized()) {
-        return;
-    }
-    _datalake_throttle_manager.local().mark_datalake_producer(client_id);
-}
-
-ss::future<std::chrono::milliseconds> server::get_datalake_producer_throttle(
-  std::optional<std::string_view> client_id) {
-    if (
-      !config::shard_local_cfg().iceberg_enabled()
-      || !_datalake_throttle_manager.local_is_initialized()) {
-        return ssx::now<std::chrono::milliseconds>(0ms);
-    }
-
-    return _datalake_throttle_manager.local().maybe_throttle_producer(
-      client_id);
-}
 template<>
 ss::future<response_ptr> heartbeat_handler::handle(
   request_context ctx, [[maybe_unused]] ss::smp_service_group g) {
@@ -1690,9 +1656,6 @@ delete_topics_handler::handle(request_context ctx, ss::smp_service_group) {
     if (config::shard_local_cfg().audit_enabled()) {
         kafka_nodelete_topics.push_back(model::kafka_audit_logging_topic());
     }
-    if (config::shard_local_cfg().data_transforms_enabled()) {
-        kafka_nodelete_topics.push_back(model::transform_log_internal_topic());
-    }
 
     auto nodelete_topics = std::ranges::partition(
       valid_topic_names, [&kafka_nodelete_topics](const model::topic& topic) {
@@ -1700,15 +1663,6 @@ delete_topics_handler::handle(request_context ctx, ss::smp_service_group) {
       });
     valid_topic_names = std::ranges::subrange(
       valid_topic_names.begin(), nodelete_topics.begin());
-
-    auto& cl_frontend = ctx.connection()->server().cluster_link_frontend();
-    const auto is_autocreate_mirror_topic = [&cl_frontend](const auto& topic) {
-        return !cl_frontend.is_autocreate_mirror_topic(topic);
-    };
-    auto autocreate_shadow_topics = std::ranges::partition(
-      valid_topic_names, is_autocreate_mirror_topic);
-    valid_topic_names = std::ranges::subrange(
-      valid_topic_names.begin(), autocreate_shadow_topics.begin());
 
     // Measure the partition mutation rate
     auto resp_delay = 0ms;
@@ -1758,63 +1712,19 @@ delete_topics_handler::handle(request_context ctx, ss::smp_service_group) {
           });
     }
 
-    for (auto& topic : autocreate_shadow_topics) {
-        resp.data.responses.push_back(
-          deletable_topic_result{
-            .name = std::move(topic),
-            .error_code = error_code::policy_violation,
-            .error_message = "Auto-mirrored topic cannot be deleted.",
-          });
-    }
-
-    const auto is_mirror_topic = [&cl_frontend](const auto& topic) {
-        return !cl_frontend.find_link_id_by_topic(topic).has_value();
-    };
-    auto shadow_topics = std::ranges::partition(
-      valid_topic_names, is_mirror_topic);
-    // Shadow topics are missing from this range.
-    // They need to be re-inserted before this range is forwarded to topic
-    // frontend.
-    valid_topic_names = std::ranges::subrange(
-      valid_topic_names.begin(), shadow_topics.begin());
-
     auto timeout = request.data.timeout_ms + model::timeout_clock::now();
-    auto mirror_topic_results = co_await cl_frontend.delete_mirror_topics(
-      {shadow_topics.begin(), shadow_topics.end()}, timeout);
-    auto failed_mirror_topic_deletions = std::ranges::partition(
-      mirror_topic_results, [](const auto& tr) {
-          return tr.ec == cluster::cluster_link::errc::success;
-      });
-    auto successful_mirror_topic_deletions = std::ranges::subrange(
-      mirror_topic_results.begin(), failed_mirror_topic_deletions.begin());
 
-    for (auto& tr : failed_mirror_topic_deletions) {
-        resp.data.responses.push_back(
-          deletable_topic_result{
-            .name = std::move(tr.topic),
-            .error_code = map_cluster_link_errc(tr.ec),
-            .error_message = "Failed to delete shadow topic.",
-          });
-    }
-
-    // Merge valid_topic names with successful shadow topics
     const auto move_to_namespace = std::views::as_rvalue
                                    | std::views::transform(&as_tp_ns);
     auto valid_ns_topics = valid_topic_names | move_to_namespace;
-    auto shadow_ns_topics = successful_mirror_topic_deletions
-                            | std::views::transform(
-                              &cluster::cluster_link::topic_result::topic)
-                            | move_to_namespace;
 
     std::vector<model::topic_namespace> ns_topics;
-    ns_topics.reserve(valid_ns_topics.size() + shadow_ns_topics.size());
+    ns_topics.reserve(valid_ns_topics.size());
     ns_topics.insert(
       ns_topics.end(), valid_ns_topics.begin(), valid_ns_topics.end());
-    ns_topics.insert(
-      ns_topics.end(), shadow_ns_topics.begin(), shadow_ns_topics.end());
 
     // construct namespaced topic set from request
-    auto tout = request.data.timeout_ms + model::timeout_clock::now();
+    auto tout = timeout;
     std::vector<cluster::topic_result> do_delete_res
       = co_await ctx.topics_frontend().delete_topics(
         std::move(ns_topics), tout);

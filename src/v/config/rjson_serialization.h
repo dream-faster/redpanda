@@ -13,7 +13,6 @@
 
 #include "base/format_to.h"
 #include "base/seastarx.h"
-#include "cloud_io/admission_control_types.h"
 #include "config/data_directory_path.h"
 #include "config/endpoint_tls_config.h"
 #include "config/leaders_preference.h"
@@ -25,7 +24,6 @@
 #include "json/stringbuffer.h"
 #include "json/writer.h"
 #include "model/metadata.h"
-#include "pandaproxy/schema_registry/schema_id_validation.h"
 
 #include <seastar/core/sstring.hh>
 
@@ -93,18 +91,8 @@ void rjson_serialize(
   json::Writer<json::StringBuffer>& w, const config::s3_url_style& v);
 
 void rjson_serialize(
-  json::Writer<json::StringBuffer>& w, const cloud_io::policy_type& v);
-
-void rjson_serialize(
-  json::Writer<json::StringBuffer>& w,
-  const model::cloud_credentials_source& v);
-
-void rjson_serialize(
   json::Writer<json::StringBuffer>& w,
   const model::partition_autobalancing_mode& v);
-
-void rjson_serialize(
-  json::Writer<json::StringBuffer>& w, const model::cloud_storage_backend& v);
 
 void rjson_serialize(
   json::Writer<json::StringBuffer>& w, const model::leader_balancer_mode& v);
@@ -116,18 +104,7 @@ void rjson_serialize(
   json::Writer<json::StringBuffer>& w, const model::write_caching_mode& v);
 
 void rjson_serialize(
-  json::Writer<json::StringBuffer>& w,
-  const model::cloud_storage_chunk_eviction_strategy& v);
-
-void rjson_serialize(
-  json::Writer<json::StringBuffer>& w,
-  const pandaproxy::schema_registry::schema_id_validation_mode& v);
-
-void rjson_serialize(
   json::Writer<json::StringBuffer>&, const model::broker_endpoint&);
-
-void rjson_serialize(
-  json::Writer<json::StringBuffer>&, const model::recovery_validation_mode&);
 
 void rjson_serialize(
   json::Writer<json::StringBuffer>&, const config::fips_mode_flag& f);
@@ -149,20 +126,6 @@ void rjson_serialize(
   json::Writer<json::StringBuffer>&, const config::leaders_preference&);
 
 void rjson_serialize(
-  json::Writer<json::StringBuffer>&, config::datalake_catalog_type);
-
-void rjson_serialize(
-  json::Writer<json::StringBuffer>&,
-  const model::iceberg_invalid_record_action&);
-
-void rjson_serialize(
-  json::Writer<json::StringBuffer>&,
-  const model::iceberg_schema_case_insensitive&);
-
-void rjson_serialize(
-  json::Writer<json::StringBuffer>&, config::datalake_catalog_auth_mode);
-
-void rjson_serialize(
   json::Writer<json::StringBuffer>&, config::tls_name_format);
 
 void rjson_serialize(
@@ -173,12 +136,5 @@ void rjson_serialize(
 
 void rjson_serialize(
   json::Writer<json::StringBuffer>&, security::oidc::nested_group_behavior);
-
-void rjson_serialize(
-  json::Writer<json::StringBuffer>&, const model::redpanda_storage_mode&);
-
-void rjson_serialize(
-  json::Writer<json::StringBuffer>&,
-  const model::redpanda_storage_mode_tiered_impl&);
 
 } // namespace json

@@ -223,15 +223,6 @@ failure_injectable_log::disk_usage(storage::gc_config cfg) {
     return _underlying_log->disk_usage(cfg);
 }
 
-ss::future<storage::reclaimable_offsets>
-failure_injectable_log::get_reclaimable_offsets(storage::gc_config cfg) {
-    return _underlying_log->get_reclaimable_offsets(cfg);
-}
-
-void failure_injectable_log::set_cloud_gc_offset(model::offset o) {
-    return _underlying_log->set_cloud_gc_offset(o);
-}
-
 const storage::segment_set& failure_injectable_log::segments() const {
     return _underlying_log->segments();
 }

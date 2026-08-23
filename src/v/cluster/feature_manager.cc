@@ -11,6 +11,7 @@
 
 #include "feature_manager.h"
 
+#include "base/outcome.h"
 #include "cluster/commands.h"
 #include "cluster/controller_service.h"
 #include "cluster/controller_utils.h"
@@ -30,7 +31,6 @@
 #include "features/feature_state.h"
 #include "features/feature_table.h"
 #include "model/timeout_clock.h"
-#include "pandaproxy/schema_registry/schema_id_validation.h"
 #include "raft/group_manager.h"
 #include "rpc/connection_cache.h"
 #include "security/role_store.h"
@@ -243,10 +243,6 @@ feature_manager::report_enterprise_features() const {
         return config::oidc_is_enabled_kafka()
                || config::oidc_is_enabled_http();
     };
-    auto has_schema_id_validation = [&cfg]() {
-        return cfg.enable_schema_id_validation()
-               != pandaproxy::schema_registry::schema_id_validation_mode::none;
-    };
     auto fips_enabled = [&node_cfg]() {
         auto fips_mode = node_cfg.fips_mode();
         return fips_mode == config::fips_mode_flag::permissive
@@ -277,9 +273,6 @@ feature_manager::report_enterprise_features() const {
     report.set(
       features::license_required_feature::audit_logging, cfg.audit_enabled());
     report.set(
-      features::license_required_feature::cloud_storage,
-      cfg.cloud_storage_enabled());
-    report.set(
       features::license_required_feature::partition_auto_balancing_continuous,
       cfg.partition_autobalancing_mode()
         == model::partition_autobalancing_mode::continuous);
@@ -290,20 +283,11 @@ feature_manager::report_enterprise_features() const {
       features::license_required_feature::gssapi,
       config::has_sasl_mechanism(config::gssapi));
     report.set(features::license_required_feature::oidc, has_oidc());
-    report.set(
-      features::license_required_feature::schema_id_validation,
-      has_schema_id_validation());
     report.set(features::license_required_feature::rbac, has_non_default_roles);
     report.set(features::license_required_feature::fips, fips_enabled());
     report.set(
-      features::license_required_feature::datalake_iceberg,
-      cfg.iceberg_enabled());
-    report.set(
       features::license_required_feature::leadership_pinning,
       leadership_pinning_enabled());
-    report.set(
-      features::license_required_feature::shadow_linking,
-      cfg.enable_shadow_linking());
     report.set(
       features::license_required_feature::topic_deletion_disabled,
       !cfg.delete_topic_enable());

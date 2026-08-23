@@ -22,17 +22,13 @@ namespace features {
 
 enum class license_required_feature {
     audit_logging,
-    cloud_storage,
     partition_auto_balancing_continuous,
     core_balancing_continuous,
     gssapi,
     oidc,
-    schema_id_validation,
     rbac,
     fips,
-    datalake_iceberg,
     leadership_pinning,
-    shadow_linking,
     topic_deletion_disabled,
 };
 
@@ -40,8 +36,6 @@ inline fmt::iterator format_to(license_required_feature f, fmt::iterator out) {
     switch (f) {
     case license_required_feature::audit_logging:
         return fmt::format_to(out, "audit_logging");
-    case license_required_feature::cloud_storage:
-        return fmt::format_to(out, "cloud_storage");
     case license_required_feature::partition_auto_balancing_continuous:
         return fmt::format_to(out, "partition_auto_balancing_continuous");
     case license_required_feature::core_balancing_continuous:
@@ -50,18 +44,12 @@ inline fmt::iterator format_to(license_required_feature f, fmt::iterator out) {
         return fmt::format_to(out, "gssapi");
     case license_required_feature::oidc:
         return fmt::format_to(out, "oidc");
-    case license_required_feature::schema_id_validation:
-        return fmt::format_to(out, "schema_id_validation");
     case license_required_feature::rbac:
         return fmt::format_to(out, "rbac");
     case license_required_feature::fips:
         return fmt::format_to(out, "fips");
-    case license_required_feature::datalake_iceberg:
-        return fmt::format_to(out, "datalake_iceberg");
     case license_required_feature::leadership_pinning:
         return fmt::format_to(out, "leadership_pinning");
-    case license_required_feature::shadow_linking:
-        return fmt::format_to(out, "shadow_linking");
     case license_required_feature::topic_deletion_disabled:
         return fmt::format_to(out, "topic_deletion_disabled");
     }
@@ -93,10 +81,7 @@ public:
     // | Cluster     | `sasl_mechanisms`               | `GSSAPI`      |
     // | Cluster     | `sasl_mechanisms`               | `OAUTHBEARER` |
     // | Cluster     | `http_authentication`           | `OIDC`        |
-    // | Cluster     | `enable_schema_id_validation`   | `redpanda`    |
-    // | Cluster     | `enable_schema_id_validation`   | `compat`      |
-    // | Cluster     | `iceberg_enabled`               | `true`        |
-    // | Cluster     | `enable_shadow_linking`         | `true`        |
+
     // | Cluster     | `delete_topic_enable`           | `false`       |
     // | Node        | `fips_mode`                     | `enabled`     |
     // | Node        | `fips_mode`                     | `permissive`  |

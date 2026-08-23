@@ -78,7 +78,6 @@ redpanda_test_cc_library(
         "//src/v/base",
         "//src/v/cluster",
         "//src/v/cluster:commands",
-        "//src/v/cluster:data_migrated_resources",
         "//src/v/cluster:health_monitor_types",
         "//src/v/cluster:members_table",
         "//src/v/cluster:node_status_table",
@@ -173,7 +172,6 @@ redpanda_test_cc_library(
         ":utils",
         "//src/v/base",
         "//src/v/cluster",
-        "//src/v/cluster:data_migrated_resources",
         "//src/v/cluster:members_table",
         "//src/v/cluster:node_status_table",
         "//src/v/cluster:scheduling_allocation",
@@ -193,7 +191,6 @@ redpanda_cc_btest(
         ":utils",
         "//src/v/base",
         "//src/v/cluster:controller_snapshot",
-        "//src/v/cluster:data_migrated_resources",
         "//src/v/cluster:members_table",
         "//src/v/cluster:node_status_table",
         "//src/v/cluster:scheduling_allocation",
@@ -337,53 +334,9 @@ redpanda_cc_btest(
     deps = [
         "//src/v/cluster",
         "//src/v/cluster:fwd",
-        "//src/v/cluster:plugin_table",
         "//src/v/cluster:types",
         "//src/v/test_utils:seastar_boost",
         "@boost//:test",
-    ],
-)
-
-redpanda_cc_gtest(
-    name = "plugin_table_test",
-    timeout = "short",
-    srcs = [
-        "plugin_table_test.cc",
-    ],
-    deps = [
-        "//src/v/cluster:plugin_table",
-        "//src/v/cluster:types",
-        "//src/v/model",
-        "//src/v/test_utils:gtest",
-        "//src/v/utils:uuid",
-        "@googletest//:gtest",
-        "@seastar",
-    ],
-)
-
-redpanda_cc_gtest(
-    name = "plugin_frontend_validation_test",
-    timeout = "short",
-    srcs = [
-        "plugin_frontend_validation_test.cc",
-    ],
-    deps = [
-        "//src/v/cluster",
-        "//src/v/cluster:commands",
-        "//src/v/cluster:data_migrated_resources",
-        "//src/v/cluster:fwd",
-        "//src/v/cluster:plugin_table",
-        "//src/v/cluster:topic_table",
-        "//src/v/cluster:types",
-        "//src/v/config",
-        "//src/v/model",
-        "//src/v/raft",
-        "//src/v/test_utils:gtest",
-        "//src/v/utils:uuid",
-        "@abseil-cpp//absl/container:flat_hash_map",
-        "@boost//:range",
-        "@googletest//:gtest",
-        "@seastar",
     ],
 )
 
@@ -405,24 +358,6 @@ redpanda_cc_gtest(
 )
 
 redpanda_cc_gtest(
-    name = "cluster_recovery_table_test",
-    timeout = "short",
-    srcs = [
-        "cluster_recovery_table_test.cc",
-    ],
-    deps = [
-        "//src/v/cluster:cloud_metadata_cluster_manifest",
-        "//src/v/cluster:cluster_recovery_table",
-        "//src/v/cluster:commands",
-        "//src/v/cluster:logger",
-        "//src/v/cluster:types",
-        "//src/v/test_utils:gtest",
-        "@googletest//:gtest",
-        "@seastar",
-    ],
-)
-
-redpanda_cc_gtest(
     name = "partition_leaders_table_test",
     timeout = "short",
     srcs = [
@@ -430,7 +365,6 @@ redpanda_cc_gtest(
     ],
     deps = [
         "//src/v/cluster:commands",
-        "//src/v/cluster:data_migrated_resources",
         "//src/v/cluster:logger",
         "//src/v/cluster:partition_leaders_table",
         "//src/v/cluster:producer_state",
@@ -507,11 +441,11 @@ redpanda_cc_btest(
         "partition_balancer_planner_test.cc",
     ],
     deps = [
+        "@abseil-cpp//absl/container:node_hash_set",
         ":partition_balancer_planner_fixture",
         "//src/v/base",
         "//src/v/cluster:commands",
         "//src/v/cluster:controller_snapshot",
-        "//src/v/cluster:data_migrated_resources",
         "//src/v/cluster:health_monitor_types",
         "//src/v/cluster:members_table",
         "//src/v/cluster:node_status_table",
@@ -536,7 +470,6 @@ redpanda_cc_btest(
         ":partition_balancer_planner_fixture",
         "//src/v/base",
         "//src/v/cluster:commands",
-        "//src/v/cluster:data_migrated_resources",
         "//src/v/cluster:health_monitor_types",
         "//src/v/cluster:members_table",
         "//src/v/cluster:node_status_table",
@@ -580,8 +513,6 @@ redpanda_cc_btest(
     deps = [
         "//src/v/cluster",
         "//src/v/cluster:client_quota_backend",
-        "//src/v/cluster:cluster_link_table",
-        "//src/v/cluster:cluster_recovery_table",
         "//src/v/cluster:cluster_utils",
         "//src/v/cluster:members_table",
         "//src/v/cluster:topic_table",
@@ -604,7 +535,6 @@ redpanda_cc_btest(
     deps = [
         "//src/v/cluster:errc",
         "//src/v/cluster:notification_latch",
-        "//src/v/cluster:offsets_lookup",
         "//src/v/model",
         "//src/v/test_utils:seastar_boost",
         "@boost//:test",
@@ -623,7 +553,6 @@ redpanda_cc_btest(
         ":utils",
         "//src/v/base",
         "//src/v/cluster:commands",
-        "//src/v/cluster:data_migrated_resources",
         "//src/v/cluster:members_table",
         "//src/v/cluster:node_status_table",
         "//src/v/cluster:scheduling_allocation",
@@ -649,7 +578,6 @@ redpanda_cc_btest(
     ],
     deps = [
         "//src/v/cluster",
-        "//src/v/cluster:data_migrated_resources",
         "//src/v/cluster:node_status_table",
         "//src/v/cluster:scheduling_allocation",
         "//src/v/cluster:topic_table",
@@ -670,7 +598,6 @@ redpanda_cc_btest(
         "topic_table_partition_generator_test.cc",
     ],
     deps = [
-        "//src/v/cluster:data_migrated_resources",
         "//src/v/cluster:members_table",
         "//src/v/cluster:node_status_table",
         "//src/v/cluster:scheduling_allocation",
@@ -693,15 +620,11 @@ redpanda_cc_btest(
         "//src/v/base",
         "//src/v/cluster",
         "//src/v/cluster:client_quota_backend",
-        "//src/v/cluster:cluster_link_table",
-        "//src/v/cluster:cluster_recovery_table",
         "//src/v/cluster:commands",
         "//src/v/cluster:controller_log_limiter",
-        "//src/v/cluster:data_migration_table",
         "//src/v/cluster:feature_backend",
         "//src/v/cluster:members_table",
         "//src/v/cluster:notification",
-        "//src/v/cluster:plugin_backend",
         "//src/v/test_utils:seastar_boost",
         "@boost//:test",
         "@seastar",
@@ -797,7 +720,6 @@ redpanda_cc_gtest(
     deps = [
         "//src/v/cluster",
         "//src/v/cluster:fwd",
-        "//src/v/cluster:plugin_table",
         "//src/v/cluster:types",
         "//src/v/storage/tests:kvstore_fixture",
         "//src/v/test_utils:gtest",
@@ -818,7 +740,6 @@ redpanda_cc_btest(
         "//src/v/cluster:client_quota_backend",
         "//src/v/cluster:commands",
         "//src/v/cluster:controller_log_limiter",
-        "//src/v/cluster:data_migration_table",
         "//src/v/cluster:feature_backend",
         "//src/v/cluster:leader_balancer_strategy",
         "//src/v/cluster:node_status_backend",
@@ -844,7 +765,6 @@ redpanda_cc_btest(
         "//src/v/cluster:client_quota_backend",
         "//src/v/cluster:commands",
         "//src/v/cluster:controller_log_limiter",
-        "//src/v/cluster:data_migration_table",
         "//src/v/cluster:feature_backend",
         "//src/v/cluster:leader_balancer_strategy",
         "//src/v/cluster:node_status_backend",
@@ -867,7 +787,6 @@ redpanda_cc_btest(
     deps = [
         ":rebalancing_tests_fixture",
         "//src/v/cluster",
-        "//src/v/cluster:data_migration_table",
         "//src/v/cluster:feature_backend",
         "//src/v/cluster:fwd",
         "//src/v/cluster:leader_balancer_strategy",
@@ -948,7 +867,6 @@ redpanda_cc_bench(
     deps = [
         ":partition_balancer_planner_fixture",
         "//src/v/cluster:commands",
-        "//src/v/cluster:data_migrated_resources",
         "//src/v/cluster:health_monitor_types",
         "//src/v/cluster:members_table",
         "//src/v/cluster:node_status_table",
@@ -977,7 +895,6 @@ redpanda_cc_btest(
         ":health_monitor_test_utils",
         "//src/v/base",
         "//src/v/cluster",
-        "//src/v/cluster:data_migration_table",
         "//src/v/cluster:feature_backend",
         "//src/v/cluster:fwd",
         "//src/v/cluster:health_monitor_types",
@@ -1007,7 +924,6 @@ redpanda_cc_btest(
         "//src/v/base",
         "//src/v/cluster",
         "//src/v/cluster:fwd",
-        "//src/v/cluster:inventory_service",
         "//src/v/cluster:leader_balancer_strategy",
         "//src/v/cluster:members_table",
         "//src/v/cluster:node_status_backend",
@@ -1034,7 +950,6 @@ redpanda_cc_btest(
         ":cluster_test_fixture",
         "//src/v/base",
         "//src/v/cluster:fwd",
-        "//src/v/cluster:inventory_service",
         "//src/v/cluster:leader_balancer_strategy",
         "//src/v/cluster:node_status_backend",
         "//src/v/cluster:partition_properties_stm",
@@ -1062,7 +977,6 @@ redpanda_cc_btest(
         "//src/v/base",
         "//src/v/cluster",
         "//src/v/cluster:fwd",
-        "//src/v/cluster:inventory_service",
         "//src/v/cluster:leader_balancer_strategy",
         "//src/v/cluster:members_table",
         "//src/v/cluster:node_status_backend",
@@ -1096,7 +1010,6 @@ redpanda_cc_btest(
         "//src/v/cluster",
         "//src/v/cluster:errc",
         "//src/v/cluster:fwd",
-        "//src/v/cluster:inventory_service",
         "//src/v/cluster:leader_balancer_strategy",
         "//src/v/cluster:node_status_backend",
         "//src/v/cluster:ntp_callbacks",
@@ -1151,7 +1064,6 @@ redpanda_cc_btest(
         "//src/v/base",
         "//src/v/cluster",
         "//src/v/cluster:fwd",
-        "//src/v/cluster:inventory_service",
         "//src/v/cluster:leader_balancer_strategy",
         "//src/v/cluster:members_table",
         "//src/v/cluster:node_status_backend",
@@ -1283,29 +1195,6 @@ redpanda_cc_gtest(
     ],
 )
 
-redpanda_cc_gtest(
-    name = "data_migration_table_test",
-    timeout = "short",
-    srcs = [
-        "data_migration_table_test.cc",
-    ],
-    deps = [
-        "//src/v/cluster:commands",
-        "//src/v/cluster:data_migrated_resources",
-        "//src/v/cluster:data_migration_table",
-        "//src/v/cluster:data_migration_types",
-        "//src/v/cluster:errc",
-        "//src/v/cluster:topic_table",
-        "//src/v/config",
-        "//src/v/container:chunked_vector",
-        "//src/v/model",
-        "//src/v/random:generators",
-        "//src/v/test_utils:gtest",
-        "@googletest//:gtest",
-        "@seastar",
-    ],
-)
-
 redpanda_cc_btest(
     name = "controller_state_test",
     timeout = "short",
@@ -1316,7 +1205,6 @@ redpanda_cc_btest(
         ":cluster_test_fixture",
         "//src/v/cluster",
         "//src/v/cluster:cluster_utils",
-        "//src/v/cluster:inventory_service",
         "//src/v/cluster:leader_balancer_strategy",
         "//src/v/cluster:node_status_backend",
         "//src/v/cluster:partition_leaders_table",
@@ -1347,7 +1235,6 @@ redpanda_cc_btest(
     deps = [
         ":cluster_test_fixture",
         "//src/v/cluster:ephemeral_credential_frontend",
-        "//src/v/cluster:inventory_service",
         "//src/v/cluster:leader_balancer_strategy",
         "//src/v/cluster:node_status_backend",
         "//src/v/cluster:partition_properties_stm",
@@ -1389,7 +1276,6 @@ redpanda_cc_btest(
         "//src/v/base",
         "//src/v/cluster:cluster_utils",
         "//src/v/cluster:controller_log_limiter",
-        "//src/v/cluster:data_migration_table",
         "//src/v/cluster:feature_backend",
         "//src/v/cluster:leader_balancer_strategy",
         "//src/v/cluster:logger",
@@ -1419,7 +1305,6 @@ redpanda_cc_btest(
         "//src/v/cluster:client_quota_backend",
         "//src/v/cluster:commands",
         "//src/v/cluster:controller_log_limiter",
-        "//src/v/cluster:data_migration_table",
         "//src/v/cluster:feature_backend",
         "//src/v/cluster:fwd",
         "//src/v/cluster:leader_balancer_strategy",
@@ -1458,7 +1343,6 @@ redpanda_cc_btest(
         "//src/v/container:chunked_vector",
         "//src/v/model",
         "//src/v/model/tests:random",
-        "//src/v/pandaproxy/schema_registry/test:random",
         "//src/v/raft",
         "//src/v/raft:fundamental",
         "//src/v/random:generators",
@@ -1487,7 +1371,6 @@ redpanda_cc_btest(
     deps = [
         "//src/v/cluster",
         "//src/v/cluster:fwd",
-        "//src/v/cluster:inventory_service",
         "//src/v/cluster:leader_balancer_strategy",
         "//src/v/cluster:node_status_backend",
         "//src/v/cluster:partition_properties_stm",
@@ -1604,25 +1487,6 @@ redpanda_cc_btest(
 )
 
 redpanda_cc_gtest(
-    name = "epoch_service_test",
-    timeout = "short",
-    srcs = [
-        "epoch_service_test.cc",
-    ],
-    cpu = 2,
-    deps = [
-        "//src/v/cluster",
-        "//src/v/cluster:errc",
-        "//src/v/config",
-        "//src/v/ssx:abort_source",
-        "//src/v/test_utils:gtest",
-        "@googletest//:gtest",
-        "@seastar",
-        "@seastar//:testing",
-    ],
-)
-
-redpanda_cc_gtest(
     name = "controller_forced_reconfiguration_test",
     timeout = "moderate",
     srcs = [
@@ -1634,7 +1498,6 @@ redpanda_cc_gtest(
         "//src/v/cluster",
         "//src/v/cluster:client_quota_backend",
         "//src/v/cluster:controller_log_limiter",
-        "//src/v/cluster:data_migration_table",
         "//src/v/cluster:errc",
         "//src/v/cluster:feature_backend",
         "//src/v/cluster:leader_balancer_strategy",

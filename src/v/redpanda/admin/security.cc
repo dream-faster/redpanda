@@ -21,10 +21,6 @@
 #include "kafka/client/config_utils.h"
 #include "kafka/client/configuration.h"
 #include "kafka/server/server.h"
-#include "pandaproxy/rest/api.h"
-#include "pandaproxy/rest/configuration.h"
-#include "pandaproxy/schema_registry/api.h"
-#include "pandaproxy/schema_registry/configuration.h"
 #include "redpanda/admin/api-doc/security.json.hh"
 #include "redpanda/admin/server.h"
 #include "security/credential_store.h"
@@ -51,18 +47,12 @@ struct interfaces_report : public json::json_base {
     json::json_list<kafka_interface_security_report> kafka;
     json::json_element<rpc_interface_security_report> rpc;
     json::json_list<admin_interface_security_report> admin;
-    json::json_list<schema_registry_interface_security_report> schema_registry;
-    json::json_element<client_security_report> schema_registry_client;
-    json::json_list<pandaproxy_interface_security_report> pandaproxy;
     json::json_element<client_security_report> audit_log_client;
 
     void register_params() {
         add(&kafka, "kafka");
         add(&rpc, "rpc");
         add(&admin, "admin");
-        add(&schema_registry, "schema_registry");
-        add(&schema_registry_client, "schema_registry_client");
-        add(&pandaproxy, "pandaproxy");
         add(&audit_log_client, "audit_log_client");
     }
 
@@ -73,9 +63,6 @@ struct interfaces_report : public json::json_base {
         kafka = e.kafka;
         rpc = e.rpc;
         admin = e.admin;
-        schema_registry = e.schema_registry;
-        schema_registry_client = e.schema_registry_client;
-        pandaproxy = e.pandaproxy;
         audit_log_client = e.audit_log_client;
     }
     template<class T>
@@ -83,9 +70,6 @@ struct interfaces_report : public json::json_base {
         kafka = e.kafka;
         rpc = e.rpc;
         admin = e.admin;
-        schema_registry = e.schema_registry;
-        schema_registry_client = e.schema_registry_client;
-        pandaproxy = e.pandaproxy;
         audit_log_client = e.audit_log_client;
         return *this;
     }
@@ -93,9 +77,6 @@ struct interfaces_report : public json::json_base {
         kafka = e.kafka;
         rpc = e.rpc;
         admin = e.admin;
-        schema_registry = e.schema_registry;
-        schema_registry_client = e.schema_registry_client;
-        pandaproxy = e.pandaproxy;
         audit_log_client = e.audit_log_client;
         return *this;
     }
@@ -104,9 +85,6 @@ struct interfaces_report : public json::json_base {
         e.kafka = kafka;
         e.rpc = rpc;
         e.admin = admin;
-        e.schema_registry = schema_registry;
-        e.schema_registry_client = schema_registry_client;
-        e.pandaproxy = pandaproxy;
         e.audit_log_client = audit_log_client;
         return *this;
     }
@@ -1285,141 +1263,6 @@ generate_admin_interface_report(
     return reports;
 }
 
-std::vector<ss::httpd::security_json::pandaproxy_interface_security_report>
-generate_pandaproxy_interface_report(
-  std::vector<ss::httpd::security_json::security_report_alert>& alerts,
-  const pandaproxy::rest::configuration& config,
-  const kafka::client::configuration& client_config) {
-    std::vector<ss::httpd::security_json::pandaproxy_interface_security_report>
-      reports;
-    const auto& pp_interfaces = config.pandaproxy_api();
-
-    reports.reserve(pp_interfaces.size());
-
-    for (const auto& iface : pp_interfaces) {
-        ss::httpd::security_json::pandaproxy_interface_security_report report;
-        report.name = iface.name;
-        report.host = iface.address.host();
-        report.port = iface.address.port();
-
-        set_report_advertised(
-          report, iface.name, config.advertised_pandaproxy_api());
-
-        set_report_tls(report, iface.name, config.pandaproxy_api_tls());
-        if (!report.tls_enabled()) {
-            alerts.push_back(make_interface_alert(
-              affected_interface::pandaproxy, alert_issue::NO_TLS, iface.name));
-        }
-
-        const auto authn = iface.authn_method.value_or(
-          config::rest_authn_method::none);
-        // If rest_authn_method is not none, then the actual authentication
-        // method is being read from http_authentication cluster config
-        const bool is_authn_enabled = authn
-                                      == config::rest_authn_method::http_basic;
-
-        const auto get_pp_auth_method = [is_authn_enabled, &client_config]() {
-            if (is_authn_enabled) {
-                return pp_authn_method::SCRAM_Proxied;
-            }
-
-            const auto kclient_configured = is_scram_configured(client_config);
-            if (kclient_configured) {
-                return pp_authn_method::SCRAM_Configured;
-            }
-
-            return pp_authn_method::None;
-        };
-        const auto config_authn_method = get_pp_auth_method();
-        report.configured_authentication_method = config_authn_method;
-
-        // For pp, authn kinda implies authz as well.
-        report.authorization_enabled = is_authn_enabled;
-        if (!report.authorization_enabled()) {
-            alerts.push_back(make_interface_alert(
-              affected_interface::pandaproxy,
-              alert_issue::NO_AUTHZ,
-              iface.name));
-        }
-
-        if (config_authn_method == pp_authn_method::SCRAM_Configured) {
-            alerts.push_back(make_interface_alert(
-              affected_interface::pandaproxy,
-              alert_issue::PP_CONFIGURED_CLIENT,
-              iface.name));
-        }
-
-        set_report_http_authentication(report, is_authn_enabled);
-        if (report.authentication_methods._elements.empty()) {
-            alerts.push_back(make_interface_alert(
-              affected_interface::pandaproxy,
-              alert_issue::NO_AUTHN,
-              iface.name));
-        }
-
-        reports.emplace_back(std::move(report));
-    }
-
-    return reports;
-}
-
-std::vector<ss::httpd::security_json::schema_registry_interface_security_report>
-generate_schema_registry_interface_report(
-  std::vector<ss::httpd::security_json::security_report_alert>& alerts,
-  const pandaproxy::schema_registry::configuration& config) {
-    std::vector<
-      ss::httpd::security_json::schema_registry_interface_security_report>
-      reports;
-    const auto& sr_interfaces = config.schema_registry_api();
-
-    reports.reserve(sr_interfaces.size());
-
-    for (const auto& iface : sr_interfaces) {
-        ss::httpd::security_json::schema_registry_interface_security_report
-          report;
-        report.name = iface.name;
-        report.host = iface.address.host();
-        report.port = iface.address.port();
-
-        set_report_tls(report, iface.name, config.schema_registry_api_tls());
-        if (!report.tls_enabled()) {
-            alerts.push_back(make_interface_alert(
-              affected_interface::schema_registry,
-              alert_issue::NO_TLS,
-              iface.name));
-        }
-
-        const auto authn = iface.authn_method.value_or(
-          config::rest_authn_method::none);
-        // If rest_authn_method is not none, then the actual authentication
-        // method is being red from http_authentication cluster config
-        const bool is_authn_enabled = authn
-                                      == config::rest_authn_method::http_basic;
-
-        report.authorization_enabled
-          = config::shard_local_cfg().schema_registry_enable_authorization()
-            && is_authn_enabled;
-        if (!report.authorization_enabled()) {
-            alerts.push_back(make_interface_alert(
-              affected_interface::schema_registry,
-              alert_issue::NO_AUTHZ,
-              iface.name));
-        }
-
-        set_report_http_authentication(report, is_authn_enabled);
-        if (report.authentication_methods._elements.empty()) {
-            alerts.push_back(make_interface_alert(
-              affected_interface::schema_registry,
-              alert_issue::NO_AUTHN,
-              iface.name));
-        }
-
-        reports.emplace_back(std::move(report));
-    }
-
-    return reports;
-}
-
 using ephemeral_credentials = ss::bool_class<struct ephemeral_credentials_tag>;
 
 client_authn_method get_kclient_auth(
@@ -1490,21 +1333,6 @@ admin_server::get_security_report(std::unique_ptr<ss::http::request>) {
     interfaces_report.kafka = generate_kafka_interface_report(alerts);
     interfaces_report.rpc = generate_rpc_interface_report(alerts);
     interfaces_report.admin = generate_admin_interface_report(alerts);
-    if (_http_proxy) {
-        interfaces_report.pandaproxy = generate_pandaproxy_interface_report(
-          alerts, _http_proxy->get_config(), _http_proxy->get_client_config());
-    }
-    if (_schema_registry) {
-        interfaces_report.schema_registry
-          = generate_schema_registry_interface_report(
-            alerts, _schema_registry->get_config());
-        interfaces_report
-          .schema_registry_client = generate_kafka_client_interface_report(
-          alerts,
-          affected_interface::schema_registry_client,
-          _schema_registry->get_client_config(),
-          ephemeral_credentials{_schema_registry->has_ephemeral_credentials()});
-    }
     if (
       config::shard_local_cfg().audit_enabled()
       && !config::shard_local_cfg().audit_use_rpc()) {

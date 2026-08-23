@@ -68,39 +68,10 @@ inline const model::ntp id_allocator_ntp(
   model::id_allocator_topic,
   model::partition_id(0));
 
-inline const model::topic_partition schema_registry_internal_tp{
-  model::topic{"_schemas"}, model::partition_id{0}};
-
-inline const model::ntp schema_registry_internal_ntp(
-  model::kafka_namespace,
-  schema_registry_internal_tp.topic,
-  schema_registry_internal_tp.partition);
-
-inline const model::ntp wasm_binaries_internal_ntp(
-  model::kafka_internal_namespace,
-  model::topic("wasm_binaries"),
-  model::partition_id(0));
-
-inline const model::topic
-  transform_log_internal_topic("_redpanda.transform_logs");
-
-inline const model::topic_namespace transform_log_internal_nt(
-  model::kafka_namespace, model::transform_log_internal_topic);
-
-inline const model::topic datalake_coordinator_topic("datalake_coordinator");
-inline const model::topic_namespace datalake_coordinator_nt(
-  model::kafka_internal_namespace, model::datalake_coordinator_topic);
-
-inline const model::topic l1_metastore_topic("ct_l1_domain");
-inline const model::topic_namespace
-  l1_metastore_nt(model::kafka_internal_namespace, model::l1_metastore_topic);
-
 // Topics in the Kafka namespace that are not user-created topics.
 inline const std::array non_user_topics{
   kafka_consumer_offsets_topic,
-  schema_registry_internal_tp.topic,
   kafka_audit_logging_topic,
-  transform_log_internal_topic,
 };
 
 inline bool is_user_topic(topic_namespace_view tp_ns) {
@@ -114,15 +85,6 @@ inline bool is_user_topic(const ntp& ntp) {
 
 inline bool is_consumer_offsets_topic(const ntp& ntp) {
     return topic_namespace_view{ntp} == kafka_consumer_offsets_nt;
-}
-
-inline bool is_shadow_link_enabled(topic_namespace_view tp_ns) {
-    return is_user_topic(tp_ns)
-           || tp_ns.tp == schema_registry_internal_tp.topic;
-}
-
-inline bool is_shadow_link_enabled(const ntp& ntp) {
-    return is_shadow_link_enabled(topic_namespace_view{ntp});
 }
 
 } // namespace model

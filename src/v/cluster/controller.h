@@ -11,13 +11,9 @@
 
 #pragma once
 
-#include "cluster/cloud_metadata/producer_id_recovery_manager.h"
-#include "cluster/cluster_epoch_service.h"
-#include "cluster/cluster_link/fwd.h"
+#include "base/outcome.h"
 #include "cluster/controller_probe.h"
 #include "cluster/controller_stm.h"
-#include "cluster/data_migration_group_proxy.h"
-#include "cluster/data_migration_router.h"
 #include "cluster/fwd.h"
 #include "cluster/node_status_table.h"
 #include "cluster/scheduling/leader_balancer.h"
@@ -39,14 +35,6 @@
 #include <chrono>
 #include <vector>
 
-namespace cloud_storage {
-class topic_mount_handler;
-}
-
-namespace cloud_topics {
-class state_accessors;
-} // namespace cloud_topics
-
 namespace cluster {
 
 class cluster_discovery;
@@ -63,8 +51,6 @@ public:
       ss::sharded<node::local_monitor>& local_monitor,
       ss::sharded<raft::group_manager>&,
       ss::sharded<features::feature_table>&,
-      ss::sharded<cloud_storage::remote>&,
-      ss::sharded<cloud_io::cache>&,
       ss::sharded<node_status_table>&,
       ss::sharded<cluster::metadata_cache>&,
       ss::scheduling_group);
@@ -81,9 +67,6 @@ public:
     }
     ss::sharded<config_manager>& get_config_manager() {
         return _config_manager;
-    }
-    ss::sharded<plugin_frontend>& get_plugin_frontend() {
-        return _plugin_frontend;
     }
     ss::sharded<members_table>& get_members_table() { return _members_table; }
     ss::sharded<topic_table>& get_topics_state() { return _tp_state; }
@@ -162,52 +145,11 @@ public:
     }
     ss::sharded<controller_stm>& get_controller_stm() { return _stm; }
 
-    ss::sharded<cluster_epoch_service<>>& get_cluster_epoch_generator() {
-        return _epoch_service;
-    }
-
-    ss::sharded<data_migrations::migrated_resources>&
-    get_data_migrated_resources() {
-        return _data_migrated_resources;
-    }
-    ss::sharded<data_migrations::frontend>& get_data_migration_frontend() {
-        return _data_migration_frontend;
-    }
-
-    ss::sharded<data_migrations::irpc_frontend>&
-    get_data_migration_irpc_frontend() {
-        return _data_migration_irpc_frontend;
-    }
-
-    ss::sharded<data_migrations::router>& get_data_migration_router() {
-        return _data_migration_router;
-    }
-
-    std::optional<std::reference_wrapper<cloud_metadata::uploader>>
-    metadata_uploader() {
-        if (_metadata_uploader) {
-            return std::ref<cloud_metadata::uploader>(*_metadata_uploader);
-        }
-        return std::nullopt;
-    }
-
-    ss::sharded<cluster_recovery_manager>& get_cluster_recovery_manager() {
-        return _recovery_manager;
-    }
-
-    ss::sharded<cluster_recovery_table>& get_cluster_recovery_table() {
-        return _recovery_table;
-    }
-
     ss::sharded<client_quota::frontend>& get_quota_frontend() {
         return _quota_frontend;
     }
 
     ss::sharded<client_quota::store>& get_quota_store() { return _quota_store; }
-
-    ss::sharded<cluster::cluster_link::frontend>& get_cluster_link_frontend() {
-        return _cluster_link_frontend;
-    }
 
     /// Register a callback to contribute telemetry data during metrics
     /// collection. This allows higher-layer subsystems to populate fields
@@ -242,12 +184,7 @@ public:
     ss::future<> start(
       cluster_discovery&,
       ss::abort_source&,
-      ss::shared_ptr<cluster::cloud_metadata::offsets_upload_requestor>,
-      ss::shared_ptr<cluster::cloud_metadata::producer_id_recovery_manager>,
-      ss::shared_ptr<cluster::cloud_metadata::offsets_recovery_requestor>,
-      std::chrono::milliseconds application_start_time,
-      ss::sharded<cluster::data_migrations::group_proxy>&,
-      ss::sharded<cloud_topics::state_accessors>* ct_state = nullptr);
+      std::chrono::milliseconds application_start_time);
 
     // prevents controller from accepting new requests
     ss::future<> shutdown_input();
@@ -321,8 +258,6 @@ private:
     ss::future<>
     cluster_creation_hook(cluster_discovery& discovery, ss::abort_source& as);
 
-    std::optional<cloud_storage_clients::bucket_name> get_configured_bucket();
-
     // Checks configuration invariants stored in kvstore
     ss::future<configuration_invariants> validate_configuration_invariants();
 
@@ -335,9 +270,6 @@ private:
     ss::sharded<members_table> _members_table;             // instance per core
     ss::sharded<partition_balancer_state>
       _partition_balancer_state; // single instance
-    ss::sharded<data_migrations::migrated_resources> _data_migrated_resources;
-    ssx::single_sharded<data_migrations::migrations_table>
-      _data_migration_table;
     ss::sharded<partition_leaders_table>
       _partition_leaders;                                // instance per core
     ss::sharded<shard_placement_table> _shard_placement; // instance per core
@@ -352,7 +284,6 @@ private:
     ss::sharded<members_backend> _members_backend;       // single instance
     ss::sharded<config_frontend> _config_frontend;       // instance per core
     ss::sharded<config_manager> _config_manager;         // single instance
-    ss::sharded<data_migrations::frontend> _data_migration_frontend;
     ss::sharded<rpc::connection_cache>& _connections;
     ss::sharded<partition_manager>& _partition_manager;
     ss::sharded<shard_table>& _shard_table;
@@ -378,38 +309,16 @@ private:
     ss::sharded<features::feature_table>& _feature_table; // instance per core
     std::unique_ptr<leader_balancer> _leader_balancer;
     ss::sharded<partition_balancer_backend> _partition_balancer;
-    std::unique_ptr<cloud_metadata::uploader> _metadata_uploader;
-    ss::sharded<cluster_recovery_table> _recovery_table; // instance per core
-    ss::sharded<cluster_recovery_manager> _recovery_manager; // single instance
-    std::unique_ptr<cloud_metadata::cluster_recovery_backend> _recovery_backend;
     ss::sharded<client_quota::frontend> _quota_frontend; // instance per core
     ss::sharded<client_quota::store> _quota_store;       // instance per core
     ss::sharded<client_quota::backend> _quota_backend;   // single instance
-    ss::sharded<data_migrations::router> _data_migration_router;
-    ss::sharded<data_migrations::worker> _data_migration_worker;
-    ss::sharded<cloud_storage::topic_mount_handler> _topic_mount_handler;
-    ssx::single_sharded<data_migrations::backend> _data_migration_backend;
-    ss::sharded<data_migrations::irpc_frontend> _data_migration_irpc_frontend;
     ss::gate _gate;
     consensus_ptr _raft0;
-    ss::sharded<cloud_storage::remote>& _cloud_storage_api;
-    ss::sharded<cloud_io::cache>& _cloud_cache;
     ss::sharded<node_status_table>& _node_status_table;
     ss::sharded<cluster::metadata_cache>& _metadata_cache;
     controller_probe _probe;
     ss::sharded<bootstrap_backend> _bootstrap_backend; // single instance
     ss::sharded<topic_metrics_watcher> _topic_metrics_watcher;
-
-    ss::sharded<plugin_frontend> _plugin_frontend; // instance per core
-    ss::sharded<plugin_table> _plugin_table;       // instance per core
-    ss::sharded<plugin_backend> _plugin_backend;   // single instance
-
-    ss::sharded<cluster::cluster_link::frontend>
-      _cluster_link_frontend; // instance per core
-    ss::sharded<cluster::cluster_link::table>
-      _cluster_link_table; // instance per core
-
-    ss::sharded<cluster_epoch_service<>> _epoch_service; // instance per core
 
     std::unique_ptr<controller_forced_reconfiguration_manager> _cfr_m;
 

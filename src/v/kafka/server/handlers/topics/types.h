@@ -42,13 +42,6 @@ inline constexpr std::string_view topic_property_compaction_strategy
   = "compaction.strategy";
 inline constexpr std::string_view topic_property_segment_size = "segment.bytes";
 
-inline constexpr std::string_view topic_property_remote_write
-  = "redpanda.remote.write";
-inline constexpr std::string_view topic_property_remote_read
-  = "redpanda.remote.read";
-
-inline constexpr std::string_view topic_property_remote_delete
-  = "redpanda.remote.delete";
 inline constexpr std::string_view topic_property_segment_ms = "segment.ms";
 inline constexpr std::string_view topic_property_write_caching
   = "write.caching";
@@ -57,54 +50,6 @@ inline constexpr std::string_view topic_property_flush_ms = "flush.ms";
 inline constexpr std::string_view topic_property_flush_bytes = "flush.bytes";
 
 // Server side schema registry context. Binds a topic to a specific Schema
-// Registry context; schema IDs are unique within a context but not across
-// contexts, so any per-topic resolution of schema ids (Iceberg translator
-// today, schema id validation in the future) must look schemas up here.
-inline constexpr std::string_view topic_property_schema_registry_context
-  = "redpanda.schema.registry.context";
-
-// Server side schema id validation
-inline constexpr std::string_view topic_property_record_key_schema_id_validation
-  = "redpanda.key.schema.id.validation";
-inline constexpr std::string_view
-  topic_property_record_key_subject_name_strategy
-  = "redpanda.key.subject.name.strategy";
-inline constexpr std::string_view
-  topic_property_record_value_schema_id_validation
-  = "redpanda.value.schema.id.validation";
-inline constexpr std::string_view
-  topic_property_record_value_subject_name_strategy
-  = "redpanda.value.subject.name.strategy";
-
-// Server side schema id validation (compat names)
-inline constexpr std::string_view
-  topic_property_record_key_schema_id_validation_compat
-  = "confluent.key.schema.validation";
-inline constexpr std::string_view
-  topic_property_record_key_subject_name_strategy_compat
-  = "confluent.key.subject.name.strategy";
-inline constexpr std::string_view
-  topic_property_record_value_schema_id_validation_compat
-  = "confluent.value.schema.validation";
-inline constexpr std::string_view
-  topic_property_record_value_subject_name_strategy_compat
-  = "confluent.value.subject.name.strategy";
-
-inline constexpr std::string_view topic_property_iceberg_mode
-  = "redpanda.iceberg.mode";
-
-inline constexpr std::string_view topic_property_iceberg_delete
-  = "redpanda.iceberg.delete";
-
-inline constexpr std::string_view topic_property_iceberg_partition_spec
-  = "redpanda.iceberg.partition.spec";
-
-inline constexpr std::string_view topic_property_iceberg_invalid_record_action
-  = "redpanda.iceberg.invalid.record.action";
-
-inline constexpr std::string_view topic_property_iceberg_target_lag_ms
-  = "redpanda.iceberg.target.lag.ms";
-
 inline constexpr std::string_view topic_property_min_cleanable_dirty_ratio
   = "min.cleanable.dirty.ratio";
 
@@ -166,9 +111,6 @@ cluster::topic_configuration to_topic_config(
   const config_map_t& config_map);
 
 /// \brief The intended configuration of the schema registry's internal
-/// topic (_schemas): a single compacted partition with retention disabled.
-cluster::topic_configuration
-schema_registry_topic_configuration(int16_t replication_factor);
 
 std::vector<kafka::creatable_topic_configs> report_topic_configs(
   const cluster::metadata_cache& metadata_cache,
@@ -210,8 +152,5 @@ get_tristate_value(const config_map_t& config, std::string_view key) {
 
 std::optional<bool>
 get_bool_value(const config_map_t& config, std::string_view key);
-
-model::shadow_indexing_mode
-get_shadow_indexing_mode(const config_map_t& config);
 
 } // namespace kafka

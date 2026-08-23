@@ -11,7 +11,6 @@
 
 #pragma once
 
-#include "cluster/cluster_link/fwd.h"
 #include "cluster/fwd.h"
 #include "config/configuration.h"
 #include "container/chunked_vector.h"
@@ -33,7 +32,6 @@
 #include "kafka/server/sasl_probe.h"
 #include "metrics/metrics.h"
 #include "net/server.h"
-#include "pandaproxy/schema_registry/fwd.h"
 #include "security/audit/audit_log_manager.h"
 #include "security/fwd.h"
 #include "security/gssapi_principal_mapper.h"
@@ -83,11 +81,8 @@ public:
       ss::sharded<cluster::security_frontend>&,
       ss::sharded<cluster::controller_api>&,
       ss::sharded<cluster::tx_gateway_frontend>&,
-      ss::sharded<datalake_throttle_manager>&,
-      ss::sharded<cluster::cluster_link::frontend>&,
       std::optional<qdc_monitor_config>,
-      ssx::singleton_thread_worker&,
-      const std::unique_ptr<pandaproxy::schema_registry::api>&) noexcept;
+      ssx::singleton_thread_worker&) noexcept;
 
     ~server() noexcept override = default;
     server(const server&) = delete;
@@ -205,10 +200,6 @@ public:
 
     ssx::singleton_thread_worker& thread_worker() { return _thread_worker; }
 
-    const std::unique_ptr<pandaproxy::schema_registry::api>& schema_registry() {
-        return _schema_registry;
-    }
-
     static bool enable_mpx_extensions() {
         return config::shard_local_cfg().enable_mpx_extensions();
     }
@@ -250,25 +241,6 @@ public:
     // processing incoming requests.
     ss::scheduling_group get_request_handler_sg() const;
 
-    /**
-     * Returns a throttle for a producer that may be producing to datalake
-     * enabled topics.
-     */
-    ss::future<std::chrono::milliseconds>
-    get_datalake_producer_throttle(std::optional<std::string_view> client_id);
-    /**
-     * Marks producer as datalake producer. I.e. a producer that produced to the
-     * datalake enabled topics.
-     */
-    void
-    mark_datalake_producer(const std::optional<std::string_view>& client_id);
-
-    cluster::cluster_link::frontend& cluster_link_frontend() {
-        return _cluster_link_frontend.local();
-    }
-
-    bool is_cluster_link_active() const;
-
     chunked_vector<ss::lw_shared_ptr<const connection_context>>
     list_connections() const;
 
@@ -307,8 +279,6 @@ private:
     ss::sharded<cluster::security_frontend>& _security_frontend;
     ss::sharded<cluster::controller_api>& _controller_api;
     ss::sharded<cluster::tx_gateway_frontend>& _tx_gateway_frontend;
-    ss::sharded<kafka::datalake_throttle_manager>& _datalake_throttle_manager;
-    ss::sharded<cluster::cluster_link::frontend>& _cluster_link_frontend;
     std::optional<qdc_monitor> _qdc_mon;
     kafka::fetch_metadata_cache _fetch_metadata_cache;
     security::tls::principal_mapper _mtls_principal_mapper;
@@ -325,7 +295,6 @@ private:
     std::unique_ptr<read_distribution_probe> _read_dist_probe;
     ssx::singleton_thread_worker& _thread_worker;
     std::unique_ptr<replica_selector> _replica_selector;
-    const std::unique_ptr<pandaproxy::schema_registry::api>& _schema_registry;
     boost::intrusive::list<connection_context> _connections;
     closed_connections_t _closed_connections{};
 };

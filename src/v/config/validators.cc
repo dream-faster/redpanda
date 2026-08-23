@@ -16,8 +16,6 @@
 #include "config/configuration.h"
 #include "config/sasl_mechanisms.h"
 #include "config/types.h"
-#include "datalake/partition_spec_parser.h"
-#include "datalake/validators.h"
 #include "model/namespace.h"
 #include "model/validation.h"
 #include "security/oidc_url_parser.h"
@@ -179,8 +177,7 @@ validate_audit_event_types(const std::vector<ss::sstring>& vs) {
       "describe",
       "heartbeat",
       "authenticate",
-      "admin",
-      "schema_registry"};
+      "admin"};
 
     for (const auto& e : vs) {
         if (!audit_event_types.contains(e)) {
@@ -252,163 +249,6 @@ std::optional<ss::sstring> validate_tombstone_retention_ms(
 }
 
 std::optional<ss::sstring>
-validate_iceberg_partition_spec(const ss::sstring& value) {
-    auto parsed = datalake::parse_partition_spec(value);
-    if (parsed.has_error()) {
-        return fmt::format(
-          "couldn't parse iceberg partition spec `{}': {}",
-          value,
-          parsed.error());
-    }
-    if (!parsed.value().is_valid_for_default_spec()) {
-        return fmt::format(
-          "partition spec `{}' can't be used as a default spec", value);
-    }
-    return std::nullopt;
-}
-
-std::optional<ss::sstring> validate_iceberg_rest_catalog_endpoint(
-  const std::optional<ss::sstring>& endpoint) {
-    if (!endpoint.has_value()) {
-        return std::nullopt;
-    }
-    auto parsed = datalake::parse_iceberg_rest_catalog_endpoint(
-      endpoint.value());
-    if (!parsed.has_value()) {
-        return std::move(parsed).error();
-    }
-    return std::nullopt;
-}
-
-std::optional<ss::sstring> validate_iceberg_topic_name_dot_replacement(
-  const std::optional<ss::sstring>& value) {
-    if (value.has_value() && value->find('.') != ss::sstring::npos) {
-        return "iceberg_topic_name_dot_replacement cannot contain dots";
-    }
-    return std::nullopt;
-}
-
-std::optional<ss::sstring>
-validate_iceberg_default_catalog_namespace(const std::vector<ss::sstring>& ns) {
-    if (ns.empty()) {
-        return "Iceberg namespace must contain at least one element";
-    }
-    for (const auto& s : ns) {
-        if (s.empty()) {
-            return "Iceberg namespace elements cannot be empty strings";
-        }
-    }
-    return std::nullopt;
-}
-
-std::optional<ss::sstring>
-validate_iceberg_rest_catalog_auth_mode(const config::configuration& config) {
-    auto auth_mode = config.iceberg_rest_catalog_authentication_mode();
-    switch (auth_mode) {
-    case datalake_catalog_auth_mode::none:
-        return std::nullopt;
-    case datalake_catalog_auth_mode::bearer: {
-        const auto& token = config.iceberg_rest_catalog_token;
-        if (!token().has_value()) {
-            return fmt::format(
-              "Must set {} when iceberg_rest_catalog_authentication_mode is "
-              "set to {}.",
-              token.name(),
-              auth_mode);
-        }
-        break;
-    }
-    case datalake_catalog_auth_mode::oauth2: {
-        const auto& client_id = config.iceberg_rest_catalog_client_id;
-        const auto& client_secret = config.iceberg_rest_catalog_client_secret;
-        if (!(client_id().has_value() && client_secret().has_value())) {
-            return fmt::format(
-              "Must set both of {} and {} when "
-              "iceberg_rest_catalog_authentication_mode is "
-              "set to {}.",
-              client_id.name(),
-              client_secret.name(),
-              auth_mode);
-        }
-        break;
-    }
-    case datalake_catalog_auth_mode::aws_sigv4: {
-        // Determine effective credentials source
-        auto effective_creds_source
-          = config.iceberg_rest_catalog_aws_credentials_source().has_value()
-              ? config.iceberg_rest_catalog_aws_credentials_source().value()
-              : config.cloud_storage_credentials_source();
-
-        // When using aws_instance_metadata or sts, AWS credentials are not
-        // required
-        if (
-          effective_creds_source
-            == model::cloud_credentials_source::aws_instance_metadata
-          || effective_creds_source == model::cloud_credentials_source::sts) {
-            // We still require the region of the Glue endpoint.
-            auto effective_region
-              = config.iceberg_rest_catalog_aws_region().has_value()
-                  ? config.iceberg_rest_catalog_aws_region()
-                  : config.cloud_storage_region();
-            if (!effective_region.has_value()) {
-                return fmt::format(
-                  "Must set AWS region when using SigV4 authentication with "
-                  "aws_instance_metadata or sts credentials source.");
-            }
-        } else {
-            auto effective_access_key
-              = config.iceberg_rest_catalog_aws_access_key().has_value()
-                  ? config.iceberg_rest_catalog_aws_access_key()
-                  : config.cloud_storage_access_key();
-            auto effective_secret_key
-              = config.iceberg_rest_catalog_aws_secret_key().has_value()
-                  ? config.iceberg_rest_catalog_aws_secret_key()
-                  : config.cloud_storage_secret_key();
-            auto effective_region
-              = config.iceberg_rest_catalog_aws_region().has_value()
-                  ? config.iceberg_rest_catalog_aws_region()
-                  : config.cloud_storage_region();
-
-            if (!(effective_region.has_value()
-                  && effective_access_key.has_value()
-                  && effective_secret_key.has_value())) {
-                return fmt::format(
-                  "Must set AWS region, access key, and secret key when "
-                  "iceberg_rest_catalog_authentication_mode is set to {} with "
-                  "config_file credentials source. Configure either "
-                  "iceberg-specific "
-                  "parameters (iceberg_rest_catalog_aws_region, "
-                  "iceberg_rest_catalog_aws_access_key, "
-                  "iceberg_rest_catalog_aws_secret_key) or cloud storage "
-                  "parameters).",
-                  auth_mode);
-            }
-        }
-        break;
-    }
-    case datalake_catalog_auth_mode::gcp: {
-        // We implicitly use instance metadata when GCP auth mode is chosen.
-        break;
-    }
-    }
-    return std::nullopt;
-}
-
-std::optional<ss::sstring>
-validate_iceberg_rest_catalog_config(const config::configuration& config) {
-    auto catalog_type = config.iceberg_catalog_type();
-    if (catalog_type == datalake_catalog_type::rest) {
-        const auto& endpoint = config.iceberg_rest_catalog_endpoint;
-        if (!endpoint().has_value()) {
-            return fmt::format(
-              "Must set {} when iceberg_catalog_type is set to 'rest'",
-              endpoint.name());
-        }
-    }
-    return std::nullopt;
-}
-
-std::optional<ss::sstring>
 validate_consumer_group_metrics(const std::vector<ss::sstring>& metrics) {
     constexpr auto supported = std::to_array<std::string_view>(
       {"group", "partition", "consumer_lag"});
@@ -420,84 +260,6 @@ validate_consumer_group_metrics(const std::vector<ss::sstring>& metrics) {
             })) {
             return ssx::sformat("'{}' is not a valid consumer group metric", m);
         }
-    }
-
-    return std::nullopt;
-}
-
-std::optional<ss::sstring>
-validate_cloud_storage_cluster_name(const std::optional<ss::sstring>& input) {
-    // Long enough to be useful, short enough not to hit object storage name
-    // length limits in most cases.
-    constexpr size_t max_cluster_name_length = 64;
-
-    if (!input.has_value()) {
-        return std::nullopt;
-    }
-
-    if (
-      auto non_empty_string_opt = validate_non_empty_string_opt(input);
-      non_empty_string_opt.has_value()) {
-        return non_empty_string_opt;
-    }
-
-    if (input->length() > max_cluster_name_length) {
-        return fmt::format(
-          "Length must be at most {} characters", max_cluster_name_length);
-    }
-
-    for (char c : *input) {
-        if (!std::isalnum(c) && !(c == '-' || c == '_')) {
-            return "Only alphanumeric characters, hyphens, and underscores are "
-                   "allowed";
-        }
-    }
-
-    return std::nullopt;
-}
-
-std::optional<ss::sstring>
-validate_cloud_topics_reconciliation_intervals(const configuration& config) {
-    auto min_interval = config.cloud_topics_reconciliation_min_interval();
-    auto max_interval = config.cloud_topics_reconciliation_max_interval();
-
-    if (min_interval > max_interval) {
-        return fmt::format(
-          "cloud_topics_reconciliation_min_interval ({}) must be less than or "
-          "equal to cloud_topics_reconciliation_max_interval ({})",
-          min_interval.count(),
-          max_interval.count());
-    }
-
-    return std::nullopt;
-}
-
-std::optional<ss::sstring>
-validate_default_redpanda_storage_mode(const configuration& config) {
-    auto mode = config.default_redpanda_storage_mode();
-
-    if (
-      mode == model::redpanda_storage_mode::tiered
-      && !config.cloud_storage_enabled()) {
-        return fmt::format(
-          "default_redpanda_storage_mode cannot be set to tiered when "
-          "cloud_storage_enabled is false");
-    }
-
-    if (
-      mode == model::redpanda_storage_mode::cloud
-      && !config.cloud_storage_enabled()) {
-        return fmt::format(
-          "default_redpanda_storage_mode cannot be set to cloud when "
-          "cloud_storage_enabled is false");
-    }
-
-    if (
-      mode == model::redpanda_storage_mode::tiered_cloud
-      && !config.cloud_storage_enabled()) {
-        return fmt::format(
-          "default_redpanda_storage_mode cannot be set to tiered_cloud when "
-          "cloud_storage_enabled is false");
     }
 
     return std::nullopt;

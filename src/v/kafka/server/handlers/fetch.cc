@@ -1372,11 +1372,6 @@ class simple_fetch_planner final : public fetch_planner::impl {
                   return fail_all_partitions(error_code::unknown_server_error);
               }
 
-              if (unlikely(metadata_cache.should_reject_reads(tn_view))) {
-                  return fail_all_partitions(
-                    error_code::invalid_topic_exception);
-              }
-
               const auto& topic_md = metadata_cache.get_topic_metadata_ref(
                 model::topic_namespace_view{model::kafka_namespace, topic});
 

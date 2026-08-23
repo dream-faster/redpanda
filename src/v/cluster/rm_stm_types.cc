@@ -225,8 +225,7 @@ fence_batch_data read_fence_batch(model::record_batch&& b) {
 model::control_record_type parse_control_batch(const model::record_batch& b) {
     const auto& hdr = b.header();
     vassert(
-      hdr.type == model::record_batch_type::raft_data
-        || hdr.type == model::record_batch_type::ctp_placeholder,
+      hdr.type == model::record_batch_type::raft_data,
       "expect data batch type got {}",
       hdr.type);
     vassert(hdr.attrs.is_control(), "expect control attrs got {}", hdr.attrs);

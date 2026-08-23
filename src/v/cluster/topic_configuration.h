@@ -53,32 +53,7 @@ struct topic_configuration
         return tp_ns.ns == model::kafka_internal_namespace
                || tp_ns == model::kafka_consumer_offsets_nt;
     }
-    bool is_read_replica() const {
-        return properties.read_replica && properties.read_replica.value();
-    }
-    bool is_recovery_enabled() const {
-        return properties.recovery && properties.recovery.value();
-    }
-    bool has_remote_topic_namespace_override() const {
-        return properties.remote_topic_namespace_override.has_value();
-    }
-    bool is_schema_id_validation_enabled() const {
-        return properties.record_key_schema_id_validation.value_or(false)
-               || properties.record_key_schema_id_validation_compat.value_or(
-                 false)
-               || properties.record_value_schema_id_validation.value_or(false)
-               || properties.record_value_schema_id_validation_compat.value_or(
-                 false);
-    }
-    bool is_cloud_topic() const { return properties.is_cloud_topic(); }
     bool is_compacted() const { return properties.is_compacted(); }
-
-    const model::topic_namespace& remote_tp_ns() const {
-        if (has_remote_topic_namespace_override()) {
-            return properties.remote_topic_namespace_override.value();
-        }
-        return tp_ns;
-    }
 
     model::topic_namespace tp_ns;
     // using signed integer because Kafka protocol defines it as signed int

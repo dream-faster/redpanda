@@ -62,18 +62,6 @@ inline model::compression random_compression() {
         model::compression::snappy});
 }
 
-inline model::shadow_indexing_mode random_shadow_indexing_mode() {
-    return random_generators::random_choice(
-      std::vector<model::shadow_indexing_mode>{
-        model::shadow_indexing_mode::archival,
-        model::shadow_indexing_mode::drop_archival,
-        model::shadow_indexing_mode::drop_fetch,
-        model::shadow_indexing_mode::drop_full,
-        model::shadow_indexing_mode::disabled,
-        model::shadow_indexing_mode::full,
-      });
-}
-
 inline model::timestamp_type random_timestamp_type() {
     return random_generators::random_choice(
       std::vector<model::timestamp_type>{

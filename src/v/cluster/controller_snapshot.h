@@ -16,11 +16,8 @@
 #include "absl/container/flat_hash_set.h"
 #include "absl/container/node_hash_map.h"
 #include "cluster/client_quota_serde.h"
-#include "cluster/cluster_recovery_state.h"
-#include "cluster/data_migration_types.h"
 #include "cluster/security_types.h"
 #include "cluster/types.h"
-#include "cluster_link/model/types.h"
 #include "container/chunked_hash_map.h"
 #include "container/chunked_vector.h"
 #include "features/feature_table_snapshot.h"
@@ -194,20 +191,6 @@ struct topics_t
 
     force_recoverable_partitions_t partitions_to_force_recover;
 
-    chunked_hash_map<
-      model::topic_namespace,
-      nt_iceberg_tombstone,
-      model::topic_namespace_hash,
-      model::topic_namespace_eq>
-      iceberg_tombstones;
-
-    chunked_hash_map<
-      nt_revision,
-      nt_cloud_topic_tombstone,
-      nt_revision_hash,
-      nt_revision_eq>
-      cloud_topic_tombstones;
-
     friend bool operator==(const topics_t&, const topics_t&) = default;
 
     ss::future<> serde_async_write(iobuf&);
@@ -255,32 +238,6 @@ struct metrics_reporter_t
     auto serde_fields() { return std::tie(cluster_info); }
 };
 
-struct plugins_t
-  : public serde::
-      envelope<plugins_t, serde::version<0>, serde::compat_version<0>> {
-    absl::btree_map<model::transform_id, model::transform_metadata> transforms;
-
-    friend bool operator==(const plugins_t&, const plugins_t&) = default;
-
-    auto serde_fields() { return std::tie(transforms); }
-};
-
-struct cluster_recovery_t
-  : public serde::envelope<
-      cluster_recovery_t,
-      serde::version<1>,
-      serde::compat_version<0>> {
-    std::vector<cluster_recovery_state> recovery_states;
-    pending_bootstrap_params_t pending_bootstrap_params;
-
-    friend bool
-    operator==(const cluster_recovery_t&, const cluster_recovery_t&) = default;
-
-    auto serde_fields() {
-        return std::tie(recovery_states, pending_bootstrap_params);
-    }
-};
-
 struct client_quotas_t
   : public serde::
       envelope<client_quotas_t, serde::version<0>, serde::compat_version<0>> {
@@ -291,36 +248,6 @@ struct client_quotas_t
     operator==(const client_quotas_t&, const client_quotas_t&) = default;
 
     auto serde_fields() { return std::tie(quotas); }
-};
-
-struct data_migrations_t
-  : public serde::
-      envelope<data_migrations_t, serde::version<0>, serde::compat_version<0>> {
-    data_migrations::id next_id;
-    absl::
-      node_hash_map<data_migrations::id, data_migrations::migration_metadata>
-        migrations;
-
-    friend bool
-    operator==(const data_migrations_t&, const data_migrations_t&) = default;
-
-    auto serde_fields() { return std::tie(next_id, migrations); }
-};
-
-struct cluster_link_t
-  : public serde::
-      envelope<cluster_link_t, serde::version<0>, serde::compat_version<0>> {
-    chunked_hash_map<
-      ::cluster_link::model::id_t,
-      ::cluster_link::model::metadata>
-      links;
-    chunked_hash_map<::cluster_link::model::id_t, model::revision_id>
-      link_revisions;
-
-    friend bool
-    operator==(const cluster_link_t&, const cluster_link_t&) = default;
-
-    auto serde_fields() { return std::tie(links, link_revisions); }
 };
 
 } // namespace controller_snapshot_parts
@@ -337,11 +264,7 @@ struct controller_snapshot
     controller_snapshot_parts::topics_t topics;
     controller_snapshot_parts::security_t security;
     controller_snapshot_parts::metrics_reporter_t metrics_reporter;
-    controller_snapshot_parts::plugins_t plugins;
-    controller_snapshot_parts::cluster_recovery_t cluster_recovery;
     controller_snapshot_parts::client_quotas_t client_quotas;
-    controller_snapshot_parts::data_migrations_t data_migrations;
-    controller_snapshot_parts::cluster_link_t cluster_links;
 
     friend bool operator==(
       const controller_snapshot&, const controller_snapshot&) = default;

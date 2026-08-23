@@ -206,17 +206,7 @@ public:
       ss::sharded<topics_frontend>&,
       ss::sharded<storage::api>&,
       ss::sharded<features::feature_table>&,
-      ss::sharded<cluster::cluster_recovery_table>&,
       config::binding<std::chrono::milliseconds> housekeeping_interval,
-      config::binding<std::optional<size_t>>
-        initial_retention_local_target_bytes,
-      config::binding<std::optional<std::chrono::milliseconds>>
-        initial_retention_local_target_ms,
-      config::binding<std::optional<size_t>>
-        retention_local_target_bytes_default,
-      config::binding<std::chrono::milliseconds>
-        retention_local_target_ms_default,
-      config::binding<bool> retention_local_strict,
       config::binding<uint32_t> controller_backend_reconciliation_concurrency,
       ss::scheduling_group scheduling_group,
       ss::sharded<seastar::abort_source>&);
@@ -395,20 +385,10 @@ private:
     ss::sharded<topics_frontend>& _topics_frontend;
     ss::sharded<storage::api>& _storage;
     ss::sharded<features::feature_table>& _features;
-    ss::sharded<cluster_recovery_table>& _recovery_table;
     model::node_id _self;
     ss::sstring _data_directory;
     config::binding<std::chrono::milliseconds> _housekeeping_interval;
     simple_time_jitter<ss::lowres_clock> _housekeeping_jitter;
-    config::binding<std::optional<size_t>>
-      _initial_retention_local_target_bytes;
-    config::binding<std::optional<std::chrono::milliseconds>>
-      _initial_retention_local_target_ms;
-    config::binding<std::optional<size_t>>
-      _retention_local_target_bytes_default;
-    config::binding<std::chrono::milliseconds>
-      _retention_local_target_ms_default;
-    config::binding<bool> _retention_local_strict;
     config::binding<uint32_t> _controller_backend_reconciliation_concurrency;
     ss::scheduling_group _scheduling_group;
     ss::sharded<ss::abort_source>& _as;

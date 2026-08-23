@@ -98,14 +98,6 @@ public:
          */
         _fetch = co_await ss::create_scheduling_group("fetch", 1000);
         /**
-         * WASM transforms scheduling group.
-         */
-        _transforms = co_await ss::create_scheduling_group("transforms", 100);
-        /**
-         * Group used to run datalake translation.
-         */
-        _datalake = co_await ss::create_scheduling_group("datalake", 100);
-        /**
          * Group used to handle Kafka produce requests, most of the Raft leader
          * replication part is done in this scheduling group.
          */
@@ -120,23 +112,6 @@ public:
          * Group used to handle cluster linking tasks. It includes tasks
          * synchronizing metadata as well as replication.
          */
-        _cluster_linking = co_await ss::create_scheduling_group(
-          "cluster_linking", 600);
-        /**
-         * Cloud topics compaction scheduling group.
-         */
-        _cloud_topics_compaction = co_await ss::create_scheduling_group(
-          "cloud_topics_compaction", 150);
-        /**
-         * Cloud topics reconciler scheduling group.
-         */
-        _cloud_topics_reconciler = co_await ss::create_scheduling_group(
-          "cloud_topics_reconciler", 150);
-        /**
-         * Cloud topics metastore scheduling group.
-         */
-        _cloud_topics_metastore = co_await ss::create_scheduling_group(
-          "cloud_topics_metastore", 1000);
     }
 
     ss::scheduling_group admin_sg() { return _admin; }
@@ -148,15 +123,10 @@ public:
         return _cache_background_reclaim;
     }
     ss::scheduling_group compaction_sg() { return _compaction; }
-    ss::scheduling_group cloud_topics_compaction_sg() {
-        return _cloud_topics_compaction;
-    }
     ss::scheduling_group raft_send_sg() { return _raft_send; }
     ss::scheduling_group archival_upload() { return _archival_upload; }
     ss::scheduling_group raft_heartbeats() { return _raft_heartbeats; }
     ss::scheduling_group self_test_sg() { return _self_test; }
-    ss::scheduling_group transforms_sg() { return _transforms; }
-    ss::scheduling_group datalake_sg() { return _datalake; }
     /**
      * @brief Scheduling group for fetch requests.
      *
@@ -178,15 +148,6 @@ public:
 
     ss::scheduling_group ts_read_sg() { return _ts_read; }
 
-    ss::scheduling_group cluster_linking_sg() { return _cluster_linking; }
-
-    ss::scheduling_group cloud_topics_reconciler_sg() {
-        return _cloud_topics_reconciler;
-    }
-    ss::scheduling_group cloud_topics_metastore_sg() {
-        return _cloud_topics_metastore;
-    }
-
     std::vector<std::reference_wrapper<const ss::scheduling_group>>
     all_scheduling_groups() const {
         return {
@@ -202,14 +163,8 @@ public:
           std::cref(_raft_heartbeats),
           std::cref(_self_test),
           std::cref(_fetch),
-          std::cref(_transforms),
-          std::cref(_datalake),
           std::cref(_produce),
-          std::cref(_ts_read),
-          std::cref(_cluster_linking),
-          std::cref(_cloud_topics_compaction),
-          std::cref(_cloud_topics_reconciler),
-          std::cref(_cloud_topics_metastore)};
+          std::cref(_ts_read)};
     }
 
 private:
@@ -228,12 +183,6 @@ private:
     ss::scheduling_group _raft_heartbeats;
     ss::scheduling_group _self_test;
     ss::scheduling_group _fetch;
-    ss::scheduling_group _transforms;
-    ss::scheduling_group _datalake;
     ss::scheduling_group _produce;
     ss::scheduling_group _ts_read;
-    ss::scheduling_group _cluster_linking;
-    ss::scheduling_group _cloud_topics_compaction;
-    ss::scheduling_group _cloud_topics_reconciler;
-    ss::scheduling_group _cloud_topics_metastore;
 };

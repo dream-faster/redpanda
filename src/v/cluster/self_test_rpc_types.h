@@ -36,7 +36,7 @@ ss::sstring self_test_status_as_string(self_test_status sts);
 
 fmt::iterator format_to(self_test_status sts, fmt::iterator);
 
-enum class self_test_stage : int8_t { idle = 0, disk, net, cloud };
+enum class self_test_stage : int8_t { idle = 0, disk, net };
 
 ss::sstring self_test_stage_as_string(self_test_stage sts);
 
@@ -187,45 +187,6 @@ struct netcheck_opts
     }
 };
 
-struct cloudcheck_opts
-  : serde::
-      envelope<cloudcheck_opts, serde::version<0>, serde::compat_version<0>> {
-    // Descriptive name given to test run
-    ss::sstring name{"Cloud credentials check"};
-
-    // Timeout duration for cloud storage requests.
-    ss::lowres_clock::duration timeout{std::chrono::milliseconds(10000)};
-
-    // Backoff duration for cloud storage requests.
-    ss::lowres_clock::duration backoff{std::chrono::milliseconds(10)};
-
-    // Scheduling group that the benchmark will operate under.
-    ss::scheduling_group sg;
-
-    static cloudcheck_opts from_json(const json::Value& obj) {
-        // The application using these parameters will perform any validation
-        cloudcheck_opts opts;
-        if (obj.HasMember("name")) {
-            opts.name = obj["name"].GetString();
-        }
-        if (obj.HasMember("timeout_ms")) {
-            opts.timeout = std::chrono::milliseconds(
-              obj["timeout_ms"].GetInt());
-        }
-        if (obj.HasMember("backoff_ms")) {
-            opts.backoff = std::chrono::milliseconds(
-              obj["backoff_ms"].GetInt());
-        }
-        return opts;
-    }
-
-    auto serde_fields() { return std::tie(name, timeout, backoff); }
-    fmt::iterator format_to(fmt::iterator it) const {
-        return fmt::format_to(
-          it, "{{name: {} timeout: {} backoff: {}}}", name, timeout, backoff);
-    }
-};
-
 // Captures unparsed test types passed to self test backend.
 struct unparsed_check
   : serde::
@@ -324,11 +285,7 @@ struct start_test_request
     std::vector<diskcheck_opts> dtos;
     std::vector<netcheck_opts> ntos;
     std::vector<unparsed_check> unparsed_checks;
-    std::vector<cloudcheck_opts> ctos;
-
-    auto serde_fields() {
-        return std::tie(id, dtos, ntos, unparsed_checks, ctos);
-    }
+    auto serde_fields() { return std::tie(id, dtos, ntos, unparsed_checks); }
     fmt::iterator format_to(fmt::iterator it) const {
         std::stringstream ss;
         for (const auto& v : dtos) {
@@ -336,9 +293,6 @@ struct start_test_request
         }
         for (const auto& v : ntos) {
             fmt::print(ss, "netcheck_opts: {}", v);
-        }
-        for (const auto& v : ctos) {
-            fmt::print(ss, "cloudcheck_opts: {}", v);
         }
         for (const auto& v : unparsed_checks) {
             fmt::print(ss, "unparsed_check: {}", v);

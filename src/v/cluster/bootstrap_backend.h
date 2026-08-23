@@ -44,8 +44,7 @@ public:
       ss::sharded<storage::api>&,
       ss::sharded<members_manager>&,
       ss::sharded<features::feature_table>&,
-      ss::sharded<feature_backend>&,
-      ss::sharded<cluster_recovery_table>&);
+      ss::sharded<feature_backend>&);
 
     ss::future<std::error_code> apply_update(model::record_batch);
 
@@ -66,7 +65,6 @@ private:
     ss::sharded<members_manager>& _members_manager;
     ss::sharded<features::feature_table>& _feature_table;
     ss::sharded<feature_backend>& _feature_backend;
-    ss::sharded<cluster_recovery_table>& _cluster_recovery_table;
     std::optional<model::cluster_uuid> _cluster_uuid_applied;
 };
 

@@ -37,11 +37,8 @@ FIXTURE_TEST(
     };
 
     update_cluster_config(lconf().cloud_storage_enabled.name(), "true");
-    update_cluster_config(lconf().enable_schema_id_validation.name(), "compat");
     auto unset_cluster_config = ss::defer([&] {
         update_cluster_config(lconf().cloud_storage_enabled.name(), "false");
-        update_cluster_config(
-          lconf().enable_schema_id_validation.name(), "none");
     });
 
     std::initializer_list<test_t> enterprise_props{
@@ -52,11 +49,7 @@ FIXTURE_TEST(
       with(kafka::topic_property_remote_read, true),
       with(kafka::topic_property_remote_write, true),
       // schema id validation
-      with(kafka::topic_property_record_key_schema_id_validation, true),
-      with(kafka::topic_property_record_key_schema_id_validation_compat, true),
-      with(kafka::topic_property_record_value_schema_id_validation, true),
-      with(
-        kafka::topic_property_record_value_schema_id_validation_compat, true),
+
       // pin_leadership_props
       with(
         kafka::topic_property_leaders_preference,

@@ -27,36 +27,19 @@ namespace kafka {
 
 struct log_partition_data {
     describe_log_dirs_partition local;
-    std::optional<describe_log_dirs_partition> remote;
 };
 
 using partition_dir_set
   = chunked_hash_map<model::topic, chunked_vector<log_partition_data>>;
 
-static ss::future<log_partition_data>
-describe_partition(const kafka::partition_proxy& p) {
-    auto result = log_partition_data{
+static log_partition_data describe_partition(const kafka::partition_proxy& p) {
+    return log_partition_data{
       .local = describe_log_dirs_partition{
         .partition_index = p.ntp().tp.partition(),
         .partition_size = static_cast<int64_t>(p.local_size_bytes()),
         .offset_lag = std::max(p.offset_lag()(), int64_t(0)),
         .is_future_key = false,
       }};
-
-    auto cloud_space = co_await p.cloud_size_bytes();
-    if (
-      cloud_space.has_value()
-      && config::shard_local_cfg()
-           .kafka_enable_describe_log_dirs_remote_storage()) {
-        result.remote = describe_log_dirs_partition{
-          .partition_index = p.ntp().tp.partition(),
-          .partition_size = static_cast<int64_t>(cloud_space.value()),
-          .offset_lag = std::max(p.offset_lag()(), int64_t(0)),
-          .is_future_key = false,
-        };
-    }
-
-    co_return result;
 }
 
 static ss::future<partition_dir_set> collect_mapper(
@@ -84,7 +67,7 @@ static ss::future<partition_dir_set> collect_mapper(
     for (const auto& ktp : ktps) {
         auto proxy = make_partition_proxy(ktp, pm);
         if (proxy) {
-            ret[ktp.get_topic()].push_back(co_await describe_partition(*proxy));
+            ret[ktp.get_topic()].push_back(describe_partition(*proxy));
         }
     }
     co_return ret;
@@ -133,16 +116,6 @@ ss::future<response_ptr> describe_log_dirs_handler::handle(
         .log_dir = config::node().data_directory().as_sstring(),
       });
 
-    // We don't know until we iterate over topics whether any of them are
-    // using cloud storage, so create the result structure speculatively.
-    auto bucket_name
-      = config::shard_local_cfg().cloud_storage_bucket().value_or("");
-    response.data.results.push_back(
-      describe_log_dirs_result{
-        .error_code = error_code::none,
-        .log_dir = fmt::format("remote://{}", bucket_name),
-      });
-
     auto authz = ctx.authorized(
       security::acl_operation::describe, security::default_cluster_name);
 
@@ -157,39 +130,21 @@ ss::future<response_ptr> describe_log_dirs_handler::handle(
     }
 
     auto& local_results = response.data.results.at(0);
-    auto& remote_results = response.data.results.at(1);
 
     auto partitions = co_await collect(ctx, std::move(request.data.topics));
     while (!partitions.empty()) {
         auto node = partitions.extract(partitions.begin());
 
         chunked_vector<describe_log_dirs_partition> local_partitions;
-        chunked_vector<describe_log_dirs_partition> remote_partitions;
         for (const auto& i : node.second) {
             local_partitions.push_back(i.local);
-            if (i.remote.has_value()) {
-                remote_partitions.push_back(i.remote.value());
-            }
         }
 
         local_results.topics.push_back(
           describe_log_dirs_topic{
-            .name = node.first,
+            .name = std::move(node.first),
             .partitions = std::move(local_partitions),
           });
-        if (!remote_partitions.empty()) {
-            remote_results.topics.push_back(
-              describe_log_dirs_topic{
-                .name = std::move(node.first),
-                .partitions = std::move(remote_partitions),
-              });
-        }
-    }
-
-    if (remote_results.topics.empty()) {
-        // Drop the remote storage part of the response if we had no
-        // partitions with remote data to report
-        response.data.results.pop_back();
     }
 
     co_return co_await ctx.respond(std::move(response));

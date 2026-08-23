@@ -9,22 +9,13 @@
 
 #include "cluster/controller.h"
 
-#include "cloud_storage/topic_mount_handler.h"
+#include "absl/container/flat_hash_set.h"
+#include "base/outcome.h"
 #include "cluster/bootstrap_backend.h"
 #include "cluster/client_quota_backend.h"
 #include "cluster/client_quota_frontend.h"
 #include "cluster/client_quota_store.h"
-#include "cluster/cloud_metadata/cluster_manifest.h"
-#include "cluster/cloud_metadata/cluster_recovery_backend.h"
-#include "cluster/cloud_metadata/error_outcome.h"
-#include "cluster/cloud_metadata/manifest_downloads.h"
-#include "cluster/cloud_metadata/offsets_upload_rpc_types.h"
-#include "cluster/cloud_metadata/producer_id_recovery_manager.h"
-#include "cluster/cloud_metadata/uploader.h"
 #include "cluster/cluster_discovery.h"
-#include "cluster/cluster_link/frontend.h"
-#include "cluster/cluster_link/table.h"
-#include "cluster/cluster_recovery_table.h"
 #include "cluster/config_frontend.h"
 #include "cluster/controller_api.h"
 #include "cluster/controller_backend.h"
@@ -33,14 +24,6 @@
 #include "cluster/controller_service.h"
 #include "cluster/controller_stm.h"
 #include "cluster/controller_utils.h"
-#include "cluster/data_migrated_resources.h"
-#include "cluster/data_migration_backend.h"
-#include "cluster/data_migration_frontend.h"
-#include "cluster/data_migration_irpc_frontend.h"
-#include "cluster/data_migration_router.h"
-#include "cluster/data_migration_table.h"
-#include "cluster/data_migration_types.h"
-#include "cluster/data_migration_worker.h"
 #include "cluster/drain_manager.h"
 #include "cluster/ephemeral_credential_frontend.h"
 #include "cluster/feature_backend.h"
@@ -60,8 +43,6 @@
 #include "cluster/partition_balancer_state.h"
 #include "cluster/partition_leaders_table.h"
 #include "cluster/partition_manager.h"
-#include "cluster/plugin_backend.h"
-#include "cluster/plugin_frontend.h"
 #include "cluster/raft0_utils.h"
 #include "cluster/scheduling/partition_allocator.h"
 #include "cluster/security_frontend.h"
@@ -81,6 +62,7 @@
 #include "raft/fundamental.h"
 #include "raft/fwd.h"
 #include "raft/types.h"
+#include "rpc/connection_cache.h"
 #include "security/authorizer.h"
 #include "security/credential_store.h"
 #include "security/ephemeral_credential_store.h"
@@ -114,8 +96,6 @@ controller::controller(
   ss::sharded<node::local_monitor>& local_monitor,
   ss::sharded<raft::group_manager>& raft_manager,
   ss::sharded<features::feature_table>& feature_table,
-  ss::sharded<cloud_storage::remote>& cloud_storage_api,
-  ss::sharded<cloud_io::cache>& cloud_cache,
   ss::sharded<node_status_table>& node_status_table,
   ss::sharded<cluster::metadata_cache>& metadata_cache,
   ss::scheduling_group scheduling_group)
@@ -130,8 +110,6 @@ controller::controller(
   , _security_manager(_credentials, _authorizer, _roles)
   , _raft_manager(raft_manager)
   , _feature_table(feature_table)
-  , _cloud_storage_api(cloud_storage_api)
-  , _cloud_cache(cloud_cache)
   , _node_status_table(node_status_table)
   , _metadata_cache(metadata_cache)
   , _probe(*this)
@@ -141,17 +119,6 @@ controller::controller(
 // Explicit destructor in the .cc file just to avoid bloating the header with
 // includes for destructors of all its members (e.g. the metadata uploader).
 controller::~controller() = default;
-
-std::optional<cloud_storage_clients::bucket_name>
-controller::get_configured_bucket() {
-    auto& bucket_property = cloud_storage::configuration::get_bucket_config();
-    if (
-      !bucket_property.is_overriden() || !bucket_property().has_value()
-      || !_cloud_storage_api.local_is_initialized()) {
-        return std::nullopt;
-    }
-    return cloud_storage_clients::bucket_name(bucket_property().value());
-}
 
 ss::future<> controller::wire_up() {
     return _as.start()
@@ -169,16 +136,6 @@ ss::future<> controller::wire_up() {
       .then([this] { return _credentials.start(); })
       .then([this] { return _ephemeral_credentials.start(); })
       .then([this] { return _roles.start(); })
-      .then([this] { return _data_migrated_resources.start(); })
-      .then([this] {
-          return _data_migration_table.start_on(
-            data_migrations::data_migrations_shard,
-            std::ref(_data_migrated_resources),
-            std::ref(_tp_state),
-            config::shard_local_cfg().cloud_storage_enabled()
-              && config::shard_local_cfg()
-                   .cloud_storage_disable_archiver_manager());
-      })
       .then([this] {
           return _authorizer.start(
             ss::sharded_parameter(
@@ -231,12 +188,8 @@ ss::future<> controller::wire_up() {
                 return config::shard_local_cfg().nested_group_behavior.bind();
             }));
       })
-      .then([this] {
-          return _tp_state.start(
-            ss::sharded_parameter(
-              [this] { return std::ref(_data_migrated_resources.local()); }),
-            config::node().node_id().value());
-      })
+      .then(
+        [this] { return _tp_state.start(config::node().node_id().value()); })
       .then([this] {
           return _partition_balancer_state.start_single(
             std::ref(_tp_state),
@@ -261,16 +214,7 @@ ss::future<> controller::wire_up() {
 ss::future<> controller::start(
   cluster_discovery& discovery,
   ss::abort_source& shard0_as,
-  ss::shared_ptr<cluster::cloud_metadata::offsets_upload_requestor>
-    offsets_uploader,
-  ss::shared_ptr<cluster::cloud_metadata::producer_id_recovery_manager>
-    producer_id_recovery,
-  ss::shared_ptr<cluster::cloud_metadata::offsets_recovery_requestor>
-    offsets_recovery,
-  std::chrono::milliseconds application_start_time,
-  ss::sharded<cluster::data_migrations::group_proxy>&
-    data_migrations_group_proxy,
-  ss::sharded<cloud_topics::state_accessors>* ct_state) {
+  std::chrono::milliseconds application_start_time) {
     /**
      * Switch to cluster scheduling group to ensure that all the controller
      * services are started within that scheduling group.
@@ -317,25 +261,10 @@ ss::future<> controller::start(
       std::ref(_storage),
       std::ref(_members_manager),
       std::ref(_feature_table),
-      std::ref(_feature_backend),
-      std::ref(_recovery_table));
-
-    co_await _recovery_table.start();
-    co_await _recovery_manager.start_single(
-      std::ref(_as),
-      std::ref(_stm),
-      std::ref(_cloud_storage_api),
-      std::ref(_recovery_table),
-      std::ref(_storage),
-      _raft0);
-
-    co_await _plugin_table.start();
-    co_await _plugin_backend.start_single(&_plugin_table);
+      std::ref(_feature_backend));
 
     co_await _quota_store.start();
     co_await _quota_backend.start_single(std::ref(_quota_store));
-
-    co_await _cluster_link_table.start();
 
     co_await _config_frontend.start(
       std::ref(_stm),
@@ -350,55 +279,6 @@ ss::future<> controller::start(
       std::ref(_members_table),
       std::ref(_as));
 
-    if (auto bucket_opt = get_configured_bucket(); bucket_opt.has_value()) {
-        co_await _topic_mount_handler.start(
-          bucket_opt.value(), ss::sharded_parameter([this] {
-              return std::ref(_cloud_storage_api.local());
-          }));
-    }
-
-    co_await _data_migration_frontend.start(
-      _raft0->self().id(),
-      _cloud_storage_api.local_is_initialized(),
-      std::ref(_data_migration_table),
-      std::ref(_feature_table),
-      std::ref(_stm),
-      std::ref(_partition_leaders),
-      ss::sharded_parameter([&data_migrations_group_proxy] {
-          return data_migrations_group_proxy.local_shared();
-      }),
-      std::ref(_connections),
-      ss::sharded_parameter(
-        [this]() -> std::optional<
-                   std::reference_wrapper<cloud_storage::topic_mount_handler>> {
-            if (_topic_mount_handler.local_is_initialized()) {
-                return std::ref(_topic_mount_handler.local());
-            } else {
-                return {};
-            }
-        }),
-      std::ref(_as));
-
-    co_await _data_migration_router.start(
-      _raft0->self().id(),
-      ss::sharded_parameter([&data_migrations_group_proxy] {
-          return data_migrations_group_proxy.local_shared();
-      }),
-      std::ref(_shard_table),
-      std::ref(_metadata_cache),
-      std::ref(_connections),
-      std::ref(_partition_leaders),
-      ss::sharded_parameter([this] { return std::ref(_as.local()); }));
-    co_await _data_migration_worker.start(
-      _raft0->self().id(),
-      ss::sharded_parameter(
-        [this] { return std::ref(_partition_leaders.local()); }),
-      ss::sharded_parameter(
-        [this] { return std::ref(_partition_manager.local()); }),
-      ss::sharded_parameter([&data_migrations_group_proxy] {
-          return data_migrations_group_proxy.local_shared();
-      }),
-      ss::sharded_parameter([this] { return std::ref(_as.local()); }));
     {
         limiter_configuration limiter_conf{
           config::shard_local_cfg().enable_controller_log_rate_limiting.bind(),
@@ -439,15 +319,8 @@ ss::future<> controller::start(
           std::ref(_config_manager),
           std::ref(_feature_backend),
           std::ref(_bootstrap_backend),
-          std::ref(_plugin_backend),
-          std::ref(_recovery_manager),
-          std::ref(_quota_backend),
-          std::ref(_data_migration_table.local()),
-          std::ref(_cluster_link_table.local()));
+          std::ref(_quota_backend));
     }
-    co_await _epoch_service.start(_raft0->self().id(), &_connections);
-    co_await _epoch_service.invoke_on_all(&cluster_epoch_service<>::start);
-    _epoch_service.local().set_raft0(_raft0, _stm, _raft_manager);
 
     co_await _members_frontend.start(
       std::ref(_stm),
@@ -479,16 +352,11 @@ ss::future<> controller::start(
       std::ref(_tp_state),
       std::ref(_hm_frontend),
       std::ref(_as),
-      std::ref(_cloud_storage_api),
       std::ref(_feature_table),
       std::ref(_members_table),
       std::ref(_partition_manager),
       std::ref(_shard_table),
       std::ref(_shard_balancer),
-      std::ref(_storage),
-      ss::sharded_parameter(
-        [this] { return std::ref(_data_migrated_resources.local()); }),
-      ss::sharded_parameter([this] { return std::ref(_plugin_table.local()); }),
       ss::sharded_parameter(
         [this] { return std::ref(_metadata_cache.local()); }),
       ss::sharded_parameter([] {
@@ -505,35 +373,12 @@ ss::future<> controller::start(
       ss::sharded_parameter(
         [] { return config::shard_local_cfg().kafka_topics_max.bind(); }));
 
-    co_await _plugin_frontend.start(
-      _raft0->self().id(),
-      ss::sharded_parameter([this] { return &_partition_leaders.local(); }),
-      ss::sharded_parameter([this] { return &_plugin_table.local(); }),
-      ss::sharded_parameter([this] { return &_tp_state.local(); }),
-      &_cluster_link_frontend,
-      ss::sharded_parameter([this] {
-          return _stm.local_is_initialized() ? &_stm.local() : nullptr;
-      }),
-      ss::sharded_parameter([this] { return &_connections.local(); }),
-      ss::sharded_parameter([this] { return &_as.local(); }));
-
     co_await _quota_frontend.start(
       _raft0->self().id(),
       std::ref(_stm),
       std::ref(_connections),
       std::ref(_partition_leaders),
       std::ref(_as));
-
-    co_await _cluster_link_frontend.start(
-      _raft0->self().id(),
-      ss::sharded_parameter([this] { return &_partition_leaders.local(); }),
-      ss::sharded_parameter([this] { return &_cluster_link_table.local(); }),
-      ss::sharded_parameter([this] {
-          return _stm.local_is_initialized() ? &_stm.local() : nullptr;
-      }),
-      ss::sharded_parameter([this] { return &_connections.local(); }),
-      ss::sharded_parameter([this] { return &_feature_table.local(); }),
-      ss::sharded_parameter([this] { return &_as.local(); }));
 
     co_await _members_backend.start_single(
       std::ref(_tp_frontend),
@@ -555,29 +400,10 @@ ss::future<> controller::start(
       std::ref(_tp_frontend),
       std::ref(_storage),
       std::ref(_feature_table),
-      std::ref(_recovery_table),
       ss::sharded_parameter([] {
           return config::shard_local_cfg()
             .controller_backend_housekeeping_interval_ms.bind();
       }),
-      ss::sharded_parameter([] {
-          return config::shard_local_cfg()
-            .initial_retention_local_target_bytes_default.bind();
-      }),
-      ss::sharded_parameter([] {
-          return config::shard_local_cfg()
-            .initial_retention_local_target_ms_default.bind();
-      }),
-      ss::sharded_parameter([] {
-          return config::shard_local_cfg()
-            .retention_local_target_bytes_default.bind();
-      }),
-      ss::sharded_parameter([] {
-          return config::shard_local_cfg()
-            .retention_local_target_ms_default.bind();
-      }),
-      ss::sharded_parameter(
-        [] { return config::shard_local_cfg().retention_local_strict.bind(); }),
       ss::sharded_parameter([] {
           return config::shard_local_cfg()
             .controller_backend_reconciliation_concurrency.bind();
@@ -707,7 +533,6 @@ ss::future<> controller::start(
       std::ref(_connections),
       std::ref(_members_table),
       std::ref(_partition_balancer),
-      std::ref(_partition_manager),
       std::ref(_partition_leaders),
       std::ref(_as));
 
@@ -751,7 +576,6 @@ ss::future<> controller::start(
       std::ref(_local_monitor),
       std::ref(_drain_manager),
       std::ref(_feature_table),
-      std::ref(_partition_leaders),
       std::ref(_tp_state),
       std::ref(_node_status_table));
 
@@ -799,10 +623,8 @@ ss::future<> controller::start(
       std::ref(_feature_table),
       std::ref(_roles),
       std::ref(_authorizer),
-      std::addressof(_plugin_table),
       std::addressof(_feature_manager),
       std::addressof(_storage),
-      std::addressof(_cluster_link_frontend),
       std::ref(_as));
     co_await _metrics_reporter.invoke_on(0, &metrics_reporter::start);
 
@@ -842,79 +664,6 @@ ss::future<> controller::start(
       config::shard_local_cfg().health_monitor_max_metadata_age.bind());
     co_await _partition_balancer.invoke_on(
       partition_balancer_backend::shard, &partition_balancer_backend::start);
-
-    if (!config::node().recovery_mode_enabled()) {
-        auto bucket_opt = get_configured_bucket();
-        if (bucket_opt.has_value()) {
-            cloud_storage_clients::bucket_name bucket = bucket_opt.value();
-            _metadata_uploader = std::make_unique<cloud_metadata::uploader>(
-              _raft_manager.local(),
-              _storage.local(),
-              bucket,
-              _cloud_storage_api.local(),
-              _raft0,
-              _tp_state.local(),
-              offsets_uploader);
-            if (
-              config::shard_local_cfg().enable_cluster_metadata_upload_loop()) {
-                _metadata_uploader->start();
-            }
-            _recovery_backend
-              = std::make_unique<cloud_metadata::cluster_recovery_backend>(
-                _recovery_manager.local(),
-                _raft_manager.local(),
-                _cloud_storage_api.local(),
-                _cloud_cache.local(),
-                _members_table.local(),
-                _feature_table.local(),
-                _credentials.local(),
-                _roles.local(),
-                _tp_state.local(),
-                _api.local(),
-                _feature_manager.local(),
-                _config_frontend.local(),
-                _security_frontend.local(),
-                _tp_frontend.local(),
-                producer_id_recovery,
-                offsets_recovery,
-                std::ref(_recovery_table),
-                _raft0,
-                ct_state);
-            if (!config::shard_local_cfg()
-                   .disable_cluster_recovery_loop_for_tests()) {
-                _recovery_backend->start();
-            }
-        }
-    }
-
-    co_await _data_migration_backend.start_on(
-      data_migrations::data_migrations_shard,
-      std::ref(_data_migration_table.local()),
-      std::ref(_data_migration_frontend.local()),
-      std::ref(_data_migration_router.local()),
-      std::ref(_data_migration_worker),
-      std::ref(_partition_leaders.local()),
-      std::ref(_tp_frontend.local()),
-      std::ref(_tp_state.local()),
-      std::ref(_shard_table.local()),
-      ss::sharded_parameter([&data_migrations_group_proxy] {
-          // ss::sharded::start copies all parameters on all shards before
-          // checking shard number, and copying an ss::shared_ptr on a wrong
-          // shard is a no-no. Use ss::sharded_parameter to only copy the lambda
-          // and invoke it on each shard individually.
-          return data_migrations_group_proxy.local_shared();
-      }),
-      _cloud_storage_api.local_is_initialized()
-        ? std::make_optional(std::ref(_cloud_storage_api.local()))
-        : std::nullopt,
-      _topic_mount_handler.local_is_initialized()
-        ? std::make_optional(std::ref(_topic_mount_handler.local()))
-        : std::nullopt,
-      std::ref(_as.local()));
-    co_await _data_migration_backend.invoke_on_instance(
-      &data_migrations::backend::start);
-    co_await _data_migration_irpc_frontend.start(
-      std::ref(_feature_table), std::ref(_data_migration_backend));
 
     co_await _topic_metrics_watcher.start(
       ss::sharded_parameter([this] { return std::ref(_tp_state.local()); }),
@@ -956,9 +705,6 @@ ss::future<> controller::shutdown_input() {
     if (_raft0) {
         _raft0->shutdown_input();
     }
-    if (_metadata_uploader) {
-        _metadata_uploader->stop();
-    }
 
     co_await ss::smp::submit_to(controller_stm_shard, [&stm = _stm] {
         if (stm.local_is_initialized()) {
@@ -987,17 +733,7 @@ ss::future<> controller::stop() {
         co_await _leader_balancer->stop();
     }
 
-    if (_metadata_uploader) {
-        co_await _metadata_uploader->stop_and_wait();
-    }
-    co_await _data_migration_irpc_frontend.stop();
-    co_await _data_migration_backend.stop();
-    if (_recovery_backend) {
-        co_await _recovery_backend->stop_and_wait();
-    }
     co_await _topic_metrics_watcher.stop();
-    co_await _recovery_manager.stop();
-    co_await _recovery_table.stop();
     co_await _partition_balancer.stop();
     co_await _crash_reporter.stop();
     co_await _metrics_reporter.stop();
@@ -1006,17 +742,11 @@ ss::future<> controller::stop() {
     co_await _hm_backend.stop();
     co_await _health_manager.stop();
     co_await _members_backend.stop();
-    co_await _data_migration_router.stop();
-    co_await _data_migration_worker.stop();
-    co_await _data_migration_frontend.stop();
-    co_await _topic_mount_handler.stop();
     co_await _config_manager.stop();
     co_await _api.stop();
     co_await _shard_balancer.stop();
     co_await _backend.stop();
     co_await _tp_frontend.stop();
-    co_await _plugin_frontend.stop();
-    co_await _cluster_link_frontend.stop();
     co_await _quota_frontend.stop();
     co_await _ephemeral_credential_frontend.stop();
     co_await _security_frontend.stop();
@@ -1027,19 +757,13 @@ ss::future<> controller::stop() {
     co_await _oidc_service.stop();
     co_await _authorizer.stop();
     co_await _ephemeral_credentials.stop();
-    co_await _data_migration_table.stop();
-    co_await _data_migrated_resources.stop();
     co_await _roles.stop();
     co_await _credentials.stop();
     co_await _tp_state.stop();
     co_await _members_manager.stop();
-    co_await _epoch_service.stop();
     co_await _stm.stop();
-    co_await _cluster_link_table.stop();
     co_await _quota_backend.stop();
     co_await _quota_store.stop();
-    co_await _plugin_backend.stop();
-    co_await _plugin_table.stop();
     co_await _drain_manager.stop();
     co_await _shard_placement.stop();
     co_await _partition_balancer_state.stop();
@@ -1077,52 +801,6 @@ ss::future<> controller::create_cluster(
               "Cluster UUID is {}",
               *_storage.local().get_cluster_uuid());
             co_return;
-        }
-
-        // Check if there is any cluster metadata in the cloud.
-        auto bucket_opt = get_configured_bucket();
-        if (
-          bucket_opt.has_value()
-          && config::shard_local_cfg()
-               .cloud_storage_attempt_cluster_restore_on_bootstrap.value()) {
-            retry_chain_node retry_node(as, 300s, 5s);
-            auto res
-              = co_await cloud_metadata::download_highest_manifest_in_bucket(
-                _cloud_storage_api.local(),
-                bucket_opt.value(),
-                retry_node,
-                config::shard_local_cfg().cloud_storage_cluster_name());
-            if (res.has_value()) {
-                vlog(
-                  clusterlog.info,
-                  "Found cluster metadata manifest {} in bucket {}",
-                  res.value(),
-                  bucket_opt.value());
-                cmd_data.recovery_state.emplace();
-                cmd_data.recovery_state->manifest = std::move(res.value());
-                cmd_data.recovery_state->bucket = bucket_opt.value();
-                // Proceed with recovery via cluster bootstrap.
-            } else {
-                const auto& err = res.error();
-                if (
-                  err == cloud_metadata::error_outcome::no_matching_metadata) {
-                    vlog(
-                      clusterlog.info,
-                      "No cluster manifest in bucket {}, proceeding without "
-                      "recovery",
-                      bucket_opt.value());
-                    // Fall through to regular cluster bootstrap.
-                } else {
-                    vlog(
-                      clusterlog.error,
-                      "Error looking for cluster recovery material in cloud, "
-                      "retrying: {}",
-                      err);
-                    co_await ss::sleep_abortable(
-                      retry_jitter.next_duration(), as);
-                    continue;
-                }
-            }
         }
 
         vlog(clusterlog.info, "Creating cluster UUID {}", cmd_data.uuid);

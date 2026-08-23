@@ -43,11 +43,8 @@ seastar::future<> server_app::init(
   seastar::sharded<cluster::security_frontend>& sec,
   seastar::sharded<cluster::controller_api>& ctrl,
   seastar::sharded<cluster::tx_gateway_frontend>& tx,
-  seastar::sharded<datalake_throttle_manager>& dtm,
-  seastar::sharded<cluster::cluster_link::frontend>& clfe,
   std::optional<qdc_monitor_config> qdc,
-  ssx::singleton_thread_worker& worker,
-  const std::unique_ptr<pandaproxy::schema_registry::api>& pp) {
+  ssx::singleton_thread_worker& worker) {
     return _server.start(
       conf,
       smp,
@@ -75,11 +72,8 @@ seastar::future<> server_app::init(
       std::ref(sec),
       std::ref(ctrl),
       std::ref(tx),
-      std::ref(dtm),
-      std::ref(clfe),
       qdc,
-      std::ref(worker),
-      std::ref(pp));
+      std::ref(worker));
 }
 
 server_app::~server_app() = default;

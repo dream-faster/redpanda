@@ -50,14 +50,11 @@ make_partition_errors(const delete_records_topic& t, error_code ec) {
 /// partitions that all contain the identical error codes
 chunked_vector<delete_records_partition_result>
 validate_at_topic_level(request_context& ctx, const delete_records_topic& t) {
-    if (ctx.recovery_mode_enabled() || !ctx.is_topic_mutable(t.name)) {
+    if (ctx.recovery_mode_enabled()) {
         return make_partition_errors(t, error_code::policy_violation);
     }
 
     const auto is_deletable = [](const cluster::topic_configuration& cfg) {
-        if (cfg.is_read_replica()) {
-            return false;
-        }
         /// Immitates the logic in ntp_config::is_*_collectable
         if (
           !cfg.properties.has_overrides()

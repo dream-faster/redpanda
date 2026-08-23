@@ -11,9 +11,8 @@
 
 #pragma once
 
-#include "cluster/cluster_link/fwd.h"
+#include "base/outcome.h"
 #include "cluster/fwd.h"
-#include "cluster/plugin_table.h"
 #include "cluster/types.h"
 #include "features/enterprise_features.h"
 #include "features/fwd.h"
@@ -100,10 +99,6 @@ public:
         std::optional<ss::sstring> k8s_cluster_id;
     };
 
-    struct schema_registry_metrics {
-        uint32_t context_count{0};
-    };
-
     struct metrics_snapshot {
         ss::sstring cluster_uuid;
         ss::sstring storage_uuid;
@@ -111,12 +106,7 @@ public:
         uint32_t topic_count{0};
         uint32_t partition_count{0};
 
-        uint32_t topics_with_iceberg_kv{0};
-        uint32_t topics_with_iceberg_schema_id{0};
-        uint32_t topics_with_iceberg_schema_latest{0};
-
         uint32_t local_topic_count{0};
-        uint32_t cloud_topic_count{0};
 
         cluster_version active_logical_version{invalid_version};
         cluster_version original_logical_version{invalid_version};
@@ -126,7 +116,6 @@ public:
         bool has_oidc{false};
         uint32_t rbac_role_count{0};
         uint32_t unique_group_count{0};
-        uint32_t data_transforms_count{0};
 
         static constexpr int64_t max_size_for_rp_env = 80;
         ss::sstring redpanda_environment;
@@ -141,14 +130,9 @@ public:
         ss::sstring domain_name;
         std::vector<ss::sstring> fqdns;
 
-        uint32_t number_of_active_shadow_links{0};
-        uint32_t number_of_shadow_topics{0};
-        bool schema_registry_shadowed{false};
-
         std::optional<kubernetes_metrics> kubernetes;
 
         // Schema Registry metrics (nullopt when SR not configured)
-        std::optional<schema_registry_metrics> schema_registry;
     };
 
     /// Callback type for external subsystems to contribute metrics data.
@@ -172,10 +156,8 @@ public:
       ss::sharded<features::feature_table>&,
       ss::sharded<security::role_store>& role_store,
       ss::sharded<security::authorizer>& authorizer,
-      ss::sharded<plugin_table>*,
       ss::sharded<feature_manager>*,
       ss::sharded<storage::api>*,
-      ss::sharded<cluster_link::frontend>*,
       ss::sharded<ss::abort_source>&);
 
     ss::future<> start();
@@ -210,10 +192,8 @@ private:
     ss::sharded<features::feature_table>& _feature_table;
     ss::sharded<security::role_store>& _role_store;
     ss::sharded<security::authorizer>& _authorizer;
-    ss::sharded<plugin_table>* _plugin_table;
     ss::sharded<feature_manager>* _feature_manager;
     ss::sharded<storage::api>* _storage;
-    ss::sharded<cluster_link::frontend>* _clfe;
     ss::sharded<ss::abort_source>& _as;
     prefix_logger _logger;
     ss::timer<ss::lowres_clock> _tick_timer;
@@ -243,7 +223,4 @@ void rjson_serialize(
 void rjson_serialize(
   json::Writer<json::StringBuffer>& w,
   const cluster::metrics_reporter::kubernetes_metrics& v);
-void rjson_serialize(
-  json::Writer<json::StringBuffer>& w,
-  const cluster::metrics_reporter::schema_registry_metrics& v);
 } // namespace json

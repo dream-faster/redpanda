@@ -18,7 +18,6 @@
 #include "kafka/protocol/schemata/create_topics_response.h"
 #include "model/compression.h"
 #include "model/fundamental.h"
-#include "pandaproxy/schema_registry/subject_name_strategy.h"
 #include "ssx/sformat.h"
 #include "utils/tristate.h"
 
@@ -83,8 +82,6 @@ struct metadata_cache_info {
     virtual std::optional<size_t> get_default_retention_bytes() const = 0;
     virtual model::timestamp_type get_default_timestamp_type() const = 0;
     virtual uint32_t get_default_batch_max_bytes() const = 0;
-    virtual model::shadow_indexing_mode
-    get_default_shadow_indexing_mode() const = 0;
     virtual std::optional<size_t>
     get_default_retention_local_target_bytes() const = 0;
     virtual std::chrono::milliseconds
@@ -93,18 +90,10 @@ struct metadata_cache_info {
     get_default_segment_ms() const = 0;
     virtual std::optional<std::chrono::milliseconds>
     get_default_delete_retention_ms() const = 0;
-    virtual bool get_default_record_key_schema_id_validation() const = 0;
-    virtual pandaproxy::schema_registry::subject_name_strategy
-    get_default_record_key_subject_name_strategy() const = 0;
-    virtual bool get_default_record_value_schema_id_validation() const = 0;
-    virtual pandaproxy::schema_registry::subject_name_strategy
-    get_default_record_value_subject_name_strategy() const = 0;
     virtual std::optional<size_t>
     get_default_initial_retention_local_target_bytes() const = 0;
     virtual std::optional<std::chrono::milliseconds>
     get_default_initial_retention_local_target_ms() const = 0;
-    virtual std::chrono::milliseconds
-    get_default_iceberg_target_lag_ms() const = 0;
     virtual std::optional<double>
     get_default_min_cleanable_dirty_ratio() const = 0;
     virtual std::chrono::milliseconds
@@ -133,8 +122,6 @@ public:
     std::optional<size_t> get_default_retention_bytes() const override;
     model::timestamp_type get_default_timestamp_type() const override;
     uint32_t get_default_batch_max_bytes() const override;
-    model::shadow_indexing_mode
-    get_default_shadow_indexing_mode() const override;
     std::optional<size_t>
     get_default_retention_local_target_bytes() const override;
     std::chrono::milliseconds
@@ -143,18 +130,10 @@ public:
     get_default_segment_ms() const override;
     std::optional<std::chrono::milliseconds>
     get_default_delete_retention_ms() const override;
-    bool get_default_record_key_schema_id_validation() const override;
-    pandaproxy::schema_registry::subject_name_strategy
-    get_default_record_key_subject_name_strategy() const override;
-    bool get_default_record_value_schema_id_validation() const override;
-    pandaproxy::schema_registry::subject_name_strategy
-    get_default_record_value_subject_name_strategy() const override;
     std::optional<size_t>
     get_default_initial_retention_local_target_bytes() const override;
     std::optional<std::chrono::milliseconds>
     get_default_initial_retention_local_target_ms() const override;
-    std::chrono::milliseconds
-    get_default_iceberg_target_lag_ms() const override;
     std::optional<double>
     get_default_min_cleanable_dirty_ratio() const override;
     std::chrono::milliseconds

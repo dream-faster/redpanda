@@ -18,7 +18,6 @@
 #include "kafka/protocol/timeout.h"
 #include "kafka/protocol/types.h"
 #include "kafka/server/connection_context.h"
-#include "kafka/server/handlers/topics/sr_context_validator.h"
 #include "kafka/server/handlers/topics/topic_utils.h"
 #include "kafka/server/handlers/topics/types.h"
 #include "kafka/server/handlers/topics/validators.h"
@@ -42,52 +41,31 @@ namespace kafka {
 namespace {
 
 bool is_supported(std::string_view name) {
-    static constexpr auto supported_configs = std::to_array(
-      {topic_property_compression,
-       topic_property_cleanup_policy,
-       topic_property_timestamp_type,
-       topic_property_segment_size,
-       topic_property_compaction_strategy,
-       topic_property_retention_bytes,
-       topic_property_retention_duration,
-       topic_property_recovery,
-       topic_property_remote_write,
-       topic_property_remote_read,
-       topic_property_remote_delete,
-       topic_property_read_replica,
-       topic_property_max_message_bytes,
-       topic_property_retention_local_target_bytes,
-       topic_property_retention_local_target_ms,
-       topic_property_segment_ms,
-       topic_property_record_key_schema_id_validation,
-       topic_property_record_key_schema_id_validation_compat,
-       topic_property_record_key_subject_name_strategy,
-       topic_property_record_key_subject_name_strategy_compat,
-       topic_property_record_value_schema_id_validation,
-       topic_property_record_value_schema_id_validation_compat,
-       topic_property_record_value_subject_name_strategy,
-       topic_property_record_value_subject_name_strategy_compat,
-       topic_property_initial_retention_local_target_bytes,
-       topic_property_initial_retention_local_target_ms,
-       topic_property_write_caching,
-       topic_property_flush_ms,
-       topic_property_flush_bytes,
-       topic_property_iceberg_mode,
-       topic_property_leaders_preference,
-       topic_property_delete_retention_ms,
-       topic_property_iceberg_delete,
-       topic_property_iceberg_partition_spec,
-       topic_property_iceberg_invalid_record_action,
-       topic_property_iceberg_target_lag_ms,
-       topic_property_schema_registry_context,
-       topic_property_min_cleanable_dirty_ratio,
-       topic_property_min_compaction_lag_ms,
-       topic_property_max_compaction_lag_ms,
-       topic_property_remote_allow_gaps,
-       topic_property_message_timestamp_before_max_ms,
-       topic_property_message_timestamp_after_max_ms,
-       topic_property_redpanda_storage_mode,
-       topic_property_redpanda_storage_mode_impl});
+    static constexpr auto supported_configs = std::to_array({
+      topic_property_compression,
+      topic_property_cleanup_policy,
+      topic_property_timestamp_type,
+      topic_property_segment_size,
+      topic_property_compaction_strategy,
+      topic_property_retention_bytes,
+      topic_property_retention_duration,
+      topic_property_max_message_bytes,
+      topic_property_retention_local_target_bytes,
+      topic_property_retention_local_target_ms,
+      topic_property_segment_ms,
+      topic_property_initial_retention_local_target_bytes,
+      topic_property_initial_retention_local_target_ms,
+      topic_property_write_caching,
+      topic_property_flush_ms,
+      topic_property_flush_bytes,
+      topic_property_leaders_preference,
+      topic_property_delete_retention_ms,
+      topic_property_min_cleanable_dirty_ratio,
+      topic_property_min_compaction_lag_ms,
+      topic_property_max_compaction_lag_ms,
+      topic_property_message_timestamp_before_max_ms,
+      topic_property_message_timestamp_after_max_ms,
+    });
 
     if (
       std::any_of(
@@ -112,18 +90,11 @@ using validators = make_validator_types<
   compaction_strategy_validator,
   timestamp_type_validator,
   cleanup_policy_validator,
-  remote_read_and_write_are_not_supported_for_read_replica,
   batch_max_bytes_limits,
-  subject_name_strategy_validator,
   replication_factor_must_be_greater_or_equal_to_minimum,
   vcluster_id_validator,
   write_caching_configs_validator,
-  iceberg_create_config_validator,
-  iceberg_invalid_record_action_validator,
-  iceberg_target_lag_ms_validator,
-  schema_registry_context_create_validator,
-  min_max_compaction_lag_ms_validator,
-  storage_mode_config_validator>;
+  min_max_compaction_lag_ms_validator>;
 
 static void
 append_topic_configs(request_context& ctx, create_topics_response& response) {
@@ -248,9 +219,7 @@ ss::future<response_ptr> create_topics_handler::handle(
         return topics;
     };
 
-    auto superuser_required = ctx.is_cluster_link_active()
-                                ? superuser_required::yes
-                                : superuser_required::no;
+    auto superuser_required = superuser_required::no;
 
     const auto has_cluster_auth = ctx.authorized(
       security::acl_operation::create,
