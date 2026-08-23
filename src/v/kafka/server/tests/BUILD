@@ -89,7 +89,6 @@ redpanda_cc_btest(
         "error_mapping_test.cc",
     ],
     deps = [
-        "//src/v/cluster:cluster_link_errc",
         "//src/v/cluster:tx_protocol_types",
         "//src/v/kafka/server",
         "//src/v/test_utils:seastar_boost",
@@ -157,8 +156,6 @@ redpanda_cc_btest(
     ],
     deps = [
         "//src/v/cluster:client_quota_backend",
-        "//src/v/cluster:cluster_link_table",
-        "//src/v/cluster:cluster_link_types",
         "//src/v/cluster:cluster_recovery_table",
         "//src/v/cluster:controller_log_limiter",
         "//src/v/cluster:data_migration_table",
@@ -459,8 +456,6 @@ redpanda_cc_btest(
         "api_versions_test.cc",
     ],
     deps = [
-        "//src/v/cluster:cluster_link_table",
-        "//src/v/cluster:cluster_link_types",
         "//src/v/cluster:controller_log_limiter",
         "//src/v/cluster:data_migration_table",
         "//src/v/cluster:feature_backend",
@@ -882,8 +877,6 @@ redpanda_cc_btest(
     cpu = "1",
     deps = [
         ":kafka_test_utils",
-        "//src/v/cluster:cluster_link_table",
-        "//src/v/cluster:cluster_link_types",
         "//src/v/cluster:controller_log_limiter",
         "//src/v/cluster:data_migration_table",
         "//src/v/cluster:feature_backend",
@@ -992,27 +985,6 @@ redpanda_cc_btest(
         "@fmt",
         "@seastar",
         "@seastar//:testing",
-    ],
-)
-
-redpanda_cc_gtest(
-    name = "write_at_offset_stm_test",
-    timeout = "moderate",
-    srcs = [
-        "write_at_offset_stm_test.cc",
-    ],
-    cpu = 1,
-    deps = [
-        "//src/v/config",
-        "//src/v/kafka/data:log_reader_config",
-        "//src/v/kafka/server:write_at_offset_stm",
-        "//src/v/model/tests:random",
-        "//src/v/raft",
-        "//src/v/raft/tests:stm_test_fixture",
-        "//src/v/redpanda/tests:fixture",
-        "//src/v/test_utils:gtest",
-        "//src/v/test_utils:scoped_config",
-        "@googletest//:gtest",
     ],
 )
 

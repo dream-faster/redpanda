@@ -9,7 +9,6 @@
 
 #include "pandaproxy/schema_registry/service.h"
 
-#include "cluster/cluster_link/frontend.h"
 #include "cluster/controller.h"
 #include "config/configuration.h"
 #include "kafka/data/rpc/deps.h"
@@ -683,19 +682,6 @@ ss::future<> service::create_internal_topic() {
     if (topic_cfg.has_value()) {
         vlog(srlog.debug, "Schema registry: found internal topic");
         co_return;
-    }
-
-    // If shadow linking is active and a link is actively mirroring the
-    // schema registry topic, then we will not create the topic and we will
-    // throw an error.  This is so the oneshot doesn't become 'completed'.
-    // API sync needs a local _schemas topic; topic mirroring does not.
-    if (
-      _controller->get_cluster_link_frontend()
-        .local()
-        .schema_registry_local_topic_writes_disabled()) {
-        throw std::runtime_error(
-          "Shadow Linking actively mirroring schema "
-          "registry topic.  Topic will not be created");
     }
 
     // Use the default topic replica count, unless our specific setting

@@ -33,7 +33,6 @@
 #include "kafka/server/quota_manager.h"
 #include "kafka/server/snc_quota_manager.h"
 #include "kafka/server/usage_manager.h"
-#include "kafka/server/write_at_offset_stm.h"
 #include "migrations/migrators.h"
 #include "raft/group_manager.h"
 #include "raft/service.h"
@@ -72,8 +71,6 @@ void application::start_runtime_services(::stop_signal& app_signal) {
           pm.register_factory<cluster::partition_properties_stm_factory>(
             storage.local().kvs(),
             config::shard_local_cfg().internal_rpc_request_timeout_ms.bind());
-          pm.register_factory<kafka::write_at_offset_stm_factory>(
-            storage.local().kvs(), model::offset_translator_batch_types());
       })
       .get();
     partition_manager.invoke_on_all(&cluster::partition_manager::start).get();

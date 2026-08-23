@@ -239,9 +239,7 @@ ss::future<response_ptr> create_topics_handler::handle(
         return topics;
     };
 
-    auto superuser_required = ctx.is_cluster_link_active()
-                                ? superuser_required::yes
-                                : superuser_required::no;
+    auto superuser_required = superuser_required::no;
 
     const auto has_cluster_auth = ctx.authorized(
       security::acl_operation::create,

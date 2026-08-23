@@ -379,8 +379,6 @@ fmt::iterator format_to(record_batch_type bt, fmt::iterator out) {
         return fmt::format_to(out, "batch_type::group_fence_tx");
     case record_batch_type::partition_properties_update:
         return fmt::format_to(out, "batch_type::partition_properties_update");
-    case record_batch_type::cluster_link:
-        return fmt::format_to(out, "cluster_link");
     case record_batch_type::group_block:
         return fmt::format_to(out, "group_block");
     }

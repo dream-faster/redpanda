@@ -112,8 +112,6 @@ public:
          * Group used to handle cluster linking tasks. It includes tasks
          * synchronizing metadata as well as replication.
          */
-        _cluster_linking = co_await ss::create_scheduling_group(
-          "cluster_linking", 600);
     }
 
     ss::scheduling_group admin_sg() { return _admin; }
@@ -150,8 +148,6 @@ public:
 
     ss::scheduling_group ts_read_sg() { return _ts_read; }
 
-    ss::scheduling_group cluster_linking_sg() { return _cluster_linking; }
-
     std::vector<std::reference_wrapper<const ss::scheduling_group>>
     all_scheduling_groups() const {
         return {
@@ -168,8 +164,7 @@ public:
           std::cref(_self_test),
           std::cref(_fetch),
           std::cref(_produce),
-          std::cref(_ts_read),
-          std::cref(_cluster_linking)};
+          std::cref(_ts_read)};
     }
 
 private:
@@ -190,5 +185,4 @@ private:
     ss::scheduling_group _fetch;
     ss::scheduling_group _produce;
     ss::scheduling_group _ts_read;
-    ss::scheduling_group _cluster_linking;
 };

@@ -11,7 +11,6 @@
 
 #pragma once
 
-#include "cluster/cluster_link/fwd.h"
 #include "cluster/fwd.h"
 #include "cluster/types.h"
 #include "features/enterprise_features.h"
@@ -134,10 +133,6 @@ public:
         ss::sstring domain_name;
         std::vector<ss::sstring> fqdns;
 
-        uint32_t number_of_active_shadow_links{0};
-        uint32_t number_of_shadow_topics{0};
-        bool schema_registry_shadowed{false};
-
         std::optional<kubernetes_metrics> kubernetes;
 
         // Schema Registry metrics (nullopt when SR not configured)
@@ -167,7 +162,6 @@ public:
       ss::sharded<security::authorizer>& authorizer,
       ss::sharded<feature_manager>*,
       ss::sharded<storage::api>*,
-      ss::sharded<cluster_link::frontend>*,
       ss::sharded<ss::abort_source>&);
 
     ss::future<> start();
@@ -204,7 +198,6 @@ private:
     ss::sharded<security::authorizer>& _authorizer;
     ss::sharded<feature_manager>* _feature_manager;
     ss::sharded<storage::api>* _storage;
-    ss::sharded<cluster_link::frontend>* _clfe;
     ss::sharded<ss::abort_source>& _as;
     prefix_logger _logger;
     ss::timer<ss::lowres_clock> _tick_timer;

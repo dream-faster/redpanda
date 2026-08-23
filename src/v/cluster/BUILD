@@ -21,7 +21,6 @@ redpanda_cc_rpc_library(
     name = "controller_rpc",
     src = "controller.json",
     deps = [
-        ":cluster_link_rpc_types",
         ":security_types",
     ],
 )
@@ -360,10 +359,8 @@ redpanda_cc_library(
 redpanda_cc_library(
     name = "table_utils",
     srcs = [
-        "cluster_link/table_utils.cc",
     ],
     hdrs = [
-        "cluster_link/table_utils.h",
     ],
     implementation_deps = [
         "//src/v/ssx:async_algorithm",
@@ -371,7 +368,6 @@ redpanda_cc_library(
     visibility = ["__subpackages__"],
     deps = [
         "//src/v/base",
-        "//src/v/cluster_link/model",
         "//src/v/container:chunked_hash_map",
         "@seastar",
     ],
@@ -401,20 +397,6 @@ redpanda_cc_library(
         "@fmt",
     ],
     visibility = ["//visibility:public"],
-)
-
-redpanda_cc_library(
-    name = "cluster_link_errc",
-    srcs = [
-        "cluster_link/errc.cc",
-    ],
-    hdrs = [
-        "cluster_link/errc.h",
-    ],
-    visibility = ["//visibility:public"],
-    deps = [
-        "@fmt",
-    ],
 )
 
 redpanda_cc_library(
@@ -577,21 +559,6 @@ redpanda_cc_library(
         "//src/v/serde:vector",
         "@abseil-cpp//absl/container:btree",
         "@abseil-cpp//absl/container:flat_hash_map",
-    ],
-)
-
-redpanda_cc_library(
-    name = "cluster_link_rpc_types",
-    hdrs = [
-        "cluster_link_rpc_types.h",
-    ],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":cluster_link_errc",
-        ":errc",
-        "//src/v/cluster_link/model",
-        "//src/v/model",
-        "//src/v/serde",
     ],
 )
 
@@ -760,7 +727,6 @@ redpanda_cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":cloud_metadata_cluster_manifest",
-        ":cluster_link_errc",
         ":data_policy",
         ":errc",
         ":features",
@@ -772,7 +738,6 @@ redpanda_cc_library(
         ":tx_errc",
         ":version",
         "//src/v/cloud_storage:remote_label",
-        "//src/v/cluster_link/model",
         "//src/v/container:chunked_vector",
         "//src/v/container:contiguous_range_map",
         "//src/v/model",
@@ -944,25 +909,6 @@ redpanda_cc_library(
 )
 
 redpanda_cc_library(
-    name = "cluster_link_types",
-    srcs = [
-        "cluster_link/types.cc",
-    ],
-    hdrs = [
-        "cluster_link/types.h",
-    ],
-    implementation_deps = [
-        "@fmt",
-    ],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":cluster_link_errc",
-        "//src/v/base",
-        "//src/v/model",
-    ],
-)
-
-redpanda_cc_library(
     name = "commands",
     hdrs = [
         "commands.h",
@@ -970,13 +916,11 @@ redpanda_cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":client_quota_serde",
-        ":cluster_link_rpc_types",
         ":data_migration_types",
         ":security_types",
         ":simple_batch_builder",
         ":types",
         "//src/v/bytes:iobuf_parser",
-        "//src/v/cluster_link/model",
         "//src/v/model",
         "//src/v/reflection:adl",
         "//src/v/security",
@@ -1131,7 +1075,6 @@ redpanda_cc_library(
         ":data_migration_types",
         ":security_types",
         ":types",
-        "//src/v/cluster_link/model",
         "//src/v/container:chunked_hash_map",
         "//src/v/container:chunked_vector",
         "//src/v/features",
@@ -1889,31 +1832,6 @@ redpanda_cc_library(
 )
 
 redpanda_cc_library(
-    name = "cluster_link_table",
-    srcs = [
-        "cluster_link/table.cc",
-    ],
-    hdrs = [
-        "cluster_link/table.h",
-    ],
-    implementation_deps = [
-        ":commands",
-        ":errc",
-        ":logger",
-        ":table_utils",
-        "//src/v/base",
-    ],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":cluster_link_errc",
-        ":controller_snapshot",
-        "//src/v/cluster_link/model",
-        "//src/v/model",
-        "@seastar",
-    ],
-)
-
-redpanda_cc_library(
     name = "topic_validators",
     hdrs = [
         "topic_validators.h",
@@ -2075,8 +1993,6 @@ redpanda_cc_library(
         "cloud_metadata/uploader.cc",
         "cloud_storage_size_reducer.cc",
         "cluster_discovery.cc",
-        "cluster_epoch_service.cc",
-        "cluster_link/frontend.cc",
         "cluster_recovery_manager.cc",
         "cluster_recovery_reconciler.cc",
         "config_frontend.cc",
@@ -2170,9 +2086,6 @@ redpanda_cc_library(
         "cloud_storage_size_reducer.h",
         "cluster_bootstrap_service.h",
         "cluster_discovery.h",
-        "cluster_epoch_service.h",
-        "cluster_link/frontend.h",
-        "cluster_link/fwd.h",
         "cluster_recovery_manager.h",
         "cluster_recovery_reconciler.h",
         "config_frontend.h",
@@ -2273,10 +2186,6 @@ redpanda_cc_library(
         ":cloud_metadata_key_utils",
         ":cloud_metadata_manifest_downloads",
         ":cloud_metadata_types",
-        ":cluster_link_errc",
-        ":cluster_link_rpc_types",
-        ":cluster_link_table",
-        ":cluster_link_types",
         ":cluster_recovery_state",
         ":cluster_recovery_table",
         ":cluster_utils",
@@ -2374,8 +2283,6 @@ redpanda_cc_library(
         "//src/v/cloud_storage:topic_mount_manifest_path",
         "//src/v/cloud_storage:types",
         "//src/v/cloud_storage_clients",
-        "//src/v/cluster_link/model",
-        "//src/v/cluster_link/model:sr_context_mapping",
         "//src/v/config",
         "//src/v/container:chunked_hash_map",
         "//src/v/container:chunked_vector",

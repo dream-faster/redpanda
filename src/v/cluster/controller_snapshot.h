@@ -20,7 +20,6 @@
 #include "cluster/data_migration_types.h"
 #include "cluster/security_types.h"
 #include "cluster/types.h"
-#include "cluster_link/model/types.h"
 #include "container/chunked_hash_map.h"
 #include "container/chunked_vector.h"
 #include "features/feature_table_snapshot.h"
@@ -283,22 +282,6 @@ struct data_migrations_t
     auto serde_fields() { return std::tie(next_id, migrations); }
 };
 
-struct cluster_link_t
-  : public serde::
-      envelope<cluster_link_t, serde::version<0>, serde::compat_version<0>> {
-    chunked_hash_map<
-      ::cluster_link::model::id_t,
-      ::cluster_link::model::metadata>
-      links;
-    chunked_hash_map<::cluster_link::model::id_t, model::revision_id>
-      link_revisions;
-
-    friend bool
-    operator==(const cluster_link_t&, const cluster_link_t&) = default;
-
-    auto serde_fields() { return std::tie(links, link_revisions); }
-};
-
 } // namespace controller_snapshot_parts
 
 struct controller_snapshot
@@ -316,7 +299,6 @@ struct controller_snapshot
     controller_snapshot_parts::cluster_recovery_t cluster_recovery;
     controller_snapshot_parts::client_quotas_t client_quotas;
     controller_snapshot_parts::data_migrations_t data_migrations;
-    controller_snapshot_parts::cluster_link_t cluster_links;
 
     friend bool operator==(
       const controller_snapshot&, const controller_snapshot&) = default;

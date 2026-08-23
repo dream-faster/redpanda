@@ -249,7 +249,6 @@ const std::vector<ss::sstring>& stm_snapshot_names() {
       cluster::id_allocator_snapshot,
       cluster::rm_stm_snapshot,
       cluster::partition_properties_stm_snapshot,
-      cluster::write_at_offset_stm_snapshot,
     };
 
     return names;

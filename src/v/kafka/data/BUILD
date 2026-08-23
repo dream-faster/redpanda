@@ -12,33 +12,6 @@ redpanda_cc_library(
 )
 
 redpanda_cc_library(
-    name = "exact_offset_replicator",
-    hdrs = ["exact_offset_replicator.h"],
-    visibility = ["//visibility:public"],
-    deps = [
-        "//src/v/base",
-        "//src/v/model",
-        "//src/v/raft",
-        "@seastar",
-    ],
-)
-
-redpanda_cc_library(
-    name = "make_exact_offset_replicator",
-    srcs = ["make_exact_offset_replicator.cc"],
-    hdrs = ["make_exact_offset_replicator.h"],
-    implementation_deps = [
-        ":partition_proxy",
-    ],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":exact_offset_replicator",
-        "//src/v/base",
-        "@seastar",
-    ],
-)
-
-redpanda_cc_library(
     name = "partition_proxy",
     srcs = [
         "partition_proxy.cc",
@@ -53,12 +26,10 @@ redpanda_cc_library(
         "//src/v/cloud_io:admission_control_types",
         "//src/v/cluster",
         "//src/v/cluster:types",
-        "//src/v/kafka/server:write_at_offset_stm",
         "@boost//:numeric_conversion",
     ],
     visibility = ["//visibility:public"],
     deps = [
-        ":exact_offset_replicator",
         "//src/v/base",
         "//src/v/cloud_storage:types",
         "//src/v/cluster:errc",

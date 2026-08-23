@@ -11,7 +11,6 @@
 
 #pragma once
 
-#include "cluster/cluster_link/fwd.h"
 #include "cluster/fwd.h"
 #include "config/configuration.h"
 #include "container/chunked_vector.h"
@@ -83,7 +82,6 @@ public:
       ss::sharded<cluster::security_frontend>&,
       ss::sharded<cluster::controller_api>&,
       ss::sharded<cluster::tx_gateway_frontend>&,
-      ss::sharded<cluster::cluster_link::frontend>&,
       std::optional<qdc_monitor_config>,
       ssx::singleton_thread_worker&,
       const std::unique_ptr<pandaproxy::schema_registry::api>&) noexcept;
@@ -249,12 +247,6 @@ public:
     // processing incoming requests.
     ss::scheduling_group get_request_handler_sg() const;
 
-    cluster::cluster_link::frontend& cluster_link_frontend() {
-        return _cluster_link_frontend.local();
-    }
-
-    bool is_cluster_link_active() const;
-
     chunked_vector<ss::lw_shared_ptr<const connection_context>>
     list_connections() const;
 
@@ -293,7 +285,6 @@ private:
     ss::sharded<cluster::security_frontend>& _security_frontend;
     ss::sharded<cluster::controller_api>& _controller_api;
     ss::sharded<cluster::tx_gateway_frontend>& _tx_gateway_frontend;
-    ss::sharded<cluster::cluster_link::frontend>& _cluster_link_frontend;
     std::optional<qdc_monitor> _qdc_mon;
     kafka::fetch_metadata_cache _fetch_metadata_cache;
     security::tls::principal_mapper _mtls_principal_mapper;

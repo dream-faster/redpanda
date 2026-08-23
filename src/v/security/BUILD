@@ -76,7 +76,6 @@ redpanda_cc_library(
         "//src/v/cluster",
         "//src/v/cluster:client_quota_backend",
         "//src/v/cluster:cloud_metadata_types",
-        "//src/v/cluster:cluster_link_table",
         "//src/v/cluster:cluster_recovery_table",
         "//src/v/cluster:commands",
         "//src/v/cluster:controller_log_limiter",

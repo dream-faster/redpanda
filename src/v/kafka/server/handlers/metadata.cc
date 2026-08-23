@@ -405,9 +405,7 @@ static ss::future<chunked_vector<metadata_response::topic>> get_topic_metadata(
       *request.data.topics,
       [](const auto& topic) { return topic.topic_id != model::topic_id{}; });
 
-    auto superuser_required_to_create = ctx.is_cluster_link_active()
-                                          ? superuser_required::yes
-                                          : superuser_required::no;
+    auto superuser_required_to_create = superuser_required::no;
 
     for (auto& topic : *request.data.topics) {
         const auto move_topic_name = [&topic]() {

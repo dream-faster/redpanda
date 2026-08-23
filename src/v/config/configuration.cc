@@ -397,24 +397,6 @@ configuration::configuration()
       {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
       0,
       {.min = 0, .max = 100_MiB})
-  , cloud_topics_epoch_service_epoch_increment_interval(
-      *this,
-      "cloud_topics_epoch_service_epoch_increment_interval",
-      "The interval at which the cluster epoch is incremented.",
-      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
-      10min)
-  , cloud_topics_epoch_service_local_epoch_cache_duration(
-      *this,
-      "cloud_topics_epoch_service_local_epoch_cache_duration",
-      "The local cache duration of a cluster wide epoch.",
-      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
-      1min)
-  , cloud_topics_epoch_service_max_same_epoch_duration(
-      *this,
-      "cloud_topics_epoch_service_max_same_epoch_duration",
-      "The duration of time that a node can use the exact same epoch.",
-      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
-      24 * 60min)
   , enable_usage(
       *this,
       "enable_usage",
@@ -4197,22 +4179,6 @@ configuration::configuration()
       "may affect performance. The change is applied only after the restart.",
       {.needs_restart = needs_restart::yes, .visibility = visibility::tunable},
       false)
-  , enable_shadow_linking(
-      *this,
-      true,
-      "enable_shadow_linking",
-      "Enable creating Shadow Links from this cluster to a remote source "
-      "cluster for data replication.",
-      meta{.needs_restart = needs_restart::no, .visibility = visibility::user},
-      false)
-  , shadow_link_failover_batch_size(
-      *this,
-      "shadow_link_failover_batch_size",
-      "Maximum number of mirror topics to include in a single batched "
-      "failover controller command.",
-      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
-      1000,
-      {.min = 1})
   , internal_rpc_request_timeout_ms(
       *this,
       "internal_rpc_request_timeout_ms",

@@ -15,7 +15,6 @@
 #include "base/seastarx.h"
 #include "base/vlog.h"
 #include "bytes/iobuf.h"
-#include "cluster/cluster_link/frontend.h"
 #include "kafka/protocol/fetch.h"
 #include "kafka/protocol/fwd.h"
 #include "kafka/protocol/types.h"
@@ -204,12 +203,6 @@ public:
 
     fetch_metadata_cache& get_fetch_metadata_cache() {
         return _conn->server().get_fetch_metadata_cache();
-    }
-
-    bool is_topic_mutable(const model::topic& topic) const {
-        return _conn->server()
-          .cluster_link_frontend()
-          .is_topic_mutable_for_kafka_api(topic);
     }
 
     template<typename ResponseType>
@@ -424,10 +417,6 @@ public:
     }
 
     ss::sharded<server>& server() { return _conn->server().container(); }
-
-    bool is_cluster_link_active() const {
-        return _conn->server().container().local().is_cluster_link_active();
-    }
 
     void add_response_resource_deleter(ss::deleter&& res) {
         _request_resources->response_resource_deleter = ss::make_object_deleter(

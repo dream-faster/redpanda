@@ -13,7 +13,6 @@
 #include "base/outcome.h"
 #include "cluster/fwd.h"
 #include "cluster/types.h"
-#include "kafka/data/exact_offset_replicator.h"
 #include "kafka/data/log_reader_config.h"
 #include "kafka/protocol/errors.h"
 #include "kafka/protocol/types.h"
@@ -93,9 +92,6 @@ public:
 
         /// Returns a replicator for writing batches at exact offsets,
         /// or nullptr if the partition does not support this operation.
-        virtual std::unique_ptr<exact_offset_replicator>
-        make_exact_offset_replicator() && = 0;
-
         virtual result<partition_info> get_partition_info() const = 0;
         virtual size_t
           estimate_size_between(kafka::offset, kafka::offset) const = 0;
@@ -193,10 +189,6 @@ public:
       model::record_batch batch,
       raft::replicate_options opts) {
         return _impl->replicate(bi, std::move(batch), opts);
-    }
-
-    std::unique_ptr<exact_offset_replicator> make_exact_offset_replicator() && {
-        return std::move(*_impl).make_exact_offset_replicator();
     }
 
     /*

@@ -13,7 +13,6 @@
 
 #include "cluster/bootstrap_backend.h"
 #include "cluster/client_quota_backend.h"
-#include "cluster/cluster_link/table.h"
 #include "cluster/cluster_recovery_manager.h"
 #include "cluster/config_manager.h"
 #include "cluster/controller_log_limiter.h"
@@ -41,7 +40,7 @@ class controller_stm final
       cluster_recovery_manager,
       client_quota::backend,
       data_migrations::migrations_table,
-      cluster_link::table> {
+      data_migrations::migrations_table> {
 public:
     template<typename... Args>
     controller_stm(

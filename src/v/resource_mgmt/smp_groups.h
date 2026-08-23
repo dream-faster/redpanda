@@ -31,8 +31,6 @@ public:
           = default_max_nonlocal_requests;
         uint32_t proxy_group_max_non_local_requests
           = default_max_nonlocal_requests;
-        uint32_t cluster_link_group_max_non_local_requests
-          = default_max_nonlocal_requests;
     };
 
     smp_groups() = default;
@@ -42,7 +40,6 @@ public:
     ss::smp_service_group kafka_smp_sg() { return *_kafka; }
     ss::smp_service_group cluster_smp_sg() { return *_cluster; }
     ss::smp_service_group proxy_smp_sg() { return *_proxy; }
-    ss::smp_service_group cluster_link_smp_sg() { return *_cluster_link; }
 
     ss::future<> destroy_groups();
 
@@ -53,7 +50,6 @@ private:
     ss::future<std::unique_ptr<ss::smp_service_group>>
     create_service_group(unsigned max_non_local_requests);
 
-    std::unique_ptr<ss::smp_service_group> _cluster_link;
     std::unique_ptr<ss::smp_service_group> _raft;
     std::unique_ptr<ss::smp_service_group> _kafka;
     std::unique_ptr<ss::smp_service_group> _cluster;

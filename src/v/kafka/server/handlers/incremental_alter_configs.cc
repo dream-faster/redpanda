@@ -137,15 +137,6 @@ create_topic_properties_update(
         current_storage_mode = topic_cfg->properties.storage_mode;
     }
 
-    if (!ctx.is_topic_mutable(tp_ns.tp)) {
-        return make_error_alter_config_resource_response<resp_resource_t>(
-          resource,
-          error_code::policy_violation,
-          fmt::format(
-            "Topic cannot be altered because it belongs to an active "
-            "shadow link."));
-    }
-
     schema_id_validation_config_parser schema_id_validation_config_parser{
       update.properties};
 

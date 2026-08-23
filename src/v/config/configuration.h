@@ -164,12 +164,6 @@ struct configuration final : public config_store {
     // Kafka
     // Configures cluster_epoch_service, the raft0-backed monotonic cluster
     // epoch. Named for its original consumer; the service itself is generic.
-    property<std::chrono::milliseconds>
-      cloud_topics_epoch_service_epoch_increment_interval;
-    property<std::chrono::milliseconds>
-      cloud_topics_epoch_service_local_epoch_cache_duration;
-    property<std::chrono::milliseconds>
-      cloud_topics_epoch_service_max_same_epoch_duration;
     property<bool> enable_usage;
     bounded_property<size_t> usage_num_windows;
     bounded_property<std::chrono::seconds> usage_window_width_interval_sec;
@@ -726,8 +720,6 @@ struct configuration final : public config_store {
     property<bool> enable_host_metrics;
 
     property<bool> consumer_offsets_topic_batch_cache_enabled;
-    enterprise<property<bool>> enable_shadow_linking;
-    bounded_property<uint32_t> shadow_link_failover_batch_size;
     property<std::chrono::milliseconds> internal_rpc_request_timeout_ms;
 
     configuration();

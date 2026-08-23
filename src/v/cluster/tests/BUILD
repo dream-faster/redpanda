@@ -536,7 +536,6 @@ redpanda_cc_btest(
     deps = [
         "//src/v/cluster",
         "//src/v/cluster:client_quota_backend",
-        "//src/v/cluster:cluster_link_table",
         "//src/v/cluster:cluster_recovery_table",
         "//src/v/cluster:cluster_utils",
         "//src/v/cluster:members_table",
@@ -649,7 +648,6 @@ redpanda_cc_btest(
         "//src/v/base",
         "//src/v/cluster",
         "//src/v/cluster:client_quota_backend",
-        "//src/v/cluster:cluster_link_table",
         "//src/v/cluster:cluster_recovery_table",
         "//src/v/cluster:commands",
         "//src/v/cluster:controller_log_limiter",
@@ -1554,25 +1552,6 @@ redpanda_cc_btest(
         "//src/v/test_utils:test_env",
         "@boost//:test",
         "@seastar",
-    ],
-)
-
-redpanda_cc_gtest(
-    name = "epoch_service_test",
-    timeout = "short",
-    srcs = [
-        "epoch_service_test.cc",
-    ],
-    cpu = 2,
-    deps = [
-        "//src/v/cluster",
-        "//src/v/cluster:errc",
-        "//src/v/config",
-        "//src/v/ssx:abort_source",
-        "//src/v/test_utils:gtest",
-        "@googletest//:gtest",
-        "@seastar",
-        "@seastar//:testing",
     ],
 )
 

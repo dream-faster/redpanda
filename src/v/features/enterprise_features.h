@@ -31,7 +31,6 @@ enum class license_required_feature {
     rbac,
     fips,
     leadership_pinning,
-    shadow_linking,
     topic_deletion_disabled,
 };
 
@@ -57,8 +56,6 @@ inline fmt::iterator format_to(license_required_feature f, fmt::iterator out) {
         return fmt::format_to(out, "fips");
     case license_required_feature::leadership_pinning:
         return fmt::format_to(out, "leadership_pinning");
-    case license_required_feature::shadow_linking:
-        return fmt::format_to(out, "shadow_linking");
     case license_required_feature::topic_deletion_disabled:
         return fmt::format_to(out, "topic_deletion_disabled");
     }
@@ -92,7 +89,6 @@ public:
     // | Cluster     | `http_authentication`           | `OIDC`        |
     // | Cluster     | `enable_schema_id_validation`   | `redpanda`    |
     // | Cluster     | `enable_schema_id_validation`   | `compat`      |
-    // | Cluster     | `enable_shadow_linking`         | `true`        |
     // | Cluster     | `delete_topic_enable`           | `false`       |
     // | Node        | `fips_mode`                     | `enabled`     |
     // | Node        | `fips_mode`                     | `permissive`  |

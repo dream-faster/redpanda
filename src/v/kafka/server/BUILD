@@ -268,7 +268,6 @@ redpanda_cc_library(
     ],
     implementation_deps = [
         "//src/v/cluster:cloud_metadata_types",
-        "//src/v/cluster:cluster_link_errc",
         "//src/v/cluster:errc",
         "//src/v/cluster:feature_backend",
         "//src/v/cluster:leader_balancer_strategy",
@@ -297,8 +296,6 @@ redpanda_cc_library(
         "//src/v/cluster:client_quota_backend",
         "//src/v/cluster:client_quota_serde",
         "//src/v/cluster:client_quota_store",
-        "//src/v/cluster:cluster_link_table",
-        "//src/v/cluster:cluster_link_types",
         "//src/v/cluster:cluster_recovery_table",
         "//src/v/cluster:controller_log_limiter",
         "//src/v/cluster:data_migration_group_proxy",
@@ -321,7 +318,6 @@ redpanda_cc_library(
         "//src/v/cluster:topic_table",
         "//src/v/cluster:tx_protocol_types",
         "//src/v/cluster:types",
-        "//src/v/cluster_link/model",
         "//src/v/config",
         "//src/v/container:chunked_hash_map",
         "//src/v/container:chunked_vector",
@@ -493,7 +489,6 @@ redpanda_cc_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
-        "//src/v/cluster:cluster_link_errc",
         "//src/v/cluster:errc",
         "//src/v/cluster:tx_errc",
         "//src/v/kafka/protocol",
@@ -519,24 +514,3 @@ redpanda_cc_library(
     ],
 )
 
-redpanda_cc_library(
-    name = "write_at_offset_stm",
-    srcs = [
-        "write_at_offset_stm.cc",
-    ],
-    hdrs = [
-        "write_at_offset_stm.h",
-    ],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":logger",
-        "//src/v/base",
-        "//src/v/cluster:snapshot",
-        "//src/v/cluster:state_machine_registry",
-        "//src/v/model:batch_utils",
-        "//src/v/raft",
-        "//src/v/raft:fundamental",
-        "//src/v/ssx:future_util",
-        "@seastar",
-    ],
-)

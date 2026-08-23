@@ -197,10 +197,6 @@ public:
     get_cloud_storage_status() const override {
         throw std::runtime_error("unimplemented");
     }
-    std::unique_ptr<kafka::exact_offset_replicator>
-      make_exact_offset_replicator() && final {
-        return nullptr;
-    }
 
 private:
     model::offset latest_offset() const {
@@ -549,11 +545,6 @@ public:
 
 private:
     fake_partition_manager_proxy* _fake_proxy;
-};
-
-class fake_shadow_link_registry : public shadow_link_registry {
-public:
-    bool is_topic_mutable(const model::topic&) const final { return true; }
 };
 
 class kafka_data_test_fixture {

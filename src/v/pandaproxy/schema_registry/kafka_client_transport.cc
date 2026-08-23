@@ -11,7 +11,6 @@
 
 #include "pandaproxy/schema_registry/kafka_client_transport.h"
 
-#include "cluster/cluster_link/frontend.h"
 #include "cluster/controller.h"
 #include "cluster/ephemeral_credential_frontend.h"
 #include "cluster/members_table.h"
@@ -297,12 +296,7 @@ ss::future<> kafka_client_transport::validate_topic_creation_authorization(
     const auto& topic_res = res.data.topics[0];
     if (
       topic_res.error_code == kafka::error_code::none
-      || topic_res.error_code == kafka::error_code::topic_already_exists
-      || (topic_res.error_code == kafka::error_code::topic_authorization_failed && shadow_linking_active())) {
-        // if shadow linking is active, then the user must be a superuser to
-        // create the topic via the Kafka API.  To continue with normal
-        // operations, we will assume the user is authorized to create the
-        // topic.
+      || topic_res.error_code == kafka::error_code::topic_already_exists) {
         vlog(srlog.trace, "User is properly authorized");
         co_return;
     }
@@ -326,11 +320,6 @@ ss::future<cluster::errc> kafka_client_transport::create_topic(
 
 bool kafka_client_transport::has_ephemeral_credentials() const {
     return _has_ephemeral_credentials;
-}
-
-bool kafka_client_transport::shadow_linking_active() const {
-    const auto& clfe = _controller.get_cluster_link_frontend().local();
-    return clfe.cluster_linking_enabled() && clfe.cluster_link_active();
 }
 
 } // namespace pandaproxy::schema_registry

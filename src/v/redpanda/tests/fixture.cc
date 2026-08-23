@@ -85,8 +85,7 @@ redpanda_thread_fixture::redpanda_thread_fixture(
   std::optional<cloud_storage::configuration> cloud_cfg,
   configure_node_id use_node_id,
   const empty_seed_starts_cluster empty_seed_starts_cluster_val,
-  bool enable_legacy_upload_mode,
-  bool development_cluster_linking_enabled, )
+  bool enable_legacy_upload_mode, )
   : app(ssx::sformat("redpanda-{}", node_id()))
   , proxy_port(proxy_port)
   , schema_reg_port(schema_reg_port)
@@ -104,8 +103,7 @@ redpanda_thread_fixture::redpanda_thread_fixture(
       std::move(cloud_cfg),
       use_node_id,
       empty_seed_starts_cluster_val,
-      enable_legacy_upload_mode,
-      development_cluster_linking_enabled);
+      enable_legacy_upload_mode);
     try {
         app.initialize(
           proxy_port.transform(
@@ -170,7 +168,6 @@ redpanda_thread_fixture::redpanda_thread_fixture(
         std::ref(app.controller->get_security_frontend()),
         std::ref(app.controller->get_api()),
         std::ref(app.tx_gateway_frontend),
-        std::ref(app.controller->get_cluster_link_frontend()),
         std::nullopt,
         std::ref(*app.thread_worker),
         std::ref(app.schema_registry()))
@@ -334,8 +331,7 @@ void redpanda_thread_fixture::configure(
   std::optional<cloud_storage::configuration> cloud_cfg,
   configure_node_id use_node_id,
   const empty_seed_starts_cluster empty_seed_starts_cluster_val,
-  bool legacy_upload_mode_enabled,
-  bool development_cluster_linking_enabled) {
+  bool legacy_upload_mode_enabled, ) {
     auto base_path = std::filesystem::path(data_dir);
     ss::smp::invoke_on_all([=]() {
         auto& config = config::shard_local_cfg();
@@ -438,8 +434,6 @@ void redpanda_thread_fixture::configure(
 
         config.get("cloud_storage_disable_archiver_manager")
           .set_value(legacy_upload_mode_enabled);
-        config.get("enable_shadow_linking")
-          .set_value(development_cluster_linking_enabled);
 
         // Disable automatic cluster metadata uploads by default. Only tests
         // that explicitly want it should enable it.

@@ -82,8 +82,7 @@ public:
       configure_node_id use_node_id = configure_node_id::yes,
       const empty_seed_starts_cluster empty_seed_starts_cluster_val
       = empty_seed_starts_cluster::yes,
-      bool enable_legacy_upload_mode = true,
-      bool development_cluster_linking_enabled = false);
+      bool enable_legacy_upload_mode = true);
 
     // creates single node with default configuration
     redpanda_thread_fixture();
@@ -141,8 +140,7 @@ public:
       configure_node_id use_node_id = configure_node_id::yes,
       const empty_seed_starts_cluster empty_seed_starts_cluster_val
       = empty_seed_starts_cluster::yes,
-      bool legacy_upload_mode_enabled = true,
-      bool development_cluster_linking_enabled = false);
+      bool legacy_upload_mode_enabled = true);
 
     YAML::Node proxy_config(uint16_t proxy_port = 8082);
 

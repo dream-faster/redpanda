@@ -22,8 +22,6 @@
 #include "cluster/cloud_metadata/producer_id_recovery_manager.h"
 #include "cluster/cloud_metadata/uploader.h"
 #include "cluster/cluster_discovery.h"
-#include "cluster/cluster_link/frontend.h"
-#include "cluster/cluster_link/table.h"
 #include "cluster/cluster_recovery_table.h"
 #include "cluster/config_frontend.h"
 #include "cluster/controller_api.h"
@@ -329,8 +327,6 @@ ss::future<> controller::start(
     co_await _quota_store.start();
     co_await _quota_backend.start_single(std::ref(_quota_store));
 
-    co_await _cluster_link_table.start();
-
     co_await _config_frontend.start(
       std::ref(_stm),
       std::ref(_connections),
@@ -435,12 +431,8 @@ ss::future<> controller::start(
           std::ref(_bootstrap_backend),
           std::ref(_recovery_manager),
           std::ref(_quota_backend),
-          std::ref(_data_migration_table.local()),
-          std::ref(_cluster_link_table.local()));
+          std::ref(_data_migration_table.local()));
     }
-    co_await _epoch_service.start(_raft0->self().id(), &_connections);
-    co_await _epoch_service.invoke_on_all(&cluster_epoch_service<>::start);
-    _epoch_service.local().set_raft0(_raft0, _stm, _raft_manager);
 
     co_await _members_frontend.start(
       std::ref(_stm),
@@ -503,17 +495,6 @@ ss::future<> controller::start(
       std::ref(_connections),
       std::ref(_partition_leaders),
       std::ref(_as));
-
-    co_await _cluster_link_frontend.start(
-      _raft0->self().id(),
-      ss::sharded_parameter([this] { return &_partition_leaders.local(); }),
-      ss::sharded_parameter([this] { return &_cluster_link_table.local(); }),
-      ss::sharded_parameter([this] {
-          return _stm.local_is_initialized() ? &_stm.local() : nullptr;
-      }),
-      ss::sharded_parameter([this] { return &_connections.local(); }),
-      ss::sharded_parameter([this] { return &_feature_table.local(); }),
-      ss::sharded_parameter([this] { return &_as.local(); }));
 
     co_await _members_backend.start_single(
       std::ref(_tp_frontend),
@@ -781,7 +762,6 @@ ss::future<> controller::start(
       std::ref(_authorizer),
       std::addressof(_feature_manager),
       std::addressof(_storage),
-      std::addressof(_cluster_link_frontend),
       std::ref(_as));
     co_await _metrics_reporter.invoke_on(0, &metrics_reporter::start);
 
@@ -994,7 +974,6 @@ ss::future<> controller::stop() {
     co_await _shard_balancer.stop();
     co_await _backend.stop();
     co_await _tp_frontend.stop();
-    co_await _cluster_link_frontend.stop();
     co_await _quota_frontend.stop();
     co_await _ephemeral_credential_frontend.stop();
     co_await _security_frontend.stop();
@@ -1011,9 +990,7 @@ ss::future<> controller::stop() {
     co_await _credentials.stop();
     co_await _tp_state.stop();
     co_await _members_manager.stop();
-    co_await _epoch_service.stop();
     co_await _stm.stop();
-    co_await _cluster_link_table.stop();
     co_await _quota_backend.stop();
     co_await _quota_store.stop();
     co_await _drain_manager.stop();

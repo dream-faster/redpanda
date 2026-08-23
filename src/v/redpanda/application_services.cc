@@ -488,11 +488,7 @@ void application::wire_up_redpanda_services(
             &shard_table,
             &partition_manager,
             smp_service_groups.transform_smp_sg());
-      }),
-      ss::sharded_parameter([this] {
-          return kafka::data::rpc::shadow_link_registry::make_default(
-            &controller->get_cluster_link_frontend());
-      }))
+      }), )
       .get();
 
     construct_service(
@@ -1005,7 +1001,6 @@ void application::wire_up_redpanda_services(
         std::ref(controller->get_security_frontend()),
         std::ref(controller->get_api()),
         std::ref(tx_gateway_frontend),
-        std::ref(controller->get_cluster_link_frontend()),
         qdc_config,
         std::ref(*thread_worker),
         std::ref(_schema_registry))

@@ -19,8 +19,7 @@ void kafka_data_test_fixture::wire_up_and_start() {
             _remote_fpm = fpm.get();
             return fpm;
         }),
-        ss::sharded_parameter(
-          []() { return std::make_unique<fake_shadow_link_registry>(); }))
+        ss::sharded_parameter())
       .get();
 
     _local_fpmp = std::make_unique<fake_partition_manager_proxy>();
@@ -37,8 +36,7 @@ void kafka_data_test_fixture::wire_up_and_start() {
             _local_fpm = fpm.get();
             return fpm;
         }),
-        ss::sharded_parameter(
-          []() { return std::make_unique<fake_shadow_link_registry>(); }))
+        ss::sharded_parameter())
       .get();
 
     auto fplc = std::make_unique<fake_partition_leader_cache>();

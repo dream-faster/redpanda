@@ -9,7 +9,6 @@
 
 #include "pandaproxy/schema_registry/api.h"
 
-#include "cluster/cluster_link/frontend.h"
 #include "cluster/controller.h"
 #include "config/configuration.h"
 #include "features/feature_table.h"
@@ -156,16 +155,7 @@ public:
 
     writes_disabled_t
     writes_disabled(write_source source, const context& ctx) const final {
-        auto& frontend = _controller->get_cluster_link_frontend().local();
-        switch (source) {
-        case write_source::client:
-            return writes_disabled_t{
-              frontend.schema_registry_client_writes_disabled(ctx())};
-        case write_source::schema_registry_sync:
-            return writes_disabled_t{
-              frontend.schema_registry_local_topic_writes_disabled()};
-        }
-        vunreachable("Unhandled write_source: {}", static_cast<int>(source));
+        return writes_disabled_t{false};
     }
 
 private:

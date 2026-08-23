@@ -10,8 +10,6 @@
  */
 
 #pragma once
-#include "cluster/cluster_link/fwd.h"
-#include "cluster/cluster_link_rpc_types.h"
 #include "cluster/controller_service.h"
 #include "cluster/fwd.h"
 #include "cluster/types.h"
@@ -44,8 +42,7 @@ public:
       ss::sharded<rpc::connection_cache>&,
       ss::sharded<partition_manager>&,
       ss::sharded<node_status_backend>&,
-      ss::sharded<client_quota::frontend>&,
-      ss::sharded<cluster_link::frontend>&);
+      ss::sharded<client_quota::frontend>&);
 
     virtual ss::future<join_node_reply>
     join_node(join_node_request, rpc::streaming_context&) override;
@@ -142,30 +139,6 @@ public:
     ss::future<client_quota::alter_quotas_response> alter_client_quotas(
       client_quota::alter_quotas_request, rpc::streaming_context&) final;
 
-    ss::future<upsert_cluster_link_response> upsert_cluster_link(
-      upsert_cluster_link_request, rpc::streaming_context&) final;
-    ss::future<remove_cluster_link_response> remove_cluster_link(
-      remove_cluster_link_request, rpc::streaming_context&) final;
-    ss::future<add_mirror_topic_response>
-    add_mirror_topic(add_mirror_topic_request, rpc::streaming_context&) final;
-    ss::future<update_mirror_topic_status_response> update_mirror_topic_status(
-      update_mirror_topic_status_request, rpc::streaming_context&) final;
-    ss::future<batch_update_mirror_topic_status_response>
-    batch_update_mirror_topic_status(
-      batch_update_mirror_topic_status_request, rpc::streaming_context&) final;
-    ss::future<update_mirror_topic_properties_response>
-    update_mirror_topic_properties(
-      update_mirror_topic_properties_request, rpc::streaming_context&) final;
-    ss::future<delete_mirror_topic_response> delete_mirror_topic(
-      delete_mirror_topic_request, rpc::streaming_context&) final;
-
-    ss::future<update_cluster_link_configuration_response>
-    update_cluster_link_configuration(
-      update_cluster_link_configuration_request, rpc::streaming_context&) final;
-
-    ss::future<get_current_cluster_epoch_response> get_current_cluster_epoch(
-      get_current_cluster_epoch_request, ::rpc::streaming_context&) final;
-
 private:
     static constexpr auto default_move_interruption_timeout = 10s;
     std::pair<std::vector<model::topic_metadata>, topic_configuration_vector>
@@ -221,6 +194,5 @@ private:
     ss::sharded<partition_manager>& _partition_manager;
     ss::sharded<node_status_backend>& _node_status_backend;
     ss::sharded<client_quota::frontend>& _quotas_frontend;
-    ss::sharded<cluster_link::frontend>& _cluster_link_frontend;
 };
 } // namespace cluster

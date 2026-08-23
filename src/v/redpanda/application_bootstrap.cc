@@ -16,7 +16,6 @@
 #include "cluster/feature_manager.h"
 #include "cluster/members_manager.h"
 #include "cluster/types.h"
-#include "cluster_link/service.h"
 #include "config/configuration.h"
 #include "config/node_config.h"
 #include "config/tls_config.h"
@@ -683,8 +682,6 @@ void application::wire_up_and_start(
 
     start_kafka(node_id, app_signal);
     controller->set_ready().get();
-
-    _cluster_link_service.invoke_on_all(&cluster_link::service::start).get();
 
     construct_service(_aggregate_metrics_watcher).get();
 

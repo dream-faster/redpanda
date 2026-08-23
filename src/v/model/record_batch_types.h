@@ -54,9 +54,8 @@ enum class record_batch_type : int8_t {
     data_migration_cmd = 32,  // data migration manipulation command
     group_fence_tx = 33,      // fence batch in group transactions
     partition_properties_update
-    = 34,              // special batch type used to update partition properties
-    cluster_link = 39, // cluster link update batches
-    group_block = 40,  // (un)blocks group names in a consumer offsets partition
+    = 34,             // special batch type used to update partition properties
+    group_block = 40, // (un)blocks group names in a consumer offsets partition
     MAX = group_block,
 };
 

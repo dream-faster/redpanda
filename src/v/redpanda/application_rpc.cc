@@ -21,7 +21,6 @@
 #include "cluster/service.h"
 #include "cluster/topic_recovery_status_rpc_handler.h"
 #include "cluster/tx_gateway.h"
-#include "cluster_link/rpc_service.h"
 #include "config/configuration.h"
 #include "config/node_config.h"
 #include "kafka/data/rpc/service.h"
@@ -94,12 +93,6 @@ void application::add_runtime_rpc_services(
             return _admin.local().handle_rpc_request(
               std::move(ctx), std::move(buf));
         }));
-
-    runtime_services.push_back(
-      std::make_unique<cluster_link::rpc::service_impl>(
-        scheduling_groups::instance().cluster_sg(),
-        smp_service_groups.cluster_smp_sg(),
-        _cluster_link_service));
 
     s.add_services(std::move(runtime_services));
 

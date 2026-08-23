@@ -10,7 +10,6 @@
 #include "cloud_storage_clients/types.h"
 #include "cluster/controller.h"
 #include "cluster/utils/partition_change_notifier_impl.h"
-#include "cluster_link/service.h"
 #include "config/configuration.h"
 #include "config/node_config.h"
 #include "debug_bundle/debug_bundle_service.h"
@@ -41,35 +40,6 @@ void application::wire_up_runtime_services(
           *_proxy_config,
           controller.get());
     }
-    construct_service(
-      _cluster_link_service,
-      node_id,
-      ss::sharded_parameter([]() {
-          return config::shard_local_cfg().enable_shadow_linking.bind();
-      }),
-      &controller->get_cluster_link_frontend(),
-      ss::sharded_parameter([this] {
-          return cluster::partition_change_notifier_impl::make_default(
-            raft_group_manager,
-            partition_manager,
-            controller->get_topics_state());
-      }),
-      &partition_manager,
-      &controller->get_partition_leaders(),
-      &controller->get_shard_table(),
-      &metadata_cache,
-      &_connection_cache,
-      controller.get(),
-      &group_router,
-      &snc_quota_mgr,
-      &controller->get_health_monitor(),
-      &controller->get_security_frontend(),
-      &_kafka_data_rpc_client,
-      &id_allocator_frontend,
-      _schema_registry.get(),
-      smp_service_groups.cluster_link_smp_sg(),
-      scheduling_groups::instance().cluster_linking_sg())
-      .get();
 
     syschecks::systemd_message("Creating kafka usage manager frontend").get();
     construct_service(

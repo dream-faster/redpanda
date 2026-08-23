@@ -31,26 +31,7 @@ namespace client_quota {
 class frontend;
 class store;
 } // namespace client_quota
-namespace cluster_link {
-class frontend;
-}
 } // namespace cluster
-
-namespace security {
-class credential_store;
-class authorizer;
-class role_store;
-namespace audit {
-class audit_log_manager;
-}
-namespace oidc {
-class service;
-}
-} // namespace security
-
-namespace pandaproxy::schema_registry {
-class api;
-}
 
 namespace ssx {
 class singleton_thread_worker;
@@ -108,7 +89,6 @@ public:
       seastar::sharded<cluster::security_frontend>&,
       seastar::sharded<cluster::controller_api>&,
       seastar::sharded<cluster::tx_gateway_frontend>&,
-      seastar::sharded<cluster::cluster_link::frontend>&,
       std::optional<qdc_monitor_config>,
       ssx::singleton_thread_worker&,
       const std::unique_ptr<pandaproxy::schema_registry::api>&);

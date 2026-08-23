@@ -61,7 +61,6 @@ private:
     ss::future<> do_inform(model::node_id);
     ss::future<>
     validate_topic_creation_authorization(int16_t replication_factor);
-    bool shadow_linking_active() const;
 
     kafka::client::configuration& _client_config;
     cluster::controller& _controller;

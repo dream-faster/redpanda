@@ -12,8 +12,6 @@
 #pragma once
 
 #include "cluster/cloud_metadata/producer_id_recovery_manager.h"
-#include "cluster/cluster_epoch_service.h"
-#include "cluster/cluster_link/fwd.h"
 #include "cluster/controller_probe.h"
 #include "cluster/controller_stm.h"
 #include "cluster/data_migration_group_proxy.h"
@@ -155,10 +153,6 @@ public:
     }
     ss::sharded<controller_stm>& get_controller_stm() { return _stm; }
 
-    ss::sharded<cluster_epoch_service<>>& get_cluster_epoch_generator() {
-        return _epoch_service;
-    }
-
     ss::sharded<data_migrations::migrated_resources>&
     get_data_migrated_resources() {
         return _data_migrated_resources;
@@ -197,10 +191,6 @@ public:
     }
 
     ss::sharded<client_quota::store>& get_quota_store() { return _quota_store; }
-
-    ss::sharded<cluster::cluster_link::frontend>& get_cluster_link_frontend() {
-        return _cluster_link_frontend;
-    }
 
     /// Register a callback to contribute telemetry data during metrics
     /// collection. This allows higher-layer subsystems to populate fields
@@ -391,13 +381,6 @@ private:
     controller_probe _probe;
     ss::sharded<bootstrap_backend> _bootstrap_backend; // single instance
     ss::sharded<topic_metrics_watcher> _topic_metrics_watcher;
-
-    ss::sharded<cluster::cluster_link::frontend>
-      _cluster_link_frontend; // instance per core
-    ss::sharded<cluster::cluster_link::table>
-      _cluster_link_table; // instance per core
-
-    ss::sharded<cluster_epoch_service<>> _epoch_service; // instance per core
 
     std::unique_ptr<controller_forced_reconfiguration_manager> _cfr_m;
 

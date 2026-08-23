@@ -16,9 +16,9 @@
 
 namespace kafka::client {
 
-class cluster_link_test_metadata_adapter : public kafka::metadata_cache_info {
+class test_metadata_adapter : public kafka::metadata_cache_info {
 public:
-    explicit cluster_link_test_metadata_adapter(config::configuration* config)
+    explicit test_metadata_adapter(config::configuration* config)
       : _config(config) {}
 
     ::model::compression get_default_compression() const override {
@@ -301,7 +301,7 @@ ss::future<response_t> cluster_mock::handle_describe_configs_request(
         report_topic_config(
           resource,
           result,
-          cluster_link_test_metadata_adapter{_mock_config.get()},
+          test_metadata_adapter{_mock_config.get()},
           topic_it->second.topic_properties,
           dc_req.data.include_synonyms,
           dc_req.data.include_documentation);

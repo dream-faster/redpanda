@@ -15,9 +15,7 @@
 #include "redpanda/admin/services/features.h"
 #include "redpanda/admin/services/internal/breakglass.h"
 #include "redpanda/admin/services/internal/debug.h"
-#include "redpanda/admin/services/internal/shadow_link_internal.h"
 #include "redpanda/admin/services/security.h"
-#include "redpanda/admin/services/shadow_link/shadow_link.h"
 #include "redpanda/application.h"
 #include "resource_mgmt/memory_groups.h"
 #include "resource_mgmt/scheduling_groups_probe.h"
@@ -77,12 +75,6 @@ void application::configure_admin_server(model::node_id node_id) {
           };
           // Add RPC services
           s.add_service(
-            std::make_unique<admin::shadow_link_service_impl>(
-              create_client(),
-              &_cluster_link_service,
-              &metadata_cache,
-              &controller->get_feature_table()));
-          s.add_service(
             std::make_unique<admin::debug_service_impl>(
               create_client(), stress_fiber_manager));
           s.add_service(
@@ -96,10 +88,6 @@ void application::configure_admin_server(model::node_id node_id) {
           s.add_service(
             std::make_unique<admin::internal::breakglass_service_impl>(
               controller.get()));
-          s.add_service(
-            std::make_unique<
-              admin::internal::shadow_link_internal_service_impl>(
-              create_client(), &_cluster_link_service, &metadata_cache));
           s.add_service(
             std::make_unique<admin::security_service_impl>(
               create_client(),

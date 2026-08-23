@@ -118,8 +118,7 @@ public:
       = std::nullopt,
       std::optional<archival::configuration> archival_cfg = std::nullopt,
       std::optional<cloud_storage::configuration> cloud_cfg = std::nullopt,
-      bool enable_legacy_upload_mode = true,
-      bool cluster_linking_enabled = false) {
+      bool enable_legacy_upload_mode = true) {
         return std::make_unique<redpanda_thread_fixture>(
           node_id,
           kafka_port,
@@ -135,8 +134,7 @@ public:
           use_node_id,
           empty_seed_starts_cluster_val,
           false,
-          enable_legacy_upload_mode,
-          cluster_linking_enabled);
+          enable_legacy_upload_mode);
     }
 
     void add_node(
@@ -153,8 +151,7 @@ public:
       = std::nullopt,
       std::optional<archival::configuration> archival_cfg = std::nullopt,
       std::optional<cloud_storage::configuration> cloud_cfg = std::nullopt,
-      bool enable_legacy_upload_mode = true,
-      bool cluster_linking_enabled = false) {
+      bool enable_legacy_upload_mode = true) {
         _instances.emplace(
           node_id,
           make_redpanda_fixture(
@@ -169,8 +166,7 @@ public:
             s3_config,
             archival_cfg,
             cloud_cfg,
-            enable_legacy_upload_mode,
-            cluster_linking_enabled));
+            enable_legacy_upload_mode));
     }
 
     application* get_node_application(model::node_id id) {
@@ -209,7 +205,6 @@ public:
       std::optional<archival::configuration> archival_cfg = std::nullopt,
       std::optional<cloud_storage::configuration> cloud_cfg = std::nullopt,
       bool legacy_upload_mode_enabled = true,
-      bool cluster_linking_enabled = false,
       model::node_id seed_node_id = model::node_id{0}) {
         std::vector<config::seed_server> seeds = {};
         if (!empty_seed_starts_cluster_val || node_id != 0) {
@@ -231,8 +226,7 @@ public:
           s3_config,
           archival_cfg,
           cloud_cfg,
-          legacy_upload_mode_enabled,
-          cluster_linking_enabled);
+          legacy_upload_mode_enabled);
         return get_node_application(node_id);
     }
 
