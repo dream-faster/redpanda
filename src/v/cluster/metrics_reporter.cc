@@ -175,7 +175,6 @@ metrics_reporter::metrics_reporter(
   ss::sharded<features::feature_table>& feature_table,
   ss::sharded<security::role_store>& role_store,
   ss::sharded<security::authorizer>& authorizer,
-  ss::sharded<plugin_table>* pt,
   ss::sharded<feature_manager>* fm,
   ss::sharded<storage::api>* storage,
   ss::sharded<cluster_link::frontend>* clfe,
@@ -190,7 +189,6 @@ metrics_reporter::metrics_reporter(
   , _feature_table(feature_table)
   , _role_store(role_store)
   , _authorizer(authorizer)
-  , _plugin_table(pt)
   , _feature_manager(fm)
   , _storage(storage)
   , _clfe(clfe)
@@ -390,8 +388,6 @@ metrics_reporter::build_metrics_snapshot() {
     }
 
     snapshot.unique_group_count = unique_groups.size();
-
-    snapshot.data_transforms_count = _plugin_table->local().size();
 
     auto env_value = std::getenv("REDPANDA_ENVIRONMENT");
     if (env_value) {
@@ -722,9 +718,6 @@ void rjson_serialize(
 
     w.Key("unique_group_count");
     w.Uint(snapshot.unique_group_count);
-
-    w.Key("data_transforms_count");
-    w.Uint(snapshot.data_transforms_count);
 
     w.Key("config");
     config::shard_local_cfg().to_json_for_metrics(w);

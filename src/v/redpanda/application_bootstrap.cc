@@ -42,10 +42,6 @@
 #include "storage/chunk_cache.h"
 #include "storage/directories.h"
 #include "syschecks/syschecks.h"
-#include "transform/api.h"
-#include "transform/rpc/client.h"
-#include "wasm/cache.h"
-#include "wasm/engine.h"
 
 #include <seastar/core/memory.hh>
 #include <seastar/core/smp.hh>
@@ -687,27 +683,6 @@ void application::wire_up_and_start(
 
     start_kafka(node_id, app_signal);
     controller->set_ready().get();
-
-    if (
-      wasm_data_transforms_enabled() && !config::node().recovery_mode_enabled) {
-        const auto& cluster = config::shard_local_cfg();
-        wasm::runtime::config config = {
-          .heap_memory = {
-            .per_core_pool_size_bytes = cluster.data_transforms_per_core_memory_reservation.value(),
-            .per_engine_memory_limit = cluster.data_transforms_per_function_memory_limit.value(),
-          },
-          .stack_memory = {
-            .debug_host_stack_usage = false,
-          },
-          .cpu = {
-            .per_invocation_timeout = cluster.data_transforms_runtime_limit_ms.value(),
-          },
-        };
-        _wasm_runtime->start(config).get();
-        _transform_rpc_client.invoke_on_all(&transform::rpc::client::start)
-          .get();
-        _transform_service.invoke_on_all(&transform::service::start).get();
-    }
 
     _cluster_link_service.invoke_on_all(&cluster_link::service::start).get();
 

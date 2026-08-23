@@ -280,7 +280,6 @@ topics_frontend::topics_frontend(
   ss::sharded<shard_balancer>& sb,
   ss::sharded<storage::api>& storage,
   data_migrations::migrated_resources& migrated_resources,
-  plugin_table& plugin_table,
   metadata_cache& metadata_cache,
   config::binding<unsigned> hard_max_disk_usage_ratio,
   config::binding<int16_t> minimum_topic_replication,
@@ -298,7 +297,6 @@ topics_frontend::topics_frontend(
   , _features(features)
   , _shard_balancer(sb)
   , _storage(storage)
-  , _plugin_table(plugin_table)
   , _metadata_cache(metadata_cache)
   , _members_table(members_table)
   , _pm(pm)
@@ -1009,18 +1007,6 @@ ss::future<topic_result> topics_frontend::do_delete_topic(
               std::move(tp_ns), errc::resource_is_being_migrated);
             return ss::make_ready_future<topic_result>(result);
         }
-    }
-    // Before deleting a topic we need to make sure there are no transforms
-    // hooked up to it first.
-    //
-    // NOTE: This is best effort validation, it's possible for a plugin creation
-    // racing in a suspension point and there being a dangling topic for a
-    // plugin.
-    auto source_transforms = _plugin_table.find_by_input_topic(tp_ns);
-    auto sink_transforms = _plugin_table.find_by_output_topic(tp_ns);
-    if (!source_transforms.empty() || !sink_transforms.empty()) {
-        topic_result result(std::move(tp_ns), errc::source_topic_still_in_use);
-        return ss::make_ready_future<topic_result>(result);
     }
     // Lifecycle marker driven deletion is added alongside the v2 manifest
     // format in Redpanda 23.2.  Before that, we write legacy one-shot

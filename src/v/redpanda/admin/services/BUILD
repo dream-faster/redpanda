@@ -80,7 +80,6 @@ redpanda_cc_library(
         ":utils",
         "//src/v/cluster:feature_backend",
         "//src/v/cluster:leader_balancer_strategy",
-        "//src/v/cluster:plugin_backend",
         "//src/v/cluster:topic_metrics_watcher",
         "//src/v/redpanda/admin/proxy:context",
         "//src/v/security:request_auth",

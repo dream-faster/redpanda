@@ -76,27 +76,11 @@ inline const model::ntp schema_registry_internal_ntp(
   schema_registry_internal_tp.topic,
   schema_registry_internal_tp.partition);
 
-inline const model::ntp wasm_binaries_internal_ntp(
-  model::kafka_internal_namespace,
-  model::topic("wasm_binaries"),
-  model::partition_id(0));
-
-inline const model::topic
-  transform_log_internal_topic("_redpanda.transform_logs");
-
-inline const model::topic_namespace transform_log_internal_nt(
-  model::kafka_namespace, model::transform_log_internal_topic);
-
-inline const model::topic l1_metastore_topic("ct_l1_domain");
-inline const model::topic_namespace
-  l1_metastore_nt(model::kafka_internal_namespace, model::l1_metastore_topic);
-
 // Topics in the Kafka namespace that are not user-created topics.
 inline const std::array non_user_topics{
   kafka_consumer_offsets_topic,
   schema_registry_internal_tp.topic,
   kafka_audit_logging_topic,
-  transform_log_internal_topic,
 };
 
 inline bool is_user_topic(topic_namespace_view tp_ns) {

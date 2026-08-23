@@ -69,7 +69,6 @@ public:
       ss::sharded<shard_balancer>&,
       ss::sharded<storage::api>&,
       data_migrations::migrated_resources&,
-      plugin_table&,
       metadata_cache&,
       config::binding<unsigned> hard_max_disk_usage_ratio,
       config::binding<int16_t> minimum_topic_replication,
@@ -312,7 +311,6 @@ private:
     ss::sharded<features::feature_table>& _features;
     ss::sharded<shard_balancer>& _shard_balancer;
     ss::sharded<storage::api>& _storage;
-    plugin_table& _plugin_table;
     metadata_cache& _metadata_cache;
 
     ss::sharded<cluster::members_table>& _members_table;

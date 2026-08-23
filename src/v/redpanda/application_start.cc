@@ -43,7 +43,6 @@
 #include "resource_mgmt/scheduling_groups_probe.h"
 #include "storage/compaction_controller.h"
 #include "syschecks/syschecks.h"
-#include "transform/stm/transform_offsets_stm.h"
 
 #include <seastar/core/condition-variable.hh>
 
@@ -56,7 +55,6 @@ void application::start_runtime_services(::stop_signal& app_signal) {
       .invoke_on_all([this](cluster::partition_manager& pm) {
           pm.register_factory<cluster::tm_stm_factory>();
           pm.register_factory<cluster::id_allocator_stm_factory>();
-          pm.register_factory<transform::transform_offsets_stm_factory>();
           pm.register_factory<cluster::rm_stm_factory>(
             config::shard_local_cfg().enable_transactions.value(),
             config::shard_local_cfg().enable_idempotence.value(),

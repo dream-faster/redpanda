@@ -58,9 +58,7 @@
 #include "rpc/rpc_server.h"
 #include "ssx/sharded_service_container.h"
 #include "storage/api.h"
-#include "transform/fwd.h"
 #include "utils/stop_signal.h"
-#include "wasm/fwd.h"
 
 #include <seastar/core/app-template.hh>
 #include <seastar/core/metrics_registration.hh>
@@ -212,10 +210,6 @@ public:
         return _schema_registry;
     }
 
-    ss::sharded<transform::rpc::client>& transforms_client() {
-        return _transform_rpc_client;
-    }
-
     // At a minimum, we need to construct the feature table and storage systems
     // in order to properly bootstrap the system. Public for test fixture
     // access.
@@ -352,8 +346,6 @@ private:
 
     bool archival_storage_enabled();
 
-    bool wasm_data_transforms_enabled();
-
     void setup_metrics();
     void setup_public_metrics();
     void setup_internal_metrics();
@@ -398,11 +390,6 @@ private:
     ss::sharded<archival::upload_controller> _archival_upload_controller;
     std::unique_ptr<monitor_unsafe> _monitor_unsafe;
     ss::sharded<archival::purger> _archival_purger;
-
-    std::unique_ptr<wasm::caching_runtime> _wasm_runtime;
-    ss::sharded<transform::service> _transform_service;
-    ss::sharded<transform::rpc::local_service> _transform_rpc_service;
-    ss::sharded<transform::rpc::client> _transform_rpc_client;
 
     metrics::internal_metric_groups _metrics;
     ss::sharded<metrics::public_metrics_group_service> _public_metrics;

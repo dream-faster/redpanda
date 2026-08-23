@@ -83,7 +83,6 @@ redpanda_cc_library(
     implementation_deps = [
         "//src/v/cluster:cluster_link_rpc_types",
         "//src/v/cluster:feature_backend",
-        "//src/v/cluster:plugin_backend",
         "//src/v/cluster:types",
         "//src/v/cluster_link/model:sr_context_mapping",
         "//src/v/cluster_link/schema_registry_sync:http_source_reader",
@@ -270,7 +269,6 @@ redpanda_cc_library(
         "//src/v/cluster:fwd",
         "//src/v/cluster:leader_balancer_strategy",
         "//src/v/cluster:members_table",
-        "//src/v/cluster:plugin_backend",
         "//src/v/cluster:topic_metrics_watcher",
         "//src/v/cluster_link/model",
         "//src/v/cluster_link/schema_registry_sync:http_source_reader",

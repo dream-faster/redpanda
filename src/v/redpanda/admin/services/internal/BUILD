@@ -40,7 +40,6 @@ redpanda_cc_library(
         "//src/v/cluster:fwd",
         "//src/v/cluster:members_table",
         "//src/v/cluster:notification",
-        "//src/v/cluster:plugin_backend",
         "//src/v/cluster:rpc_utils",
         "//src/v/finjector",
         "//src/v/model",

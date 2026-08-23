@@ -19,7 +19,6 @@
 #include "cluster/topics_frontend.h"
 #include "cluster/types.h"
 #include "model/namespace.h"
-#include "model/transform.h"
 
 #include <seastar/core/sleep.hh>
 #include <seastar/core/timer.hh>
@@ -153,21 +152,7 @@ ss::future<> health_manager::do_tick() {
 
         if (ok) {
             ok = co_await ensure_topic_replication(
-              model::topic_namespace_view(model::wasm_binaries_internal_ntp));
-        }
-
-        if (ok) {
-            ok = co_await ensure_topic_replication(model::transform_offsets_nt);
-        }
-
-        if (ok) {
-            ok = co_await ensure_topic_replication(
               model::kafka_audit_logging_nt);
-        }
-
-        if (ok) {
-            ok = co_await ensure_topic_replication(
-              model::transform_log_internal_nt);
         }
     }
 

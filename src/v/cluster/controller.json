@@ -5,7 +5,6 @@
         "cluster/types.h",
         "cluster/health_monitor_types.h",
         "cluster/client_quota_serde.h",
-        "cluster/plugin_rpc_types.h",
         "cluster/cluster_link_rpc_types.h",
         "cluster/security_types.h"
     ],
@@ -156,16 +155,6 @@
             "output_type": "controller_committed_offset_reply"
         },
         {
-            "name": "upsert_plugin",
-            "input_type": "upsert_plugin_request",
-            "output_type": "upsert_plugin_response"
-        },
-        {
-            "name": "remove_plugin",
-            "input_type": "remove_plugin_request",
-            "output_type": "remove_plugin_response"
-        },
-        {
             "name": "delete_topics",
             "input_type": "delete_topics_request",
             "output_type": "delete_topics_reply"
@@ -215,7 +204,6 @@
             "input_type": "delete_mirror_topic_request",
             "output_type": "delete_mirror_topic_response"
         },
-
         {
             "name": "get_current_cluster_epoch",
             "input_type": "get_current_cluster_epoch_request",

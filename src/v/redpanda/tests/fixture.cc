@@ -85,7 +85,6 @@ redpanda_thread_fixture::redpanda_thread_fixture(
   std::optional<cloud_storage::configuration> cloud_cfg,
   configure_node_id use_node_id,
   const empty_seed_starts_cluster empty_seed_starts_cluster_val,
-  bool enable_data_transforms,
   bool enable_legacy_upload_mode,
   bool development_cluster_linking_enabled, )
   : app(ssx::sformat("redpanda-{}", node_id()))
@@ -105,7 +104,6 @@ redpanda_thread_fixture::redpanda_thread_fixture(
       std::move(cloud_cfg),
       use_node_id,
       empty_seed_starts_cluster_val,
-      enable_data_transforms,
       enable_legacy_upload_mode,
       development_cluster_linking_enabled);
     try {
@@ -336,7 +334,6 @@ void redpanda_thread_fixture::configure(
   std::optional<cloud_storage::configuration> cloud_cfg,
   configure_node_id use_node_id,
   const empty_seed_starts_cluster empty_seed_starts_cluster_val,
-  bool data_transforms_enabled,
   bool legacy_upload_mode_enabled,
   bool development_cluster_linking_enabled) {
     auto base_path = std::filesystem::path(data_dir);
@@ -439,8 +436,6 @@ void redpanda_thread_fixture::configure(
               .set_value(std::vector<ss::sstring>{});
         }
 
-        config.get("data_transforms_enabled")
-          .set_value(data_transforms_enabled);
         config.get("cloud_storage_disable_archiver_manager")
           .set_value(legacy_upload_mode_enabled);
         config.get("enable_shadow_linking")

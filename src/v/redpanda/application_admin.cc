@@ -61,7 +61,6 @@ void application::configure_admin_server(model::node_id node_id) {
       std::ref(_memory_sampling),
       std::ref(shadow_index_cache),
       std::ref(_cpu_profiler),
-      &_transform_service,
       std::ref(audit_mgr),
       std::ref(_tx_manager_migrator),
       std::ref(_kafka_server.ref()),

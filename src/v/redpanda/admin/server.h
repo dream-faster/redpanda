@@ -37,7 +37,6 @@
 #include "security/types.h"
 #include "serde/protobuf/rpc.h"
 #include "storage/node.h"
-#include "transform/fwd.h"
 
 #include <seastar/core/do_with.hh>
 #include <seastar/core/scheduling.hh>
@@ -92,7 +91,6 @@ public:
       ss::sharded<memory_sampling>&,
       ss::sharded<cloud_io::cache>&,
       ss::sharded<resources::cpu_profiler>&,
-      ss::sharded<transform::service>*,
       ss::sharded<security::audit::audit_log_manager>&,
       std::unique_ptr<cluster::tx_manager_migrator>&,
       ss::sharded<kafka::server>&,
@@ -455,7 +453,6 @@ private:
     void register_cluster_routes();
     void register_cluster_partitions_routes();
     void register_shadow_indexing_routes();
-    void register_wasm_transform_routes();
     void register_recovery_mode_routes();
     void register_data_migration_routes();
     void register_topic_routes();
@@ -681,20 +678,6 @@ private:
     ss::future<ss::json::json_return_type>
       override_node_uuid_handler(std::unique_ptr<ss::http::request>);
 
-    // Transform routes
-    ss::future<ss::json::json_return_type>
-      deploy_transform(std::unique_ptr<ss::http::request>);
-    ss::future<ss::json::json_return_type>
-      list_transforms(std::unique_ptr<ss::http::request>);
-    ss::future<ss::json::json_return_type>
-      delete_transform(std::unique_ptr<ss::http::request>);
-    ss::future<ss::json::json_return_type>
-      list_committed_offsets(std::unique_ptr<ss::http::request>);
-    ss::future<ss::json::json_return_type>
-      garbage_collect_committed_offsets(std::unique_ptr<ss::http::request>);
-    ss::future<ss::json::json_return_type>
-      patch_transform_metadata(std::unique_ptr<ss::http::request>);
-
     // Data migration routes
     ss::future<std::unique_ptr<ss::http::reply>> list_data_migrations(
       std::unique_ptr<ss::http::request>, std::unique_ptr<ss::http::reply>);
@@ -796,7 +779,6 @@ private:
     ss::sharded<memory_sampling>& _memory_sampling_service;
     ss::sharded<cloud_io::cache>& _cloud_storage_cache;
     ss::sharded<resources::cpu_profiler>& _cpu_profiler;
-    ss::sharded<transform::service>* _transform_service;
     ss::sharded<security::audit::audit_log_manager>& _audit_mgr;
     std::unique_ptr<cluster::tx_manager_migrator>& _tx_manager_migrator;
     ss::sharded<kafka::server>& _kafka_server;

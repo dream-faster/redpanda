@@ -49,7 +49,6 @@ public:
         chunked_vector<cluster::role_recovery> roles;
         chunked_vector<topic_configuration> remote_topics;
         chunked_vector<topic_configuration> local_topics;
-        // TODO: restore wasm plugins/transforms
 
         bool empty() const {
             return !license.has_value() && config.upsert.empty()

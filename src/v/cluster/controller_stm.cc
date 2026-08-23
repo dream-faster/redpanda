@@ -147,7 +147,6 @@ ss::future<> controller_stm::apply_snapshot(
 
         // apply everything else in no particular order.
         co_await ss::when_all(
-          std::get<plugin_backend&>(_state).apply_snapshot(offset, snapshot),
           std::get<cluster_recovery_manager&>(_state).apply_snapshot(
             offset, snapshot),
           std::get<security_manager&>(_state).apply_snapshot(offset, snapshot),

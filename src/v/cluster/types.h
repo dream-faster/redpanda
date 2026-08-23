@@ -34,7 +34,6 @@
 #include "model/fundamental.h"
 #include "model/metadata.h"
 #include "model/timeout_clock.h"
-#include "model/transform.h"
 #include "pandaproxy/schema_registry/subject_name_strategy.h"
 #include "pandaproxy/schema_registry/types.h"
 #include "raft/errc.h"

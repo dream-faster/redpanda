@@ -163,7 +163,6 @@ redpanda_cc_btest(
         "//src/v/cluster:controller_log_limiter",
         "//src/v/cluster:data_migration_table",
         "//src/v/cluster:feature_backend",
-        "//src/v/cluster:plugin_backend",
         "//src/v/kafka/protocol:describe_redpanda_roles",
         "//src/v/kafka/protocol:produce",
         "//src/v/kafka/server",

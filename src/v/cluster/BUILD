@@ -22,7 +22,6 @@ redpanda_cc_rpc_library(
     src = "controller.json",
     deps = [
         ":cluster_link_rpc_types",
-        ":plugin_rpc_types",
         ":security_types",
     ],
 )
@@ -553,20 +552,6 @@ redpanda_cc_library(
 )
 
 redpanda_cc_library(
-    name = "plugin_rpc_types",
-    hdrs = [
-        "plugin_rpc_types.h",
-    ],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":errc",
-        "//src/v/model",
-        "//src/v/serde",
-        "//src/v/utils:uuid",
-    ],
-)
-
-redpanda_cc_library(
     name = "partition_balancer_types",
     srcs = [
         "partition_balancer_types.cc",
@@ -918,27 +903,6 @@ redpanda_cc_library(
         "//src/v/serde:chrono",
         "//src/v/serde:enum",
         "//src/v/serde:vector",
-    ],
-)
-
-redpanda_cc_library(
-    name = "plugin_table",
-    srcs = [
-        "plugin_table.cc",
-    ],
-    hdrs = [
-        "plugin_table.h",
-    ],
-    implementation_deps = [
-        ":types",
-        "//src/v/base",
-        "@seastar",
-    ],
-    visibility = ["//visibility:public"],
-    deps = [
-        "//src/v/model",
-        "@abseil-cpp//absl/container:btree",
-        "@abseil-cpp//absl/container:flat_hash_set",
     ],
 )
 
@@ -1773,26 +1737,6 @@ redpanda_cc_library(
 )
 
 redpanda_cc_library(
-    name = "plugin_backend",
-    srcs = [
-        "plugin_backend.cc",
-    ],
-    hdrs = [
-        "plugin_backend.h",
-    ],
-    implementation_deps = [
-        ":controller_snapshot",
-    ],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":commands",
-        ":fwd",
-        ":plugin_table",
-        "@seastar",
-    ],
-)
-
-redpanda_cc_library(
     name = "remote_topic_configuration_source",
     srcs = [
         "remote_topic_configuration_source.cc",
@@ -2177,7 +2121,6 @@ redpanda_cc_library(
         "partition_manager.cc",
         "partition_probe.cc",
         "partition_recovery_manager.cc",
-        "plugin_frontend.cc",
         "rm_partition_frontend.cc",
         "rm_stm.cc",
         "scheduling/leader_balancer.cc",
@@ -2286,7 +2229,6 @@ redpanda_cc_library(
         "partition_manager.h",
         "partition_probe.h",
         "partition_recovery_manager.h",
-        "plugin_frontend.h",
         "raft0_utils.h",
         "rm_partition_frontend.h",
         "rm_stm.h",
@@ -2384,9 +2326,6 @@ redpanda_cc_library(
         ":partition_balancer_types",
         ":partition_leaders_table",
         ":partition_properties_stm",
-        ":plugin_backend",
-        ":plugin_rpc_types",
-        ":plugin_table",
         ":prefix_truncate_record",
         ":producer_state",
         ":producer_state_manager",

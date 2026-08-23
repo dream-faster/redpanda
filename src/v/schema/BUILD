@@ -26,7 +26,6 @@ redpanda_cc_library(
     deps = [
         "//src/v/base",
         "//src/v/cluster:fwd",
-        "//src/v/cluster:plugin_table",
         "//src/v/pandaproxy/schema_registry:api",
         "//src/v/pandaproxy/schema_registry:avro",
         "//src/v/pandaproxy/schema_registry:fwd",

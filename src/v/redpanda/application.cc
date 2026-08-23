@@ -974,11 +974,6 @@ bool application::archival_storage_enabled() {
     return cfg.cloud_storage_enabled();
 }
 
-bool application::wasm_data_transforms_enabled() {
-    return config::shard_local_cfg().data_transforms_enabled.value()
-           && !config::node().emergency_disable_data_transforms.value();
-}
-
 ss::future<>
 application::set_proxy_client_config(ss::sstring name, std::any val) {
     return _proxy->set_client_config(std::move(name), std::move(val));

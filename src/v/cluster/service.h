@@ -14,7 +14,6 @@
 #include "cluster/cluster_link_rpc_types.h"
 #include "cluster/controller_service.h"
 #include "cluster/fwd.h"
-#include "cluster/plugin_rpc_types.h"
 #include "cluster/types.h"
 #include "features/fwd.h"
 #include "rpc/fwd.h"
@@ -32,7 +31,6 @@ public:
       ss::smp_service_group,
       controller* controller,
       ss::sharded<topics_frontend>&,
-      ss::sharded<plugin_frontend>&,
       ss::sharded<members_manager>&,
       ss::sharded<metadata_cache>&,
       ss::sharded<security_frontend>&,
@@ -135,12 +133,6 @@ public:
     get_controller_committed_offset(
       controller_committed_offset_request, rpc::streaming_context&) final;
 
-    ss::future<upsert_plugin_response>
-    upsert_plugin(upsert_plugin_request, rpc::streaming_context&) final;
-
-    ss::future<remove_plugin_response>
-    remove_plugin(remove_plugin_request, rpc::streaming_context&) final;
-
     ss::future<delete_topics_reply>
     delete_topics(delete_topics_request, rpc::streaming_context&) final;
 
@@ -227,7 +219,6 @@ private:
     ss::sharded<health_monitor_frontend>& _hm_frontend;
     ss::sharded<rpc::connection_cache>& _conn_cache;
     ss::sharded<partition_manager>& _partition_manager;
-    ss::sharded<plugin_frontend>& _plugin_frontend;
     ss::sharded<node_status_backend>& _node_status_backend;
     ss::sharded<client_quota::frontend>& _quotas_frontend;
     ss::sharded<cluster_link::frontend>& _cluster_link_frontend;

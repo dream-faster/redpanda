@@ -363,8 +363,6 @@ fmt::iterator format_to(record_batch_type bt, fmt::iterator out) {
         return fmt::format_to(out, "batch_type::tx_tm_hosted_trasactions");
     case record_batch_type::prefix_truncate:
         return fmt::format_to(out, "batch_type::prefix_truncate");
-    case record_batch_type::plugin_update:
-        return fmt::format_to(out, "batch_type::plugin_update");
     case record_batch_type::tx_registry:
         return fmt::format_to(out, "batch_type::tx_registry");
     case record_batch_type::cluster_recovery_cmd:
@@ -381,18 +379,10 @@ fmt::iterator format_to(record_batch_type bt, fmt::iterator out) {
         return fmt::format_to(out, "batch_type::group_fence_tx");
     case record_batch_type::partition_properties_update:
         return fmt::format_to(out, "batch_type::partition_properties_update");
-    case record_batch_type::ctp_placeholder:
-        return fmt::format_to(out, "batch_type::ctp_placeholder");
-    case record_batch_type::ctp_stm_command:
-        return fmt::format_to(out, "batch_type::ctp_stm_command");
     case record_batch_type::cluster_link:
         return fmt::format_to(out, "cluster_link");
     case record_batch_type::group_block:
         return fmt::format_to(out, "group_block");
-    case record_batch_type::l1_stm:
-        return fmt::format_to(out, "l1_stm");
-    case record_batch_type::ct_read_replica_stm:
-        return fmt::format_to(out, "ct_read_replica_stm");
     }
     return fmt::format_to(
       out, "batch_type::unknown{{{}}}", static_cast<int>(bt));

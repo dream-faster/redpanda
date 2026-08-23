@@ -84,11 +84,6 @@ seastar_cc_swagger_library(
 )
 
 seastar_cc_swagger_library(
-    name = "transform",
-    src = "api-doc/transform.json",
-)
-
-seastar_cc_swagger_library(
     name = "usage",
     src = "api-doc/usage.json",
 )
@@ -260,7 +255,6 @@ redpanda_cc_library(
         "server.cc",
         "topics.cc",
         "transaction.cc",
-        "transform.cc",
         "usage.cc",
         "util.cc",
     ],
@@ -281,7 +275,6 @@ redpanda_cc_library(
         "api-doc/shadow_indexing.json.hh",
         "api-doc/status.json.hh",
         "api-doc/transaction.json.hh",
-        "api-doc/transform.json.hh",
         "api-doc/usage.json.hh",
         "debug_bundle.h",
         "server.h",
@@ -327,7 +320,6 @@ redpanda_cc_library(
         ":shadow_indexing",
         ":status",
         ":transaction",
-        ":transform",
         ":usage",
         "//src/v/base",
         "//src/v/bytes:iostream",
@@ -346,7 +338,6 @@ redpanda_cc_library(
         "//src/v/cluster:fwd",
         "//src/v/cluster:ntp_callbacks",
         "//src/v/cluster:partition_properties_stm",
-        "//src/v/cluster:plugin_backend",
         "//src/v/cluster:rpc_utils",
         "//src/v/cluster:tm_stm",
         "//src/v/cluster:topic_table_partition_generator",
@@ -392,13 +383,10 @@ redpanda_cc_library(
         "//src/v/storage",
         "//src/v/strings:string_switch",
         "//src/v/strings:utf8",
-        "//src/v/transform",
-        "//src/v/transform:fwd",
         "//src/v/utils:arch",
         "//src/v/utils:functional",
         "//src/v/utils:unresolved_address",
         "//src/v/version",
-        "//src/v/wasm:api",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/container:flat_hash_set",
         "@boost//:algorithm",

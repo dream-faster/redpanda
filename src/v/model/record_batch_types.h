@@ -45,7 +45,6 @@ enum class record_batch_type : int8_t {
     version_fence = 23,              // version fence/epoch
     tx_tm_hosted_trasactions = 24,   // tx_tm_hosted_trasactions_batch_type
     prefix_truncate = 25,            // log prefix truncation type
-    plugin_update = 26,              // Wasm plugin update
     tx_registry = 27,                // tx_registry_batch_type
     cluster_recovery_cmd = 28,       // cluster recovery command
     compaction_placeholder
@@ -55,12 +54,10 @@ enum class record_batch_type : int8_t {
     data_migration_cmd = 32,  // data migration manipulation command
     group_fence_tx = 33,      // fence batch in group transactions
     partition_properties_update
-    = 34, // special batch type used to update partition properties
-    ctp_placeholder = 36, // placeholder batch type used by cloud topics
-    ctp_stm_command = 37, // ctp_stm command batch
-    cluster_link = 39,    // cluster link update batches
-    group_block = 40, // (un)blocks group names in a consumer offsets partition
-    MAX = ct_read_replica_stm,
+    = 34,              // special batch type used to update partition properties
+    cluster_link = 39, // cluster link update batches
+    group_block = 40,  // (un)blocks group names in a consumer offsets partition
+    MAX = group_block,
 };
 
 fmt::iterator format_to(record_batch_type bt, fmt::iterator out);
@@ -78,8 +75,7 @@ inline std::vector<model::record_batch_type> offset_translator_batch_types() {
       model::record_batch_type::version_fence,
       model::record_batch_type::prefix_truncate,
       model::record_batch_type::partition_properties_update,
-      model::record_batch_type::group_block,
-      model::record_batch_type::ctp_stm_command};
+      model::record_batch_type::group_block};
 }
 
 } // namespace model

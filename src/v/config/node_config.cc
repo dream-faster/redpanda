@@ -139,13 +139,6 @@ node_config::node_config() noexcept
       {},
       endpoint_tls_config::validate_many)
   , coproc_supervisor_server(*this, "coproc_supervisor_server")
-  , emergency_disable_data_transforms(
-      *this,
-      "emergency_disable_data_transforms",
-      "Override the cluster property `data_transforms_enabled` and disable "
-      "Wasm-powered data transforms. This is an emergency shutoff button.",
-      {.visibility = visibility::user},
-      false)
   , admin_api_doc_dir(
       *this,
       "admin_api_doc_dir",

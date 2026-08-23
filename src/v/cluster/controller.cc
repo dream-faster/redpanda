@@ -60,8 +60,6 @@
 #include "cluster/partition_balancer_state.h"
 #include "cluster/partition_leaders_table.h"
 #include "cluster/partition_manager.h"
-#include "cluster/plugin_backend.h"
-#include "cluster/plugin_frontend.h"
 #include "cluster/raft0_utils.h"
 #include "cluster/scheduling/partition_allocator.h"
 #include "cluster/security_frontend.h"
@@ -328,9 +326,6 @@ ss::future<> controller::start(
       std::ref(_storage),
       _raft0);
 
-    co_await _plugin_table.start();
-    co_await _plugin_backend.start_single(&_plugin_table);
-
     co_await _quota_store.start();
     co_await _quota_backend.start_single(std::ref(_quota_store));
 
@@ -438,7 +433,6 @@ ss::future<> controller::start(
           std::ref(_config_manager),
           std::ref(_feature_backend),
           std::ref(_bootstrap_backend),
-          std::ref(_plugin_backend),
           std::ref(_recovery_manager),
           std::ref(_quota_backend),
           std::ref(_data_migration_table.local()),
@@ -487,7 +481,6 @@ ss::future<> controller::start(
       std::ref(_storage),
       ss::sharded_parameter(
         [this] { return std::ref(_data_migrated_resources.local()); }),
-      ss::sharded_parameter([this] { return std::ref(_plugin_table.local()); }),
       ss::sharded_parameter(
         [this] { return std::ref(_metadata_cache.local()); }),
       ss::sharded_parameter([] {
@@ -503,18 +496,6 @@ ss::future<> controller::start(
       }),
       ss::sharded_parameter(
         [] { return config::shard_local_cfg().kafka_topics_max.bind(); }));
-
-    co_await _plugin_frontend.start(
-      _raft0->self().id(),
-      ss::sharded_parameter([this] { return &_partition_leaders.local(); }),
-      ss::sharded_parameter([this] { return &_plugin_table.local(); }),
-      ss::sharded_parameter([this] { return &_tp_state.local(); }),
-      &_cluster_link_frontend,
-      ss::sharded_parameter([this] {
-          return _stm.local_is_initialized() ? &_stm.local() : nullptr;
-      }),
-      ss::sharded_parameter([this] { return &_connections.local(); }),
-      ss::sharded_parameter([this] { return &_as.local(); }));
 
     co_await _quota_frontend.start(
       _raft0->self().id(),
@@ -798,7 +779,6 @@ ss::future<> controller::start(
       std::ref(_feature_table),
       std::ref(_roles),
       std::ref(_authorizer),
-      std::addressof(_plugin_table),
       std::addressof(_feature_manager),
       std::addressof(_storage),
       std::addressof(_cluster_link_frontend),
@@ -1014,7 +994,6 @@ ss::future<> controller::stop() {
     co_await _shard_balancer.stop();
     co_await _backend.stop();
     co_await _tp_frontend.stop();
-    co_await _plugin_frontend.stop();
     co_await _cluster_link_frontend.stop();
     co_await _quota_frontend.stop();
     co_await _ephemeral_credential_frontend.stop();
@@ -1037,8 +1016,6 @@ ss::future<> controller::stop() {
     co_await _cluster_link_table.stop();
     co_await _quota_backend.stop();
     co_await _quota_store.stop();
-    co_await _plugin_backend.stop();
-    co_await _plugin_table.stop();
     co_await _drain_manager.stop();
     co_await _shard_placement.stop();
     co_await _partition_balancer_state.stop();

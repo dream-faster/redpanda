@@ -39,18 +39,6 @@ struct partitions_memory_reservation {
     size_t reserved_bytes(size_t total_memory) const;
 };
 
-/**
- * Memory reservation for the WebAssembly runtime (data transforms). Held
- * off the top, separate from the share-based allocation that
- * `data_transforms_max_memory()` provides for the rest of the data
- * transforms subsystem.
- */
-struct data_transforms_memory_reservation {
-    size_t max_bytes{0};
-
-    size_t reserved_bytes() const { return max_bytes; }
-};
-
 namespace testing {
 class system_memory_groups_accessor;
 }
@@ -67,8 +55,6 @@ public:
     system_memory_groups(
       size_t total_available_memory,
       compaction_memory_reservation compaction,
-      data_transforms_memory_reservation data_transforms,
-      bool wasm_enabled,
       partitions_memory_reservation partitions);
 
     size_t kafka_total_memory() const;
@@ -99,14 +85,9 @@ public:
     size_t admin_max_memory() const;
 
     /// Max memory that data transform subsystem should use.
-    size_t data_transforms_max_memory() const;
 
     size_t compaction_reserved_memory() const {
         return _compaction_reserved_memory;
-    }
-
-    size_t data_transforms_reserved_memory() const {
-        return _data_transforms_reserved_memory;
     }
 
     /// Sum of all per-shard memory reservations subtracted from the shard's
@@ -136,10 +117,8 @@ private:
     size_t subsystem_memory() const;
 
     size_t _compaction_reserved_memory;
-    size_t _data_transforms_reserved_memory;
     size_t _partitions_reserved_memory;
     size_t _total_available_memory;
-    bool _wasm_enabled;
 
     friend class testing::system_memory_groups_accessor;
 };

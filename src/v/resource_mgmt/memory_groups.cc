@@ -24,11 +24,6 @@ bool sliding_window_compaction_enabled() {
     return config::shard_local_cfg().log_compaction_use_sliding_window();
 }
 
-bool wasm_enabled() {
-    return config::shard_local_cfg().data_transforms_enabled.value()
-           && !config::node().emergency_disable_data_transforms.value();
-}
-
 struct memory_shares {
     constexpr static size_t chunk_cache = 15;
     constexpr static size_t kafka = 30;
@@ -36,15 +31,9 @@ struct memory_shares {
     constexpr static size_t recovery = 10;
     constexpr static size_t tiered_storage = 10;
     constexpr static size_t admin = 2;
-    constexpr static size_t data_transforms = 10;
 
-    static size_t total_shares(bool with_wasm) {
-        size_t total = chunk_cache + kafka + rpc + recovery + tiered_storage
-                       + admin;
-        if (with_wasm) {
-            total += data_transforms;
-        }
-        return total;
+    static size_t total_shares() {
+        return chunk_cache + kafka + rpc + recovery + tiered_storage + admin;
     }
 };
 
@@ -64,16 +53,12 @@ partitions_memory_reservation::reserved_bytes(size_t total_memory) const {
 system_memory_groups::system_memory_groups(
   size_t total_available_memory,
   compaction_memory_reservation compaction,
-  data_transforms_memory_reservation data_transforms,
-  bool wasm_enabled,
   partitions_memory_reservation partitions)
   : _compaction_reserved_memory(
       compaction.reserved_bytes(total_available_memory))
-  , _data_transforms_reserved_memory(data_transforms.reserved_bytes())
   , _partitions_reserved_memory(
       partitions.reserved_bytes(total_available_memory))
-  , _total_available_memory(total_available_memory)
-  , _wasm_enabled(wasm_enabled) {}
+  , _total_available_memory(total_available_memory) {}
 
 size_t system_memory_groups::chunk_cache_min_memory() const {
     return chunk_cache_max_memory() / 3;
@@ -103,20 +88,12 @@ size_t system_memory_groups::admin_max_memory() const {
     return subsystem_memory<memory_shares::admin>();
 }
 
-size_t system_memory_groups::data_transforms_max_memory() const {
-    if (!_wasm_enabled) {
-        return 0;
-    }
-    return subsystem_memory<memory_shares::data_transforms>();
-}
-
 size_t system_memory_groups::partitions_max_memory() const {
     return _partitions_reserved_memory;
 }
 
 size_t system_memory_groups::total_reserved_memory() const {
-    return _compaction_reserved_memory + _data_transforms_reserved_memory
-           + _partitions_reserved_memory;
+    return _compaction_reserved_memory + _partitions_reserved_memory;
 }
 
 double system_memory_groups::partitions_max_memory_share() const {
@@ -126,8 +103,7 @@ double system_memory_groups::partitions_max_memory_share() const {
 
 template<size_t shares>
 size_t system_memory_groups::subsystem_memory() const {
-    size_t per_share_amount = total_memory()
-                              / memory_shares::total_shares(_wasm_enabled);
+    size_t per_share_amount = total_memory() / memory_shares::total_shares();
     return per_share_amount * shares;
 }
 
@@ -151,9 +127,8 @@ void system_memory_groups::log_memory_group_allocations(seastar::logger& log) {
       log.info,
       "Per shard memory group allocations: total memory: {}, reserved memory: "
       "{}, total memory minus pre-share reservations: {}, chunk cache: {}, "
-      "kafka: {}, rpc: {}, recovery: {}, tiered storage: {}, admin: {}, data "
-      "transforms: {}, compaction: {}, data transforms reserved: {}, "
-      "partitions: {}",
+      "kafka: {}, rpc: {}, recovery: {}, tiered storage: {}, admin: {}, "
+      "compaction: {}, partitions: {}",
       human::bytes(ss::memory::stats().total_memory()),
       human::bytes(total_reserved_memory()),
       human::bytes(total_memory()),
@@ -163,9 +138,7 @@ void system_memory_groups::log_memory_group_allocations(seastar::logger& log) {
       human::bytes(recovery_max_memory()),
       human::bytes(tiered_storage_max_memory()),
       human::bytes(admin_max_memory()),
-      human::bytes(data_transforms_max_memory()),
       human::bytes(compaction_reserved_memory()),
-      human::bytes(data_transforms_reserved_memory()),
       human::bytes(partitions_max_memory()));
 }
 
@@ -181,7 +154,6 @@ system_memory_groups& memory_groups() {
     }
 
     auto sliding_window_compaction = sliding_window_compaction_enabled();
-    auto wasm = wasm_enabled();
 
     const auto& cfg = config::shard_local_cfg();
     compaction_memory_reservation compaction{
@@ -190,17 +162,8 @@ system_memory_groups& memory_groups() {
                      : 0,
       .max_limit_pct
       = cfg.storage_compaction_key_map_memory_limit_percent.value()};
-    data_transforms_memory_reservation data_transforms{
-      .max_bytes = wasm
-                     ? cfg.data_transforms_per_core_memory_reservation.value()
-                     : 0};
     partitions_memory_reservation partitions{
       .max_limit_pct = cfg.topic_partitions_memory_allocation_percent()};
-    groups.emplace(
-      ss::memory::stats().total_memory(),
-      compaction,
-      data_transforms,
-      wasm,
-      partitions);
+    groups.emplace(ss::memory::stats().total_memory(), compaction, partitions);
     return *groups;
 }

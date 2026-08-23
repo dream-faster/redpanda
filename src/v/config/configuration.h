@@ -131,18 +131,6 @@ struct configuration final : public config_store {
     bounded_property<int> rpc_client_connections_per_peer;
     property<bool> rpc_server_compress_replies;
     // Data Transforms
-    property<bool> data_transforms_enabled;
-    property<std::chrono::milliseconds> data_transforms_commit_interval_ms;
-    bounded_property<size_t> data_transforms_per_core_memory_reservation;
-    bounded_property<size_t> data_transforms_per_function_memory_limit;
-    property<std::chrono::milliseconds> data_transforms_runtime_limit_ms;
-    bounded_property<size_t> data_transforms_binary_max_size;
-    bounded_property<size_t> data_transforms_logging_buffer_capacity_bytes;
-    property<std::chrono::milliseconds>
-      data_transforms_logging_flush_interval_ms;
-    property<size_t> data_transforms_logging_line_max_bytes;
-    bounded_property<size_t> data_transforms_read_buffer_memory_percentage;
-    bounded_property<size_t> data_transforms_write_buffer_memory_percentage;
 
     // Controller
     bounded_property<std::optional<std::size_t>> topic_memory_per_partition;

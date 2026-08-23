@@ -30,8 +30,6 @@
 #include "cluster/metadata_cache.h"
 #include "cluster/node_status_backend.h"
 #include "cluster/partition_manager.h"
-#include "cluster/plugin_frontend.h"
-#include "cluster/plugin_rpc_types.h"
 #include "cluster/security_frontend.h"
 #include "cluster/topics_frontend.h"
 #include "cluster/types.h"
@@ -52,7 +50,6 @@ service::service(
   ss::smp_service_group ssg,
   controller* controller,
   ss::sharded<topics_frontend>& tf,
-  ss::sharded<plugin_frontend>& pf,
   ss::sharded<members_manager>& mm,
   ss::sharded<metadata_cache>& cache,
   ss::sharded<security_frontend>& sf,
@@ -83,7 +80,6 @@ service::service(
   , _hm_frontend(hm_frontend)
   , _conn_cache(conn_cache)
   , _partition_manager(partition_manager)
-  , _plugin_frontend(pf)
   , _node_status_backend(node_status_backend)
   , _quotas_frontend(quotas_frontend)
   , _cluster_link_frontend(cluster_link_frontend) {}
@@ -851,28 +847,6 @@ service::do_get_partition_state(partition_state_request req) {
           reply.error_code = errc::success;
           return ss::make_ready_future<partition_state_reply>(reply);
       });
-}
-
-ss::future<upsert_plugin_response>
-service::upsert_plugin(upsert_plugin_request req, rpc::streaming_context&) {
-    // Capture the request values in this coroutine
-    auto transform = std::move(req.transform);
-    auto deadline = model::timeout_clock::now() + req.timeout;
-    co_await ss::coroutine::switch_to(get_scheduling_group());
-    auto ec = co_await _plugin_frontend.local().upsert_transform(
-      std::move(transform), deadline);
-    co_return upsert_plugin_response{.ec = ec};
-}
-
-ss::future<remove_plugin_response>
-service::remove_plugin(remove_plugin_request req, rpc::streaming_context&) {
-    // Capture the request values in this coroutine
-    auto name = std::move(req.name);
-    auto deadline = model::timeout_clock::now() + req.timeout;
-    co_await ss::coroutine::switch_to(get_scheduling_group());
-    auto result = co_await _plugin_frontend.local().remove_transform(
-      name, deadline);
-    co_return remove_plugin_response{.uuid = result.uuid, .ec = result.ec};
 }
 
 ss::future<delete_topics_reply>

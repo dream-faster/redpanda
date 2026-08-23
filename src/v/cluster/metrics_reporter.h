@@ -13,7 +13,6 @@
 
 #include "cluster/cluster_link/fwd.h"
 #include "cluster/fwd.h"
-#include "cluster/plugin_table.h"
 #include "cluster/types.h"
 #include "features/enterprise_features.h"
 #include "features/fwd.h"
@@ -121,7 +120,6 @@ public:
         bool has_oidc{false};
         uint32_t rbac_role_count{0};
         uint32_t unique_group_count{0};
-        uint32_t data_transforms_count{0};
 
         static constexpr int64_t max_size_for_rp_env = 80;
         ss::sstring redpanda_environment;
@@ -167,7 +165,6 @@ public:
       ss::sharded<features::feature_table>&,
       ss::sharded<security::role_store>& role_store,
       ss::sharded<security::authorizer>& authorizer,
-      ss::sharded<plugin_table>*,
       ss::sharded<feature_manager>*,
       ss::sharded<storage::api>*,
       ss::sharded<cluster_link::frontend>*,
@@ -205,7 +202,6 @@ private:
     ss::sharded<features::feature_table>& _feature_table;
     ss::sharded<security::role_store>& _role_store;
     ss::sharded<security::authorizer>& _authorizer;
-    ss::sharded<plugin_table>* _plugin_table;
     ss::sharded<feature_manager>* _feature_manager;
     ss::sharded<storage::api>* _storage;
     ss::sharded<cluster_link::frontend>* _clfe;

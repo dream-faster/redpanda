@@ -31,7 +31,6 @@
 #include "redpanda/admin/server.h"
 #include "redpanda/application.h"
 #include "resource_mgmt/scheduling_groups_probe.h"
-#include "transform/rpc/service.h"
 
 void application::add_runtime_rpc_services(
   rpc::rpc_server& s, bool start_raft_rpc_early) {
@@ -57,89 +56,6 @@ void application::add_runtime_rpc_services(
         std::ref(tx_gateway_frontend),
         _rm_group_proxy.get(),
         std::ref(rm_partition_frontend)));
-
-    if (!start_raft_rpc_early) {
-        runtime_services.push_back(
-          std::make_unique<
-            raft::service<cluster::partition_manager, cluster::shard_table>>(
-            scheduling_groups::instance().raft_recv_sg(),
-            smp_service_groups.raft_smp_sg(),
-            scheduling_groups::instance().raft_heartbeats(),
-            partition_manager,
-            shard_table.local(),
-            config::shard_local_cfg().raft_heartbeat_interval_ms(),
-            config::node().node_id().value()));
-    }
-
-    runtime_services.push_back(
-      std::make_unique<cluster::service>(
-        scheduling_groups::instance().cluster_sg(),
-        smp_service_groups.cluster_smp_sg(),
-        controller.get(),
-        std::ref(controller->get_topics_frontend()),
-        std::ref(controller->get_plugin_frontend()),
-        std::ref(controller->get_members_manager()),
-        std::ref(metadata_cache),
-        std::ref(controller->get_security_frontend()),
-        std::ref(controller->get_api()),
-        std::ref(controller->get_members_frontend()),
-        std::ref(controller->get_config_frontend()),
-        std::ref(controller->get_config_manager()),
-        std::ref(controller->get_feature_manager()),
-        std::ref(controller->get_feature_table()),
-        std::ref(controller->get_health_monitor()),
-        std::ref(_connection_cache),
-        std::ref(controller->get_partition_manager()),
-        std::ref(node_status_backend),
-        std::ref(controller->get_quota_frontend()),
-        std::ref(controller->get_cluster_link_frontend())));
-    runtime_services.push_back(
-      std::make_unique<cluster::metadata_dissemination_handler>(
-        scheduling_groups::instance().cluster_sg(),
-        smp_service_groups.cluster_smp_sg(),
-        std::ref(controller->get_partition_leaders())));
-
-    runtime_services.push_back(
-      std::make_unique<cluster::node_status_rpc_handler>(
-        scheduling_groups::instance().raft_heartbeats(),
-        smp_service_groups.cluster_smp_sg(),
-        std::ref(node_status_backend)));
-
-    runtime_services.push_back(
-      std::make_unique<cluster::self_test_rpc_handler>(
-        scheduling_groups::instance().raft_heartbeats(),
-        smp_service_groups.cluster_smp_sg(),
-        std::ref(self_test_backend)));
-
-    runtime_services.push_back(
-      std::make_unique<cluster::partition_balancer_rpc_handler>(
-        scheduling_groups::instance().cluster_sg(),
-        smp_service_groups.cluster_smp_sg(),
-        std::ref(controller->get_partition_balancer())));
-
-    runtime_services.push_back(
-      std::make_unique<cluster::ephemeral_credential_service>(
-        scheduling_groups::instance().cluster_sg(),
-        smp_service_groups.cluster_smp_sg(),
-        std::ref(controller->get_ephemeral_credential_frontend())));
-
-    runtime_services.push_back(
-      std::make_unique<kafka::data::rpc::network_service>(
-        scheduling_groups::instance().transforms_sg(),
-        smp_service_groups.transform_smp_sg(),
-        &_kafka_data_rpc_service,
-        kafka::data::rpc::network_service::memory_config{
-          .memory = &s.memory(),
-          .total = s.cfg.max_service_memory_per_core,
-        }));
-
-    if (wasm_data_transforms_enabled()) {
-        runtime_services.push_back(
-          std::make_unique<transform::rpc::network_service>(
-            scheduling_groups::instance().transforms_sg(),
-            smp_service_groups.transform_smp_sg(),
-            &_transform_rpc_service));
-    }
 
     runtime_services.push_back(
       std::make_unique<cluster::topic_recovery_status_rpc_handler>(

@@ -47,7 +47,6 @@ redpanda_cc_library(
         "//src/v/cluster:feature_backend",
         "//src/v/cluster:leader_balancer_strategy",
         "//src/v/cluster:node_status_table",
-        "//src/v/cluster:plugin_backend",
         "//src/v/cluster:shard_table",
         "//src/v/cluster:topic_metrics_watcher",
         "//src/v/features",

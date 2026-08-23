@@ -99,9 +99,7 @@
 #include "ssx/sformat.h"
 #include "strings/string_switch.h"
 #include "strings/utf8.h"
-#include "transform/api.h"
 #include "utils/unresolved_address.h"
-#include "wasm/errc.h"
 
 #include <seastar/core/lowres_clock.hh>
 #include <seastar/core/map_reduce.hh>
@@ -300,7 +298,6 @@ admin_server::admin_server(
   ss::sharded<memory_sampling>& memory_sampling_service,
   ss::sharded<cloud_io::cache>& cloud_storage_cache,
   ss::sharded<resources::cpu_profiler>& cpu_profiler,
-  ss::sharded<transform::service>* transform_service,
   ss::sharded<security::audit::audit_log_manager>& audit_mgr,
   std::unique_ptr<cluster::tx_manager_migrator>& tx_manager_migrator,
   ss::sharded<kafka::server>& kafka_server,
@@ -332,7 +329,6 @@ admin_server::admin_server(
   , _memory_sampling_service(memory_sampling_service)
   , _cloud_storage_cache(cloud_storage_cache)
   , _cpu_profiler(cpu_profiler)
-  , _transform_service(transform_service)
   , _audit_mgr(audit_mgr)
   , _tx_manager_migrator(tx_manager_migrator)
   , _kafka_server(kafka_server)
@@ -598,7 +594,6 @@ void admin_server::configure_admin_routes() {
     rb->register_function(_server._routes, insert_comma);
     rb->register_api_file(_server._routes, "cluster");
     rb->register_function(_server._routes, insert_comma);
-    rb->register_api_file(_server._routes, "transform");
     rb->register_function(_server._routes, insert_comma);
     rb->register_api_file(_server._routes, "debug_bundle");
     register_config_routes();
@@ -617,7 +612,6 @@ void admin_server::configure_admin_routes() {
     register_self_test_routes();
     register_cluster_routes();
     register_shadow_indexing_routes();
-    register_wasm_transform_routes();
     register_data_migration_routes();
     register_topic_routes();
     register_debug_bundle_routes();
@@ -1333,30 +1327,11 @@ ss::future<> admin_server::throw_on_error(
               ss::http::reply::status_type::too_many_requests);
         case cluster::errc::topic_already_exists:
         case cluster::errc::topic_not_exists:
-        case cluster::errc::transform_does_not_exist:
-        case cluster::errc::transform_invalid_update:
-        case cluster::errc::transform_invalid_create:
-        case cluster::errc::transform_invalid_source:
-        case cluster::errc::transform_invalid_environment:
         case cluster::errc::source_topic_not_exists:
         case cluster::errc::source_topic_still_in_use:
         case cluster::errc::invalid_partition_operation:
             throw ss::httpd::bad_request_exception(
               fmt::format("{}", ec.message()));
-        case cluster::errc::transform_count_limit_exceeded: {
-            const size_t max_transforms
-              = config::shard_local_cfg()
-                  .data_transforms_per_core_memory_reservation.value()
-                / config::shard_local_cfg()
-                    .data_transforms_per_function_memory_limit.value();
-            throw ss::httpd::bad_request_exception(
-              ss::format(
-                "The limit of transforms has been reached ({}), more "
-                "memory must be configured via {}",
-                max_transforms,
-                config::shard_local_cfg()
-                  .data_transforms_per_core_memory_reservation.name()));
-        }
         case cluster::errc::invalid_data_migration_state:
         case cluster::errc::data_migration_already_exists:
         case cluster::errc::data_migration_invalid_resources:
@@ -1468,28 +1443,6 @@ ss::future<> admin_server::throw_on_error(
         case rpc::errc::method_not_found:
         case rpc::errc::version_not_supported:
         case rpc::errc::unknown:
-            throw ss::httpd::server_error_exception(
-              fmt::format("Unexpected error: {}", ec.message()));
-        }
-    } else if (ec.category() == wasm::error_category()) {
-        switch (wasm::errc(ec.value())) {
-        case wasm::errc::invalid_module_missing_abi:
-            throw ss::httpd::bad_request_exception(
-              "Invalid WebAssembly - the binary is missing required transform "
-              "functions. Check the broker support for the version of the Data "
-              "Transforms SDK being used.");
-        case wasm::errc::invalid_module_unsupported_sr:
-            throw ss::httpd::bad_request_exception(
-              "Invalid WebAssembly - the binary is using an unsupported Schema "
-              "Registry client. Does the broker support this version of the "
-              "Data Transforms Schema Registry SDK?");
-        case wasm::errc::invalid_module_missing_wasi:
-            throw ss::httpd::bad_request_exception(
-              "invalid WebAssembly - missing required WASI functions");
-        case wasm::errc::invalid_module:
-            throw ss::httpd::bad_request_exception(
-              "invalid WebAssembly module");
-        default:
             throw ss::httpd::server_error_exception(
               fmt::format("Unexpected error: {}", ec.message()));
         }

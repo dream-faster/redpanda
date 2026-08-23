@@ -274,7 +274,6 @@ redpanda_cc_library(
         "//src/v/cluster:leader_balancer_strategy",
         "//src/v/cluster:logger",
         "//src/v/cluster:offsets_snapshot",
-        "//src/v/cluster:plugin_backend",
         "//src/v/cluster:simple_batch_builder",
         "//src/v/cluster:topic_metrics_watcher",
         "//src/v/cluster:tx_errc",

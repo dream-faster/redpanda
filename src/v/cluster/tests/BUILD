@@ -337,53 +337,9 @@ redpanda_cc_btest(
     deps = [
         "//src/v/cluster",
         "//src/v/cluster:fwd",
-        "//src/v/cluster:plugin_table",
         "//src/v/cluster:types",
         "//src/v/test_utils:seastar_boost",
         "@boost//:test",
-    ],
-)
-
-redpanda_cc_gtest(
-    name = "plugin_table_test",
-    timeout = "short",
-    srcs = [
-        "plugin_table_test.cc",
-    ],
-    deps = [
-        "//src/v/cluster:plugin_table",
-        "//src/v/cluster:types",
-        "//src/v/model",
-        "//src/v/test_utils:gtest",
-        "//src/v/utils:uuid",
-        "@googletest//:gtest",
-        "@seastar",
-    ],
-)
-
-redpanda_cc_gtest(
-    name = "plugin_frontend_validation_test",
-    timeout = "short",
-    srcs = [
-        "plugin_frontend_validation_test.cc",
-    ],
-    deps = [
-        "//src/v/cluster",
-        "//src/v/cluster:commands",
-        "//src/v/cluster:data_migrated_resources",
-        "//src/v/cluster:fwd",
-        "//src/v/cluster:plugin_table",
-        "//src/v/cluster:topic_table",
-        "//src/v/cluster:types",
-        "//src/v/config",
-        "//src/v/model",
-        "//src/v/raft",
-        "//src/v/test_utils:gtest",
-        "//src/v/utils:uuid",
-        "@abseil-cpp//absl/container:flat_hash_map",
-        "@boost//:range",
-        "@googletest//:gtest",
-        "@seastar",
     ],
 )
 
@@ -701,7 +657,6 @@ redpanda_cc_btest(
         "//src/v/cluster:feature_backend",
         "//src/v/cluster:members_table",
         "//src/v/cluster:notification",
-        "//src/v/cluster:plugin_backend",
         "//src/v/test_utils:seastar_boost",
         "@boost//:test",
         "@seastar",
@@ -797,7 +752,6 @@ redpanda_cc_gtest(
     deps = [
         "//src/v/cluster",
         "//src/v/cluster:fwd",
-        "//src/v/cluster:plugin_table",
         "//src/v/cluster:types",
         "//src/v/storage/tests:kvstore_fixture",
         "//src/v/test_utils:gtest",

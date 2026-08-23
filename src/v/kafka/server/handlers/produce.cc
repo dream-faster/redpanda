@@ -439,18 +439,14 @@ produce_topic(produce_ctx& octx, produce_request::topic& topic) {
       = octx.rctx.metadata_cache().get_topic_disabled_set(
         model::topic_namespace_view{model::kafka_namespace, topic.name});
 
-    const bool is_transform_logs_topic = topic.name
-                                         == model::transform_log_internal_topic;
-
     const auto& kafka_noproduce_topics
       = config::shard_local_cfg().kafka_noproduce_topics();
 
-    const bool is_noproduce_topic = is_transform_logs_topic
-                                    || std::find(
-                                         kafka_noproduce_topics.begin(),
-                                         kafka_noproduce_topics.end(),
-                                         topic.name)
-                                         != kafka_noproduce_topics.end();
+    const bool is_noproduce_topic = std::find(
+                                      kafka_noproduce_topics.begin(),
+                                      kafka_noproduce_topics.end(),
+                                      topic.name)
+                                    != kafka_noproduce_topics.end();
 
     const bool audit_produce_restricted
       = !octx.rctx.authorized_auditor()

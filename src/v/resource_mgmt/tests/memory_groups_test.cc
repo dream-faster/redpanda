@@ -17,7 +17,6 @@
 #include <gtest/gtest.h>
 
 static constexpr size_t total_shares_without_optionals = 87;
-static constexpr size_t total_wasm_shares = 10;
 
 // It's not really useful to know the exact byte values for each of these
 // numbers so we just make sure we're within a MB
@@ -31,23 +30,16 @@ MATCHER_P(IsApprox, n, "") {
 
 class MemoryGroupSharesTest
   : public ::testing::Test
-  , public ::testing::WithParamInterface<std::tuple<bool, bool, bool, bool>> {
+  , public ::testing::WithParamInterface<bool> {
 public:
     static constexpr size_t total_memory = 2_GiB;
-    static constexpr size_t user_wasm_reservation = 20_MiB;
     static constexpr size_t user_compaction_reservation = 20_MiB;
 
-    bool compaction_enabled() const { return std::get<0>(GetParam()); }
-    bool wasm_enabled() const { return std::get<1>(GetParam()); }
+    bool compaction_enabled() const { return GetParam(); }
 };
 
 TEST_P(MemoryGroupSharesTest, DividesSharesCorrectly) {
     auto total_available_memory = total_memory;
-    data_transforms_memory_reservation data_transforms_reservation{};
-    if (wasm_enabled()) {
-        total_available_memory -= user_wasm_reservation;
-        data_transforms_reservation = {.max_bytes = user_wasm_reservation};
-    }
     compaction_memory_reservation reservation{};
     if (compaction_enabled()) {
         total_available_memory -= user_compaction_reservation;
@@ -58,16 +50,8 @@ TEST_P(MemoryGroupSharesTest, DividesSharesCorrectly) {
     partitions_memory_reservation partitions{.max_limit_pct = 20};
     total_available_memory -= partitions.reserved_bytes(total_memory);
 
-    class system_memory_groups groups(
-      total_memory,
-      reservation,
-      data_transforms_reservation,
-      wasm_enabled(),
-      partitions);
+    class system_memory_groups groups(total_memory, reservation, partitions);
     auto total_shares = total_shares_without_optionals;
-    if (wasm_enabled()) {
-        total_shares += total_wasm_shares;
-    }
     EXPECT_THAT(
       groups.chunk_cache_min_memory(),
       IsApprox(total_available_memory * 5.0 / total_shares));
@@ -89,13 +73,6 @@ TEST_P(MemoryGroupSharesTest, DividesSharesCorrectly) {
     EXPECT_THAT(
       groups.rpc_total_memory(),
       IsApprox(total_available_memory * 20.0 / total_shares));
-    if (wasm_enabled()) {
-        EXPECT_THAT(
-          groups.data_transforms_max_memory(),
-          IsApprox(total_available_memory * 10.0 / total_shares));
-    } else {
-        EXPECT_THAT(groups.data_transforms_max_memory(), 0);
-    }
     if (compaction_enabled()) {
         EXPECT_EQ(
           groups.compaction_reserved_memory(), user_compaction_reservation);
@@ -103,10 +80,9 @@ TEST_P(MemoryGroupSharesTest, DividesSharesCorrectly) {
         EXPECT_EQ(groups.compaction_reserved_memory(), 0);
     }
     EXPECT_LE(
-      groups.data_transforms_max_memory() + groups.chunk_cache_max_memory()
-        + groups.kafka_total_memory() + groups.recovery_max_memory()
-        + groups.rpc_total_memory() + groups.tiered_storage_max_memory()
-        + groups.admin_max_memory(),
+      groups.chunk_cache_max_memory() + groups.kafka_total_memory()
+        + groups.recovery_max_memory() + groups.rpc_total_memory()
+        + groups.tiered_storage_max_memory() + groups.admin_max_memory(),
       total_available_memory);
 }
 
@@ -123,8 +99,6 @@ TEST(MemoryGroups, CompactionMemoryBytes) {
             .max_bytes = compaction_max_bytes,
             .max_limit_pct = double(pct),
           },
-          /*data_transforms_memory_reservation=*/{},
-          /*wasm_enabled=*/false,
           {
             .max_limit_pct = 20,
           });
@@ -139,8 +113,6 @@ TEST(MemoryGroups, CompactionMemoryBytes) {
             .max_bytes = compaction_max_bytes,
             .max_limit_pct = double(pct),
           },
-          /*data_transforms_memory_reservation=*/{},
-          /*wasm_enabled=*/false,
           {
             .max_limit_pct = 20,
           });
@@ -150,6 +122,4 @@ TEST(MemoryGroups, CompactionMemoryBytes) {
 }
 
 INSTANTIATE_TEST_SUITE_P(
-  MemoryGroupShares,
-  MemoryGroupSharesTest,
-  ::testing::Combine(::testing::Bool(), ::testing::Bool(), ::testing::Bool()));
+  MemoryGroupShares, MemoryGroupSharesTest, ::testing::Bool());

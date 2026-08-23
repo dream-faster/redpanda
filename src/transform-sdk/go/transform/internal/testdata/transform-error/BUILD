@@ -14,5 +14,4 @@ go_binary(
     embed = [":transform-error_lib"],
     goarch = "wasm",
     goos = "wasip1",
-    visibility = ["//src/v/wasm/tests:__pkg__"],
 )
