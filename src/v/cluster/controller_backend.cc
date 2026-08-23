@@ -262,12 +262,6 @@ controller_backend::controller_backend(
   ss::sharded<storage::api>& storage,
   ss::sharded<features::feature_table>& features,
   config::binding<std::chrono::milliseconds> housekeeping_interval,
-  config::binding<std::optional<size_t>> initial_retention_local_target_bytes,
-  config::binding<std::optional<std::chrono::milliseconds>>
-    initial_retention_local_target_ms,
-  config::binding<std::optional<size_t>> retention_local_target_bytes_default,
-  config::binding<std::chrono::milliseconds> retention_local_target_ms_default,
-  config::binding<bool> retention_local_strict,
   config::binding<uint32_t> controller_backend_reconciliation_concurrency,
   ss::scheduling_group scheduling_group,
   ss::sharded<ss::abort_source>& as)
@@ -283,15 +277,6 @@ controller_backend::controller_backend(
   , _data_directory(config::node().data_directory().as_sstring())
   , _housekeeping_interval(std::move(housekeeping_interval))
   , _housekeeping_jitter(_housekeeping_interval())
-  , _initial_retention_local_target_bytes(
-      std::move(initial_retention_local_target_bytes))
-  , _initial_retention_local_target_ms(
-      std::move(initial_retention_local_target_ms))
-  , _retention_local_target_bytes_default(
-      std::move(retention_local_target_bytes_default))
-  , _retention_local_target_ms_default(
-      std::move(retention_local_target_ms_default))
-  , _retention_local_strict(std::move(retention_local_strict))
   , _controller_backend_reconciliation_concurrency(
       std::move(controller_backend_reconciliation_concurrency))
   , _scheduling_group(scheduling_group)

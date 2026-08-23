@@ -33,6 +33,7 @@ These print a count and exit non-zero when it is not zero.
 | `check_merged_decls.py` | a deleted declaration's return type fusing into the next declaration (`virtual T virtual U`) |
 | `sweep.py` | brace/paren imbalance, compared against upstream so pre-existing imbalances (raw string literals) do not register |
 | `ctor_order.py` | `configuration.cc`'s initializer order drifting from the header, which `-Wreorder` rejects |
+| `check_unused_fields.py` | private fields whose last reader was removed — `-Wunused-private-field` is enabled and fatal, and it *does* fire for classes declared in headers |
 
 ## Advisory scans
 

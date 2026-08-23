@@ -407,24 +407,6 @@ ss::future<> controller::start(
       }),
       ss::sharded_parameter([] {
           return config::shard_local_cfg()
-            .initial_retention_local_target_bytes_default.bind();
-      }),
-      ss::sharded_parameter([] {
-          return config::shard_local_cfg()
-            .initial_retention_local_target_ms_default.bind();
-      }),
-      ss::sharded_parameter([] {
-          return config::shard_local_cfg()
-            .retention_local_target_bytes_default.bind();
-      }),
-      ss::sharded_parameter([] {
-          return config::shard_local_cfg()
-            .retention_local_target_ms_default.bind();
-      }),
-      ss::sharded_parameter(
-        [] { return config::shard_local_cfg().retention_local_strict.bind(); }),
-      ss::sharded_parameter([] {
-          return config::shard_local_cfg()
             .controller_backend_reconciliation_concurrency.bind();
       }),
       _scheduling_group,
