@@ -33,6 +33,7 @@
 #include "kafka/data/rpc/client.h"
 #include "kafka/data/rpc/service.h"
 #include "kafka/server/app.h"
+#include "kafka/server/group_initializer.h"
 #include "kafka/server/snc_quota_manager.h"
 #include "metrics/aggregate_metrics_watcher.h"
 #include "metrics/host_metrics_watcher.h"

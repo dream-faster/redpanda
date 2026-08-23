@@ -43,6 +43,7 @@
 
 #include <seastar/core/seastar.hh>
 #include <seastar/core/smp.hh>
+#include <seastar/core/thread.hh>
 
 // Forward declarations (defined in application_config.cc)
 storage::backlog_controller_config

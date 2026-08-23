@@ -42,6 +42,7 @@
 
 #include <seastar/core/memory.hh>
 #include <seastar/core/smp.hh>
+#include <seastar/core/thread.hh>
 
 #include <chrono>
 
