@@ -94,7 +94,7 @@ struct metadata_cache_info {
     get_default_initial_retention_local_target_bytes() const = 0;
     virtual std::optional<std::chrono::milliseconds>
     get_default_initial_retention_local_target_ms() const = 0;
-    virtual std::chrono::milliseconds virtual std::optional<double>
+    virtual std::optional<double>
     get_default_min_cleanable_dirty_ratio() const = 0;
     virtual std::chrono::milliseconds
     get_default_min_compaction_lag_ms() const = 0;
@@ -134,7 +134,7 @@ public:
     get_default_initial_retention_local_target_bytes() const override;
     std::optional<std::chrono::milliseconds>
     get_default_initial_retention_local_target_ms() const override;
-    std::chrono::milliseconds std::optional<double>
+    std::optional<double>
     get_default_min_cleanable_dirty_ratio() const override;
     std::chrono::milliseconds
     get_default_min_compaction_lag_ms() const override;

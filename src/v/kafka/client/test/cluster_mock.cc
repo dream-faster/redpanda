@@ -74,7 +74,7 @@ public:
         return config::shard_local_cfg()
           .initial_retention_local_target_ms_default();
     }
-    std::chrono::milliseconds std::optional<double>
+    std::optional<double>
     get_default_min_cleanable_dirty_ratio() const override {
         return _config->min_cleanable_dirty_ratio();
     }
