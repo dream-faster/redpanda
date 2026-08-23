@@ -144,26 +144,6 @@ topic_table::apply(topic_lifecycle_transition soft_del, model::offset offset) {
               errc::topic_not_exists);
         }
 
-        // Create lifecycle markers
-
-        const auto& topic_cfg = tp->second.get_configuration();
-        const auto& topic_properties = topic_cfg.properties;
-
-        if (topic_properties.requires_tiered_remote_erase()) {
-            auto tombstone = nt_lifecycle_marker{
-              .config = tp->second.get_configuration(),
-              .initial_revision_id = tp->second.get_remote_revision().value_or(
-                model::initial_revision_id(tp->second.get_revision())),
-              .timestamp = ss::lowres_system_clock::now()};
-
-            _lifecycle_markers.emplace(soft_del.topic, tombstone);
-            vlog(
-              clusterlog.debug,
-              "Created lifecycle marker for topic {} {}",
-              soft_del.topic.nt,
-              soft_del.topic.initial_revision_id);
-        }
-
         [[fallthrough]]; // proceed to local deletion
     }
     case topic_lifecycle_transition_mode::oneshot_delete:

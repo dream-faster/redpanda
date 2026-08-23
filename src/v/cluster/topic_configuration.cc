@@ -95,12 +95,6 @@ void topic_configuration::serde_read(iobuf_parser& in, const serde::header& h) {
     } else {
         tp_id = std::nullopt;
     }
-
-    if (h._version < 1) {
-        // Legacy tiered storage topics do not delete data on
-        // topic deletion.
-        properties.remote_delete = storage::ntp_config::legacy_remote_delete;
-    }
 }
 fmt::iterator topic_configuration::format_to(fmt::iterator it) const {
     return fmt::format_to(

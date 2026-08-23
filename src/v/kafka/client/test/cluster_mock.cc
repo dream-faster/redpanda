@@ -47,19 +47,6 @@ public:
     uint32_t get_default_batch_max_bytes() const override {
         return _config->kafka_batch_max_bytes();
     }
-    ::model::shadow_indexing_mode
-    get_default_shadow_indexing_mode() const override {
-        ::model::shadow_indexing_mode m
-          = ::model::shadow_indexing_mode::disabled;
-        if (_config->cloud_storage_enable_remote_write()) {
-            m = ::model::shadow_indexing_mode::archival;
-        }
-        if (_config->cloud_storage_enable_remote_read()) {
-            m = ::model::add_shadow_indexing_flag(
-              m, ::model::shadow_indexing_mode::fetch);
-        }
-        return m;
-    }
     std::optional<size_t>
     get_default_retention_local_target_bytes() const override {
         return _config->retention_local_target_bytes_default();

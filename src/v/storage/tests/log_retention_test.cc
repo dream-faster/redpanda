@@ -274,9 +274,9 @@ TEST_F(gc_fixture, retention_test_after_truncation) {
     EXPECT_EQ(builder.get_disk_log_impl().get_probe().partition_size(), 0);
 }
 
-TEST_F(gc_fixture, retention_by_size_with_remote_write) {
+TEST_F(gc_fixture, retention_by_size_local_target) {
     /*
-     * This test sets the size retention limit on a cloud storage topic
+     * This test sets the size retention limit on a topic
      * via the rention.local.target.bytes topic configuration option.
      *
      * Fixed size segments are added until the limit is breached.
@@ -284,18 +284,12 @@ TEST_F(gc_fixture, retention_by_size_with_remote_write) {
      * if it acted correctly.
      */
 
-    config::shard_local_cfg().get("cloud_storage_enabled").set_value(true);
-    auto reset_cfg = ss::defer(
-      [] { config::shard_local_cfg().get("cloud_storage_enabled").reset(); });
-
     size_t size_limit = 1000;
 
     storage::ntp_config config{
       storage::log_builder_ntp(), builder.get_log_config().base_dir};
 
     storage::ntp_config::default_overrides overrides;
-    overrides.shadow_indexing_mode = model::shadow_indexing_mode::full;
-    overrides.storage_mode = model::redpanda_storage_mode::tiered;
     overrides.retention_local_target_bytes = tristate<size_t>{size_limit};
     config.set_overrides(overrides);
 
@@ -343,31 +337,25 @@ TEST_F(gc_fixture, retention_by_size_with_remote_write) {
     builder.stop().get();
 }
 
-TEST_F(gc_fixture, retention_by_time_with_remote_write) {
+TEST_F(gc_fixture, retention_by_time_local_target) {
     /*
-     * This test sets the time retention limit on a cloud storage topic
-     * via the rention.local.target.ms topic configuration option.
+     * This test sets the time retention limit via the
+     * rention.local.target.ms topic configuration option.
      */
     using namespace std::chrono_literals;
     auto batch_age = std::chrono::duration_cast<std::chrono::milliseconds>(1h);
-
-    config::shard_local_cfg().get("cloud_storage_enabled").set_value(true);
 
     // this test assumes that retention overrides are applied, which they are
     // not, if operating in nonstrict mode.
     config::shard_local_cfg().get("retention_local_strict").set_value(true);
 
-    auto reset_cfg = ss::defer([] {
-        config::shard_local_cfg().get("cloud_storage_enabled").reset();
-        config::shard_local_cfg().get("retention_local_strict").reset();
-    });
+    auto reset_cfg = ss::defer(
+      [] { config::shard_local_cfg().get("retention_local_strict").reset(); });
 
     storage::ntp_config config{
       storage::log_builder_ntp(), builder.get_log_config().base_dir};
 
     storage::ntp_config::default_overrides overrides;
-    overrides.shadow_indexing_mode = model::shadow_indexing_mode::full;
-    overrides.storage_mode = model::redpanda_storage_mode::tiered;
     config.set_overrides(overrides);
 
     auto log_creation_time = model::timestamp{
@@ -400,8 +388,6 @@ TEST_F(gc_fixture, retention_by_time_with_remote_write) {
 
     // Override the local target retention.
     storage::ntp_config::default_overrides time_override;
-    time_override.shadow_indexing_mode = model::shadow_indexing_mode::full;
-    time_override.storage_mode = model::redpanda_storage_mode::tiered;
     time_override.retention_local_target_ms
       = tristate<std::chrono::milliseconds>{0ms};
     builder.update_configuration(time_override).get();

@@ -896,9 +896,6 @@ SEASTAR_THREAD_TEST_CASE(serde_reflection_roundtrip) {
         roundtrip_test(p_as);
     }
     {
-        roundtrip_test(random_remote_topic_properties());
-    }
-    {
         roundtrip_test(old_random_topic_properties());
     }
     {
@@ -933,10 +930,6 @@ SEASTAR_THREAD_TEST_CASE(serde_reflection_roundtrip) {
             [] { return random_generators::get_int(100_MiB, 1_GiB); }));
         updates.retention_duration = random_property_update(
           tests::random_tristate([] { return tests::random_duration_ms(); }));
-        updates.remote_delete = random_property_update(tests::random_bool());
-        updates.get_shadow_indexing() = random_property_update(
-          tests::random_optional(
-            [] { return model::random_shadow_indexing_mode(); }));
         roundtrip_test(updates);
     }
     {
