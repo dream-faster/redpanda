@@ -6,9 +6,10 @@ Head at time of writing: `c10e7333fc`.
 Goal: a Redpanda that is only a distributed Kafka broker on local storage,
 with everything else removed.
 
-**Status: not finished.** The tree compiles — the last CI round got 5806 of
-5935 build actions done (98%) — but no build has completed end to end yet, so
-the binary has never been produced or run. See *Where it stands* below.
+**Status: it builds.** CI run `32661684896` on `695abfa` completed all 5935
+build actions and linked `//src/v/redpanda:redpanda` — a 1.09 GB binary, 27
+minutes wall clock. It has **not been run**: no broker started, no test
+executed. See *Where it stands* below.
 
 ---
 
@@ -71,37 +72,36 @@ caches a bazel toolchain image in GHCR, then a `build` job on
 disk cache and bazelisk cache all restored from `/mnt`. It does
 `build --nobuild //...` then `build --config=release //src/v/redpanda:redpanda`.
 
-Compile errors per round: **415 → 4 → 2 → 2 → 1**. The trend is the point —
-each round is a smaller, more local failure.
+It took eleven rounds to go green. Almost every failure was the same shape:
+**transitive-include collapse**. A file used `result<>`, `ss::async`,
+`kafka::group_initializer` or `rpc::connection_cache` and reached the header
+through `pandaproxy/schema_registry/types.h` or
+`kafka/server/data_migration_group_proxy_impl.h`. Delete those and the file
+stops compiling for reasons that have nothing to do with the removal.
+`layering_check` is on, so the providing target is already a direct dep and
+adding the `#include` is enough.
 
-The last round (`32651449395`) failed on a single translation unit,
-`src/v/security/audit/client.cc`, with `Exit 1` and **no compiler diagnostic**
-despite `--verbose_failures`. That file is byte-identical to upstream and
-references nothing that was removed, so the reading is that clang was
-OOM-killed: it is a heavy TU (`cluster/controller.h` plus the kafka client)
-compiled 8-wide on a 32 GB runner. A re-run with the disk cache warm was in
-flight when this document was written.
+Two things made this take longer than it should have:
 
-**If it fails again at the same TU**, cap concurrency in the build step rather
-than changing code:
-
-```yaml
-bazel ... build --config=release --jobs=6 ... //src/v/redpanda:redpanda
-```
-
-**If it succeeds**, the binary has still never been executed. Nothing here has
-been run — not a unit test, not a broker. That is the whole of the remaining
-risk and it is not small.
-
----
+- `gh run view --log-failed` prints only the **last** failing action, so a
+  round with twenty errors looked like one broken file. Use
+  `tools/slim-checks/ci-errors.sh <run-id>`, which reads the raw log archive.
+- Several rounds were spent on breakage I had introduced myself while fixing
+  the previous round — a bazel label deduped by line number out of the wrong
+  rule, a private field left without a reader, a declaration deleted by name
+  leaving its return type behind.
 
 ## What is left
 
-1. **Get one green build**, then actually start the broker: create a topic,
-   produce, consume, restart, confirm the log survives.
-2. **Tests do not build.** Analysis covers them, but they were never compiled.
-   `bazel build //src/v/...` will surface a fresh crop of errors in test files,
-   which have had far less attention than production code.
+1. **Run it.** The binary has never been started. Bring up a broker, create a
+   topic, produce, consume, restart, confirm the log survives. Nothing below
+   matters until this is done, and it is where the real risk now sits — a clean
+   compile says nothing about whether the partition and controller paths still
+   behave after this much was cut out of them.
+2. **Tests do not build.** Analysis covers them, but only
+   `//src/v/redpanda:redpanda` was ever compiled. `bazel build //src/v/...`
+   will surface a fresh crop of errors in test files, which have had far less
+   attention than production code.
 3. **Vestigial config remains.** `cloud_storage_*` cluster properties are gone,
    but `space_management_enable`, `retention_local_trim_*` and
    `disk_reservation_percent` survive with nothing reading them — the space
