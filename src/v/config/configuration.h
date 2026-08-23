@@ -376,9 +376,26 @@ struct configuration final : public config_store {
 
     // Archival upload controller
 
-    // Defaults for local retention for partitions of topics with
-    // cloud storage read and write enabled
+    // Defaults for local retention and disk space management
+    property<std::optional<size_t>> retention_local_target_bytes_default;
+    property<std::chrono::milliseconds> retention_local_target_ms_default;
+    property<bool> retention_local_strict;
+    property<bool> retention_local_strict_override;
+    property<std::optional<uint64_t>> retention_local_target_capacity_bytes;
+    bounded_property<std::optional<double>, numeric_bounds>
+      retention_local_target_capacity_percent;
+    property<std::chrono::milliseconds> retention_local_trim_interval;
+    property<double> retention_local_trim_overage_coeff;
+    property<bool> space_management_enable;
+    deprecated_property space_management_enable_override;
+    bounded_property<double, numeric_bounds> disk_reservation_percent;
+    bounded_property<uint16_t> space_management_max_log_concurrency;
+    bounded_property<uint16_t> space_management_max_segment_concurrency;
     property<std::vector<ss::sstring>> log_eviction_exempt_topics;
+    property<std::optional<size_t>>
+      initial_retention_local_target_bytes_default;
+    property<std::optional<std::chrono::milliseconds>>
+      initial_retention_local_target_ms_default;
 
     // Archival cache
 
@@ -489,6 +506,8 @@ struct configuration final : public config_store {
     property<std::vector<throughput_control_group>> kafka_throughput_control;
 
     bounded_property<int64_t> node_isolation_heartbeat_timeout;
+
+    property<std::chrono::seconds> controller_snapshot_max_age_sec;
 
     // security controls
     property<bool> legacy_permit_unsafe_log_operation;

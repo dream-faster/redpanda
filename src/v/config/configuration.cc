@@ -1955,6 +1955,142 @@ configuration::configuration()
       "testing and should not be set in production.",
       {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
       false)
+  , retention_local_target_bytes_default(
+      *this,
+      "retention_local_target_bytes_default",
+      "Local retention size target for partitions of topics with object "
+      "storage write enabled. If `null`, the property is disabled. This "
+      "property can be overridden on a per-topic basis by setting "
+      "`retention.local.target.bytes` in each topic enabled for Tiered "
+      "Storage. Both `retention_local_target_bytes_default` and "
+      "`retention_local_target_ms_default` can be set. The limit that is "
+      "reached earlier is applied.",
+      {.needs_restart = needs_restart::no, .visibility = visibility::user},
+      std::nullopt)
+  , retention_local_target_ms_default(
+      *this,
+      "retention_local_target_ms_default",
+      "Local retention time target for partitions of topics with object "
+      "storage write enabled. This property can be overridden on a per-topic "
+      "basis by setting `retention.local.target.ms` in each topic enabled for "
+      "Tiered Storage. Both `retention_local_target_bytes_default` and "
+      "`retention_local_target_ms_default` can be set. The limit that is "
+      "reached first is applied.",
+      {.needs_restart = needs_restart::no, .visibility = visibility::user},
+      24h)
+  , retention_local_strict(
+      *this,
+      "retention_local_strict",
+      "Flag to allow Tiered Storage topics to expand to consumable retention "
+      "policy limits. When this flag is enabled, non-local retention settings "
+      "are used, and local retention settings are used to inform data removal "
+      "policies in low-disk space scenarios.",
+      {.needs_restart = needs_restart::no, .visibility = visibility::user},
+      false,
+      property<bool>::noop_validator,
+      legacy_default<bool>(true, legacy_version{9}))
+  , retention_local_strict_override(
+      *this,
+      "retention_local_strict_override",
+      "Trim log data when a cloud topic reaches its local retention limit. "
+      "When this option is disabled Redpanda will allow partitions to grow "
+      "past the local retention limit, and will be trimmed automatically as "
+      "storage reaches the configured target size.",
+      {.needs_restart = needs_restart::no, .visibility = visibility::user},
+      true)
+  , retention_local_target_capacity_bytes(
+      *this,
+      "retention_local_target_capacity_bytes",
+      "The target capacity (in bytes) that log storage will try to use before "
+      "additional retention rules take over to trim data to meet the target. "
+      "When no target is specified, storage usage is unbounded. Redpanda Data "
+      "recommends setting only one of `retention_local_target_capacity_bytes` "
+      "or `retention_local_target_capacity_percent`. If both are set, the "
+      "minimum of the two is used as the effective target capacity.",
+      {.needs_restart = needs_restart::no,
+       .example = "2147483648000",
+       .visibility = visibility::user},
+      std::nullopt,
+      property<std::optional<size_t>>::noop_validator,
+      legacy_default<std::optional<size_t>>(std::nullopt, legacy_version{9}))
+  , retention_local_target_capacity_percent(
+      *this,
+      "retention_local_target_capacity_percent",
+      "The target capacity in percent of unreserved space "
+      "(`disk_reservation_percent`) that log storage will try to use before "
+      "additional retention rules will take over to trim data in order to meet "
+      "the target. When no target is specified storage usage is unbounded. "
+      "Redpanda Data recommends setting only one of "
+      "`retention_local_target_capacity_bytes` or "
+      "`retention_local_target_capacity_percent`. If both are set, the minimum "
+      "of the two is used as the effective target capacity.",
+      {.needs_restart = needs_restart::no,
+       .example = "80.0",
+       .visibility = visibility::user},
+      80.0,
+      {.min = 0.0, .max = 100.0},
+      legacy_default<std::optional<double>>(std::nullopt, legacy_version{9}))
+  , retention_local_trim_interval(
+      *this,
+      "retention_local_trim_interval",
+      "The period during which disk usage is checked for disk pressure, and "
+      "data is optionally trimmed to meet the target.",
+      {.needs_restart = needs_restart::no,
+       .example = "31536000000",
+       .visibility = visibility::tunable},
+      30s)
+  , retention_local_trim_overage_coeff(
+      *this,
+      "retention_local_trim_overage_coeff",
+      "The space management control loop reclaims the overage multiplied by "
+      "this this coefficient to compensate for data that is written during the "
+      "idle period between control loop invocations.",
+      {.needs_restart = needs_restart::no,
+       .example = "1.8",
+       .visibility = visibility::tunable},
+      2.0)
+  , space_management_enable(
+      *this,
+      "space_management_enable",
+      "Option to explicitly disable automatic disk space management. If this "
+      "property was explicitly disabled while using v23.2, it will remain "
+      "disabled following an upgrade.",
+      {.needs_restart = needs_restart::no, .visibility = visibility::user},
+      true)
+  , space_management_enable_override(*this, "space_management_enable_override")
+  , disk_reservation_percent(
+      *this,
+      "disk_reservation_percent",
+      "The percentage of total disk capacity that Redpanda will avoid using. "
+      "This applies both when cloud cache and log data share a disk, as well "
+      "as when cloud cache uses a dedicated disk. It is recommended to not run "
+      "disks near capacity to avoid blocking I/O due to low disk space, as "
+      "well as avoiding performance issues associated with SSD garbage "
+      "collection.",
+      {.needs_restart = needs_restart::no,
+       .example = "25.0",
+       .visibility = visibility::tunable},
+      25.0,
+      {.min = 0.0, .max = 100.0},
+      legacy_default<double>(0.0, legacy_version{9}))
+  , space_management_max_log_concurrency(
+      *this,
+      "space_management_max_log_concurrency",
+      "Maximum parallel logs inspected during space management process.",
+      {.needs_restart = needs_restart::no,
+       .example = "20",
+       .visibility = visibility::tunable},
+      20,
+      {.min = 1})
+  , space_management_max_segment_concurrency(
+      *this,
+      "space_management_max_segment_concurrency",
+      "Maximum parallel segments inspected during space management process.",
+      {.needs_restart = needs_restart::no,
+       .example = "10",
+       .visibility = visibility::tunable},
+      10,
+      {.min = 1})
   , log_eviction_exempt_topics(
       *this,
       "log_eviction_exempt_topics",
@@ -1967,6 +2103,24 @@ configuration::configuration()
       {.needs_restart = needs_restart::yes, .visibility = visibility::user},
       {},
       &validate_non_empty_string_vec)
+  , initial_retention_local_target_bytes_default(
+      *this,
+      "initial_retention_local_target_bytes_default",
+      "Initial local retention size target for partitions of topics with "
+      "Tiered Storage enabled. If no initial local target retention is "
+      "configured all locally retained data will be delivered to learner when "
+      "joining partition replica set.",
+      {.needs_restart = needs_restart::no, .visibility = visibility::user},
+      std::nullopt)
+  , initial_retention_local_target_ms_default(
+      *this,
+      "initial_retention_local_target_ms_default",
+      "Initial local retention time target for partitions of topics with "
+      "Tiered Storage enabled. If no initial local target retention is "
+      "configured all locally retained data will be delivered to learner when "
+      "joining partition replica set.",
+      {.needs_restart = needs_restart::no, .visibility = visibility::user},
+      std::nullopt)
   , superusers(
       *this,
       "superusers",
@@ -2563,6 +2717,13 @@ configuration::configuration()
       {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
       3000,
       {.min = 100, .max = 10000})
+  , controller_snapshot_max_age_sec(
+      *this,
+      "controller_snapshot_max_age_sec",
+      "Maximum amount of time before Redpanda attempts to create a controller "
+      "snapshot after a new controller command appears.",
+      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
+      60s)
   , legacy_permit_unsafe_log_operation(
       *this,
       "legacy_permit_unsafe_log_operation",
