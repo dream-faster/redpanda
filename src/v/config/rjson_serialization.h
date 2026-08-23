@@ -149,18 +149,14 @@ void rjson_serialize(
   json::Writer<json::StringBuffer>&, const config::leaders_preference&);
 
 void rjson_serialize(
-  json::Writer<json::StringBuffer>&, config::datalake_catalog_type);
 
 void rjson_serialize(
   json::Writer<json::StringBuffer>&,
-  const model::iceberg_invalid_record_action&);
 
 void rjson_serialize(
   json::Writer<json::StringBuffer>&,
-  const model::iceberg_schema_case_insensitive&);
 
 void rjson_serialize(
-  json::Writer<json::StringBuffer>&, config::datalake_catalog_auth_mode);
 
 void rjson_serialize(
   json::Writer<json::StringBuffer>&, config::tls_name_format);

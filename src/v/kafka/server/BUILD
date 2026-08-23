@@ -57,7 +57,6 @@ redpanda_cc_library(
         "//src/v/cluster:types",
         "//src/v/config",
         "//src/v/container:chunked_vector",
-        "//src/v/datalake:partition_spec_parser",
         "//src/v/features",
         "//src/v/kafka/protocol",
         "//src/v/kafka/protocol:describe_configs",
@@ -283,8 +282,6 @@ redpanda_cc_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
-        ":datalake_throttle_manager",
-        ":datalake_usage_api",
         ":logger",
         ":qdc_monitor_config",
         ":roles",
@@ -330,7 +327,6 @@ redpanda_cc_library(
         "//src/v/container:chunked_hash_map",
         "//src/v/container:chunked_vector",
         "//src/v/container:intrusive",
-        "//src/v/datalake:partition_spec_parser",
         "//src/v/features",
         "//src/v/hashing:combine",
         "//src/v/hashing:jump_consistent",
@@ -492,47 +488,6 @@ redpanda_cc_library(
 )
 
 redpanda_cc_library(
-    name = "datalake_usage_api",
-    srcs = [
-        "datalake_usage_api.cc",
-    ],
-    hdrs = [
-        "datalake_usage_api.h",
-    ],
-    visibility = ["//visibility:public"],
-    deps = [
-        "//src/v/base",
-        "//src/v/container:chunked_vector",
-        "//src/v/model",
-        "@seastar",
-    ],
-)
-
-redpanda_cc_library(
-    name = "datalake_throttle_manager",
-    srcs = [
-        "datalake_throttle_manager.cc",
-    ],
-    hdrs = [
-        "datalake_throttle_manager.h",
-    ],
-    visibility = [":__subpackages__"],
-    deps = [
-        ":logger",
-        "//src/v/base",
-        "//src/v/config",
-        "//src/v/container:chunked_hash_map",
-        "//src/v/metrics",
-        "//src/v/ssx:future_util",
-        "//src/v/storage",
-        "//src/v/utils:absl_sstring_hash",
-        "//src/v/utils:human",
-        "@boost//:range",
-        "@seastar",
-    ],
-)
-
-redpanda_cc_library(
     name = "errors",
     hdrs = [
         "errors.h",
@@ -559,7 +514,6 @@ redpanda_cc_library(
     ],
     visibility = ["//src/v/redpanda:__pkg__"],
     deps = [
-        ":datalake_throttle_manager",
         ":qdc_monitor_config",
         "//src/v/cluster:fwd",
         "@seastar",

@@ -1,7 +1,0 @@
-syntax = "proto3";
-
-package redpanda.datalake;
-
-message Foo {
-    int32 bar = 1;
-}

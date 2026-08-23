@@ -1,0 +1,173 @@
+---
+name: slim-build
+on:
+  push:
+    branches:
+      - 'claude/redpanda-slim'
+  workflow_dispatch:
+    inputs:
+      analysis_only:
+        description: 'Run only the Bazel analysis phase (fast, no compiling)'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  REGISTRY: ghcr.io
+  TOOLCHAIN_IMAGE: ghcr.io/${{ github.repository }}/bazel-toolchain
+
+# A cold build is heavy; newer pushes to the same ref cancel the in-flight run.
+concurrency:
+  group: slim-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # The toolchain image is the repo's own CI image (tools/docker/bazel.dockerfile).
+  # It is rebuilt only when the dockerfile or install-deps.sh changes; otherwise the
+  # tag already exists in ghcr and the build is a no-op cache hit.
+  toolchain:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Compute toolchain tag
+        id: meta
+        run: |
+          TAG=$(sha256sum tools/docker/bazel.dockerfile bazel/install-deps.sh \
+                 | sha256sum | cut -c1-16)
+          # ghcr repository names must be lowercase.
+          IMAGE=$(echo "${{ env.TOOLCHAIN_IMAGE }}:$TAG" | tr '[:upper:]' '[:lower:]')
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+          echo "Toolchain image: $IMAGE"
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check whether the toolchain image already exists
+        id: exists
+        run: |
+          if docker manifest inspect "${{ steps.meta.outputs.image }}" >/dev/null 2>&1; then
+            echo "hit=true" >> "$GITHUB_OUTPUT"
+            echo "Toolchain image already published; skipping build."
+          else
+            echo "hit=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: docker/setup-buildx-action@v3
+        if: steps.exists.outputs.hit != 'true'
+
+      - name: Build and push toolchain image
+        if: steps.exists.outputs.hit != 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: tools/docker/bazel.dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.image }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  build:
+    needs: toolchain
+    runs-on: ubicloud-standard-8
+    permissions:
+      contents: read
+      packages: read
+    # Everything below runs inside the repo's own bazel toolchain image, so the
+    # compiler, sysroot and system deps are identical to what upstream CI uses
+    # and nothing has to be apt-installed per run.
+    container:
+      image: ${{ needs.toolchain.outputs.image }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+      # /mnt is the large ephemeral volume; the bazel output base lives there
+      # because the container's overlay fs is small.
+      volumes:
+        - /mnt:/mnt
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Prepare build environment
+        run: |
+          echo "=== disk ==="
+          df -h
+          free -h
+          mkdir -p /mnt/bazel-output /mnt/bazel-repo-cache /mnt/bazel-disk-cache
+          # Swap keeps the OOM killer away during the RAM-heavy final link.
+          if [[ ! -f /mnt/swapfile ]]; then
+            fallocate -l 16G /mnt/swapfile
+            chmod 600 /mnt/swapfile
+            mkswap /mnt/swapfile
+            swapon /mnt/swapfile || echo "swapon unavailable in container; continuing"
+          fi
+          free -h
+
+      # Two caches with different lifetimes: the repository cache only changes
+      # when MODULE.bazel does, while the action disk cache changes on every
+      # source edit and is restored from the newest prefix match.
+      - name: Restore Bazel repository cache
+        uses: actions/cache@v4
+        with:
+          path: /mnt/bazel-repo-cache
+          key: bazel-repo-${{ hashFiles('.bazelversion', 'MODULE.bazel', 'MODULE.bazel.lock') }}
+          restore-keys: |
+            bazel-repo-
+
+      - name: Restore Bazel disk cache
+        uses: actions/cache@v4
+        with:
+          path: /mnt/bazel-disk-cache
+          key: bazel-disk-${{ github.ref_name }}-${{ github.sha }}
+          restore-keys: |
+            bazel-disk-${{ github.ref_name }}-
+            bazel-disk-
+
+      - name: Bazel analysis
+        run: |
+          bazel \
+            --output_base=/mnt/bazel-output \
+            build --nobuild \
+            --repository_cache=/mnt/bazel-repo-cache \
+            --disk_cache=/mnt/bazel-disk-cache \
+            --lockfile_mode=update \
+            //...
+
+      - name: Bazel build
+        if: ${{ inputs.analysis_only != true }}
+        run: |
+          bazel \
+            --output_base=/mnt/bazel-output \
+            build \
+            --config=release \
+            --repository_cache=/mnt/bazel-repo-cache \
+            --disk_cache=/mnt/bazel-disk-cache \
+            --spawn_strategy=sandboxed,local \
+            --verbose_failures \
+            --lockfile_mode=update \
+            '--local_resources=memory=HOST_RAM*.8' \
+            //src/v/redpanda:redpanda
+          echo "=== post-build ==="
+          df -h
+          free -h
+          ls -la bazel-bin/src/v/redpanda/redpanda
+
+      - name: Trim the disk cache
+        if: always()
+        run: |
+          # Keep the cache from growing without bound across runs.
+          SIZE=$(du -sm /mnt/bazel-disk-cache | cut -f1)
+          echo "disk cache: ${SIZE}MB"
+          if [[ "$SIZE" -gt 12000 ]]; then
+            find /mnt/bazel-disk-cache -type f -atime +3 -delete || true
+            echo "trimmed to $(du -sm /mnt/bazel-disk-cache | cut -f1)MB"
+          fi

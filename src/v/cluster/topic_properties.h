@@ -74,14 +74,8 @@ struct topic_properties
       std::optional<model::write_caching_mode> write_caching,
       std::optional<std::chrono::milliseconds> flush_ms,
       std::optional<size_t> flush_bytes,
-      model::iceberg_mode iceberg_mode,
       std::optional<config::leaders_preference> leaders_preference,
       tristate<std::chrono::milliseconds> delete_retention_ms,
-      std::optional<bool> iceberg_delete,
-      std::optional<ss::sstring> iceberg_partition_spec,
-      std::optional<model::iceberg_invalid_record_action>
-        iceberg_invalid_record_action,
-      std::optional<std::chrono::milliseconds> iceberg_target_lag_ms,
       tristate<double> min_cleanable_dirty_ratio,
       std::optional<std::chrono::milliseconds> min_compaction_lag_ms,
       std::optional<std::chrono::milliseconds> max_compaction_lag_ms,
@@ -127,13 +121,8 @@ struct topic_properties
       , write_caching(write_caching)
       , flush_ms(flush_ms)
       , flush_bytes(flush_bytes)
-      , iceberg_mode(iceberg_mode)
       , leaders_preference(std::move(leaders_preference))
       , delete_retention_ms(delete_retention_ms)
-      , iceberg_delete(iceberg_delete)
-      , iceberg_partition_spec(std::move(iceberg_partition_spec))
-      , iceberg_invalid_record_action(iceberg_invalid_record_action)
-      , iceberg_target_lag_ms(iceberg_target_lag_ms)
       , min_cleanable_dirty_ratio(min_cleanable_dirty_ratio)
       , min_compaction_lag_ms(min_compaction_lag_ms)
       , max_compaction_lag_ms(max_compaction_lag_ms)
@@ -207,7 +196,6 @@ struct topic_properties
     std::optional<model::write_caching_mode> write_caching;
     std::optional<std::chrono::milliseconds> flush_ms;
     std::optional<size_t> flush_bytes;
-    model::iceberg_mode iceberg_mode{storage::ntp_config::default_iceberg_mode};
 
     // Label to be used when generating paths of remote objects (manifests,
     // segments, etc) of this topic.
@@ -225,16 +213,6 @@ struct topic_properties
     std::optional<config::leaders_preference> leaders_preference;
 
     tristate<std::chrono::milliseconds> delete_retention_ms{disable_tristate};
-    // Should we delete the corresponding iceberg table when deleting the topic.
-    std::optional<bool> iceberg_delete;
-    // Partition spec expression for the corresponding Iceberg table.
-    // std::nullopt means that the cluster default will be used.
-    std::optional<ss::sstring> iceberg_partition_spec;
-
-    std::optional<model::iceberg_invalid_record_action>
-      iceberg_invalid_record_action;
-
-    std::optional<std::chrono::milliseconds> iceberg_target_lag_ms{};
 
     tristate<double> min_cleanable_dirty_ratio{std::nullopt};
     std::optional<std::chrono::milliseconds> min_compaction_lag_ms{};
@@ -314,14 +292,9 @@ struct topic_properties
           flush_bytes,
           remote_label,
           remote_topic_namespace_override,
-          iceberg_mode,
           leaders_preference,
           deprecated_cloud_topic_enabled,
           delete_retention_ms,
-          iceberg_delete,
-          iceberg_partition_spec,
-          iceberg_invalid_record_action,
-          iceberg_target_lag_ms,
           min_cleanable_dirty_ratio,
           remote_topic_allow_gaps,
           min_compaction_lag_ms,

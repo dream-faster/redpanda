@@ -997,26 +997,6 @@ redpanda_cc_btest(
 )
 
 redpanda_cc_gtest(
-    name = "datalake_throttle_manager_test",
-    timeout = "short",
-    srcs = [
-        "datalake_throttle_manager_test.cc",
-    ],
-    cpu = 3,
-    deps = [
-        "//src/v/config",
-        "//src/v/kafka/server:datalake_throttle_manager",
-        "//src/v/random:generators",
-        "//src/v/ssx:future_util",
-        "//src/v/test_utils:gtest",
-        "@fmt",
-        "@googletest//:gtest",
-        "@seastar",
-        "@seastar//:testing",
-    ],
-)
-
-redpanda_cc_gtest(
     name = "write_at_offset_stm_test",
     timeout = "moderate",
     srcs = [

@@ -33,7 +33,6 @@ redpanda_cc_library(
         "//src/v/cluster:partition_properties_stm",
         "//src/v/config",
         "//src/v/container:chunked_vector",
-        "//src/v/datalake:manager",
         "//src/v/metrics",
         "//src/v/raft",
         "//src/v/ssx:semaphore",

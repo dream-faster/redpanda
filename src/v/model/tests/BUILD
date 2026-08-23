@@ -245,23 +245,6 @@ redpanda_cc_gtest(
 )
 
 redpanda_cc_gtest(
-    name = "iceberg_mode_test",
-    timeout = "short",
-    srcs = [
-        "iceberg_mode_test.cc",
-    ],
-    cpu = 1,
-    deps = [
-        "//src/v/bytes:iobuf",
-        "//src/v/bytes:iobuf_parser",
-        "//src/v/model",
-        "//src/v/serde",
-        "//src/v/test_utils:gtest",
-        "@googletest//:gtest",
-    ],
-)
-
-redpanda_cc_gtest(
     name = "storage_mode_alias_test",
     timeout = "short",
     srcs = [

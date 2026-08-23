@@ -61,22 +61,14 @@ std::optional<ss::sstring> validate_tombstone_retention_ms(
   const std::optional<std::chrono::milliseconds>& ms);
 
 std::optional<ss::sstring>
-validate_iceberg_partition_spec(const ss::sstring& spec);
 
-std::optional<ss::sstring> validate_iceberg_rest_catalog_endpoint(
-  const std::optional<ss::sstring>& endpoint);
 
-std::optional<ss::sstring> validate_iceberg_topic_name_dot_replacement(
-  const std::optional<ss::sstring>& value);
 
 std::optional<ss::sstring>
-validate_iceberg_default_catalog_namespace(const std::vector<ss::sstring>& ns);
 
 std::optional<ss::sstring>
-validate_iceberg_rest_catalog_auth_mode(const configuration& config);
 
 std::optional<ss::sstring>
-validate_iceberg_rest_catalog_config(const configuration& config);
 
 std::optional<ss::sstring>
 validate_consumer_group_metrics(const std::vector<ss::sstring>& metrics);

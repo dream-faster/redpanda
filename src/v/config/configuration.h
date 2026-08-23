@@ -731,77 +731,11 @@ struct configuration final : public config_store {
     property<ss::sstring> tls_v1_2_cipher_suites;
     property<ss::sstring> tls_v1_3_cipher_suites;
 
-    // datalake configurations
-    enterprise<property<bool>> iceberg_enabled;
-    bounded_property<std::chrono::milliseconds>
-      iceberg_catalog_commit_interval_ms;
-    bounded_property<std::chrono::milliseconds>
-      iceberg_latest_schema_cache_ttl_ms;
-    property<ss::sstring> iceberg_catalog_base_location;
-    property<std::optional<ss::sstring>> iceberg_rest_catalog_base_location;
-    bounded_property<std::chrono::seconds>
-      datalake_coordinator_snapshot_max_delay_secs;
 
-    // datalake catalog configuration
-    enum_property<datalake_catalog_type> iceberg_catalog_type;
-    property<std::optional<ss::sstring>> iceberg_rest_catalog_endpoint;
-    property<std::optional<ss::sstring>> iceberg_rest_catalog_client_id;
-    property<std::optional<ss::sstring>> iceberg_rest_catalog_client_secret;
-    property<std::optional<ss::sstring>> iceberg_rest_catalog_token;
-    property<std::chrono::milliseconds> iceberg_rest_catalog_request_timeout_ms;
-    property<std::optional<ss::sstring>> iceberg_rest_catalog_trust_file;
-    property<std::optional<ss::sstring>> iceberg_rest_catalog_trust;
-    property<std::optional<ss::sstring>> iceberg_rest_catalog_crl_file;
-    property<std::optional<ss::sstring>> iceberg_rest_catalog_crl;
-    property<std::optional<ss::sstring>> iceberg_rest_catalog_warehouse;
-    property<std::optional<ss::sstring>> iceberg_rest_catalog_oauth2_server_uri;
-    property<ss::sstring> iceberg_rest_catalog_oauth2_scope;
-    enum_property<datalake_catalog_auth_mode>
-      iceberg_rest_catalog_authentication_mode;
-    property<ss::sstring> iceberg_rest_catalog_aws_service_name;
-    property<std::optional<ss::sstring>> iceberg_rest_catalog_aws_access_key;
-    property<std::optional<ss::sstring>> iceberg_rest_catalog_aws_secret_key;
-    property<std::optional<ss::sstring>> iceberg_rest_catalog_aws_region;
-    enum_property<std::optional<model::cloud_credentials_source>>
-      iceberg_rest_catalog_aws_credentials_source;
-    property<std::optional<ss::sstring>> iceberg_rest_catalog_gcp_user_project;
-    property<std::optional<ss::sstring>> iceberg_rest_catalog_credentials_host;
-    property<double> iceberg_backlog_controller_p_coeff;
-    property<double> iceberg_backlog_controller_i_coeff;
-    bounded_property<uint32_t> iceberg_target_backlog_size;
-    property<std::optional<double>> iceberg_throttle_backlog_size_ratio;
 
-    property<bool> iceberg_delete;
-    property<ss::sstring> iceberg_default_partition_spec;
-    enum_property<model::iceberg_invalid_record_action>
-      iceberg_invalid_record_action;
-    enum_property<model::iceberg_schema_case_insensitive>
-      iceberg_schema_case_insensitive;
-    bounded_property<std::chrono::milliseconds> iceberg_target_lag_ms;
-    property<bool> iceberg_disable_snapshot_tagging;
-    bounded_property<size_t> datalake_coordinator_max_files_per_commit;
-    bounded_property<size_t> datalake_coordinator_max_bytes_per_commit;
-    bounded_property<size_t> datalake_coordinator_max_pending_files;
-    bounded_property<size_t> datalake_coordinator_max_pending_bytes;
-    property<bool> iceberg_disable_automatic_snapshot_expiry;
-    property<std::optional<ss::sstring>> iceberg_topic_name_dot_replacement;
-    property<ss::sstring> iceberg_dlq_table_suffix;
-    property<std::vector<ss::sstring>> iceberg_default_catalog_namespace;
 
     property<bool> enable_host_metrics;
 
-    // datalake scheduler configs
-    bounded_property<size_t> datalake_scheduler_block_size_bytes;
-    bounded_property<size_t> datalake_scheduler_max_concurrent_translations;
-    bounded_property<std::chrono::milliseconds>
-      datalake_scheduler_time_slice_ms;
-    bounded_property<size_t> datalake_translator_flush_bytes;
-    property<bool> datalake_disk_space_monitor_enable;
-    property<size_t> datalake_scratch_space_size_bytes;
-    bounded_property<double, numeric_bounds>
-      datalake_scratch_space_soft_limit_size_percent;
-    property<double> datalake_disk_usage_overage_coeff;
-    bounded_property<size_t> datalake_scheduler_disk_reservation_block_size;
     property<bool> consumer_offsets_topic_batch_cache_enabled;
     enterprise<property<bool>> enable_shadow_linking;
     bounded_property<uint32_t> shadow_link_failover_batch_size;

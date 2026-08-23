@@ -6,7 +6,6 @@ redpanda_cc_library(
         "api.cc",
         "configuration.cc",
         "handlers.cc",
-        "iceberg_handlers.cc",
         "proxy.cc",
     ],
     hdrs = [
@@ -14,7 +13,6 @@ redpanda_cc_library(
         "configuration.h",
         "fwd.h",
         "handlers.h",
-        "iceberg_handlers.h",
         "proxy.h",
     ],
     implementation_deps = [
@@ -30,7 +28,6 @@ redpanda_cc_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
-        "//proto/redpanda/core/rest:iceberg_redpanda_proto",
         "//src/v/base",
         "//src/v/bytes:iostream",
         "//src/v/cluster",
@@ -42,10 +39,6 @@ redpanda_cc_library(
         "//src/v/cluster:rpc_utils",
         "//src/v/cluster:topic_table",
         "//src/v/config",
-        "//src/v/datalake:table_id_provider",
-        "//src/v/datalake/coordinator:frontend",
-        "//src/v/datalake/coordinator:model",
-        "//src/v/datalake/coordinator:state",
         "//src/v/kafka/client",
         "//src/v/kafka/client:config_utils",
         "//src/v/kafka/client:configuration",

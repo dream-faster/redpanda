@@ -115,81 +115,11 @@ inline fmt::iterator format_to(tls_version v, fmt::iterator out) {
     return fmt::format_to(out, "{}", to_string_view(v));
 }
 
-enum class datalake_catalog_type { object_storage, rest };
 
-constexpr std::string_view to_string_view(datalake_catalog_type ct) {
-    switch (ct) {
-    case datalake_catalog_type::object_storage:
-        return "object_storage";
-    case datalake_catalog_type::rest:
-        return "rest";
-    }
-}
-inline fmt::iterator format_to(datalake_catalog_type ct, fmt::iterator out) {
-    return fmt::format_to(out, "{}", to_string_view(ct));
-}
-static constexpr auto acceptable_datalake_catalog_types() {
-    return std::to_array(
-      {to_string_view(datalake_catalog_type::rest),
-       to_string_view(datalake_catalog_type::object_storage)});
-}
 
-inline std::istream& operator>>(std::istream& is, datalake_catalog_type& ct) {
-    ss::sstring s;
-    is >> s;
-    ct = string_switch<datalake_catalog_type>(s)
-           .match(
-             to_string_view(datalake_catalog_type::rest),
-             datalake_catalog_type::rest)
-           .match(
-             to_string_view(datalake_catalog_type::object_storage),
-             datalake_catalog_type::object_storage);
-    return is;
-}
 
-enum class datalake_catalog_auth_mode { none, bearer, oauth2, aws_sigv4, gcp };
 
-constexpr std::string_view to_string_view(datalake_catalog_auth_mode cam) {
-    switch (cam) {
-    case datalake_catalog_auth_mode::none:
-        return "none";
-    case datalake_catalog_auth_mode::bearer:
-        return "bearer";
-    case datalake_catalog_auth_mode::oauth2:
-        return "oauth2";
-    case datalake_catalog_auth_mode::aws_sigv4:
-        return "aws_sigv4";
-    case datalake_catalog_auth_mode::gcp:
-        return "gcp";
-    }
-}
-inline fmt::iterator
-format_to(datalake_catalog_auth_mode cam, fmt::iterator out) {
-    return fmt::format_to(out, "{}", to_string_view(cam));
-}
 
-inline std::istream&
-operator>>(std::istream& is, datalake_catalog_auth_mode& cam) {
-    ss::sstring s;
-    is >> s;
-    cam = string_switch<datalake_catalog_auth_mode>(s)
-            .match(
-              to_string_view(datalake_catalog_auth_mode::none),
-              datalake_catalog_auth_mode::none)
-            .match(
-              to_string_view(datalake_catalog_auth_mode::bearer),
-              datalake_catalog_auth_mode::bearer)
-            .match(
-              to_string_view(datalake_catalog_auth_mode::oauth2),
-              datalake_catalog_auth_mode::oauth2)
-            .match(
-              to_string_view(datalake_catalog_auth_mode::aws_sigv4),
-              datalake_catalog_auth_mode::aws_sigv4)
-            .match(
-              to_string_view(datalake_catalog_auth_mode::gcp),
-              datalake_catalog_auth_mode::gcp);
-    return is;
-}
 
 enum class tls_name_format { legacy, rfc2253 };
 

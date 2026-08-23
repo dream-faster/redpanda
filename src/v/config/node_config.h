@@ -146,9 +146,6 @@ public:
         return data_directory().path / "cloud_storage_inventory";
     }
 
-    std::filesystem::path datalake_staging_path() const {
-        return data_directory().path / "datalake_staging";
-    }
 
     std::filesystem::path l1_staging_path() const {
         return data_directory().path / "l1_staging";
