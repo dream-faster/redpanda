@@ -1485,6 +1485,7 @@ redpanda_cc_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
+        "//src/v/utils:stable_iterator",
         ":commands",
         ":fwd",
         ":logger",

@@ -30,6 +30,7 @@ These print a count and exit non-zero when it is not zero.
 |---|---|
 | `check_files.py` | BUILD rules naming a file that no longer exists — analysis resolves the label without stat'ing it, so the rule only fails at build time |
 | `check_srcs2.py` | `srcs`/`hdrs` entries missing locally but present upstream |
+| `check_includes_exist.py` | `#include` of a file the removal deleted — analysis never opens a source file, so this only appears as `fatal error: file not found` partway through a build |
 | `check_merged_decls.py` | a deleted declaration's return type fusing into the next declaration (`virtual T virtual U`) |
 | `sweep.py` | brace/paren imbalance, compared against upstream so pre-existing imbalances (raw string literals) do not register |
 | `ctor_order.py` | `configuration.cc`'s initializer order drifting from the header, which `-Wreorder` rejects |

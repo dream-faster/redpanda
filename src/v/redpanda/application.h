@@ -15,7 +15,6 @@
 #include "cluster/cluster_discovery.h"
 #include "cluster/config_manager.h"
 #include "cluster/fwd.h"
-#include "cluster/inventory_service.h"
 #include "cluster/migrations/tx_manager_migrator.h"
 #include "cluster/node/local_monitor.h"
 #include "cluster/node_status_backend.h"

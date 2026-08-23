@@ -13,7 +13,7 @@ z = zipfile.ZipFile(sys.argv[1])
 name = next(n for n in z.namelist() if n.endswith('Bazel build.txt'))
 s = z.read(name).decode('utf-8', 'replace')
 errs = {}
-for m in re.finditer(r'(\S+\.(?:cc|h)):(\d+):(\d+): error: (.*)', s):
+for m in re.finditer(r'(\S+\.(?:cc|h)):(\d+):(\d+): (?:fatal )?error: (.*)', s):
     errs.setdefault((m.group(1).split('_virtual_includes/')[-1], m.group(4)), m.group(2))
 for (f, e), line in sorted(errs.items()):
     print(f'{f}:{line}: {e}')
