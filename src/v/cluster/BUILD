@@ -53,16 +53,6 @@ redpanda_cc_rpc_library(
 )
 
 redpanda_cc_rpc_library(
-    name = "topic_recovery_status_rpc",
-    src = "topic_recovery_status_rpc.json",
-)
-
-redpanda_cc_rpc_library(
-    name = "offsets_recovery_rpc",
-    src = "offsets_recovery_rpc.json",
-)
-
-redpanda_cc_rpc_library(
     name = "tx_manager_migrator_rpc",
     src = "migrations/tx_manager_migrator.json",
     out = "tx_manager_migrator_service.h",
@@ -1637,7 +1627,6 @@ redpanda_cc_library(
         "migrations/tx_manager_migrator_types.h",
         "node_isolation_watcher.h",
         "node_status_rpc_service.h",
-        "offsets_recovery_rpc_service.h",
         "partition.h",
         "partition_balancer_backend.h",
         "partition_balancer_planner.h",
@@ -1656,7 +1645,6 @@ redpanda_cc_library(
         "service.h",
         "shard_balancer.h",
         "shard_placement_table.h",
-        "topic_recovery_status_rpc_service.h",
         "topic_updates_dispatcher.h",
         "topics_frontend.h",
         "tx_coordinator_mapper.h",
@@ -1740,7 +1728,6 @@ redpanda_cc_library(
         ":tm_stm_types",
         ":topic_configuration",
         ":topic_metrics_watcher",
-        ":topic_recovery_status_rpc",
         ":topic_rules",
         ":topic_table",
         ":topic_table_partition_generator",

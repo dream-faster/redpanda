@@ -80,8 +80,6 @@ redpanda_cc_library(
         "//src/v/redpanda/admin/services:security",
         "//src/v/redpanda/admin/services/internal:breakglass",
         "//src/v/redpanda/admin/services/internal:debug",
-        "//src/v/redpanda/admin/services/internal:level_zero",
-        "//src/v/redpanda/admin/services/internal:metastore",
         "//src/v/resource_mgmt:cpu_profiler",
         "//src/v/resource_mgmt:memory_groups",
         "//src/v/resource_mgmt:memory_sampling",
