@@ -54,6 +54,7 @@ redpanda_cc_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
+        "//src/v/cluster:members_table",
         ":types",
         "//src/v/base",
         "//src/v/cluster",

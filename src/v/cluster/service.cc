@@ -33,6 +33,7 @@
 #include "cluster/topics_frontend.h"
 #include "cluster/types.h"
 #include "config/configuration.h"
+#include "config/node_config.h"
 #include "model/fundamental.h"
 #include "model/timeout_clock.h"
 #include "rpc/connection_cache.h"

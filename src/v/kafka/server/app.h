@@ -33,6 +33,18 @@ class store;
 } // namespace client_quota
 } // namespace cluster
 
+namespace security {
+class credential_store;
+class authorizer;
+class role_store;
+namespace audit {
+class audit_log_manager;
+}
+namespace oidc {
+class service;
+}
+} // namespace security
+
 namespace ssx {
 class singleton_thread_worker;
 }

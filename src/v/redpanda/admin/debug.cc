@@ -498,15 +498,6 @@ void admin_server::register_debug_routes() {
           return get_local_storage_usage_handler(std::move(req));
       });
 
-    request_handler_fn unsafe_reset_metadata_handler = [this](
-                                                         auto req, auto reply) {
-        return unsafe_reset_metadata(std::move(req), std::move(reply));
-    };
-
-    register_route<superuser>(
-      ss::httpd::debug_json::unsafe_reset_metadata,
-      std::move(unsafe_reset_metadata_handler));
-
     register_route<superuser>(
       ss::httpd::debug_json::get_disk_stat,
       [this](std::unique_ptr<ss::http::request> request) {

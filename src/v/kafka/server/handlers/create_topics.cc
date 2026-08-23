@@ -79,7 +79,22 @@ bool is_supported(std::string_view name) {
 }
 } // namespace
 
-using validators = make_validator_types<creatable_topic, custom_partition_assignment_negative_partition_count, partition_count_must_be_positive, replication_factor_must_be_positive, replication_factor_must_be_odd, replicas_diversity, compression_type_validator, compaction_strategy_validator, timestamp_type_validator, cleanup_policy_validator, batch_max_bytes_limits, replication_factor_must_be_greater_or_equal_to_minimum, vcluster_id_validator, write_caching_configs_validator, min_max_compaction_lag_ms_validator, >;
+using validators = make_validator_types<
+  creatable_topic,
+  custom_partition_assignment_negative_partition_count,
+  partition_count_must_be_positive,
+  replication_factor_must_be_positive,
+  replication_factor_must_be_odd,
+  replicas_diversity,
+  compression_type_validator,
+  compaction_strategy_validator,
+  timestamp_type_validator,
+  cleanup_policy_validator,
+  batch_max_bytes_limits,
+  replication_factor_must_be_greater_or_equal_to_minimum,
+  vcluster_id_validator,
+  write_caching_configs_validator,
+  min_max_compaction_lag_ms_validator>;
 
 static void
 append_topic_configs(request_context& ctx, create_topics_response& response) {

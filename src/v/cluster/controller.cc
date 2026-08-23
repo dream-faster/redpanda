@@ -62,6 +62,7 @@
 #include "raft/fundamental.h"
 #include "raft/fwd.h"
 #include "raft/types.h"
+#include "rpc/connection_cache.h"
 #include "security/authorizer.h"
 #include "security/credential_store.h"
 #include "security/ephemeral_credential_store.h"

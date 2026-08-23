@@ -1493,7 +1493,6 @@ redpanda_cc_library(
         "//src/v/container:chunked_hash_map",
         "//src/v/container:contiguous_range_map",
         "//src/v/model",
-        "//src/v/utils:stable_iterator",
         "@abseil-cpp//absl/container:node_hash_map",
     ],
 )

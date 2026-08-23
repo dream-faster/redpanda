@@ -57,7 +57,6 @@ controller_api::controller_api(
   , _connections(cache)
   , _members(members)
   , _partition_balancer(partition_balancer)
-  , _partition_manager(partition_manager)
   , _partition_leaders(partition_leaders)
   , _as(as) {}
 

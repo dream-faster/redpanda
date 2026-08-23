@@ -108,7 +108,6 @@ private:
     ss::sharded<rpc::connection_cache>& _connections;
     ss::sharded<members_table>& _members;
     ss::sharded<partition_balancer_backend>& _partition_balancer;
-    ss::sharded<partition_manager>& _partition_manager;
     ss::sharded<partition_leaders_table>& _partition_leaders;
     ss::sharded<ss::abort_source>& _as;
 };

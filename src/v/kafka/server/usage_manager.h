@@ -38,11 +38,9 @@ public:
     class usage_accounting_fiber final : public usage_aggregator<> {
     public:
         usage_accounting_fiber(
-          cluster::controller* controller,
           ss::sharded<usage_manager>& um,
           ss::sharded<cluster::health_monitor_frontend>& health_monitor,
           ss::sharded<storage::api>& storage,
-          ss::abort_source& as,
           size_t usage_num_windows,
           std::chrono::seconds usage_window_width_interval,
           std::chrono::seconds usage_disk_persistance_interval);
@@ -51,11 +49,8 @@ public:
         virtual ss::future<usage> close_current_window() final;
 
     private:
-    private:
-        cluster::controller* _controller;
         cluster::health_monitor_frontend& _health_monitor;
         ss::sharded<usage_manager>& _um;
-        ss::abort_source& _as;
     };
 
     /// Class constructor

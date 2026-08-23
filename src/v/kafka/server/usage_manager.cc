@@ -21,11 +21,9 @@
 namespace kafka {
 
 usage_manager::usage_accounting_fiber::usage_accounting_fiber(
-  cluster::controller* controller,
   ss::sharded<usage_manager>& um,
   ss::sharded<cluster::health_monitor_frontend>& health_monitor,
   ss::sharded<storage::api>& storage,
-  ss::abort_source& as,
   size_t usage_num_windows,
   std::chrono::seconds usage_window_width_interval,
   std::chrono::seconds usage_disk_persistance_interval)
@@ -34,10 +32,8 @@ usage_manager::usage_accounting_fiber::usage_accounting_fiber(
       usage_num_windows,
       usage_window_width_interval,
       usage_disk_persistance_interval)
-  , _controller(controller)
   , _health_monitor(health_monitor.local())
-  , _um(um)
-  , _as(as) {}
+  , _um(um) {}
 
 /// The fiber running on the timer has a mutable effect when sample() is
 /// called, to prevent issues when open bucket is querying all shards for
@@ -89,11 +85,9 @@ ss::future<> usage_manager::start_accounting_fiber() {
         co_return; /// Double start called, do-nothing
     }
     _accounting_fiber = std::make_unique<usage_accounting_fiber>(
-      _controller,
       this->container(),
       _health_monitor,
       _storage,
-      _as,
       _usage_num_windows(),
       _usage_window_width_interval(),
       _usage_disk_persistance_interval());

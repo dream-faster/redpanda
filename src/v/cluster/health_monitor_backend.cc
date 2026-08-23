@@ -26,6 +26,7 @@
 #include "cluster/partition_kafka_offsets.h"
 #include "cluster/partition_manager.h"
 #include "cluster/partition_probe.h"
+#include "cluster/topic_table.h"
 #include "cluster/types.h"
 #include "config/configuration.h"
 #include "config/property.h"
@@ -39,6 +40,7 @@
 #include "rpc/types.h"
 #include "ssx/async_algorithm.h"
 #include "ssx/future-util.h"
+#include "utils/stable_iterator_adaptor.h"
 
 #include <seastar/core/lowres_clock.hh>
 #include <seastar/core/metrics.hh>
