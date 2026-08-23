@@ -20,7 +20,10 @@ fmt::iterator topic_properties::format_to(fmt::iterator it) const {
       it,
       "{{ compression: {}, cleanup_policy_bitflags: {}, compaction_strategy: "
       "{}, retention_bytes: {}, retention_duration_ms: {}, segment_size: {}, "
-      "timestamp_type: {}batch_max_bytes: {}segment_ms: "
+      "timestamp_type: {}batch_max_bytes: {}, "
+      "retention_local_target_bytes: {}, retention_local_target_ms: {}, "
+      "segment_ms: {}, initial_retention_local_target_bytes: {}, "
+      "initial_retention_local_target_ms: "
       "{}mpx_virtual_cluster_id: {}, write_caching: {}, flush_ms: {}, "
       "flush_bytes: {}leaders_preference: {}, delete_retention_ms: "
       "{}min_cleanable_dirty_ratio: {}, min_compaction_lag_ms: {}, "
@@ -34,7 +37,11 @@ fmt::iterator topic_properties::format_to(fmt::iterator it) const {
       segment_size,
       timestamp_type,
       batch_max_bytes,
+      retention_local_target_bytes,
+      retention_local_target_ms,
       segment_ms,
+      initial_retention_local_target_bytes,
+      initial_retention_local_target_ms,
       mpx_virtual_cluster_id,
       write_caching,
       flush_ms,
@@ -64,7 +71,11 @@ bool topic_properties::has_overrides() const {
                            || segment_size || retention_bytes.is_engaged()
                            || retention_duration.is_engaged()
                            || batch_max_bytes.has_value()
+                           || retention_local_target_bytes.is_engaged()
+                           || retention_local_target_ms.is_engaged()
                            || segment_ms.is_engaged()
+                           || initial_retention_local_target_bytes.is_engaged()
+                           || initial_retention_local_target_ms.is_engaged()
                            || write_caching.has_value() || flush_ms.has_value()
                            || flush_bytes.has_value()
                            || leaders_preference.has_value()
@@ -86,7 +97,12 @@ topic_properties::get_ntp_cfg_overrides() const {
     ret.retention_bytes = retention_bytes;
     ret.retention_time = retention_duration;
     ret.segment_size = segment_size;
+    ret.retention_local_target_bytes = retention_local_target_bytes;
+    ret.retention_local_target_ms = retention_local_target_ms;
     ret.segment_ms = segment_ms;
+    ret.initial_retention_local_target_bytes
+      = initial_retention_local_target_bytes;
+    ret.initial_retention_local_target_ms = initial_retention_local_target_ms;
     ret.write_caching = write_caching;
     ret.flush_ms = flush_ms;
     ret.flush_bytes = flush_bytes;

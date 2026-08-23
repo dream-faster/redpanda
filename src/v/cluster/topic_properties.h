@@ -42,7 +42,11 @@ struct topic_properties
       tristate<size_t> retention_bytes,
       tristate<std::chrono::milliseconds> retention_duration,
       std::optional<uint32_t> batch_max_bytes,
+      tristate<size_t> retention_local_target_bytes,
+      tristate<std::chrono::milliseconds> retention_local_target_ms,
       tristate<std::chrono::milliseconds> segment_ms,
+      tristate<size_t> initial_retention_local_target_bytes,
+      tristate<std::chrono::milliseconds> initial_retention_local_target_ms,
       std::optional<model::vcluster_id> mpx_virtual_cluster_id,
       std::optional<model::write_caching_mode> write_caching,
       std::optional<std::chrono::milliseconds> flush_ms,
@@ -62,7 +66,12 @@ struct topic_properties
       , retention_bytes(retention_bytes)
       , retention_duration(retention_duration)
       , batch_max_bytes(batch_max_bytes)
+      , retention_local_target_bytes(retention_local_target_bytes)
+      , retention_local_target_ms(retention_local_target_ms)
       , segment_ms(segment_ms)
+      , initial_retention_local_target_bytes(
+          initial_retention_local_target_bytes)
+      , initial_retention_local_target_ms(initial_retention_local_target_ms)
       , mpx_virtual_cluster_id(mpx_virtual_cluster_id)
       , write_caching(write_caching)
       , flush_ms(flush_ms)
@@ -73,9 +82,9 @@ struct topic_properties
       , min_compaction_lag_ms(min_compaction_lag_ms)
       , max_compaction_lag_ms(max_compaction_lag_ms)
       , message_timestamp_before_max_ms(message_timestamp_before_max_ms)
-      , message_timestamp_after_max_ms(message_timestamp_after_max_ms)
+      , message_timestamp_after_max_ms(message_timestamp_after_max_ms) {}
 
-          std::optional<model::compression> compression;
+    std::optional<model::compression> compression;
     std::optional<model::cleanup_policy_bitflags> cleanup_policy_bitflags;
     std::optional<model::compaction_strategy> compaction_strategy;
     std::optional<model::timestamp_type> timestamp_type;
@@ -85,15 +94,20 @@ struct topic_properties
 
     std::optional<uint32_t> batch_max_bytes;
 
-    // Remote deletes are enabled by default in new tiered storage topics,
+    tristate<size_t> retention_local_target_bytes{std::nullopt};
+    tristate<std::chrono::milliseconds> retention_local_target_ms{std::nullopt};
 
     tristate<std::chrono::milliseconds> segment_ms{std::nullopt};
+
+    // Local retention to apply while a partition is still catching up: it is
+    // relaxed to the values above once the replica is in sync.
+    tristate<size_t> initial_retention_local_target_bytes{std::nullopt};
+    tristate<std::chrono::milliseconds> initial_retention_local_target_ms{
+      std::nullopt};
     std::optional<model::vcluster_id> mpx_virtual_cluster_id;
     std::optional<model::write_caching_mode> write_caching;
     std::optional<std::chrono::milliseconds> flush_ms;
     std::optional<size_t> flush_bytes;
-
-    // Label to be used when generating paths of remote objects (manifests,
 
     std::optional<config::leaders_preference> leaders_preference;
 
@@ -123,7 +137,11 @@ struct topic_properties
           retention_bytes,
           retention_duration,
           batch_max_bytes,
+          retention_local_target_bytes,
+          retention_local_target_ms,
           segment_ms,
+          initial_retention_local_target_bytes,
+          initial_retention_local_target_ms,
           mpx_virtual_cluster_id,
           write_caching,
           flush_ms,

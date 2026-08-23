@@ -690,7 +690,13 @@ struct incremental_topic_updates
     property_update<tristate<size_t>> retention_bytes;
     property_update<tristate<std::chrono::milliseconds>> retention_duration;
     property_update<std::optional<uint32_t>> batch_max_bytes;
+    property_update<tristate<size_t>> retention_local_target_bytes;
+    property_update<tristate<std::chrono::milliseconds>>
+      retention_local_target_ms;
     property_update<tristate<std::chrono::milliseconds>> segment_ms;
+    property_update<tristate<size_t>> initial_retention_local_target_bytes;
+    property_update<tristate<std::chrono::milliseconds>>
+      initial_retention_local_target_ms;
     property_update<std::optional<model::write_caching_mode>> write_caching;
     property_update<std::optional<std::chrono::milliseconds>> flush_ms;
     property_update<std::optional<size_t>> flush_bytes;
@@ -721,7 +727,11 @@ struct incremental_topic_updates
           retention_bytes,
           retention_duration,
           batch_max_bytes,
+          retention_local_target_bytes,
+          retention_local_target_ms,
           segment_ms,
+          initial_retention_local_target_bytes,
+          initial_retention_local_target_ms,
           write_caching,
           flush_ms,
           flush_bytes,
