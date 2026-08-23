@@ -577,6 +577,7 @@ redpanda_cc_library(
         "//src/v/utils:tristate",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/container:node_hash_map",
+        "@abseil-cpp//absl/container:node_hash_set",
         "@fmt",
         "@seastar",
     ],

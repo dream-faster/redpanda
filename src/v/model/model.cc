@@ -409,24 +409,6 @@ fmt::iterator format_to(maintenance_state st, fmt::iterator out) {
     __builtin_unreachable();
 }
 
-fmt::iterator format_to(cloud_credentials_source cs, fmt::iterator out) {
-    switch (cs) {
-    case cloud_credentials_source::config_file:
-        return fmt::format_to(out, "config_file");
-    case cloud_credentials_source::aws_instance_metadata:
-        return fmt::format_to(out, "aws_instance_metadata");
-    case cloud_credentials_source::sts:
-        return fmt::format_to(out, "sts");
-    case cloud_credentials_source::gcp_instance_metadata:
-        return fmt::format_to(out, "gcp_instance_metadata");
-    case cloud_credentials_source::azure_aks_oidc_federation:
-        return fmt::format_to(out, "azure_aks_oidc_federation");
-    case cloud_credentials_source::azure_vm_instance_metadata:
-        return fmt::format_to(out, "azure_vm_instance_metadata");
-    }
-    return fmt::format_to(out, "unknown");
-}
-
 fmt::iterator format_to(control_record_type crt, fmt::iterator out) {
     switch (crt) {
     case control_record_type::tx_abort:

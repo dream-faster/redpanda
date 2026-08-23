@@ -145,35 +145,31 @@ fmt::iterator ntp_config::default_overrides::format_to(fmt::iterator it) const {
     return fmt::format_to(
       it,
       "{{compaction_strategy: {}, cleanup_policy_bitflags: {}, segment_size: "
-      "{}, retention_bytes: {}, retention_time_ms: {}, recovery_enabled: {}, "
+      "{}, retention_bytes: {}, retention_time_ms: {}, "
       "retention_local_target_bytes: {}, retention_local_target_ms: {}, "
-      "remote_delete: {}, segment_ms: {}, "
+      "segment_ms: {}, "
       "initial_retention_local_target_bytes: {}, "
       "initial_retention_local_target_ms: {}, write_caching: {}, flush_ms: {}, "
-      "flush_bytes: {}remote_allow_gaps: {}, delete_retention_ms: {}, "
+      "flush_bytes: {}delete_retention_ms: {}, "
       "min_cleanable_dirty_ratio: {}, min_compaction_lag_ms: {}, "
-      "max_compaction_lag_ms: {}, storage_mode: {} }}",
+      "max_compaction_lag_ms: {} }}",
       compaction_strategy,
       cleanup_policy_bitflags,
       segment_size,
       retention_bytes,
       retention_time,
-      recovery_enabled,
       retention_local_target_bytes,
       retention_local_target_ms,
-      remote_delete,
       segment_ms,
       initial_retention_local_target_bytes,
       initial_retention_local_target_ms,
       write_caching,
       flush_ms,
       flush_bytes,
-      remote_allow_gaps,
       delete_retention_ms,
       min_cleanable_dirty_ratio,
       min_compaction_lag_ms,
-      max_compaction_lag_ms,
-      storage_mode);
+      max_compaction_lag_ms);
 }
 
 fmt::iterator ntp_config::format_to(fmt::iterator it) const {

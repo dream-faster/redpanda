@@ -13,7 +13,9 @@
 
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/node_hash_map.h"
+#include "absl/container/node_hash_set.h"
 #include "base/format_to.h"
+#include "base/outcome.h"
 #include "cluster/data_policy.h"
 #include "cluster/errc.h"
 #include "cluster/feature_update_action.h"
@@ -1618,8 +1620,7 @@ struct bootstrap_cluster_cmd_data
           bootstrap_user_cred,
           node_ids_by_uuid,
           founding_version,
-          initial_nodes,
-          recovery_state);
+          initial_nodes);
     }
 
     model::cluster_uuid uuid;

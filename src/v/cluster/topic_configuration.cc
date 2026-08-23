@@ -10,6 +10,7 @@
 #include "cluster/topic_configuration.h"
 
 #include "base/format_to.h"
+#include "model/adl_serde.h"
 #include "model/fundamental.h"
 #include "model/metadata.h"
 #include "model/namespace.h"
