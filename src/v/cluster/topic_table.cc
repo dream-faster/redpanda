@@ -67,15 +67,6 @@ topic_table::apply(create_topic_cmd cmd, model::offset offset) {
         co_return schema_id_validation_validator::ec;
     }
 
-    if (
-      cmd.value.cfg.properties.iceberg_mode != model::iceberg_mode::disabled
-      && !cmd.value.cfg.properties.iceberg_partition_spec) {
-        // Remember partition spec default at time of creation - i.e. make it a
-        // sticky config.
-        cmd.value.cfg.properties.iceberg_partition_spec
-          = config::shard_local_cfg().iceberg_default_partition_spec();
-    }
-
     std::optional<model::initial_revision_id> remote_revision
       = cmd.value.cfg.properties.remote_topic_properties
           ? std::make_optional(
@@ -205,24 +196,6 @@ topic_table::apply(topic_lifecycle_transition soft_del, model::offset offset) {
               soft_del.topic.initial_revision_id);
         }
 
-        if (topic_properties.requires_iceberg_remote_erase()) {
-            // Note that for iceberg tombstones we use topic.get_revision()
-            // (i.e. revision that got assigned to the topic at creation time)
-            // and not topic.get_remote_revision() (which may be an earlier
-            // revision if the topic was recovered from cloud storage).
-            auto tombstone = nt_iceberg_tombstone{
-              .last_deleted_revision = tp->second.get_revision()};
-            auto it = _iceberg_tombstones.emplace(tp->first, tombstone).first;
-            it->second.last_deleted_revision = std::max(
-              it->second.last_deleted_revision, tp->second.get_revision());
-
-            vlog(
-              clusterlog.debug,
-              "created iceberg tombstone for topic {} (revision: {})",
-              it->first,
-              it->second.last_deleted_revision);
-        }
-
         if (topic_properties.requires_cloud_topic_remote_erase()) {
             auto tp_id = topic_cfg.tp_id;
             if (tp_id.has_value()) {
@@ -276,35 +249,6 @@ topic_table::apply(topic_lifecycle_transition soft_del, model::offset offset) {
                 return ss::make_ready_future<std::error_code>(
                   errc::topic_not_exists);
             }
-        }
-        case topic_purge_domain::iceberg: {
-            auto tombstone_it = _iceberg_tombstones.find(soft_del.topic.nt);
-            if (tombstone_it == _iceberg_tombstones.end()) {
-                return ss::make_ready_future<std::error_code>(
-                  errc::topic_not_exists);
-            }
-
-            model::revision_id purged_revision{
-              soft_del.topic.initial_revision_id};
-            if (tombstone_it->second.last_deleted_revision > purged_revision) {
-                vlog(
-                  clusterlog.info,
-                  "[{}] unexpected iceberg tombstone revision {} (expected {})",
-                  soft_del.topic.nt,
-                  tombstone_it->second.last_deleted_revision,
-                  purged_revision);
-                return ss::make_ready_future<std::error_code>(
-                  errc::concurrent_modification_error);
-            }
-
-            vlog(
-              clusterlog.debug,
-              "Purged iceberg tombstone for {} {}",
-              tombstone_it->first,
-              tombstone_it->second.last_deleted_revision);
-
-            _iceberg_tombstones.erase(tombstone_it);
-            return ss::make_ready_future<std::error_code>(errc::success);
         }
         case topic_purge_domain::cloud_topic: {
             auto tombstone_it = _cloud_topic_tombstones.find(soft_del.topic);
@@ -1017,35 +961,6 @@ void incremental_update(
 }
 
 void incremental_update(
-  model::iceberg_mode& property,
-  std::optional<ss::sstring>& partition_spec_property,
-  property_update<model::iceberg_mode> override,
-  model::iceberg_mode default_value) {
-    switch (override.op) {
-    case incremental_update_operation::remove:
-        // remove override, fallback to default
-        property = default_value;
-        return;
-    case incremental_update_operation::set: {
-        // set new value and remember the current partition spec default if we
-        // are enabling iceberg.
-        auto old_property = property;
-        property = override.value;
-        if (
-          old_property == model::iceberg_mode::disabled
-          && property != old_property && !partition_spec_property) {
-            partition_spec_property
-              = config::shard_local_cfg().iceberg_default_partition_spec();
-        }
-        return;
-    }
-    case incremental_update_operation::none:
-        // do nothing
-        return;
-    }
-}
-
-void incremental_update(
   model::redpanda_storage_mode& property,
   property_update<std::optional<model::redpanda_storage_mode>> override,
   model::redpanda_storage_mode /*default_value*/) {
@@ -1189,27 +1104,9 @@ topic_properties topic_table::update_topic_properties(
     incremental_update(updated_properties.flush_ms, overrides.flush_ms);
     incremental_update(updated_properties.flush_bytes, overrides.flush_bytes);
     incremental_update(
-      updated_properties.iceberg_mode,
-      updated_properties.iceberg_partition_spec,
-      overrides.iceberg_mode,
-      storage::ntp_config::default_iceberg_mode);
-    incremental_update(
       updated_properties.leaders_preference, overrides.leaders_preference);
     incremental_update(
       updated_properties.delete_retention_ms, overrides.delete_retention_ms);
-    incremental_update(
-      updated_properties.iceberg_delete, overrides.iceberg_delete);
-    incremental_update(
-      updated_properties.iceberg_partition_spec,
-      overrides.iceberg_partition_spec,
-      std::optional(
-        config::shard_local_cfg().iceberg_default_partition_spec()));
-    incremental_update(
-      updated_properties.iceberg_invalid_record_action,
-      overrides.iceberg_invalid_record_action);
-    incremental_update(
-      updated_properties.iceberg_target_lag_ms,
-      overrides.iceberg_target_lag_ms);
     incremental_update(
       updated_properties.min_cleanable_dirty_ratio,
       overrides.min_cleanable_dirty_ratio);
@@ -1758,9 +1655,6 @@ ss::future<> topic_table::apply_snapshot(
 
     reset_partitions_to_force_reconfigure(
       controller_snap.topics.partitions_to_force_recover);
-
-    _iceberg_tombstones.replace(
-      controller_snap.topics.iceberg_tombstones.values().copy());
 
     _cloud_topic_tombstones.replace(
       controller_snap.topics.cloud_topic_tombstones.values().copy());

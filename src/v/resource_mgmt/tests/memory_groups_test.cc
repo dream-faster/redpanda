@@ -18,7 +18,6 @@
 
 static constexpr size_t total_shares_without_optionals = 87;
 static constexpr size_t total_wasm_shares = 10;
-static constexpr size_t total_datalake_shares = 10;
 static constexpr size_t total_cloud_storage_shares = 10;
 
 // It's not really useful to know the exact byte values for each of these
@@ -42,8 +41,7 @@ public:
 
     bool compaction_enabled() const { return std::get<0>(GetParam()); }
     bool wasm_enabled() const { return std::get<1>(GetParam()); }
-    bool datalake_enabled() const { return std::get<2>(GetParam()); }
-    bool cloud_storage_enabled() const { return std::get<3>(GetParam()); }
+    bool cloud_storage_enabled() const { return std::get<2>(GetParam()); }
 };
 
 TEST_P(MemoryGroupSharesTest, DividesSharesCorrectly) {
@@ -73,15 +71,11 @@ TEST_P(MemoryGroupSharesTest, DividesSharesCorrectly) {
       /*cloud_topics_reconciler_memory_reservation=*/{},
       data_transforms_reservation,
       wasm_enabled(),
-      datalake_enabled(),
       cloud_storage_enabled(),
       partitions);
     auto total_shares = total_shares_without_optionals;
     if (wasm_enabled()) {
         total_shares += total_wasm_shares;
-    }
-    if (datalake_enabled()) {
-        total_shares += total_datalake_shares;
     }
     if (cloud_storage_enabled()) {
         total_shares += total_cloud_storage_shares;
@@ -114,14 +108,6 @@ TEST_P(MemoryGroupSharesTest, DividesSharesCorrectly) {
     } else {
         EXPECT_THAT(groups.data_transforms_max_memory(), 0);
     }
-    if (datalake_enabled()) {
-        EXPECT_THAT(
-          groups.datalake_max_memory(),
-          IsApprox(total_available_memory * 10.0 / total_shares));
-    } else {
-        EXPECT_THAT(groups.datalake_max_memory(), 0);
-    }
-
     if (compaction_enabled()) {
         EXPECT_EQ(
           groups.compaction_reserved_memory(), user_compaction_reservation);
@@ -135,7 +121,7 @@ TEST_P(MemoryGroupSharesTest, DividesSharesCorrectly) {
       groups.data_transforms_max_memory() + groups.chunk_cache_max_memory()
         + groups.kafka_total_memory() + groups.recovery_max_memory()
         + groups.rpc_total_memory() + groups.tiered_storage_max_memory()
-        + groups.admin_max_memory() + groups.datalake_max_memory(),
+        + groups.admin_max_memory(),
       total_available_memory);
 }
 
@@ -156,7 +142,6 @@ TEST(MemoryGroups, CompactionMemoryBytes) {
           /*cloud_topics_reconciler_memory_reservation=*/{},
           /*data_transforms_memory_reservation=*/{},
           /*wasm_enabled=*/false,
-          /*datalake_enabled=*/false,
           /*cloud_storage_enabled=*/false,
           {
             .max_limit_pct = 20,
@@ -176,7 +161,6 @@ TEST(MemoryGroups, CompactionMemoryBytes) {
           /*cloud_topics_reconciler_memory_reservation=*/{},
           /*data_transforms_memory_reservation=*/{},
           /*wasm_enabled=*/false,
-          /*datalake_enabled=*/false,
           /*cloud_storage_enabled=*/false,
           {
             .max_limit_pct = 20,
@@ -189,8 +173,4 @@ TEST(MemoryGroups, CompactionMemoryBytes) {
 INSTANTIATE_TEST_SUITE_P(
   MemoryGroupShares,
   MemoryGroupSharesTest,
-  ::testing::Combine(
-    ::testing::Bool(),
-    ::testing::Bool(),
-    ::testing::Bool(),
-    ::testing::Bool()));
+  ::testing::Combine(::testing::Bool(), ::testing::Bool(), ::testing::Bool()));

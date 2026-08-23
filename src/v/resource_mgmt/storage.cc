@@ -15,7 +15,6 @@
 #include "cloud_io/cache_service.h"
 #include "cluster/node/local_monitor.h"
 #include "cluster/partition_manager.h"
-#include "datalake/datalake_manager.h"
 #include "metrics/prometheus_sanitize.h"
 #include "utils/human.h"
 
@@ -514,18 +513,6 @@ ss::future<storage::usage_report> disk_space_manager::disk_usage() {
      */
     auto report = co_await _storage->local().disk_usage();
 
-    /*
-     * datalake scratch space usage. from the perspective of space management
-     * the data used by datalake is not reclaimable. it is reported in the
-     * report as more "log data" the same way that kvstore data is reported.
-     */
-    const auto datalake_usage
-      = co_await datalake::datalake_manager::disk_usage();
-    vlog(rlog.debug, "Datalake usage: {}", human::bytes(datalake_usage));
-
-    _probe.set_total_datalake_usage(datalake_usage);
-    report.usage.data += datalake_usage;
-
     co_return report;
 }
 
@@ -739,12 +726,6 @@ void disk_space_manager::probe::setup_metrics() {
         [this]() { return _total_usage; },
         sm::description(
           "Total amount of disk usage under control of space management.")));
-
-    defs.emplace_back(
-      sm::make_gauge(
-        "datalake_disk_usage_bytes",
-        [this]() { return _total_datalake_usage; },
-        sm::description("Total amount of disk usage by datalake.")));
 
     defs.emplace_back(
       sm::make_gauge(

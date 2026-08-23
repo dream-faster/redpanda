@@ -30,7 +30,6 @@ enum class license_required_feature {
     schema_id_validation,
     rbac,
     fips,
-    datalake_iceberg,
     leadership_pinning,
     shadow_linking,
     topic_deletion_disabled,
@@ -56,8 +55,6 @@ inline fmt::iterator format_to(license_required_feature f, fmt::iterator out) {
         return fmt::format_to(out, "rbac");
     case license_required_feature::fips:
         return fmt::format_to(out, "fips");
-    case license_required_feature::datalake_iceberg:
-        return fmt::format_to(out, "datalake_iceberg");
     case license_required_feature::leadership_pinning:
         return fmt::format_to(out, "leadership_pinning");
     case license_required_feature::shadow_linking:
@@ -95,7 +92,6 @@ public:
     // | Cluster     | `http_authentication`           | `OIDC`        |
     // | Cluster     | `enable_schema_id_validation`   | `redpanda`    |
     // | Cluster     | `enable_schema_id_validation`   | `compat`      |
-    // | Cluster     | `iceberg_enabled`               | `true`        |
     // | Cluster     | `enable_shadow_linking`         | `true`        |
     // | Cluster     | `delete_topic_enable`           | `false`       |
     // | Node        | `fips_mode`                     | `enabled`     |

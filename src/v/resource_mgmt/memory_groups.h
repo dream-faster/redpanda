@@ -90,7 +90,6 @@ public:
       cloud_topics_reconciler_memory_reservation cloud_topics_reconciler,
       data_transforms_memory_reservation data_transforms,
       bool wasm_enabled,
-      bool datalake_enabled,
       bool cloud_storage_enabled,
       partitions_memory_reservation partitions);
 
@@ -145,8 +144,6 @@ public:
     /// memory below which the share-based allocator has no memory to divide.
     size_t total_reserved_memory() const;
 
-    size_t datalake_max_memory() const;
-
     size_t cloud_topics_memory() const;
 
     // Absolute memory in bytes reserved for partitions
@@ -177,7 +174,6 @@ private:
     size_t _partitions_reserved_memory;
     size_t _total_available_memory;
     bool _wasm_enabled;
-    bool _datalake_enabled;
     bool _cloud_storage_enabled;
 
     friend class testing::system_memory_groups_accessor;

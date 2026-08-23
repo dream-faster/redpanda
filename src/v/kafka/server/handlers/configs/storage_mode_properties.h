@@ -118,16 +118,6 @@ inline constexpr auto storage_mode_properties
     {topic_property_remote_allow_gaps, storage_mode_mask::tiered},
 
     // Properties valid for tiered and cloud only (NOT local)
-    {topic_property_iceberg_mode,
-     storage_mode_mask::tiered_and_cloud | storage_mode_mask::tiered_cloud},
-    {topic_property_iceberg_delete,
-     storage_mode_mask::tiered_and_cloud | storage_mode_mask::tiered_cloud},
-    {topic_property_iceberg_partition_spec,
-     storage_mode_mask::tiered_and_cloud | storage_mode_mask::tiered_cloud},
-    {topic_property_iceberg_invalid_record_action,
-     storage_mode_mask::tiered_and_cloud | storage_mode_mask::tiered_cloud},
-    {topic_property_iceberg_target_lag_ms,
-     storage_mode_mask::tiered_and_cloud | storage_mode_mask::tiered_cloud},
     {topic_property_remote_delete,
      storage_mode_mask::tiered_and_cloud | storage_mode_mask::tiered_cloud},
     {topic_property_read_replica,

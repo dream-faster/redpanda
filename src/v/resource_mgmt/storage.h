@@ -260,13 +260,6 @@ private:
         void set_total_usage(size_t usage) noexcept { _total_usage = usage; }
 
         /*
-         * Total amount of scratch space used by datalake.
-         */
-        void set_total_datalake_usage(size_t usage) noexcept {
-            _total_datalake_usage = usage;
-        }
-
-        /*
          * This is the amount of data that is currently reclaimable by the
          * normal retention policy. Space management only kicks in when it needs
          * to reclaim more data than is available through the normal retention
@@ -349,7 +342,6 @@ private:
         disk_space_manager* _sm;
         metrics::internal_metric_groups _metrics;
         size_t _total_usage{0};
-        size_t _total_datalake_usage{0};
         size_t _retention_reclaimable{0};
         size_t _available_reclaimable{0};
         size_t _local_retention_reclaimable{0};

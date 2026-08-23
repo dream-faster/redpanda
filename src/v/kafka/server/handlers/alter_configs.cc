@@ -99,7 +99,7 @@ create_topic_properties_update(
     std::apply(apply_op(op_t::none), update.custom_properties.serde_fields());
 
     static_assert(
-      std::tuple_size_v<decltype(update.properties.serde_fields())> == 45,
+      std::tuple_size_v<decltype(update.properties.serde_fields())> == 40,
       "If you add a property, decide on its default alter config "
       "policy, and handle the update in the loop below");
     static_assert(
@@ -370,24 +370,6 @@ create_topic_properties_update(
                   flush_bytes_validator{});
                 continue;
             }
-            if (cfg.name == topic_property_iceberg_mode) {
-                parse_and_set_property(
-                  tp_ns,
-                  update.properties.iceberg_mode,
-                  cfg.value,
-                  kafka::config_resource_operation::set,
-                  iceberg_config_validator{
-                    ctx.feature_table().local().is_active(
-                      features::feature::iceberg_extended_mode_config)},
-                  [](const ss::sstring& s) -> model::iceberg_mode {
-                      auto r = model::parse_iceberg_mode(s);
-                      if (!r) {
-                          throw validation_error(r.error());
-                      }
-                      return std::move(*r);
-                  });
-                continue;
-            }
             if (cfg.name == topic_property_leaders_preference) {
                 // if we evaluate to ordered_racks, check that its fully enabled
                 // before setting it
@@ -421,59 +403,7 @@ create_topic_properties_update(
                   kafka::config_resource_operation::set);
                 continue;
             }
-            if (cfg.name == topic_property_iceberg_delete) {
-                parse_and_set_optional_bool_alpha(
-                  update.properties.iceberg_delete,
-                  cfg.value,
-                  kafka::config_resource_operation::set);
-                continue;
-            }
-            if (cfg.name == topic_property_iceberg_partition_spec) {
-                // Use std::identity as the "parser function" (i.e. pass through
-                // the raw string) because boost::lexical_cast<ss::sstring> (the
-                // default) doesn't allow spaces in the config value.
-                parse_and_set_optional(
-                  update.properties.iceberg_partition_spec,
-                  cfg.value,
-                  kafka::config_resource_operation::set,
-                  iceberg_partition_spec_validator{},
-                  std::identity{});
-                continue;
-            }
-            if (cfg.name == topic_property_iceberg_invalid_record_action) {
-                parse_and_set_optional(
-                  update.properties.iceberg_invalid_record_action,
-                  cfg.value,
-                  kafka::config_resource_operation::set);
-                continue;
-            }
-            if (cfg.name == topic_property_iceberg_target_lag_ms) {
-                parse_and_set_optional(
-                  update.properties.iceberg_target_lag_ms,
-                  cfg.value,
-                  kafka::config_resource_operation::set,
-                  iceberg_target_lag_ms_validator,
-                  [](const ss::sstring& v) {
-                      auto parsed
-                        = boost::lexical_cast<std::chrono::milliseconds::rep>(
-                          v);
-                      return std::chrono::milliseconds{parsed};
-                  });
-                continue;
-            }
             if (cfg.name == topic_property_schema_registry_context) {
-                if (
-                  topic_cfg
-                  && topic_cfg->properties.iceberg_mode
-                       != model::iceberg_mode::disabled) {
-                    return make_error_alter_config_resource_response<
-                      alter_configs_resource_response>(
-                      resource,
-                      error_code::invalid_config,
-                      "Cannot change redpanda.schema.registry.context while "
-                      "Iceberg translation is enabled; set "
-                      "redpanda.iceberg.mode=disabled first");
-                }
                 parse_and_set_property(
                   tp_ns,
                   update.properties.schema_registry_context,

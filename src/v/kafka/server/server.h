@@ -83,7 +83,6 @@ public:
       ss::sharded<cluster::security_frontend>&,
       ss::sharded<cluster::controller_api>&,
       ss::sharded<cluster::tx_gateway_frontend>&,
-      ss::sharded<datalake_throttle_manager>&,
       ss::sharded<cluster::cluster_link::frontend>&,
       std::optional<qdc_monitor_config>,
       ssx::singleton_thread_worker&,
@@ -250,19 +249,6 @@ public:
     // processing incoming requests.
     ss::scheduling_group get_request_handler_sg() const;
 
-    /**
-     * Returns a throttle for a producer that may be producing to datalake
-     * enabled topics.
-     */
-    ss::future<std::chrono::milliseconds>
-    get_datalake_producer_throttle(std::optional<std::string_view> client_id);
-    /**
-     * Marks producer as datalake producer. I.e. a producer that produced to the
-     * datalake enabled topics.
-     */
-    void
-    mark_datalake_producer(const std::optional<std::string_view>& client_id);
-
     cluster::cluster_link::frontend& cluster_link_frontend() {
         return _cluster_link_frontend.local();
     }
@@ -307,7 +293,6 @@ private:
     ss::sharded<cluster::security_frontend>& _security_frontend;
     ss::sharded<cluster::controller_api>& _controller_api;
     ss::sharded<cluster::tx_gateway_frontend>& _tx_gateway_frontend;
-    ss::sharded<kafka::datalake_throttle_manager>& _datalake_throttle_manager;
     ss::sharded<cluster::cluster_link::frontend>& _cluster_link_frontend;
     std::optional<qdc_monitor> _qdc_mon;
     kafka::fetch_metadata_cache _fetch_metadata_cache;

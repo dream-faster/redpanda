@@ -730,25 +730,15 @@ struct incremental_topic_updates
     property_update<std::optional<model::write_caching_mode>> write_caching;
     property_update<std::optional<std::chrono::milliseconds>> flush_ms;
     property_update<std::optional<size_t>> flush_bytes;
-    property_update<model::iceberg_mode> iceberg_mode{
-      storage::ntp_config::default_iceberg_mode,
-      incremental_update_operation::none};
     property_update<std::optional<config::leaders_preference>>
       leaders_preference;
     property_update<tristate<std::chrono::milliseconds>> delete_retention_ms;
-    property_update<std::optional<bool>> iceberg_delete;
-    property_update<std::optional<ss::sstring>> iceberg_partition_spec;
-    property_update<std::optional<model::iceberg_invalid_record_action>>
-      iceberg_invalid_record_action;
     property_update<tristate<double>> min_cleanable_dirty_ratio;
     property_update<std::optional<std::chrono::milliseconds>>
       min_compaction_lag_ms;
     property_update<std::optional<std::chrono::milliseconds>>
       max_compaction_lag_ms;
     property_update<std::optional<bool>> remote_allow_gaps;
-
-    property_update<std::optional<std::chrono::milliseconds>>
-      iceberg_target_lag_ms;
 
     property_update<std::optional<std::chrono::milliseconds>>
       message_timestamp_before_max_ms;
@@ -804,15 +794,10 @@ struct incremental_topic_updates
           write_caching,
           flush_ms,
           flush_bytes,
-          iceberg_mode,
           leaders_preference,
           remote_read,
           remote_write,
           delete_retention_ms,
-          iceberg_delete,
-          iceberg_partition_spec,
-          iceberg_invalid_record_action,
-          iceberg_target_lag_ms,
           min_cleanable_dirty_ratio,
           remote_allow_gaps,
           topic_id,
@@ -1030,7 +1015,6 @@ using create_partitions_configuration_assignment
 // deletions have to be tracked separately.
 enum class topic_purge_domain {
     cloud_storage = 0,
-    iceberg = 1,
     cloud_topic = 2,
 };
 fmt::iterator format_to(topic_purge_domain, fmt::iterator);
@@ -1074,24 +1058,6 @@ struct nt_lifecycle_marker
 
     // Note that the serialisation of `timestamp` is explicitly avoided.
     auto serde_fields() { return std::tie(config, initial_revision_id); }
-};
-
-// A record in the topic table for a deleted topic that is pending iceberg table
-// deletion.
-struct nt_iceberg_tombstone
-  : serde::envelope<
-      nt_iceberg_tombstone,
-      serde::version<0>,
-      serde::compat_version<0>> {
-    // The topic revision of a last deleted topic for which the corresponding
-    // iceberg table has to be deleted. It is used to avoid deleting iceberg
-    // data from a topic with the same name that was created later. If several
-    // iceberg-enabled topics with the same name are created and deleted in a
-    // rapid succession, we just update this revision (the corresponding table
-    // only has to be deleted once).
-    model::revision_id last_deleted_revision;
-
-    auto serde_fields() { return std::tie(last_deleted_revision); }
 };
 
 struct nt_cloud_topic_tombstone
@@ -2764,7 +2730,6 @@ struct partition_state
     bool is_remote_fetch_enabled;
     bool is_cloud_data_available;
     ss::sstring read_replica_bucket;
-    ss::sstring iceberg_mode;
     partition_raft_state raft_state;
     model::offset max_tombstone_removable_offset;
     model::offset max_transaction_removable_offset;
@@ -2789,7 +2754,6 @@ struct partition_state
           is_cloud_data_available,
           read_replica_bucket,
           raft_state,
-          iceberg_mode,
           max_tombstone_removable_offset,
           max_transaction_removable_offset,
           max_cleanly_compacted_offset,

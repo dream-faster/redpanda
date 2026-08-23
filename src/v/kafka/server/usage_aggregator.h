@@ -12,7 +12,6 @@
 #pragma once
 #include "base/vlog.h"
 #include "container/chunked_vector.h"
-#include "kafka/server/datalake_usage_api.h"
 #include "kafka/server/logger.h"
 #include "serde/rw/envelope.h"
 #include "serde/rw/optional.h"
@@ -63,23 +62,19 @@ struct usage
     uint64_t bytes_sent{0};
     uint64_t bytes_received{0};
     std::optional<uint64_t> bytes_cloud_storage;
-    datalake_usage_api::usage_stats datalake_usage;
     usage operator+(const usage&) const;
     usage& operator+=(const usage&);
     auto serde_fields() {
-        return std::tie(
-          bytes_sent, bytes_received, bytes_cloud_storage, datalake_usage);
+        return std::tie(bytes_sent, bytes_received, bytes_cloud_storage);
     }
     friend bool operator==(const usage&, const usage&) = default;
     fmt::iterator format_to(fmt::iterator it) const {
         return fmt::format_to(
           it,
-          "{{ bytes_sent: {} bytes_received: {} bytes_cloud_storage: {} "
-          "datalake_usage: {} }}",
+          "{{ bytes_sent: {} bytes_received: {} bytes_cloud_storage: {} }}",
           bytes_sent,
           bytes_received,
-          bytes_cloud_storage ? std::to_string(*bytes_cloud_storage) : "n/a",
-          datalake_usage);
+          bytes_cloud_storage ? std::to_string(*bytes_cloud_storage) : "n/a");
     }
 };
 

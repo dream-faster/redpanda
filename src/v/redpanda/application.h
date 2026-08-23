@@ -31,8 +31,6 @@
 #include "config/node_config.h"
 #include "crash_tracker/service.h"
 #include "crypto/ossl_context_service.h"
-#include "datalake/credential_manager.h"
-#include "datalake/fwd.h"
 #include "debug_bundle/fwd.h"
 #include "features/feature_table_snapshot.h"
 #include "features/fwd.h"
@@ -206,7 +204,6 @@ public:
     std::unique_ptr<ssx::singleton_thread_worker> thread_worker;
 
     ss::sharded<crypto::ossl_context_service> ossl_context_service;
-    ss::sharded<kafka::datalake_throttle_manager> datalake_throttle_manager;
 
     kafka::server_app _kafka_server;
     ss::sharded<rpc::connection_cache> _connection_cache;
@@ -221,11 +218,6 @@ public:
 
     ss::sharded<transform::rpc::client>& transforms_client() {
         return _transform_rpc_client;
-    }
-
-    ss::sharded<datalake::coordinator::frontend>&
-    datalake_coordinator_frontend() {
-        return _datalake_coordinator_fe;
     }
 
     // At a minimum, we need to construct the feature table and storage systems
@@ -370,10 +362,6 @@ private:
 
     bool wasm_data_transforms_enabled();
 
-    bool datalake_enabled();
-
-    ss::shared_ptr<kafka::datalake_usage_api> make_datalake_usage_aggregator();
-
     void setup_metrics();
     void setup_public_metrics();
     void setup_internal_metrics();
@@ -437,12 +425,6 @@ private:
 
     // Small helpers to execute one-time upgrade actions
     std::vector<std::unique_ptr<features::feature_migrator>> _migrators;
-
-    ss::sharded<datalake::credential_manager> _datalake_credential_mgr;
-    ss::sharded<datalake::coordinator::coordinator_manager>
-      _datalake_coordinator_mgr;
-    ss::sharded<datalake::coordinator::frontend> _datalake_coordinator_fe;
-    ss::sharded<datalake::datalake_manager> _datalake_manager;
 
     ss::sharded<kafka::data::rpc::local_service> _kafka_data_rpc_service;
     ss::sharded<kafka::data::rpc::client> _kafka_data_rpc_client;

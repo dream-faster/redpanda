@@ -101,11 +101,7 @@ public:
         return config::shard_local_cfg()
           .initial_retention_local_target_ms_default();
     }
-    std::chrono::milliseconds
-    get_default_iceberg_target_lag_ms() const override {
-        return _config->iceberg_target_lag_ms();
-    }
-    std::optional<double>
+    std::chrono::milliseconds std::optional<double>
     get_default_min_cleanable_dirty_ratio() const override {
         return _config->min_cleanable_dirty_ratio();
     }

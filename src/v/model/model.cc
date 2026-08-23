@@ -381,14 +381,10 @@ fmt::iterator format_to(record_batch_type bt, fmt::iterator out) {
         return fmt::format_to(out, "batch_type::group_fence_tx");
     case record_batch_type::partition_properties_update:
         return fmt::format_to(out, "batch_type::partition_properties_update");
-    case record_batch_type::datalake_coordinator:
-        return fmt::format_to(out, "batch_type::datalake_coordinator");
     case record_batch_type::ctp_placeholder:
         return fmt::format_to(out, "batch_type::ctp_placeholder");
     case record_batch_type::ctp_stm_command:
         return fmt::format_to(out, "batch_type::ctp_stm_command");
-    case record_batch_type::datalake_translation_state:
-        return fmt::format_to(out, "datalake_translation_state");
     case record_batch_type::cluster_link:
         return fmt::format_to(out, "cluster_link");
     case record_batch_type::group_block:

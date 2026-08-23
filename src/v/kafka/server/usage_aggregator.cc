@@ -119,7 +119,6 @@ void usage_window::reset(uint64_t now) {
     u.bytes_sent = 0;
     u.bytes_received = 0;
     u.bytes_cloud_storage = std::nullopt;
-    u.datalake_usage = {};
 }
 
 template<typename clock_type>
@@ -322,8 +321,6 @@ ss::future<> usage_aggregator<clock_type>::grab_data(size_t idx) {
             _buckets[idx].u += usage_data;
             _buckets[idx].u.bytes_cloud_storage
               = usage_data.bytes_cloud_storage;
-            _buckets[idx].u.datalake_usage = std::move(
-              usage_data.datalake_usage);
         }
     } catch (const std::exception& e) {
         vlog(

@@ -34,8 +34,6 @@ public:
     // is handled during adl/serde decode).
     static constexpr bool default_remote_delete{true};
     static constexpr bool legacy_remote_delete{false};
-    static inline model::iceberg_mode default_iceberg_mode
-      = model::iceberg_mode{};
     static constexpr model::redpanda_storage_mode default_storage_mode{
       model::redpanda_storage_mode::unset};
 
@@ -81,7 +79,6 @@ public:
 
         std::optional<std::chrono::milliseconds> flush_ms;
         std::optional<size_t> flush_bytes;
-        model::iceberg_mode iceberg_mode{default_iceberg_mode};
 
         tristate<std::chrono::milliseconds> delete_retention_ms;
 
@@ -428,14 +425,6 @@ public:
         const auto& cluster_default
           = config::shard_local_cfg().log_cleanup_policy();
         return cleanup_policy_override().value_or(cluster_default);
-    }
-
-    model::iceberg_mode iceberg_mode() const {
-        return _overrides ? _overrides->iceberg_mode : default_iceberg_mode;
-    }
-
-    bool iceberg_enabled() const {
-        return iceberg_mode() != model::iceberg_mode::disabled;
     }
 
     bool cloud_topic_enabled() const {

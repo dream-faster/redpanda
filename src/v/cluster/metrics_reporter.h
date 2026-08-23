@@ -111,10 +111,6 @@ public:
         uint32_t topic_count{0};
         uint32_t partition_count{0};
 
-        uint32_t topics_with_iceberg_kv{0};
-        uint32_t topics_with_iceberg_schema_id{0};
-        uint32_t topics_with_iceberg_schema_latest{0};
-
         uint32_t local_topic_count{0};
         uint32_t cloud_topic_count{0};
 

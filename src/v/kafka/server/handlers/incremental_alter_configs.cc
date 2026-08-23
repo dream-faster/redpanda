@@ -371,24 +371,6 @@ create_topic_properties_update(
                   flush_bytes_validator{});
                 continue;
             }
-            if (cfg.name == topic_property_iceberg_mode) {
-                parse_and_set_property(
-                  tp_ns,
-                  update.properties.iceberg_mode,
-                  cfg.value,
-                  op,
-                  iceberg_config_validator{
-                    ctx.feature_table().local().is_active(
-                      features::feature::iceberg_extended_mode_config)},
-                  [](const ss::sstring& s) -> model::iceberg_mode {
-                      auto r = model::parse_iceberg_mode(s);
-                      if (!r) {
-                          throw validation_error(r.error());
-                      }
-                      return std::move(*r);
-                  });
-                continue;
-            }
             if (cfg.name == topic_property_leaders_preference) {
                 parse_and_set_optional(
                   update.properties.leaders_preference,
@@ -403,56 +385,12 @@ create_topic_properties_update(
                   update.properties.delete_retention_ms, cfg.value, op);
                 continue;
             }
-            if (cfg.name == topic_property_iceberg_delete) {
-                parse_and_set_optional_bool_alpha(
-                  update.properties.iceberg_delete, cfg.value, op);
-                continue;
-            }
-            if (cfg.name == topic_property_iceberg_partition_spec) {
-                // Use std::identity as the "parser function" (i.e. pass through
-                // the raw string) because boost::lexical_cast<ss::sstring> (the
-                // default) doesn't allow spaces in the config value.
-                parse_and_set_optional(
-                  update.properties.iceberg_partition_spec,
-                  cfg.value,
-                  op,
-                  iceberg_partition_spec_validator{},
-                  std::identity{});
-                continue;
-            }
-            if (cfg.name == topic_property_iceberg_invalid_record_action) {
-                parse_and_set_optional(
-                  update.properties.iceberg_invalid_record_action,
-                  cfg.value,
-                  op);
-                continue;
-            }
             if (cfg.name == topic_property_remote_allow_gaps) {
                 parse_and_set_optional_bool_alpha(
                   update.properties.remote_allow_gaps, cfg.value, op);
                 continue;
             }
-            if (cfg.name == topic_property_iceberg_target_lag_ms) {
-                parse_and_set_optional_duration(
-                  update.properties.iceberg_target_lag_ms,
-                  cfg.value,
-                  op,
-                  iceberg_target_lag_ms_validator);
-                continue;
-            }
             if (cfg.name == topic_property_schema_registry_context) {
-                if (
-                  topic_cfg
-                  && topic_cfg->properties.iceberg_mode
-                       != model::iceberg_mode::disabled) {
-                    return make_error_alter_config_resource_response<
-                      resp_resource_t>(
-                      resource,
-                      error_code::invalid_config,
-                      "Cannot change redpanda.schema.registry.context while "
-                      "Iceberg translation is enabled; set "
-                      "redpanda.iceberg.mode=disabled first");
-                }
                 parse_and_set_property(
                   tp_ns,
                   update.properties.schema_registry_context,

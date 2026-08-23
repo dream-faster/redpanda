@@ -87,7 +87,6 @@ redpanda_thread_fixture::redpanda_thread_fixture(
   const empty_seed_starts_cluster empty_seed_starts_cluster_val,
   bool enable_data_transforms,
   bool enable_legacy_upload_mode,
-  bool iceberg_enabled,
   bool development_cluster_linking_enabled,
   cloud_topics::test_fixture_cfg ct_test_cfg)
   : app(ssx::sformat("redpanda-{}", node_id()))
@@ -110,7 +109,6 @@ redpanda_thread_fixture::redpanda_thread_fixture(
       empty_seed_starts_cluster_val,
       enable_data_transforms,
       enable_legacy_upload_mode,
-      iceberg_enabled,
       development_cluster_linking_enabled);
     try {
         app.initialize(
@@ -178,7 +176,6 @@ redpanda_thread_fixture::redpanda_thread_fixture(
         std::ref(app.controller->get_security_frontend()),
         std::ref(app.controller->get_api()),
         std::ref(app.tx_gateway_frontend),
-        std::ref(app.datalake_throttle_manager),
         std::ref(app.controller->get_cluster_link_frontend()),
         std::nullopt,
         std::ref(*app.thread_worker),
@@ -378,7 +375,6 @@ void redpanda_thread_fixture::configure(
   const empty_seed_starts_cluster empty_seed_starts_cluster_val,
   bool data_transforms_enabled,
   bool legacy_upload_mode_enabled,
-  bool iceberg_enabled,
   bool development_cluster_linking_enabled) {
     auto base_path = std::filesystem::path(data_dir);
     ss::smp::invoke_on_all([=]() {
@@ -484,8 +480,6 @@ void redpanda_thread_fixture::configure(
           .set_value(data_transforms_enabled);
         config.get("cloud_storage_disable_archiver_manager")
           .set_value(legacy_upload_mode_enabled);
-        config.get("iceberg_enabled").set_value(iceberg_enabled);
-
         config.get("enable_shadow_linking")
           .set_value(development_cluster_linking_enabled);
 

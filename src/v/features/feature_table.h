@@ -41,7 +41,6 @@ struct feature_table_snapshot;
 /// only used at runtime.  Therefore it is safe to re-use an integer that
 /// has been made available by another feature being retired.
 enum class feature : std::uint64_t {
-    iceberg_schema_merging = 1ULL << 0U,
     validated_batch_timestamps = 1ULL << 1U,
     topic_locations_in_outbound_migrations = 1ULL << 2U,
     schema_registry_authz = 1ULL << 3U,
@@ -58,7 +57,6 @@ enum class feature : std::uint64_t {
     tiered_cloud_topics = 1ULL << 14U,
     batch_mirror_topic_status = 1ULL << 15U,
     shadow_link_sr_api_sync = 1ULL << 16U,
-    iceberg_extended_mode_config = 1ULL << 17U,
     fetch_controller_snapshot_rpc = 1ULL << 18U,
     node_isolation = 1ULL << 19U,
     group_offset_retention = 1ULL << 20U,
@@ -89,9 +87,7 @@ enum class feature : std::uint64_t {
     remote_labels = 1ULL << 51U,
     partition_properties_stm = 1ULL << 52U,
     shadow_indexing_split_topic_property_update = 1ULL << 53U,
-    datalake_iceberg = 1ULL << 54U,
     raft_symmetric_reconfiguration_cancel = 1ULL << 55U,
-    datalake_iceberg_ga = 1ULL << 56U,
     cloud_storage_metadata_rw_fence = 1ULL << 57U,
     node_restart_risk_assessment = 1ULL << 58U,
     topic_ids = 1ULL << 59U,
@@ -438,21 +434,9 @@ inline constexpr std::array feature_schema{
     feature_spec::available_policy::always,
     feature_spec::prepare_policy::always},
   feature_spec{
-    release_version::v24_3_1,
-    "datalake_iceberg",
-    feature::datalake_iceberg,
-    feature_spec::available_policy::always,
-    feature_spec::prepare_policy::always},
-  feature_spec{
     release_version::v25_1_1,
     "raft_symmetric_reconfiguration_cancel",
     feature::raft_symmetric_reconfiguration_cancel,
-    feature_spec::available_policy::always,
-    feature_spec::prepare_policy::always},
-  feature_spec{
-    release_version::v25_1_1,
-    "datalake_iceberg_ga",
-    feature::datalake_iceberg_ga,
     feature_spec::available_policy::always,
     feature_spec::prepare_policy::always},
   feature_spec{
@@ -495,12 +479,6 @@ inline constexpr std::array feature_schema{
     release_version::v25_2_1,
     "consumer_groups_migrations",
     feature::consumer_groups_migrations,
-    feature_spec::available_policy::always,
-    feature_spec::prepare_policy::always},
-  feature_spec{
-    release_version::v25_3_1,
-    "iceberg_schema_merging",
-    feature::iceberg_schema_merging,
     feature_spec::available_policy::always,
     feature_spec::prepare_policy::always},
   feature_spec{
@@ -579,12 +557,6 @@ inline constexpr std::array feature_schema{
     release_version::v26_2_1,
     "shadow_link_role_sync",
     feature::shadow_link_role_sync,
-    feature_spec::available_policy::always,
-    feature_spec::prepare_policy::always},
-  feature_spec{
-    release_version::v26_2_1,
-    "iceberg_extended_mode_config",
-    feature::iceberg_extended_mode_config,
     feature_spec::available_policy::always,
     feature_spec::prepare_policy::always},
   feature_spec{

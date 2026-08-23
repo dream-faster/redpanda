@@ -150,10 +150,9 @@ fmt::iterator ntp_config::default_overrides::format_to(fmt::iterator it) const {
       "remote_delete: {}, segment_ms: {}, "
       "initial_retention_local_target_bytes: {}, "
       "initial_retention_local_target_ms: {}, write_caching: {}, flush_ms: {}, "
-      "flush_bytes: {}, iceberg_mode: {}, remote_allow_gaps: {}, "
-      "delete_retention_ms: {}, min_cleanable_dirty_ratio: {}, "
-      "min_compaction_lag_ms: {}, max_compaction_lag_ms: {}, storage_mode: {} "
-      "}}",
+      "flush_bytes: {}remote_allow_gaps: {}, delete_retention_ms: {}, "
+      "min_cleanable_dirty_ratio: {}, min_compaction_lag_ms: {}, "
+      "max_compaction_lag_ms: {}, storage_mode: {} }}",
       compaction_strategy,
       cleanup_policy_bitflags,
       segment_size,
@@ -169,7 +168,6 @@ fmt::iterator ntp_config::default_overrides::format_to(fmt::iterator it) const {
       write_caching,
       flush_ms,
       flush_bytes,
-      iceberg_mode,
       remote_allow_gaps,
       delete_retention_ms,
       min_cleanable_dirty_ratio,

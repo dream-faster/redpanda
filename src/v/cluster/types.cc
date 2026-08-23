@@ -125,8 +125,6 @@ fmt::iterator format_to(topic_purge_domain d, fmt::iterator out) {
     switch (d) {
     case topic_purge_domain::cloud_storage:
         return fmt::format_to(out, "cloud_storage");
-    case topic_purge_domain::iceberg:
-        return fmt::format_to(out, "iceberg");
     case topic_purge_domain::cloud_topic:
         return fmt::format_to(out, "cloud_topic");
     }
@@ -325,24 +323,18 @@ fmt::iterator incremental_topic_updates::format_to(fmt::iterator it) const {
       "segment_size: {} retention_bytes: {} retention_duration: {} "
       "shadow_indexing: {}, batch_max_bytes: {}, retention_local_target_bytes: "
       "{}, retention_local_target_ms: {}, remote_delete: {}, segment_ms: {}, "
-      "schema_registry_context: {}, "
-      "record_key_schema_id_validation: {}"
-      "record_key_schema_id_validation_compat: {}"
-      "record_key_subject_name_strategy: {}"
-      "record_key_subject_name_strategy_compat: {}"
-      "record_value_schema_id_validation: {}"
-      "record_value_schema_id_validation_compat: {}"
-      "record_value_subject_name_strategy: {}"
-      "record_value_subject_name_strategy_compat: {}, "
+      "schema_registry_context: {}, record_key_schema_id_validation: "
+      "{}record_key_schema_id_validation_compat: "
+      "{}record_key_subject_name_strategy: "
+      "{}record_key_subject_name_strategy_compat: "
+      "{}record_value_schema_id_validation: "
+      "{}record_value_schema_id_validation_compat: "
+      "{}record_value_subject_name_strategy: "
+      "{}record_value_subject_name_strategy_compat: {}, "
       "initial_retention_local_target_bytes: {}, "
       "initial_retention_local_target_ms: {}, write_caching: {}, flush_ms: {}, "
-      "flush_bytes: {}, iceberg_enabled: {}, leaders_preference: {}, "
-      "remote_read: {}, remote_write: {}, iceberg_delete: {}, "
-      "iceberg_partition_spec: {}, "
-      "iceberg_invalid_record_action: {}, "
-      "iceberg_target_lag_ms: {}, "
-      "remote_allow_gaps: {}, "
-      "topic_id: {}}}",
+      "flush_bytes: {}leaders_preference: {}, remote_read: {}, remote_write: "
+      "{}remote_allow_gaps: {}, topic_id: {}}}",
       compression,
       cleanup_policy_bitflags,
       compaction_strategy,
@@ -370,14 +362,9 @@ fmt::iterator incremental_topic_updates::format_to(fmt::iterator it) const {
       write_caching,
       flush_ms,
       flush_bytes,
-      iceberg_mode,
       leaders_preference,
       remote_read,
       remote_write,
-      iceberg_delete,
-      iceberg_partition_spec,
-      iceberg_invalid_record_action,
-      iceberg_target_lag_ms,
       remote_allow_gaps,
       topic_id);
 }

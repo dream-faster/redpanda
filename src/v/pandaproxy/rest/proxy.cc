@@ -17,7 +17,6 @@
 #include "pandaproxy/logger.h"
 #include "pandaproxy/rest/configuration.h"
 #include "pandaproxy/rest/handlers.h"
-#include "pandaproxy/rest/iceberg_handlers.h"
 #include "security/authorizer.h"
 
 #include <seastar/coroutine/parallel_for_each.hh> // NOLINT(misc-include-cleaner): required for co_await/co_return coroutine support
@@ -119,8 +118,7 @@ proxy::proxy(
   size_t max_memory,
   ss::sharded<kafka::client::client>& client,
   ss::sharded<kafka_client_cache>& client_cache,
-  cluster::controller* controller,
-  ss::sharded<datalake::coordinator::frontend>& dl_frontend)
+  cluster::controller* controller)
   : _config(config)
   , _client_cfg(client_cfg)
   , _mem_sem(max_memory, "pproxy/mem")
@@ -129,7 +127,6 @@ proxy::proxy(
   , _client(client)
   , _client_cache(client_cache)
   , _controller(controller)
-  , _dl_frontend(dl_frontend)
   , _ctx{{{{}, max_memory, _mem_sem, _inflight_config_binding(), _inflight_sem, {}, smp_sg}, *this},
   {config::always_true(), config::shard_local_cfg().superusers.bind(), controller},
   _config.pandaproxy_api.value()}

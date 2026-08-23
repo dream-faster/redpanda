@@ -56,11 +56,9 @@ enum class record_batch_type : int8_t {
     group_fence_tx = 33,      // fence batch in group transactions
     partition_properties_update
     = 34, // special batch type used to update partition properties
-    datalake_coordinator = 35, // datalake::coordinator::*
-    ctp_placeholder = 36,      // placeholder batch type used by cloud topics
-    ctp_stm_command = 37,      // ctp_stm command batch
-    datalake_translation_state = 38, // maintains state for translation progress
-    cluster_link = 39,               // cluster link update batches
+    ctp_placeholder = 36, // placeholder batch type used by cloud topics
+    ctp_stm_command = 37, // ctp_stm command batch
+    cluster_link = 39,    // cluster link update batches
     group_block = 40, // (un)blocks group names in a consumer offsets partition
     l1_stm = 41,      // cloud_topics::l1::*
     ct_read_replica_stm = 42, // cloud_topics::read_replica::*
@@ -82,7 +80,6 @@ inline std::vector<model::record_batch_type> offset_translator_batch_types() {
       model::record_batch_type::version_fence,
       model::record_batch_type::prefix_truncate,
       model::record_batch_type::partition_properties_update,
-      model::record_batch_type::datalake_translation_state,
       model::record_batch_type::group_block,
       model::record_batch_type::ctp_stm_command};
 }

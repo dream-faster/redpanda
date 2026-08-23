@@ -27,10 +27,6 @@
 #include "config/configuration.h"
 #include "config/node_config.h"
 #include "crash_tracker/signals.h"
-#include "datalake/coordinator/coordinator_manager.h"
-#include "datalake/credential_manager.h"
-#include "datalake/datalake_manager.h"
-#include "datalake/datalake_usage_aggregator.h"
 #include "features/feature_table.h"
 #include "kafka/client/configuration.h"
 #include "kafka/server/rm_group_frontend.h"
@@ -180,28 +176,6 @@ void application::shutdown() {
     if (cloud_io.local_is_initialized()) {
         shutdown_with_watchdog(cloud_io, [](auto& cloud_io) {
             return cloud_io.invoke_on_all(&cloud_io::remote::request_stop);
-        });
-    }
-    /**
-     * Shutdown the datalake services before stopping all the partitions.
-     * NOTE: translators may call into the coordinator via the coordinator
-     * frontend; stop the coordinators first to stop all work as quickly as
-     * possible.
-     */
-    if (_datalake_coordinator_mgr.local_is_initialized()) {
-        shutdown_with_watchdog(_datalake_coordinator_mgr, [](auto& mgr) {
-            return mgr.invoke_on_all(
-              &datalake::coordinator::coordinator_manager::shutdown);
-        });
-    }
-    if (_datalake_manager.local_is_initialized()) {
-        shutdown_with_watchdog(_datalake_manager, [](auto& mgr) {
-            return mgr.invoke_on_all(&datalake::datalake_manager::shutdown);
-        });
-    }
-    if (_datalake_credential_mgr.local_is_initialized()) {
-        shutdown_with_watchdog(_datalake_credential_mgr, [](auto& mgr) {
-            return mgr.invoke_on_all(&datalake::credential_manager::stop);
         });
     }
     // Stop all partitions before destructing the subsystems (transaction
@@ -1004,9 +978,7 @@ ss::future<> application::set_proxy_config(ss::sstring name, std::any val) {
     return _proxy->set_config(std::move(name), std::move(val));
 }
 
-bool application::requires_cloud_io() {
-    return archival_storage_enabled() || datalake_enabled();
-}
+bool application::requires_cloud_io() { return archival_storage_enabled(); }
 
 bool application::archival_storage_enabled() {
     const auto& cfg = config::shard_local_cfg();
@@ -1016,23 +988,6 @@ bool application::archival_storage_enabled() {
 bool application::wasm_data_transforms_enabled() {
     return config::shard_local_cfg().data_transforms_enabled.value()
            && !config::node().emergency_disable_data_transforms.value();
-}
-
-bool application::datalake_enabled() {
-    return config::shard_local_cfg().iceberg_enabled()
-           && !config::node().recovery_mode_enabled();
-}
-
-ss::shared_ptr<kafka::datalake_usage_api>
-application::make_datalake_usage_aggregator() {
-    if (datalake_enabled()) {
-        return ss::make_shared<datalake::default_datalake_usage_api_impl>(
-          controller.get(),
-          &controller->get_topics_state(),
-          &_datalake_coordinator_fe);
-    }
-    return ss::make_shared<datalake::disabled_datalake_usage_api_impl>(
-      controller.get());
 }
 
 ss::future<>

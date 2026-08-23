@@ -90,10 +90,21 @@ jobs:
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
+      # redpanda's .bazelrc refuses to build in CI without linux-sandbox, and
+      # linux-sandbox needs unprivileged user namespaces -- which a default
+      # GHA service container is not allowed to create ("clone": Operation not
+      # permitted). --privileged is the simplest way to grant that; the
+      # container only ever runs our own build.
+      options: --privileged
       # /mnt is the large ephemeral volume; the bazel output base lives there
       # because the container's overlay fs is small.
       volumes:
         - /mnt:/mnt
+    env:
+      BAZELISK_HOME: /mnt/bazelisk-cache
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v6
 
@@ -102,7 +113,8 @@ jobs:
           echo "=== disk ==="
           df -h
           free -h
-          mkdir -p /mnt/bazel-output /mnt/bazel-repo-cache /mnt/bazel-disk-cache
+          mkdir -p /mnt/bazel-output /mnt/bazel-repo-cache /mnt/bazel-disk-cache \
+            /mnt/bazelisk-cache
           # Swap keeps the OOM killer away during the RAM-heavy final link.
           if [[ ! -f /mnt/swapfile ]]; then
             fallocate -l 16G /mnt/swapfile
@@ -112,9 +124,16 @@ jobs:
           fi
           free -h
 
+      # bazelisk downloads the pinned bazel release on every cold run; cache it.
+      - name: Restore bazelisk cache
+        uses: actions/cache@v4
+        with:
+          path: /mnt/bazelisk-cache
+          key: bazelisk-${{ hashFiles('.bazelversion') }}
+
       # Two caches with different lifetimes: the repository cache only changes
-      # when MODULE.bazel does, while the action disk cache changes on every
-      # source edit and is restored from the newest prefix match.
+      # when MODULE.bazel does, while the disk cache changes on every source
+      # edit and is restored from the newest prefix match.
       - name: Restore Bazel repository cache
         uses: actions/cache@v4
         with:

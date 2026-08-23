@@ -27,7 +27,6 @@
 #include "cluster_link/rpc_service.h"
 #include "config/configuration.h"
 #include "config/node_config.h"
-#include "datalake/coordinator/service.h"
 #include "kafka/data/rpc/service.h"
 #include "kafka/server/rm_group_frontend.h"
 #include "raft/service.h"
@@ -171,13 +170,6 @@ void application::add_runtime_rpc_services(
         std::ref(controller->get_data_migration_frontend()),
         std::ref(controller->get_data_migration_irpc_frontend()),
         std::ref(controller->get_data_migration_router())));
-    if (datalake_enabled()) {
-        runtime_services.push_back(
-          std::make_unique<datalake::coordinator::rpc::service>(
-            scheduling_groups::instance().datalake_sg(),
-            smp_service_groups.datalake_sg(),
-            &_datalake_coordinator_fe));
-    }
     if (config::shard_local_cfg().cloud_storage_enabled() && cloud_topics_app) {
         runtime_services.push_back(
           std::make_unique<cloud_topics::l1::rpc::service>(

@@ -107,11 +107,6 @@ get_enterprise_features(const cluster::topic_configuration& cfg) {
         features.emplace_back("leadership pinning");
     }
 
-    if (config::shard_local_cfg().iceberg_enabled.is_restricted()) {
-        if (cfg.properties.iceberg_mode != model::iceberg_mode::disabled) {
-            features.emplace_back("iceberg");
-        }
-    }
     return features;
 }
 
@@ -214,13 +209,6 @@ std::vector<std::string_view> get_enterprise_features(
       && config::shard_local_cfg().default_leaders_preference.check_restricted(
         updated_pref.value())) {
         features.emplace_back("leadership pinning");
-    }
-    if (config::shard_local_cfg().iceberg_enabled.is_restricted()) {
-        if (
-          properties.iceberg_mode == model::iceberg_mode::disabled
-          && updated_properties.iceberg_mode != model::iceberg_mode::disabled) {
-            features.emplace_back("iceberg");
-        }
     }
     return features;
 }
@@ -1175,10 +1163,6 @@ ss::future<topic_result> topics_frontend::do_purged_topic(
     switch (domain) {
     case topic_purge_domain::cloud_storage:
         marker_exists = _topics.local().get_lifecycle_markers().contains(topic);
-        break;
-    case topic_purge_domain::iceberg:
-        marker_exists = _topics.local().get_iceberg_tombstones().contains(
-          topic.nt);
         break;
     case topic_purge_domain::cloud_topic:
         marker_exists = _topics.local().get_cloud_topic_tombstones().contains(

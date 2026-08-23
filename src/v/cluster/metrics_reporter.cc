@@ -333,22 +333,6 @@ metrics_reporter::build_metrics_snapshot() {
 
         snapshot.topic_count++;
         snapshot.partition_count += md.get_configuration().partition_count;
-        const auto& iceberg = md.get_configuration().properties.iceberg_mode;
-        if (!iceberg.is_disabled()) {
-            switch (iceberg.value().mode) {
-            case model::iceberg_mode::schema_mode::binary:
-            case model::iceberg_mode::schema_mode::string:
-                ++snapshot.topics_with_iceberg_kv;
-                break;
-            case model::iceberg_mode::schema_mode::schema_id_prefix:
-                ++snapshot.topics_with_iceberg_schema_id;
-                break;
-            case model::iceberg_mode::schema_mode::schema_latest:
-                ++snapshot.topics_with_iceberg_schema_latest;
-                break;
-            }
-        }
-
         if (md.get_configuration_properties().is_local_topic()) {
             ++snapshot.local_topic_count;
         }
@@ -715,12 +699,6 @@ void rjson_serialize(
     w.Uint64(snapshot.cluster_creation_epoch);
     w.Key("topic_count");
     w.Uint64(snapshot.topic_count);
-    w.Key("topics_with_iceberg_key_value");
-    w.Uint64(snapshot.topics_with_iceberg_kv);
-    w.Key("topics_with_iceberg_value_schema_id_prefix");
-    w.Uint64(snapshot.topics_with_iceberg_schema_id);
-    w.Key("topics_with_iceberg_latest_protobuf_value");
-    w.Uint64(snapshot.topics_with_iceberg_schema_latest);
 
     w.Key("local_topic_count");
     w.Uint(snapshot.local_topic_count);

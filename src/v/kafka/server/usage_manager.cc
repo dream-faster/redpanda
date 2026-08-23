@@ -25,7 +25,6 @@ usage_manager::usage_accounting_fiber::usage_accounting_fiber(
   ss::sharded<usage_manager>& um,
   ss::sharded<cluster::health_monitor_frontend>& health_monitor,
   ss::sharded<storage::api>& storage,
-  ss::shared_ptr<datalake_usage_api> datalake_usage_api,
   ss::abort_source& as,
   size_t usage_num_windows,
   std::chrono::seconds usage_window_width_interval,
@@ -38,7 +37,6 @@ usage_manager::usage_accounting_fiber::usage_accounting_fiber(
   , _controller(controller)
   , _health_monitor(health_monitor.local())
   , _um(um)
-  , _datalake_usage_api(std::move(datalake_usage_api))
   , _as(as) {}
 
 /// The fiber running on the timer has a mutable effect when sample() is
@@ -49,7 +47,6 @@ usage_manager::usage_accounting_fiber::close_current_window() {
     auto u = co_await _um.map_reduce0(
       [](usage_manager& um) { return um.sample(); }, usage{}, std::plus<>());
     u.bytes_cloud_storage = co_await get_cloud_usage_data();
-    u.datalake_usage = co_await _datalake_usage_api->compute_usage(_as);
     co_return u;
 }
 
@@ -73,8 +70,7 @@ usage_manager::usage_accounting_fiber::get_cloud_usage_data() {
 usage_manager::usage_manager(
   cluster::controller* controller,
   ss::sharded<cluster::health_monitor_frontend>& health_monitor,
-  ss::sharded<storage::api>& storage,
-  ss::shared_ptr<datalake_usage_api> datalake_usage_api)
+  ss::sharded<storage::api>& storage)
   : _usage_enabled(config::shard_local_cfg().enable_usage.bind())
   , _usage_num_windows(config::shard_local_cfg().usage_num_windows.bind())
   , _usage_window_width_interval(
@@ -83,8 +79,7 @@ usage_manager::usage_manager(
       config::shard_local_cfg().usage_disk_persistance_interval_sec.bind())
   , _controller(controller)
   , _health_monitor(health_monitor)
-  , _storage(storage)
-  , _datalake_usage_api(std::move(datalake_usage_api)) {}
+  , _storage(storage) {}
 
 ss::future<> usage_manager::reset() {
     oncore_debug_verify(_verify_shard);
@@ -116,7 +111,6 @@ ss::future<> usage_manager::start_accounting_fiber() {
       this->container(),
       _health_monitor,
       _storage,
-      _datalake_usage_api,
       _as,
       _usage_num_windows(),
       _usage_window_width_interval(),

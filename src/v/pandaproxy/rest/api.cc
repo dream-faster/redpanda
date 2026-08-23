@@ -9,7 +9,6 @@
 
 #include "pandaproxy/rest/api.h"
 
-#include "datalake/coordinator/frontend.h"
 #include "kafka/client/configuration.h"
 #include "pandaproxy/logger.h"
 #include "pandaproxy/rest/configuration.h"
@@ -26,14 +25,12 @@ api::api(
   size_t max_memory,
   kafka::client::configuration& client_cfg,
   configuration& cfg,
-  cluster::controller* c,
-  ss::sharded<datalake::coordinator::frontend>& dl_frontend) noexcept
+  cluster::controller* c) noexcept
   : _sg{sg}
   , _max_memory{max_memory}
   , _client_cfg{client_cfg}
   , _cfg{cfg}
-  , _controller(c)
-  , _dl_frontend(dl_frontend) {}
+  , _controller(c) {}
 
 api::~api() noexcept = default;
 

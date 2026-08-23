@@ -90,21 +90,6 @@ inline constexpr std::string_view
   topic_property_record_value_subject_name_strategy_compat
   = "confluent.value.subject.name.strategy";
 
-inline constexpr std::string_view topic_property_iceberg_mode
-  = "redpanda.iceberg.mode";
-
-inline constexpr std::string_view topic_property_iceberg_delete
-  = "redpanda.iceberg.delete";
-
-inline constexpr std::string_view topic_property_iceberg_partition_spec
-  = "redpanda.iceberg.partition.spec";
-
-inline constexpr std::string_view topic_property_iceberg_invalid_record_action
-  = "redpanda.iceberg.invalid.record.action";
-
-inline constexpr std::string_view topic_property_iceberg_target_lag_ms
-  = "redpanda.iceberg.target.lag.ms";
-
 inline constexpr std::string_view topic_property_min_cleanable_dirty_ratio
   = "min.cleanable.dirty.ratio";
 

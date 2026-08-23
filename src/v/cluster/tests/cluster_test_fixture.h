@@ -120,7 +120,6 @@ public:
       std::optional<archival::configuration> archival_cfg = std::nullopt,
       std::optional<cloud_storage::configuration> cloud_cfg = std::nullopt,
       bool enable_legacy_upload_mode = true,
-      bool iceberg_enabled = false,
       bool cluster_linking_enabled = false,
       cloud_topics::test_fixture_cfg ct_test_cfg
       = cloud_topics::disable_cloud_topics_test_cfg) {
@@ -140,7 +139,6 @@ public:
           empty_seed_starts_cluster_val,
           false,
           enable_legacy_upload_mode,
-          iceberg_enabled,
           cluster_linking_enabled,
           ct_test_cfg);
     }
@@ -160,7 +158,6 @@ public:
       std::optional<archival::configuration> archival_cfg = std::nullopt,
       std::optional<cloud_storage::configuration> cloud_cfg = std::nullopt,
       bool enable_legacy_upload_mode = true,
-      bool iceberg_enabled = false,
       bool cluster_linking_enabled = false,
       cloud_topics::test_fixture_cfg ct_test_cfg
       = cloud_topics::disable_cloud_topics_test_cfg) {
@@ -179,7 +176,6 @@ public:
             archival_cfg,
             cloud_cfg,
             enable_legacy_upload_mode,
-            iceberg_enabled,
             cluster_linking_enabled,
             ct_test_cfg));
     }
@@ -220,7 +216,6 @@ public:
       std::optional<archival::configuration> archival_cfg = std::nullopt,
       std::optional<cloud_storage::configuration> cloud_cfg = std::nullopt,
       bool legacy_upload_mode_enabled = true,
-      bool iceberg_enabled = false,
       bool cluster_linking_enabled = false,
       model::node_id seed_node_id = model::node_id{0},
       cloud_topics::test_fixture_cfg ct_test_cfg
@@ -246,7 +241,6 @@ public:
           archival_cfg,
           cloud_cfg,
           legacy_upload_mode_enabled,
-          iceberg_enabled,
           cluster_linking_enabled,
           ct_test_cfg);
         return get_node_application(node_id);

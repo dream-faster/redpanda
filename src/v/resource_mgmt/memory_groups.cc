@@ -29,10 +29,6 @@ bool wasm_enabled() {
            && !config::node().emergency_disable_data_transforms.value();
 }
 
-bool datalake_enabled() {
-    return config::shard_local_cfg().iceberg_enabled.value();
-}
-
 bool cloud_storage_enabled() {
     return config::shard_local_cfg().cloud_storage_enabled();
 }
@@ -45,18 +41,13 @@ struct memory_shares {
     constexpr static size_t tiered_storage = 10;
     constexpr static size_t admin = 2;
     constexpr static size_t data_transforms = 10;
-    constexpr static size_t datalake = 10;
     constexpr static size_t cloud_topics = 10;
 
-    static size_t
-    total_shares(bool with_wasm, bool with_datalake, bool with_cloud_storage) {
+    static size_t total_shares(bool with_wasm, bool with_cloud_storage) {
         size_t total = chunk_cache + kafka + rpc + recovery + tiered_storage
                        + admin;
         if (with_wasm) {
             total += data_transforms;
-        }
-        if (with_datalake) {
-            total += datalake;
         }
         if (with_cloud_storage) {
             total += cloud_topics;
@@ -85,7 +76,6 @@ system_memory_groups::system_memory_groups(
   cloud_topics_reconciler_memory_reservation cloud_topics_reconciler,
   data_transforms_memory_reservation data_transforms,
   bool wasm_enabled,
-  bool datalake_enabled,
   bool cloud_storage_enabled,
   partitions_memory_reservation partitions)
   : _compaction_reserved_memory(
@@ -99,7 +89,6 @@ system_memory_groups::system_memory_groups(
       partitions.reserved_bytes(total_available_memory))
   , _total_available_memory(total_available_memory)
   , _wasm_enabled(wasm_enabled)
-  , _datalake_enabled(datalake_enabled)
   , _cloud_storage_enabled(cloud_storage_enabled) {}
 
 size_t system_memory_groups::chunk_cache_min_memory() const {
@@ -137,13 +126,6 @@ size_t system_memory_groups::data_transforms_max_memory() const {
     return subsystem_memory<memory_shares::data_transforms>();
 }
 
-size_t system_memory_groups::datalake_max_memory() const {
-    if (!_datalake_enabled) {
-        return 0;
-    }
-    return subsystem_memory<memory_shares::datalake>();
-}
-
 size_t system_memory_groups::cloud_topics_memory() const {
     if (!_cloud_storage_enabled) {
         return 0;
@@ -171,9 +153,7 @@ template<size_t shares>
 size_t system_memory_groups::subsystem_memory() const {
     size_t per_share_amount = total_memory()
                               / memory_shares::total_shares(
-                                _wasm_enabled,
-                                _datalake_enabled,
-                                _cloud_storage_enabled);
+                                _wasm_enabled, _cloud_storage_enabled);
     return per_share_amount * shares;
 }
 
@@ -199,7 +179,7 @@ void system_memory_groups::log_memory_group_allocations(seastar::logger& log) {
       "{}, total memory minus pre-share reservations: {}, chunk cache: {}, "
       "kafka: {}, rpc: {}, recovery: {}, tiered storage: {}, admin: {}, data "
       "transforms: {}, compaction: {}, cloud topics compaction: {}, cloud "
-      "topics reconciler: {}, data transforms reserved: {}, datalake: {}, "
+      "topics reconciler: {}, data transforms reserved: {}, "
       "partitions: {}",
       human::bytes(ss::memory::stats().total_memory()),
       human::bytes(total_reserved_memory()),
@@ -215,7 +195,6 @@ void system_memory_groups::log_memory_group_allocations(seastar::logger& log) {
       human::bytes(cloud_topics_compaction_reserved_memory()),
       human::bytes(cloud_topics_reconciler_reserved_memory()),
       human::bytes(data_transforms_reserved_memory()),
-      human::bytes(datalake_max_memory()),
       human::bytes(partitions_max_memory()));
 }
 
@@ -232,7 +211,6 @@ system_memory_groups& memory_groups() {
 
     auto sliding_window_compaction = sliding_window_compaction_enabled();
     auto wasm = wasm_enabled();
-    auto datalake = datalake_enabled();
     auto cloud_storage = cloud_storage_enabled();
 
     const auto& cfg = config::shard_local_cfg();
@@ -265,7 +243,6 @@ system_memory_groups& memory_groups() {
       cloud_topics_reconciler,
       data_transforms,
       wasm,
-      datalake,
       cloud_storage,
       partitions);
     return *groups;

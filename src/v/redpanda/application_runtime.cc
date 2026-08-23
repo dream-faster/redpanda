@@ -14,11 +14,6 @@
 #include "cluster_link/service.h"
 #include "config/configuration.h"
 #include "config/node_config.h"
-#include "datalake/coordinator/catalog_factory.h"
-#include "datalake/coordinator/coordinator_manager.h"
-#include "datalake/coordinator/frontend.h"
-#include "datalake/credential_manager.h"
-#include "datalake/datalake_manager.h"
 #include "debug_bundle/debug_bundle_service.h"
 #include "kafka/data/rpc/client.h"
 #include "kafka/server/usage_manager.h"
@@ -52,8 +47,7 @@ void application::wire_up_runtime_services(
           memory_groups().kafka_total_memory(),
           *_proxy_client_config,
           *_proxy_config,
-          controller.get(),
-          _datalake_coordinator_fe);
+          controller.get());
     }
     if (_schema_reg_config) {
         construct_single_service(
@@ -144,127 +138,6 @@ void application::wire_up_runtime_services(
           .get();
     }
 
-    if (datalake_enabled()) {
-        vassert(
-          bucket.has_value(),
-          "Bucket should have been set when configuring cloud IO");
-        // Construct datalake subsystems, now that dependencies are
-        // already constructed.
-        syschecks::systemd_message("Starting datalake services").get();
-
-        // Start credential manager first to provide shared credentials
-        construct_service(_datalake_credential_mgr).get();
-        _datalake_credential_mgr
-          .invoke_on_all(&datalake::credential_manager::start)
-          .get();
-        construct_service(
-          _datalake_coordinator_mgr,
-          node_id,
-          std::ref(storage),
-          std::ref(raft_group_manager),
-          std::ref(partition_manager),
-          std::ref(controller->get_topics_state()),
-          std::ref(controller->get_topics_frontend()),
-          _schema_registry.get(),
-          ss::sharded_parameter(
-            [bucket](
-              cloud_io::remote& remote, datalake::credential_manager& cred_mgr)
-              -> std::unique_ptr<datalake::coordinator::catalog_factory> {
-                return datalake::coordinator::get_catalog_factory(
-                  config::shard_local_cfg(),
-                  remote,
-                  *bucket,
-                  ss::metrics::label_instance{"role", "coordinator"},
-                  cred_mgr);
-            },
-            std::ref(cloud_io),
-            std::ref(_datalake_credential_mgr)),
-          std::ref(cloud_io),
-          std::ref(*bucket),
-          ss::sharded_parameter([this] { return &feature_table.local(); }))
-          .get();
-        construct_service(
-          _datalake_coordinator_fe,
-          node_id,
-          &_datalake_coordinator_mgr,
-          &raft_group_manager,
-          &partition_manager,
-          &controller->get_topics_frontend(),
-          &metadata_cache,
-          &controller->get_partition_leaders(),
-          &controller->get_shard_table(),
-          &_connection_cache)
-          .get();
-
-        construct_service(
-          _datalake_manager,
-          node_id,
-          ss::sharded_parameter([this] {
-              return cluster::partition_change_notifier_impl::make_default(
-                raft_group_manager,
-                partition_manager,
-                controller->get_topics_state());
-          }),
-          &partition_manager,
-          &controller->get_topics_state(),
-          &feature_table,
-          &_datalake_coordinator_fe,
-          &cloud_io,
-          ss::sharded_parameter(
-            [bucket](
-              cloud_io::remote& remote, datalake::credential_manager& cred_mgr)
-              -> std::unique_ptr<datalake::coordinator::catalog_factory> {
-                return datalake::coordinator::get_catalog_factory(
-                  config::shard_local_cfg(),
-                  remote,
-                  *bucket,
-                  ss::metrics::label_instance{"role", "translator"},
-                  cred_mgr);
-            },
-            std::ref(cloud_io),
-            std::ref(_datalake_credential_mgr)),
-          _schema_registry.get(),
-          &_as,
-          *bucket,
-          scheduling_groups::instance().datalake_sg(),
-          memory_groups().datalake_max_memory())
-          .get();
-        datalake::datalake_manager::prepare_staging_directory(
-          config::node().datalake_staging_path())
-          .get();
-        _datalake_manager.invoke_on_all(&datalake::datalake_manager::start)
-          .get();
-
-        construct_service(
-          datalake_throttle_manager,
-          [&mgr = _datalake_manager] {
-              return ssx::now(
-                kafka::datalake_throttle_manager::status{
-                  .max_shares_assigned = mgr.local().max_shares_assigned(),
-                  .total_translation_backlog
-                  = mgr.local().total_translation_backlog(),
-
-                });
-          },
-          std::ref(storage_node),
-          ss::sharded_parameter([] {
-              return config::shard_local_cfg()
-                .max_kafka_throttle_delay_ms.bind();
-          }),
-          ss::sharded_parameter([] {
-              return config::shard_local_cfg().quota_manager_gc_sec.bind();
-          }),
-          ss::sharded_parameter([] {
-              return config::shard_local_cfg()
-                .iceberg_throttle_backlog_size_ratio.bind();
-          }))
-          .get();
-
-        datalake_throttle_manager
-          .invoke_on_all(&kafka::datalake_throttle_manager::start)
-          .get();
-    }
-
     construct_service(
       _cluster_link_service,
       node_id,
@@ -300,9 +173,7 @@ void application::wire_up_runtime_services(
       usage_manager,
       controller.get(),
       std::ref(controller->get_health_monitor()),
-      std::ref(storage),
-      ss::sharded_parameter(
-        [this] { return make_datalake_usage_aggregator(); }))
+      std::ref(storage))
       .get();
 
     construct_single_service(_monitor_unsafe, std::ref(feature_table));

@@ -102,10 +102,6 @@ public:
          */
         _transforms = co_await ss::create_scheduling_group("transforms", 100);
         /**
-         * Group used to run datalake translation.
-         */
-        _datalake = co_await ss::create_scheduling_group("datalake", 100);
-        /**
          * Group used to handle Kafka produce requests, most of the Raft leader
          * replication part is done in this scheduling group.
          */
@@ -156,7 +152,6 @@ public:
     ss::scheduling_group raft_heartbeats() { return _raft_heartbeats; }
     ss::scheduling_group self_test_sg() { return _self_test; }
     ss::scheduling_group transforms_sg() { return _transforms; }
-    ss::scheduling_group datalake_sg() { return _datalake; }
     /**
      * @brief Scheduling group for fetch requests.
      *
@@ -203,7 +198,6 @@ public:
           std::cref(_self_test),
           std::cref(_fetch),
           std::cref(_transforms),
-          std::cref(_datalake),
           std::cref(_produce),
           std::cref(_ts_read),
           std::cref(_cluster_linking),
@@ -229,7 +223,6 @@ private:
     ss::scheduling_group _self_test;
     ss::scheduling_group _fetch;
     ss::scheduling_group _transforms;
-    ss::scheduling_group _datalake;
     ss::scheduling_group _produce;
     ss::scheduling_group _ts_read;
     ss::scheduling_group _cluster_linking;

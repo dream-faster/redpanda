@@ -195,13 +195,6 @@ struct topics_t
     force_recoverable_partitions_t partitions_to_force_recover;
 
     chunked_hash_map<
-      model::topic_namespace,
-      nt_iceberg_tombstone,
-      model::topic_namespace_hash,
-      model::topic_namespace_eq>
-      iceberg_tombstones;
-
-    chunked_hash_map<
       nt_revision,
       nt_cloud_topic_tombstone,
       nt_revision_hash,

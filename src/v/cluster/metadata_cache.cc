@@ -325,12 +325,9 @@ metadata_cache::get_default_delete_retention_ms() const {
 }
 
 std::chrono::milliseconds
-metadata_cache::get_default_iceberg_target_lag_ms() const {
-    return config::shard_local_cfg().iceberg_target_lag_ms();
-}
 
-std::optional<double>
-metadata_cache::get_default_min_cleanable_dirty_ratio() const {
+  std::optional<double>
+  metadata_cache::get_default_min_cleanable_dirty_ratio() const {
     return config::shard_local_cfg().min_cleanable_dirty_ratio();
 }
 

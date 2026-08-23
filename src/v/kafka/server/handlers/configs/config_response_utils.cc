@@ -100,10 +100,6 @@ std::optional<std::chrono::milliseconds>
 metadata_cache_adapter::get_default_initial_retention_local_target_ms() const {
     return _metadata_cache.get_default_initial_retention_local_target_ms();
 }
-std::chrono::milliseconds
-metadata_cache_adapter::get_default_iceberg_target_lag_ms() const {
-    return _metadata_cache.get_default_iceberg_target_lag_ms();
-}
 std::optional<double>
 metadata_cache_adapter::get_default_min_cleanable_dirty_ratio() const {
     return _metadata_cache.get_default_min_cleanable_dirty_ratio();
@@ -173,8 +169,7 @@ consteval describe_configs_type property_config_type() {
         std::is_same_v<T, pandaproxy::schema_registry::context> ||
         std::is_same_v<T, model::vcluster_id> ||
         std::is_same_v<T, model::write_caching_mode> ||
-        std::is_same_v<T, config::leaders_preference> || std::is_same_v<T, model::iceberg_mode> ||
-        std::is_same_v<T, model::iceberg_invalid_record_action> ||
+        std::is_same_v<T, config::leaders_preference> ||
         std::is_same_v<T, model::redpanda_storage_mode>;
 
     constexpr auto is_long_type = is_long<T> ||
@@ -831,24 +826,6 @@ config_response_container_t make_topic_configs(
           });
     }
 
-    if (config_property_requested(config_keys, topic_property_iceberg_mode)) {
-        add_topic_config<model::iceberg_mode>(
-          result,
-          topic_property_iceberg_mode,
-          storage::ntp_config::default_iceberg_mode,
-          topic_property_iceberg_mode,
-          override_if_not_default(
-            std::make_optional<model::iceberg_mode>(
-              topic_properties.iceberg_mode),
-            storage::ntp_config::default_iceberg_mode),
-          true,
-          maybe_make_documentation(
-            include_documentation, "Iceberg enablement mode for the topic."),
-          [](const model::iceberg_mode& mode) {
-              return ssx::sformat("{}", mode);
-          });
-    }
-
     add_topic_config_if_requested(
       config_keys,
       result,
@@ -1031,63 +1008,6 @@ config_response_container_t make_topic_configs(
         include_documentation,
         "Preferred location (e.g. rack) for partition leaders of this topic."),
       &describe_as_string<config::leaders_preference>);
-
-    if (topic_properties.iceberg_mode != model::iceberg_mode::disabled) {
-        add_topic_config_if_requested(
-          config_keys,
-          result,
-          config::shard_local_cfg().iceberg_delete.name(),
-          config::shard_local_cfg().iceberg_delete(),
-          topic_property_iceberg_delete,
-          topic_properties.iceberg_delete,
-          include_synonyms,
-          maybe_make_documentation(
-            include_documentation,
-            "If true, delete the corresponding Iceberg table when deleting the "
-            "topic."),
-          &describe_as_string<bool>);
-
-        add_topic_config_if_requested(
-          config_keys,
-          result,
-          config::shard_local_cfg().iceberg_default_partition_spec.name(),
-          config::shard_local_cfg().iceberg_default_partition_spec(),
-          topic_property_iceberg_partition_spec,
-          topic_properties.iceberg_partition_spec,
-          include_synonyms,
-          maybe_make_documentation(
-            include_documentation,
-            "Partition spec of the corresponding Iceberg table."),
-          &describe_as_string<ss::sstring>,
-          true);
-
-        add_topic_config_if_requested(
-          config_keys,
-          result,
-          config::shard_local_cfg().iceberg_invalid_record_action.name(),
-          config::shard_local_cfg().iceberg_invalid_record_action(),
-          topic_property_iceberg_invalid_record_action,
-          topic_properties.iceberg_invalid_record_action,
-          include_synonyms,
-          maybe_make_documentation(
-            include_documentation,
-            "Action to take when an invalid record is encountered."),
-          &describe_as_string<model::iceberg_invalid_record_action>);
-
-        add_topic_config_if_requested(
-          config_keys,
-          result,
-          topic_property_iceberg_target_lag_ms,
-          metadata_cache.get_default_iceberg_target_lag_ms(),
-          topic_property_iceberg_target_lag_ms,
-          topic_properties.iceberg_target_lag_ms,
-          include_synonyms,
-          maybe_make_documentation(
-            include_documentation,
-            "Best effort target for Iceberg table lag relative to source "
-            "topic, in milliseconds."),
-          describe_as_string<std::chrono::milliseconds>);
-    }
 
     add_topic_config_if_requested(
       config_keys,

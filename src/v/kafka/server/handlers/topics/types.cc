@@ -294,29 +294,10 @@ cluster::topic_configuration to_topic_config(
     cfg.properties.flush_bytes = get_config_value<size_t>(
       config_entries, topic_property_flush_bytes);
 
-    cfg.properties.iceberg_mode
-      = get_config_value<model::iceberg_mode>(
-          config_entries, topic_property_iceberg_mode)
-          .value_or(storage::ntp_config::default_iceberg_mode);
-
     cfg.properties.leaders_preference = get_leaders_preference(config_entries);
 
     cfg.properties.delete_retention_ms = get_delete_retention_ms(
       config_entries);
-
-    cfg.properties.iceberg_delete = get_bool_value(
-      config_entries, topic_property_iceberg_delete);
-
-    cfg.properties.iceberg_partition_spec = get_string_value(
-      config_entries, topic_property_iceberg_partition_spec);
-
-    cfg.properties.iceberg_invalid_record_action
-      = get_enum_value<model::iceberg_invalid_record_action>(
-        config_entries, topic_property_iceberg_invalid_record_action);
-
-    cfg.properties.iceberg_target_lag_ms
-      = get_duration_value<std::chrono::milliseconds>(
-        config_entries, topic_property_iceberg_target_lag_ms);
 
     if (
       auto s = get_string_value(

@@ -438,12 +438,6 @@ public:
       model::topic_namespace_hash,
       model::topic_namespace_eq>;
 
-    using iceberg_tombstones_t = chunked_hash_map<
-      model::topic_namespace,
-      nt_iceberg_tombstone,
-      model::topic_namespace_hash,
-      model::topic_namespace_eq>;
-
     using cloud_topic_tombstones_t = chunked_hash_map<
       nt_revision,
       nt_cloud_topic_tombstone,
@@ -802,11 +796,6 @@ public:
         return is_disabled(model::topic_namespace_view{ntp}, ntp.tp.partition);
     }
 
-    // Get a set of topics with pending iceberg deletion work.
-    const iceberg_tombstones_t& get_iceberg_tombstones() const {
-        return _iceberg_tombstones;
-    }
-
     const cloud_topic_tombstones_t& get_cloud_topic_tombstones() const {
         return _cloud_topic_tombstones;
     }
@@ -908,7 +897,6 @@ private:
     underlying_map _topics;
     lifecycle_markers_t _lifecycle_markers;
     disabled_partitions_t _disabled_partitions;
-    iceberg_tombstones_t _iceberg_tombstones;
 
     // Cloud topic topic_ids that have been removed from the cluster and
     // require removal of objects from the bucket and cloud topics metastore.

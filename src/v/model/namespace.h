@@ -87,10 +87,6 @@ inline const model::topic
 inline const model::topic_namespace transform_log_internal_nt(
   model::kafka_namespace, model::transform_log_internal_topic);
 
-inline const model::topic datalake_coordinator_topic("datalake_coordinator");
-inline const model::topic_namespace datalake_coordinator_nt(
-  model::kafka_internal_namespace, model::datalake_coordinator_topic);
-
 inline const model::topic l1_metastore_topic("ct_l1_domain");
 inline const model::topic_namespace
   l1_metastore_nt(model::kafka_internal_namespace, model::l1_metastore_topic);

@@ -32,9 +32,6 @@
 #include "cluster/tm_stm.h"
 #include "config/configuration.h"
 #include "config/node_config.h"
-#include "datalake/coordinator/coordinator_manager.h"
-#include "datalake/coordinator/state_machine.h"
-#include "datalake/translation/state_machine.h"
 #include "debug_bundle/debug_bundle_service.h"
 #include "kafka/server/group_manager.h"
 #include "kafka/server/group_tx_tracker_stm.h"
@@ -83,9 +80,6 @@ void application::start_runtime_services(
           pm.register_factory<cluster::partition_properties_stm_factory>(
             storage.local().kvs(),
             config::shard_local_cfg().internal_rpc_request_timeout_ms.bind());
-          pm.register_factory<datalake::coordinator::stm_factory>();
-          pm.register_factory<datalake::translation::stm_factory>(
-            config::shard_local_cfg().iceberg_enabled());
           if (
             config::shard_local_cfg().cloud_storage_enabled()
             && !ct_test_cfg.disable_cloud_topics) {
@@ -144,13 +138,6 @@ void application::start_runtime_services(
       offsets_recovery_requestor;
     if (offsets_recovery_router.local_is_initialized()) {
         offsets_recovery_requestor = offsets_recovery_manager;
-    }
-    if (_datalake_coordinator_mgr.local_is_initialized()) {
-        // Before starting the controller, start the coordinator manager so we
-        // don't miss any partition/leadership notifications.
-        _datalake_coordinator_mgr
-          .invoke_on_all(&datalake::coordinator::coordinator_manager::start)
-          .get();
     }
     controller
       ->start(

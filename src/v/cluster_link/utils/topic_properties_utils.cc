@@ -228,14 +228,6 @@ bool maybe_append_update(
           topic_config.properties.flush_bytes,
           kafka::flush_bytes_validator{});
     }
-    if (config_name == kafka::topic_property_iceberg_mode) {
-        return parse_and_set(
-          topic_config.tp_ns,
-          update.properties.iceberg_mode,
-          config_value,
-          topic_config.properties.iceberg_mode,
-          kafka::iceberg_config_validator{});
-    }
     if (config_name == kafka::topic_property_leaders_preference) {
         return parse_and_set(
           topic_config.tp_ns,
@@ -251,45 +243,12 @@ bool maybe_append_update(
           config_value,
           topic_config.properties.delete_retention_ms);
     }
-    if (config_name == kafka::topic_property_iceberg_delete) {
-        return parse_and_set(
-          topic_config.tp_ns,
-          update.properties.iceberg_delete,
-          config_value,
-          topic_config.properties.iceberg_delete);
-    }
-    if (config_name == kafka::topic_property_iceberg_partition_spec) {
-        // Use std::identity as the "parser function" (i.e. pass through
-        // the raw string) because boost::lexical_cast<ss::sstring> (the
-        // default) doesn't allow spaces in the config value.
-        return parse_and_set(
-          topic_config.tp_ns,
-          update.properties.iceberg_partition_spec,
-          config_value,
-          topic_config.properties.iceberg_partition_spec,
-          kafka::iceberg_partition_spec_validator{});
-    }
-    if (config_name == kafka::topic_property_iceberg_invalid_record_action) {
-        return parse_and_set(
-          topic_config.tp_ns,
-          update.properties.iceberg_invalid_record_action,
-          config_value,
-          topic_config.properties.iceberg_invalid_record_action);
-    }
     if (config_name == kafka::topic_property_remote_allow_gaps) {
         return parse_and_set(
           topic_config.tp_ns,
           update.properties.remote_allow_gaps,
           config_value,
           topic_config.properties.remote_topic_allow_gaps);
-    }
-    if (config_name == kafka::topic_property_iceberg_target_lag_ms) {
-        return parse_and_set(
-          topic_config.tp_ns,
-          update.properties.iceberg_target_lag_ms,
-          config_value,
-          topic_config.properties.iceberg_target_lag_ms,
-          kafka::iceberg_target_lag_ms_validator);
     }
     if (config_name == kafka::topic_property_schema_registry_context) {
         // context is named_type<ss::sstring>, not ss::sstring, so we need an

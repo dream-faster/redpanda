@@ -296,9 +296,6 @@ feature_manager::report_enterprise_features() const {
     report.set(features::license_required_feature::rbac, has_non_default_roles);
     report.set(features::license_required_feature::fips, fips_enabled());
     report.set(
-      features::license_required_feature::datalake_iceberg,
-      cfg.iceberg_enabled());
-    report.set(
       features::license_required_feature::leadership_pinning,
       leadership_pinning_enabled());
     report.set(

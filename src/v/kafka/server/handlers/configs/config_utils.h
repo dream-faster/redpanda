@@ -17,7 +17,6 @@
 #include "cluster/types.h"
 #include "config/configuration.h"
 #include "container/chunked_vector.h"
-#include "datalake/partition_spec_parser.h"
 #include "kafka/protocol/errors.h"
 #include "kafka/protocol/fwd.h"
 #include "kafka/server/handlers/topics/sr_context_validator.h"
@@ -232,8 +231,6 @@ struct duration_validator {
 
 const auto flush_ms_validator = duration_validator{
   .name = "flush.ms", .min = 1ms};
-const auto iceberg_target_lag_ms_validator = duration_validator{
-  .name = "target.lag.ms", .min = 10s};
 const auto min_compaction_lag_ms_validator = duration_validator{
   .name = "min.compaction.lag.ms"};
 const auto max_compaction_lag_ms_validator = duration_validator{
@@ -257,32 +254,6 @@ struct flush_bytes_validator {
     }
 };
 
-struct iceberg_config_validator {
-    bool extended_mode_config = false;
-    std::optional<ss::sstring> operator()(
-      model::topic_namespace_view tns,
-      const ss::sstring&,
-      const model::iceberg_mode& value) {
-        if (!model::is_user_topic(tns)) {
-            return fmt::format(
-              "Iceberg configuration cannot be altered on non user topics");
-        }
-        if (
-          !config::shard_local_cfg().iceberg_enabled()
-          && value != model::iceberg_mode::disabled) {
-            return fmt::format(
-              "Iceberg disabled in the cluster configuration, enable it by "
-              "setting: {}",
-              config::shard_local_cfg().iceberg_enabled.name());
-        }
-        if (value.needs_extended_cluster_feature() && !extended_mode_config) {
-            return "Invalid iceberg mode: extended key/headers config requires "
-                   "the cluster to be fully upgraded to at least v26.2.1.";
-        }
-        return std::nullopt;
-    }
-};
-
 struct delete_retention_ms_validator {
     std::optional<ss::sstring> operator()(
       const ss::sstring&,
@@ -295,20 +266,6 @@ struct delete_retention_ms_validator {
                   "[1, {}]",
                   serde::max_serializable_ms);
             }
-        }
-        return std::nullopt;
-    }
-};
-
-struct iceberg_partition_spec_validator {
-    std::optional<ss::sstring>
-    operator()(const ss::sstring& /*raw*/, const ss::sstring& value) {
-        auto parsed = datalake::parse_partition_spec(value);
-        if (parsed.has_error()) {
-            return fmt::format(
-              "couldn't parse iceberg partition spec `{}': {}",
-              value,
-              parsed.error());
         }
         return std::nullopt;
     }

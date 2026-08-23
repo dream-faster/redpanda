@@ -85,7 +85,6 @@ public:
       = empty_seed_starts_cluster::yes,
       bool enable_data_transforms = false,
       bool enable_legacy_upload_mode = true,
-      bool iceberg_enabled = false,
       bool development_cluster_linking_enabled = false,
       cloud_topics::test_fixture_cfg ct_test_cfg
       = cloud_topics::disable_cloud_topics_test_cfg);
@@ -162,7 +161,6 @@ public:
       = empty_seed_starts_cluster::yes,
       bool data_transforms_enabled = false,
       bool legacy_upload_mode_enabled = true,
-      bool iceberg_enabled = false,
       bool development_cluster_linking_enabled = false);
 
     YAML::Node proxy_config(uint16_t proxy_port = 8082);
