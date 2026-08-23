@@ -6,7 +6,7 @@ set -euo pipefail
 RUN="$1"
 REPO="${2:-dream-faster/redpanda}"
 TMP=$(mktemp -d)
-gh api "/repos/$REPO/actions/runs/$RUN/logs" > "$TMP/logs.zip" 2>/dev/null
+gh api "/repos/$REPO/actions/runs/$RUN/logs" >"$TMP/logs.zip" 2>/dev/null
 python3 - "$TMP/logs.zip" <<'PY'
 import re, sys, zipfile
 z = zipfile.ZipFile(sys.argv[1])

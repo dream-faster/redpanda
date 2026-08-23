@@ -5,22 +5,23 @@ Generated outputs (api-doc *.json.hh, *_rpc_service.h) never exist on disk, so
 an absolute check is all false positives; comparing against the upstream tree
 isolates the entries this branch actually orphaned.
 """
+
 import os
 import re
 import subprocess
 
 ENTRY = re.compile(r'^\s*"([A-Za-z0-9_./-]+\.(?:cc|h|hh|json|proto|inc))",\s*$')
-BLOCK = re.compile(r'^\s*(srcs|hdrs|textual_hdrs)\s*=\s*\[\s*$')
+BLOCK = re.compile(r"^\s*(srcs|hdrs|textual_hdrs)\s*=\s*\[\s*$")
 
 
 def entries(text, d):
     out, inblock = [], False
-    for line in text.split('\n'):
+    for line in text.split("\n"):
         if BLOCK.match(line):
             inblock = True
             continue
         if inblock:
-            if line.strip().startswith(']'):
+            if line.strip().startswith("]"):
                 inblock = False
                 continue
             m = ENTRY.match(line)
@@ -29,10 +30,19 @@ def entries(text, d):
     return out
 
 
-tracked = set(subprocess.run(['git', 'ls-files'], capture_output=True, text=True).stdout.split())
-up = set(subprocess.run(['git', 'ls-tree', '-r', '--name-only', 'upstream/v26.2.x'],
-                        capture_output=True, text=True).stdout.split())
-builds = subprocess.run(['git', 'ls-files', '--', '*BUILD'], capture_output=True, text=True).stdout.split()
+tracked = set(
+    subprocess.run(["git", "ls-files"], capture_output=True, text=True).stdout.split()
+)
+up = set(
+    subprocess.run(
+        ["git", "ls-tree", "-r", "--name-only", "upstream/v26.2.x"],
+        capture_output=True,
+        text=True,
+    ).stdout.split()
+)
+builds = subprocess.run(
+    ["git", "ls-files", "--", "*BUILD"], capture_output=True, text=True
+).stdout.split()
 
 bad = []
 for b in builds:
@@ -44,5 +54,5 @@ for b in builds:
         if f in up:
             bad.append((b, f))
 for b, f in bad:
-    print(f'  ORPHANED {b}: {f}')
-print(f'orphaned source refs: {len(bad)}')
+    print(f"  ORPHANED {b}: {f}")
+print(f"orphaned source refs: {len(bad)}")
