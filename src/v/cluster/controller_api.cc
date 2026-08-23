@@ -47,7 +47,6 @@ controller_api::controller_api(
   ss::sharded<rpc::connection_cache>& cache,
   ss::sharded<members_table>& members,
   ss::sharded<partition_balancer_backend>& partition_balancer,
-  ss::sharded<partition_manager>& partition_manager,
   ss::sharded<partition_leaders_table>& partition_leaders,
   ss::sharded<ss::abort_source>& as)
   : _self(self)

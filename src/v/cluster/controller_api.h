@@ -40,7 +40,6 @@ public:
       ss::sharded<rpc::connection_cache>&,
       ss::sharded<members_table>&,
       ss::sharded<partition_balancer_backend>&,
-      ss::sharded<partition_manager>&,
       ss::sharded<partition_leaders_table>&,
       ss::sharded<ss::abort_source>&);
 

@@ -73,7 +73,6 @@ public:
       ss::sharded<node::local_monitor>&,
       ss::sharded<drain_manager>&,
       ss::sharded<features::feature_table>&,
-      ss::sharded<partition_leaders_table>&,
       ss::sharded<topic_table>&,
       ss::sharded<node_status_table>&);
 
@@ -239,7 +238,6 @@ private:
     ss::sharded<ss::abort_source>& _as;
     ss::sharded<drain_manager>& _drain_manager;
     ss::sharded<features::feature_table>& _feature_table;
-    ss::sharded<partition_leaders_table>& _partition_leaders_table;
     ss::sharded<topic_table>& _topic_table;
     ss::sharded<node_status_table>& _node_status_table;
 

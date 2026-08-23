@@ -357,7 +357,6 @@ ss::future<> controller::start(
       std::ref(_partition_manager),
       std::ref(_shard_table),
       std::ref(_shard_balancer),
-      std::ref(_storage),
       ss::sharded_parameter(
         [this] { return std::ref(_metadata_cache.local()); }),
       ss::sharded_parameter([] {
@@ -534,7 +533,6 @@ ss::future<> controller::start(
       std::ref(_connections),
       std::ref(_members_table),
       std::ref(_partition_balancer),
-      std::ref(_partition_manager),
       std::ref(_partition_leaders),
       std::ref(_as));
 
@@ -578,7 +576,6 @@ ss::future<> controller::start(
       std::ref(_local_monitor),
       std::ref(_drain_manager),
       std::ref(_feature_table),
-      std::ref(_partition_leaders),
       std::ref(_tp_state),
       std::ref(_node_status_table));
 

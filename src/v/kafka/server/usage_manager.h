@@ -57,8 +57,7 @@ public:
     ///
     /// Context is to be in a sharded service, will grab \ref usage_num_windows
     /// and \ref usage_window_sec configuration parameters from cluster config
-    explicit usage_manager(
-      cluster::controller* controller,
+    usage_manager(
       ss::sharded<cluster::health_monitor_frontend>& health_monitor,
       ss::sharded<storage::api>& storage);
 
@@ -107,7 +106,6 @@ private:
     config::binding<std::chrono::seconds> _usage_window_width_interval;
     config::binding<std::chrono::seconds> _usage_disk_persistance_interval;
 
-    cluster::controller* _controller;
     ss::sharded<cluster::health_monitor_frontend>& _health_monitor;
     ss::sharded<storage::api>& _storage;
 

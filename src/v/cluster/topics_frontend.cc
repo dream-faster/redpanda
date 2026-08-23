@@ -174,7 +174,6 @@ topics_frontend::topics_frontend(
   ss::sharded<partition_manager>& pm,
   ss::sharded<shard_table>& shard_table,
   ss::sharded<shard_balancer>& sb,
-  ss::sharded<storage::api>& storage,
   metadata_cache& metadata_cache,
   config::binding<unsigned> hard_max_disk_usage_ratio,
   config::binding<int16_t> minimum_topic_replication,
@@ -190,7 +189,6 @@ topics_frontend::topics_frontend(
   , _as(as)
   , _features(features)
   , _shard_balancer(sb)
-  , _storage(storage)
   , _metadata_cache(metadata_cache)
   , _members_table(members_table)
   , _pm(pm)

@@ -46,7 +46,6 @@ usage_manager::usage_accounting_fiber::close_current_window() {
 }
 
 usage_manager::usage_manager(
-  cluster::controller* controller,
   ss::sharded<cluster::health_monitor_frontend>& health_monitor,
   ss::sharded<storage::api>& storage)
   : _usage_enabled(config::shard_local_cfg().enable_usage.bind())
@@ -55,7 +54,6 @@ usage_manager::usage_manager(
       config::shard_local_cfg().usage_window_width_interval_sec.bind())
   , _usage_disk_persistance_interval(
       config::shard_local_cfg().usage_disk_persistance_interval_sec.bind())
-  , _controller(controller)
   , _health_monitor(health_monitor)
   , _storage(storage) {}
 
