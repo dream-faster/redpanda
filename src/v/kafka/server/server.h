@@ -82,7 +82,7 @@ public:
       ss::sharded<cluster::controller_api>&,
       ss::sharded<cluster::tx_gateway_frontend>&,
       std::optional<qdc_monitor_config>,
-      ssx::singleton_thread_worker&, ) noexcept;
+      ssx::singleton_thread_worker&) noexcept;
 
     ~server() noexcept override = default;
     server(const server&) = delete;

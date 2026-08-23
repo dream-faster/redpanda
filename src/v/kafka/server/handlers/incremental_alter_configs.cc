@@ -93,7 +93,7 @@ bool valid_config_resource_operation(uint8_t v) {
 
 checked<cluster::topic_properties_update, resp_resource_t>
 create_topic_properties_update(
-  const request_context& ctx, incremental_alter_configs_resource& resource) {
+  const request_context&, incremental_alter_configs_resource& resource) {
     model::topic_namespace tp_ns(
       model::kafka_namespace, model::topic(resource.resource_name));
     cluster::topic_properties_update update(tp_ns);

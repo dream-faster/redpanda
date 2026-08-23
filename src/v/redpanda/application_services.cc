@@ -49,7 +49,7 @@ storage::backlog_controller_config
 compaction_controller_config(ss::scheduling_group sg, uint64_t fs_avail);
 
 void application::wire_up_redpanda_services(
-  model::node_id node_id, ::stop_signal& app_signal, ) {
+  model::node_id node_id, ::stop_signal&) {
     ss::smp::invoke_on_all([] {
         resources::available_memory::local().register_metrics();
     }).get();
@@ -274,8 +274,8 @@ void application::wire_up_redpanda_services(
           return kafka::data::rpc::partition_manager::make_default(
             &shard_table,
             &partition_manager,
-            smp_service_groups.transform_smp_sg());
-      }), )
+            smp_service_groups.cluster_smp_sg());
+      }))
       .get();
 
     construct_service(

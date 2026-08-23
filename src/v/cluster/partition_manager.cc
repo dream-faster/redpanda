@@ -216,7 +216,7 @@ partition_manager::do_shutdown(ss::lw_shared_ptr<partition> partition) {
 }
 
 ss::future<>
-partition_manager::remove(const model::ntp& ntp, partition_removal_mode mode) {
+partition_manager::remove(const model::ntp& ntp, partition_removal_mode) {
     auto guard = _gate.hold();
 
     auto partition = get(ntp);

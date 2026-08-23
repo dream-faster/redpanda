@@ -44,7 +44,7 @@ seastar::future<> server_app::init(
   seastar::sharded<cluster::controller_api>& ctrl,
   seastar::sharded<cluster::tx_gateway_frontend>& tx,
   std::optional<qdc_monitor_config> qdc,
-  ssx::singleton_thread_worker& worker, ) {
+  ssx::singleton_thread_worker& worker) {
     return _server.start(
       conf,
       smp,
@@ -73,7 +73,7 @@ seastar::future<> server_app::init(
       std::ref(ctrl),
       std::ref(tx),
       qdc,
-      std::ref(worker), );
+      std::ref(worker));
 }
 
 server_app::~server_app() = default;

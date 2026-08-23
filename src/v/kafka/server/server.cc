@@ -151,7 +151,7 @@ server::server(
   ss::sharded<cluster::controller_api>& controller_api,
   ss::sharded<cluster::tx_gateway_frontend>& tx_gateway_frontend,
   std::optional<qdc_monitor_config> qdc_config,
-  ssx::singleton_thread_worker& tw, ) noexcept
+  ssx::singleton_thread_worker& tw) noexcept
   : net::server(cfg, klog)
   , _smp_group(smp)
   , _fetch_scheduling_group(fetch_sg)
