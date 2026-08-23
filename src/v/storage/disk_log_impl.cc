@@ -1230,83 +1230,11 @@ bool disk_log_impl::has_local_retention_override() const {
 
 gc_config
 disk_log_impl::maybe_apply_local_storage_overrides(gc_config cfg) const {
-    // Local retention overrides only apply to tiered topics, of which there
-    // are none.
-    return cfg;
-
     /*
-     * don't override with local retention settings--let partition data expand
-     * up to standard retention settings.
-     * NOTE: both retention_local_strict and retention_local_strict_override
-     * need to be set to true to honor strict local retention. Otherwise, local
-     * retention is advisory.
+     * retention.local.target.* narrowed the on-disk slice of a tiered
+     * partition. With no cloud tier the whole log is local, so ordinary
+     * retention governs and the local targets are advisory only.
      */
-    bool strict_local_retention
-      = config::shard_local_cfg().retention_local_strict()
-        && config::shard_local_cfg().retention_local_strict_override();
-    if (!strict_local_retention) {
-        vlog(
-          gclog.trace,
-          "[{}] Skipped local retention override for topic with remote write "
-          "enabled: {}",
-          config().ntp(),
-          cfg);
-        return cfg;
-    }
-
-    cfg = apply_local_storage_overrides(cfg);
-
-    vlog(
-      gclog.trace,
-      "[{}] Overrode retention for topic with remote write enabled: {}",
-      config().ntp(),
-      cfg);
-
-    return cfg;
-}
-
-gc_config disk_log_impl::apply_local_storage_overrides(gc_config cfg) const {
-    tristate<std::size_t> local_retention_bytes{std::nullopt};
-    tristate<std::chrono::milliseconds> local_retention_ms{std::nullopt};
-
-    // Apply the topic level overrides for local retention.
-    if (config().has_overrides()) {
-        local_retention_bytes
-          = config().get_overrides().retention_local_target_bytes;
-        local_retention_ms = config().get_overrides().retention_local_target_ms;
-    }
-
-    // If local retention was not explicitly disabled or enabled, then use the
-    // defaults.
-    if (
-      !local_retention_bytes.is_disabled()
-      && !local_retention_bytes.has_optional_value()) {
-        local_retention_bytes = tristate<size_t>{
-          config::shard_local_cfg().retention_local_target_bytes_default()};
-    }
-
-    if (!local_retention_ms.is_engaged()) {
-        local_retention_ms = tristate<std::chrono::milliseconds>{
-          config::shard_local_cfg().retention_local_target_ms_default()};
-    }
-
-    if (local_retention_bytes.has_optional_value()) {
-        if (cfg.max_bytes) {
-            cfg.max_bytes = std::min(
-              local_retention_bytes.value(), cfg.max_bytes.value());
-        } else {
-            cfg.max_bytes = local_retention_bytes.value();
-        }
-    }
-
-    if (local_retention_ms.has_optional_value()) {
-        cfg.eviction_time = std::max(
-          model::timestamp(
-            model::timestamp::now().value()
-            - local_retention_ms.value().count()),
-          cfg.eviction_time);
-    }
-
     return cfg;
 }
 
