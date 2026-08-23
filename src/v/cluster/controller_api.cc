@@ -150,30 +150,11 @@ controller_api::get_reconciliation_state(model::topic_namespace_view tp_ns) {
     co_return co_await get_reconciliation_state(std::move(ntps));
 }
 
-namespace {
-std::optional<recovery_state> get_partition_recovery_state(
-  const partition_manager& pm, const model::ntp& ntp) {
-    auto partition = pm.get(ntp);
-    if (!partition) {
-        return std::nullopt;
-    }
-    auto result = partition->get_recovery_state();
-    if (!result.has_value()) {
-        return std::nullopt;
-    }
-    return std::make_optional(std::move(result.value()));
-}
-} // namespace
-
 ss::future<std::optional<backend_operation>>
 controller_api::get_current_op(model::ntp ntp, ss::shard_id shard) {
-    auto [cur_op, r_state] = co_await _backend.invoke_on(
-      shard,
-      [ntp = std::move(ntp),
-       &pm = _partition_manager](controller_backend& backend) {
-          return std::make_tuple(
-            backend.get_current_op(ntp),
-            get_partition_recovery_state(pm.local(), ntp));
+    auto cur_op = co_await _backend.invoke_on(
+      shard, [ntp = std::move(ntp)](controller_backend& backend) {
+          return backend.get_current_op(ntp);
       });
 
     if (cur_op) {
@@ -184,7 +165,6 @@ controller_api::get_current_op(model::ntp ntp, ss::shard_id shard) {
           .current_retry = cur_op->retries,
           .last_operation_result = cur_op->last_error,
           .revision_of_operation = cur_op->revision,
-          .recovery_state = r_state,
         };
     }
     co_return std::nullopt;

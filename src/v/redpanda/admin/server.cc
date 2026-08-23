@@ -1766,24 +1766,6 @@ json::validator make_cluster_config_validator() {
     return json::validator(schema);
 }
 
-ss::sstring join_properties(
-  const std::vector<
-    std::reference_wrapper<const config::property<std::optional<ss::sstring>>>>&
-    props) {
-    ss::sstring result = "";
-    for (size_t idx = 0; const auto& prop : props) {
-        if (idx == props.size() - 1) {
-            result += ss::sstring{prop.get().name()};
-        } else {
-            result += ssx::sformat("{}, ", prop.get().name());
-        }
-
-        ++idx;
-    };
-
-    return result;
-}
-
 /**
  * This function provides special case validation for configuration
  * properties that need to check other properties' values as well

@@ -3826,15 +3826,6 @@ disk_log_impl::disk_usage_and_reclaimable_space(gc_config input_cfg) {
     }
 
     /*
-     * offset calculation for local retention reclaimable is different than the
-     * retention above and takes into account local retention advisory flag.
-     */
-    auto local_retention_cfg = apply_kafka_retention_overrides(input_cfg);
-    local_retention_cfg = apply_local_storage_overrides(local_retention_cfg);
-    const auto local_retention_offset
-      = co_await maybe_adjusted_retention_offset(local_retention_cfg);
-
-    /*
      * evicting data based on the retention policy is a coordinated effort
      * between disk_log_impl housekeeping and the raft/eviction_stm. it works
      * roughly as follows:

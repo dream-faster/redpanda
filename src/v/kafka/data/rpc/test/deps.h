@@ -187,14 +187,7 @@ public:
     size_t local_size_bytes() const override {
         throw std::runtime_error("unimplemented");
     }
-    ss::future<std::optional<size_t>> cloud_size_bytes() const override {
-        throw std::runtime_error("unimplemented");
-    }
     model::offset offset_lag() const override {
-        throw std::runtime_error("unimplemented");
-    }
-    ss::future<cluster::partition_cloud_storage_status>
-    get_cloud_storage_status() const override {
         throw std::runtime_error("unimplemented");
     }
 

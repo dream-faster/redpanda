@@ -302,14 +302,6 @@ void partition_manager::maybe_arm_shutdown_watchdog() {
     }
 }
 
-uint64_t partition_manager::upload_backlog_size() const {
-    uint64_t size = 0;
-    for (const auto& [_, partition] : _ntp_table) {
-        size += partition->upload_backlog_size();
-    }
-    return size;
-}
-
 fmt::iterator partition_manager::format_to(fmt::iterator it) const {
     return fmt::format_to(
       it,

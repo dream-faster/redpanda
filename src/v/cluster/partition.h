@@ -217,9 +217,6 @@ public:
      */
     void set_topic_config(std::unique_ptr<cluster::topic_configuration> cfg);
 
-    ss::future<>
-    serialize_json_manifest_to_output_stream(ss::output_stream<char>& output);
-
     std::optional<std::reference_wrapper<cluster::topic_configuration>>
     get_topic_config();
 

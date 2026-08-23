@@ -41,7 +41,6 @@
 #include "utils/file_io.h"
 #include "utils/human.h"
 #include "version/version.h"
-#include "wasm/cache.h"
 
 #include <seastar/core/memory.hh>
 #include <seastar/core/metrics.hh>

@@ -182,7 +182,6 @@ public:
 
     /// Report the aggregate backlog of all archivers for all managed
     /// partitions
-    uint64_t upload_backlog_size() const;
 
     /*
      * Return disk space usage for for partitions not accounted for by the

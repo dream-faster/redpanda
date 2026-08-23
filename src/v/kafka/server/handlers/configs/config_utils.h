@@ -19,7 +19,6 @@
 #include "container/chunked_vector.h"
 #include "kafka/protocol/errors.h"
 #include "kafka/protocol/fwd.h"
-#include "kafka/server/handlers/topics/sr_context_validator.h"
 #include "kafka/server/handlers/topics/types.h"
 #include "model/fundamental.h"
 #include "model/metadata.h"
