@@ -231,7 +231,6 @@ fmt::iterator partition_status::format_to(fmt::iterator it) const {
       shard,
       followers_stats,
       high_watermark,
-      cloud_topic_max_gc_eligible_epoch,
       log_start_offset);
 }
 

@@ -2031,15 +2031,6 @@ void config_multi_property_validation(
         errors[name] = invalid_cache.value();
     }
 
-    // Validate cloud topics reconciliation intervals
-    auto interval_err = config::validate_cloud_topics_reconciliation_intervals(
-      updated_config);
-    if (interval_err.has_value()) {
-        errors[ss::sstring{
-          updated_config.cloud_topics_reconciliation_min_interval.name()}]
-          = interval_err.value();
-    }
-
     auto pbp_err = config::validate_sane_partition_balancer_timeouts(
       updated_config);
     if (pbp_err.has_value()) {

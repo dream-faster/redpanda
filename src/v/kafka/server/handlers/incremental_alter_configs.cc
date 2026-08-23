@@ -450,50 +450,11 @@ create_topic_properties_update(
                 continue;
             }
 
-            if (cfg.name == topic_property_redpanda_storage_mode_impl) {
-                // Read-only, but tolerate idempotent sets: describe-then-
-                // alter round trips (e.g. kafka-configs.sh) replay every
-                // config, including this one.
-                if (
-                  op == config_resource_operation::set && cfg.value.has_value()
-                  && current_storage_mode.has_value()
-                  && cfg.value.value()
-                       == model::redpanda_storage_mode_impl_name(
-                         *current_storage_mode)) {
-                    continue;
-                }
-                throw validation_error(
-                  "redpanda.storage.mode.impl is read-only and can only be "
-                  "set on topic creation; to change a topic's storage mode, "
-                  "alter redpanda.storage.mode instead");
-            }
-
             if (cfg.name == topic_property_redpanda_storage_mode) {
-                auto validator = [current_storage_mode,
-                                  &feature_table = ctx.feature_table().local()](
-                                   const ss::sstring& raw,
-                                   const model::redpanda_storage_mode& value)
-                  -> std::optional<ss::sstring> {
-                    auto transition_err = storage_mode_validator{
-                      current_storage_mode}(raw, value);
-                    if (transition_err) {
-                        return transition_err;
-                    }
-                    if (
-                      value == model::redpanda_storage_mode::tiered_cloud
-                      && !feature_table.is_active(
-                        features::feature::tiered_cloud_topics)) {
-                        return "Cannot use the tiered_v2 storage mode "
-                               "until the cluster is fully upgraded to at "
-                               "least v26.2.1";
-                    }
-                    return std::nullopt;
-                };
+                auto validator = storage_mode_validator{current_storage_mode};
                 auto parse = [](const ss::sstring& raw) {
                     auto mode = model::redpanda_storage_mode_from_user_string(
-                      raw,
-                      config::shard_local_cfg()
-                        .default_redpanda_storage_mode_tiered_impl());
+                      raw);
                     if (!mode) {
                         throw boost::bad_lexical_cast();
                     }

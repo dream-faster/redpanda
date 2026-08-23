@@ -336,13 +336,6 @@ metrics_reporter::build_metrics_snapshot() {
         if (md.get_configuration_properties().is_local_topic()) {
             ++snapshot.local_topic_count;
         }
-
-        if (
-          md.get_configuration().properties.storage_mode
-          == model::redpanda_storage_mode::cloud) {
-            // Count "pure" cloud topics and not the tiered cloud topics.
-            ++snapshot.cloud_topic_count;
-        }
     }
 
     snapshot.nodes.reserve(metrics_map.size());
@@ -702,9 +695,6 @@ void rjson_serialize(
 
     w.Key("local_topic_count");
     w.Uint(snapshot.local_topic_count);
-
-    w.Key("cloud_topic_count");
-    w.Uint(snapshot.cloud_topic_count);
 
     w.Key("partition_count");
     w.Uint64(snapshot.partition_count);

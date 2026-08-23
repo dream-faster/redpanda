@@ -1015,7 +1015,6 @@ using create_partitions_configuration_assignment
 // deletions have to be tracked separately.
 enum class topic_purge_domain {
     cloud_storage = 0,
-    cloud_topic = 2,
 };
 fmt::iterator format_to(topic_purge_domain, fmt::iterator);
 
@@ -1058,17 +1057,6 @@ struct nt_lifecycle_marker
 
     // Note that the serialisation of `timestamp` is explicitly avoided.
     auto serde_fields() { return std::tie(config, initial_revision_id); }
-};
-
-struct nt_cloud_topic_tombstone
-  : serde::envelope<
-      nt_cloud_topic_tombstone,
-      serde::version<0>,
-      serde::compat_version<0>> {
-    // The topic ID used by cloud topic whose data requires removal.
-    model::topic_id topic_id;
-
-    auto serde_fields() { return std::tie(topic_id); }
 };
 
 struct topic_lifecycle_transition
@@ -1772,8 +1760,6 @@ enum class recovery_stage : int8_t {
     recovered_cluster_config = 3,
     recovered_users = 4,
     recovered_acls = 5,
-    recovered_cloud_topics_metastore = 11,
-    recovered_cloud_topic_data = 12,
     recovered_remote_topic_data = 6,
     recovered_topic_data = 7,
 
@@ -2964,10 +2950,7 @@ enum class cloud_storage_mode : uint8_t {
     write_only = 1,
     read_only = 2,
     full = 3,
-    read_replica = 4,
-    cloud_topic = 5,
-    cloud_topic_read_replica = 6,
-    tiered_cloud_topic = 7
+    read_replica = 4
 };
 fmt::iterator format_to(cloud_storage_mode, fmt::iterator);
 

@@ -329,25 +329,10 @@ struct batch_max_bytes_limits_validator {
 // Returns true if the transition is allowed, false otherwise.
 //
 // Permitted transitions:
-//   local -> tiered: Permitted
-//   tiered -> local: Permitted (with caution)
-//   unset -> local: Permitted (with caution)
-//   unset -> tiered: Permitted
-//   cloud -> tiered_cloud: Permitted
-//   tiered_cloud -> cloud: Permitted
+//   local -> tiered, tiered -> local (with caution),
+//   unset -> local (with caution), unset -> tiered
 // Not permitted:
-//   local -> unset: Not permitted
-//   local -> cloud: Not permitted
-//   tiered -> unset: Not permitted
-//   tiered -> cloud: Not permitted
-//   cloud -> local: Not permitted
-//   cloud -> tiered: Not permitted
-//   unset <-> cloud: Not permitted (cloud requires explicit choice)
-//   local -> tiered_cloud: Not permitted
-//   tiered -> tiered_cloud: Not permitted
-//   tiered_cloud -> local: Not permitted
-//   tiered_cloud -> tiered: Not permitted
-//   unset <-> tiered_cloud: Not permitted
+//   local -> unset, tiered -> unset
 inline bool is_storage_mode_transition_permitted(
   model::redpanda_storage_mode from, model::redpanda_storage_mode to) {
     using sm = model::redpanda_storage_mode;
@@ -357,11 +342,6 @@ inline bool is_storage_mode_transition_permitted(
         return true;
     }
 
-    // Permitted transitions:
-    //   local -> tiered: Permitted
-    //   tiered -> local: Permitted (with caution)
-    //   unset -> local: Permitted (with caution)
-    //   unset -> tiered: Permitted
     if (from == sm::local && to == sm::tiered) {
         return true;
     }
@@ -372,14 +352,6 @@ inline bool is_storage_mode_transition_permitted(
         return true;
     }
     if (from == sm::unset && to == sm::tiered) {
-        return true;
-    }
-
-    // cloud <-> tiered_cloud: Permitted
-    if (from == sm::cloud && to == sm::tiered_cloud) {
-        return true;
-    }
-    if (from == sm::tiered_cloud && to == sm::cloud) {
         return true;
     }
 
@@ -404,8 +376,8 @@ struct storage_mode_validator {
             return fmt::format(
               "Cannot alter redpanda.storage.mode from {} to {} - this "
               "transition is not permitted",
-              model::redpanda_storage_mode_impl_name(*current_mode),
-              model::redpanda_storage_mode_impl_name(value));
+              model::redpanda_storage_mode_to_string(*current_mode),
+              model::redpanda_storage_mode_to_string(value));
         }
         return std::nullopt;
     }

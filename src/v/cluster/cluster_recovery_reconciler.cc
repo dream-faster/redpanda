@@ -42,10 +42,6 @@ int order(recovery_stage s) {
         return 4;
     case recovered_acls:
         return 5;
-    case recovered_cloud_topics_metastore:
-        return 6;
-    case recovered_cloud_topic_data:
-        return 7;
     case recovered_remote_topic_data:
         return 8;
     case recovered_topic_data:
@@ -162,29 +158,6 @@ controller_snapshot_reconciler::get_actions(
         }
     }
 
-    if (
-      needs_actions(
-        cur_stage, recovery_stage::recovered_cloud_topics_metastore)) {
-        const auto& snap_tables = snap.topics.topics;
-        auto snap_it = snap_tables.find(model::l1_metastore_nt);
-        if (snap_it != snap_tables.end()) {
-            auto& snap_conf = snap_it->second.metadata.configuration;
-            auto cur_conf = _topic_table.get_topic_cfg(model::l1_metastore_nt);
-            // If the topic exists but with a different remote label, it's
-            // possible we can reset it (e.g. if it's empty).
-            if (
-              !cur_conf
-              || cur_conf->properties.remote_label
-                   != snap_conf.properties.remote_label) {
-                actions.ct_metastore_topic = snap_conf;
-            }
-        }
-        if (actions.ct_metastore_topic.has_value()) {
-            actions.stages.emplace_back(
-              recovery_stage::recovered_cloud_topics_metastore);
-        }
-    }
-
     if (needs_actions(cur_stage, recovery_stage::recovered_topic_data)) {
         const auto& snap_tables = snap.topics.topics;
         for (const auto& [tp_ns, meta] : snap_tables) {
@@ -199,21 +172,6 @@ controller_snapshot_reconciler::get_actions(
                   tp_ns);
                 continue;
             }
-            if (tp_config.is_cloud_topic()) {
-                auto new_config = tp_config;
-                if (!new_config.properties.remote_topic_properties
-                       .has_value()) {
-                    auto& remote_props
-                      = new_config.properties.remote_topic_properties.emplace();
-                    remote_props.remote_revision = model::initial_revision_id{
-                      meta.metadata.revision};
-                    remote_props.remote_partition_count
-                      = tp_config.partition_count;
-                }
-                actions.cloud_topics.emplace_back(std::move(new_config));
-                continue;
-            }
-
             if (tp_config.properties.is_archival_enabled()) {
                 // We expect to create the topic with tiered storage data.
                 auto new_config = tp_config;
@@ -233,10 +191,6 @@ controller_snapshot_reconciler::get_actions(
             // Either this is a read replica or no metadata is expected to exist
             // in tiered storage. Just create the topic.
             actions.local_topics.emplace_back(tp_config);
-        }
-        if (!actions.cloud_topics.empty()) {
-            actions.stages.emplace_back(
-              recovery_stage::recovered_cloud_topic_data);
         }
         if (!actions.remote_topics.empty()) {
             actions.stages.emplace_back(

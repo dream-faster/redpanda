@@ -18,7 +18,6 @@
 
 static constexpr size_t total_shares_without_optionals = 87;
 static constexpr size_t total_wasm_shares = 10;
-static constexpr size_t total_cloud_storage_shares = 10;
 
 // It's not really useful to know the exact byte values for each of these
 // numbers so we just make sure we're within a MB
@@ -37,11 +36,9 @@ public:
     static constexpr size_t total_memory = 2_GiB;
     static constexpr size_t user_wasm_reservation = 20_MiB;
     static constexpr size_t user_compaction_reservation = 20_MiB;
-    static constexpr size_t user_cloud_topics_compaction_reservation = 20_MiB;
 
     bool compaction_enabled() const { return std::get<0>(GetParam()); }
     bool wasm_enabled() const { return std::get<1>(GetParam()); }
-    bool cloud_storage_enabled() const { return std::get<2>(GetParam()); }
 };
 
 TEST_P(MemoryGroupSharesTest, DividesSharesCorrectly) {
@@ -58,27 +55,18 @@ TEST_P(MemoryGroupSharesTest, DividesSharesCorrectly) {
           .max_bytes = user_compaction_reservation, .max_limit_pct = 100};
     }
 
-    total_available_memory -= user_cloud_topics_compaction_reservation;
-    cloud_topics_compaction_memory_reservation ct_compaction_reservation{
-      .max_bytes = user_cloud_topics_compaction_reservation};
     partitions_memory_reservation partitions{.max_limit_pct = 20};
     total_available_memory -= partitions.reserved_bytes(total_memory);
 
     class system_memory_groups groups(
       total_memory,
       reservation,
-      ct_compaction_reservation,
-      /*cloud_topics_reconciler_memory_reservation=*/{},
       data_transforms_reservation,
       wasm_enabled(),
-      cloud_storage_enabled(),
       partitions);
     auto total_shares = total_shares_without_optionals;
     if (wasm_enabled()) {
         total_shares += total_wasm_shares;
-    }
-    if (cloud_storage_enabled()) {
-        total_shares += total_cloud_storage_shares;
     }
     EXPECT_THAT(
       groups.chunk_cache_min_memory(),
@@ -114,9 +102,6 @@ TEST_P(MemoryGroupSharesTest, DividesSharesCorrectly) {
     } else {
         EXPECT_EQ(groups.compaction_reserved_memory(), 0);
     }
-    EXPECT_EQ(
-      groups.cloud_topics_compaction_reserved_memory(),
-      user_cloud_topics_compaction_reservation);
     EXPECT_LE(
       groups.data_transforms_max_memory() + groups.chunk_cache_max_memory()
         + groups.kafka_total_memory() + groups.recovery_max_memory()
@@ -138,11 +123,8 @@ TEST(MemoryGroups, CompactionMemoryBytes) {
             .max_bytes = compaction_max_bytes,
             .max_limit_pct = double(pct),
           },
-          /*cloud_topics_compaction_memory_reservation=*/{},
-          /*cloud_topics_reconciler_memory_reservation=*/{},
           /*data_transforms_memory_reservation=*/{},
           /*wasm_enabled=*/false,
-          /*cloud_storage_enabled=*/false,
           {
             .max_limit_pct = 20,
           });
@@ -157,11 +139,8 @@ TEST(MemoryGroups, CompactionMemoryBytes) {
             .max_bytes = compaction_max_bytes,
             .max_limit_pct = double(pct),
           },
-          /*cloud_topics_compaction_memory_reservation=*/{},
-          /*cloud_topics_reconciler_memory_reservation=*/{},
           /*data_transforms_memory_reservation=*/{},
           /*wasm_enabled=*/false,
-          /*cloud_storage_enabled=*/false,
           {
             .max_limit_pct = 20,
           });

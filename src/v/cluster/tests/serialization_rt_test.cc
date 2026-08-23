@@ -425,7 +425,6 @@ SEASTAR_THREAD_TEST_CASE(partition_status_v7_log_start_offset_compat_test) {
         uint32_t shard{0};
         std::optional<cluster::followers_stats> followers_stats;
         kafka::offset high_watermark{42};
-        std::optional<int64_t> cloud_topic_max_gc_eligible_epoch;
 
         auto serde_fields() {
             return std::tie(
@@ -439,7 +438,6 @@ SEASTAR_THREAD_TEST_CASE(partition_status_v7_log_start_offset_compat_test) {
               shard,
               followers_stats,
               high_watermark,
-              cloud_topic_max_gc_eligible_epoch);
         }
     };
 

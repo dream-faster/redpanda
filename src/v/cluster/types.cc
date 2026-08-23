@@ -47,12 +47,6 @@ fmt::iterator format_to(recovery_stage e, fmt::iterator out) {
     case recovery_stage::recovered_remote_topic_data:
         return fmt::format_to(
           out, "recovery_stage::recovered_remote_topic_data");
-    case recovery_stage::recovered_cloud_topics_metastore:
-        return fmt::format_to(
-          out, "recovery_stage::recovered_cloud_topics_metastore");
-    case recovery_stage::recovered_cloud_topic_data:
-        return fmt::format_to(
-          out, "recovery_stage::recovered_cloud_topic_data");
     case recovery_stage::recovered_topic_data:
         return fmt::format_to(out, "recovery_stage::recovered_topic_data");
     case recovery_stage::recovered_controller_snapshot:
@@ -125,8 +119,6 @@ fmt::iterator format_to(topic_purge_domain d, fmt::iterator out) {
     switch (d) {
     case topic_purge_domain::cloud_storage:
         return fmt::format_to(out, "cloud_storage");
-    case topic_purge_domain::cloud_topic:
-        return fmt::format_to(out, "cloud_topic");
     }
     return fmt::format_to(out, "unknown({})", static_cast<int>(d));
 }
@@ -657,12 +649,6 @@ fmt::iterator format_to(cloud_storage_mode e, fmt::iterator out) {
         return fmt::format_to(out, "full");
     case cloud_storage_mode::read_replica:
         return fmt::format_to(out, "read_replica");
-    case cloud_storage_mode::cloud_topic:
-        return fmt::format_to(out, "cloud_topic");
-    case cloud_storage_mode::cloud_topic_read_replica:
-        return fmt::format_to(out, "cloud_topic_read_replica");
-    case cloud_storage_mode::tiered_cloud_topic:
-        return fmt::format_to(out, "tiered_cloud_topic");
     }
     __builtin_unreachable();
 }

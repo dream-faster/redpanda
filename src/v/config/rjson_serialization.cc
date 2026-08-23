@@ -294,16 +294,6 @@ void rjson_serialize(
 }
 
 void rjson_serialize(
-
-void rjson_serialize(
-  json::Writer<json::StringBuffer>& w,
-
-void rjson_serialize(
-  json::Writer<json::StringBuffer>& w,
-
-void rjson_serialize(
-
-void rjson_serialize(
   json::Writer<json::StringBuffer>& w, config::tls_name_format format) {
     stringize(w, format);
 }
@@ -327,12 +317,6 @@ void rjson_serialize(
 
 void rjson_serialize(
   json::Writer<json::StringBuffer>& w, const model::redpanda_storage_mode& m) {
-    stringize(w, m);
-}
-
-void rjson_serialize(
-  json::Writer<json::StringBuffer>& w,
-  const model::redpanda_storage_mode_tiered_impl& m) {
     stringize(w, m);
 }
 

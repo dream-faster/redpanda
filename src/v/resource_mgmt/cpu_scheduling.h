@@ -118,21 +118,6 @@ public:
          */
         _cluster_linking = co_await ss::create_scheduling_group(
           "cluster_linking", 600);
-        /**
-         * Cloud topics compaction scheduling group.
-         */
-        _cloud_topics_compaction = co_await ss::create_scheduling_group(
-          "cloud_topics_compaction", 150);
-        /**
-         * Cloud topics reconciler scheduling group.
-         */
-        _cloud_topics_reconciler = co_await ss::create_scheduling_group(
-          "cloud_topics_reconciler", 150);
-        /**
-         * Cloud topics metastore scheduling group.
-         */
-        _cloud_topics_metastore = co_await ss::create_scheduling_group(
-          "cloud_topics_metastore", 1000);
     }
 
     ss::scheduling_group admin_sg() { return _admin; }
@@ -144,9 +129,6 @@ public:
         return _cache_background_reclaim;
     }
     ss::scheduling_group compaction_sg() { return _compaction; }
-    ss::scheduling_group cloud_topics_compaction_sg() {
-        return _cloud_topics_compaction;
-    }
     ss::scheduling_group raft_send_sg() { return _raft_send; }
     ss::scheduling_group archival_upload() { return _archival_upload; }
     ss::scheduling_group raft_heartbeats() { return _raft_heartbeats; }
@@ -175,13 +157,6 @@ public:
 
     ss::scheduling_group cluster_linking_sg() { return _cluster_linking; }
 
-    ss::scheduling_group cloud_topics_reconciler_sg() {
-        return _cloud_topics_reconciler;
-    }
-    ss::scheduling_group cloud_topics_metastore_sg() {
-        return _cloud_topics_metastore;
-    }
-
     std::vector<std::reference_wrapper<const ss::scheduling_group>>
     all_scheduling_groups() const {
         return {
@@ -200,10 +175,7 @@ public:
           std::cref(_transforms),
           std::cref(_produce),
           std::cref(_ts_read),
-          std::cref(_cluster_linking),
-          std::cref(_cloud_topics_compaction),
-          std::cref(_cloud_topics_reconciler),
-          std::cref(_cloud_topics_metastore)};
+          std::cref(_cluster_linking)};
     }
 
 private:
@@ -226,7 +198,4 @@ private:
     ss::scheduling_group _produce;
     ss::scheduling_group _ts_read;
     ss::scheduling_group _cluster_linking;
-    ss::scheduling_group _cloud_topics_compaction;
-    ss::scheduling_group _cloud_topics_reconciler;
-    ss::scheduling_group _cloud_topics_metastore;
 };

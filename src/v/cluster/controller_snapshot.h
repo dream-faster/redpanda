@@ -194,13 +194,6 @@ struct topics_t
 
     force_recoverable_partitions_t partitions_to_force_recover;
 
-    chunked_hash_map<
-      nt_revision,
-      nt_cloud_topic_tombstone,
-      nt_revision_hash,
-      nt_revision_eq>
-      cloud_topic_tombstones;
-
     friend bool operator==(const topics_t&, const topics_t&) = default;
 
     ss::future<> serde_async_write(iobuf&);

@@ -174,6 +174,14 @@ struct configuration final : public config_store {
     bounded_property<size_t>
       raft_max_buffered_follower_append_entries_bytes_per_shard;
     // Kafka
+    // Configures cluster_epoch_service, the raft0-backed monotonic cluster
+    // epoch. Named for its original consumer; the service itself is generic.
+    property<std::chrono::milliseconds>
+      cloud_topics_epoch_service_epoch_increment_interval;
+    property<std::chrono::milliseconds>
+      cloud_topics_epoch_service_local_epoch_cache_duration;
+    property<std::chrono::milliseconds>
+      cloud_topics_epoch_service_max_same_epoch_duration;
     property<bool> enable_usage;
     bounded_property<size_t> usage_num_windows;
     bounded_property<std::chrono::seconds> usage_window_width_interval_sec;
@@ -384,8 +392,6 @@ struct configuration final : public config_store {
     property<bool> cloud_storage_enable_remote_read;
     property<bool> cloud_storage_enable_remote_write;
     enum_property<model::redpanda_storage_mode> default_redpanda_storage_mode;
-    enum_property<model::redpanda_storage_mode_tiered_impl>
-      default_redpanda_storage_mode_tiered_impl;
     property<bool> cloud_storage_disable_archiver_manager;
     property<std::optional<ss::sstring>> cloud_storage_access_key;
     property<std::optional<ss::sstring>> cloud_storage_secret_key;
@@ -446,8 +452,6 @@ struct configuration final : public config_store {
     property<bool> cloud_storage_disable_upload_loop_for_tests;
     property<bool> cloud_storage_disable_read_replica_loop_for_tests;
     property<bool> disable_cluster_recovery_loop_for_tests;
-    property<bool> cloud_topics_disable_metastore_flush_loop_for_tests;
-    property<bool> cloud_topics_disable_level_zero_gc_for_tests;
     property<bool> enable_cluster_metadata_upload_loop;
     property<std::optional<ss::sstring>> cloud_storage_cluster_name;
     property<size_t> cloud_storage_max_segments_pending_deletion_per_partition;
@@ -731,9 +735,6 @@ struct configuration final : public config_store {
     property<ss::sstring> tls_v1_2_cipher_suites;
     property<ss::sstring> tls_v1_3_cipher_suites;
 
-
-
-
     property<bool> enable_host_metrics;
 
     property<bool> consumer_offsets_topic_batch_cache_enabled;
@@ -746,80 +747,6 @@ struct configuration final : public config_store {
     error_map_t load(const YAML::Node& root_node);
 
 public:
-    deprecated_property cloud_topics_enabled;
-    property<size_t> cloud_topics_produce_batching_size_threshold;
-    property<std::chrono::milliseconds> cloud_topics_produce_upload_interval;
-    property<size_t> cloud_topics_produce_cardinality_threshold;
-    property<bool> cloud_topics_disable_reconciliation_loop;
-    property<std::chrono::milliseconds>
-      cloud_topics_reconciliation_min_interval;
-    property<std::chrono::milliseconds>
-      cloud_topics_reconciliation_max_interval;
-    property<double> cloud_topics_reconciliation_target_fill_ratio;
-    property<double> cloud_topics_reconciliation_speedup_blend;
-    property<double> cloud_topics_reconciliation_slowdown_blend;
-    property<size_t> cloud_topics_reconciliation_max_object_size;
-    bounded_property<size_t> cloud_topics_upload_part_size;
-    bounded_property<size_t> cloud_topics_reconciliation_parallelism;
-    property<bool> cloud_topics_allow_materialization_failure;
-    property<size_t> cloud_topics_compaction_max_object_size;
-    property<size_t> cloud_topics_l1_indexing_interval;
-    property<std::chrono::milliseconds> cloud_topics_compaction_interval_ms;
-    property<std::chrono::milliseconds> cloud_topics_leveling_interval_ms;
-    bounded_property<size_t>
-      cloud_topics_max_concurrent_leveling_jobs_per_shard;
-    bounded_property<double, numeric_bounds>
-      cloud_topics_leveling_min_extent_size_ratio;
-    property<size_t> cloud_topics_leveling_max_range_bytes;
-    property<size_t> cloud_topics_leveling_max_ranges_per_partition;
-    property<bool> cloud_topics_compaction_disabled;
-    property<bool> cloud_topics_leveling_disabled;
-    bounded_property<uint64_t> cloud_topics_compaction_key_map_memory;
-    bounded_property<size_t> cloud_topics_l1_streaming_read_chunk_size;
-    property<std::chrono::milliseconds>
-      cloud_topics_long_term_garbage_collection_interval;
-    property<std::chrono::milliseconds> cloud_topics_long_term_flush_interval;
-    property<std::chrono::milliseconds>
-      cloud_topics_epoch_service_epoch_increment_interval;
-    property<std::chrono::milliseconds>
-      cloud_topics_epoch_service_local_epoch_cache_duration;
-    property<std::chrono::milliseconds>
-      cloud_topics_epoch_service_max_same_epoch_duration;
-
-    property<std::chrono::milliseconds>
-      cloud_topics_short_term_gc_minimum_object_age;
-    property<std::chrono::milliseconds> cloud_topics_short_term_gc_interval;
-    property<std::chrono::milliseconds>
-      cloud_topics_short_term_gc_backoff_interval;
-    property<std::chrono::milliseconds> cloud_topics_gc_health_check_interval;
-
-    property<std::chrono::milliseconds>
-      cloud_topics_metastore_replication_timeout_ms;
-    property<std::chrono::milliseconds>
-      cloud_topics_metastore_lsm_apply_timeout_ms;
-    property<std::chrono::milliseconds> cloud_topics_metastore_rpc_timeout_ms;
-    property<std::chrono::milliseconds> cloud_topics_metastore_retry_timeout_ms;
-    bounded_property<size_t> cloud_topics_metastore_block_cache_size;
-    bounded_property<size_t> cloud_topics_metastore_write_buffer_size;
-    bounded_property<uint32_t> cloud_topics_metastore_max_pre_open_fibers;
-
-    property<bool> cloud_topics_parallel_fetch_enabled;
-
-    property<bool> cloud_topics_fetch_debounce_enabled;
-
-    property<std::chrono::milliseconds> cloud_topics_preregistered_object_ttl;
-
-    property<std::chrono::milliseconds>
-      cloud_topics_long_term_file_deletion_delay;
-    bounded_property<int32_t> cloud_topics_num_metastore_partitions;
-    bounded_property<size_t> cloud_topics_metastore_sst_chunk_size;
-
-    bounded_property<size_t> cloud_topics_produce_write_inflight_limit;
-    bounded_property<size_t> cloud_topics_produce_no_pid_concurrency;
-
-    property<std::chrono::milliseconds>
-      cloud_topics_l1_reader_cache_eviction_timeout_ms;
-    bounded_property<size_t> cloud_topics_l1_reader_cache_max_size;
     property<bool> code_hugepages_enabled;
 
     development_feature_property<int> development_feature_property_testing_only;

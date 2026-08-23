@@ -1,14 +1,3 @@
-/*
- * Copyright 2022 Redpanda Data, Inc.
- *
- * Use of this software is governed by the Business Source License
- * included in the file licenses/BSL.md
- *
- * As of the Change Date specified in that file, in accordance with
- * the Business Source License, use of this software will be governed
- * by the Apache License, Version 2.0
- */
-
 #pragma once
 
 #include "base/seastarx.h"
@@ -61,23 +50,10 @@ std::optional<ss::sstring> validate_tombstone_retention_ms(
   const std::optional<std::chrono::milliseconds>& ms);
 
 std::optional<ss::sstring>
-
-
-
-std::optional<ss::sstring>
-
-std::optional<ss::sstring>
-
-std::optional<ss::sstring>
-
-std::optional<ss::sstring>
 validate_consumer_group_metrics(const std::vector<ss::sstring>& metrics);
 
 std::optional<ss::sstring>
 validate_cloud_storage_cluster_name(const std::optional<ss::sstring>&);
-
-std::optional<ss::sstring>
-validate_cloud_topics_reconciliation_intervals(const configuration& config);
 
 std::optional<ss::sstring>
 validate_sane_partition_balancer_timeouts(const configuration& config);

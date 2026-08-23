@@ -511,6 +511,24 @@ configuration::configuration()
       {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
       0,
       {.min = 0, .max = 100_MiB})
+  , cloud_topics_epoch_service_epoch_increment_interval(
+      *this,
+      "cloud_topics_epoch_service_epoch_increment_interval",
+      "The interval at which the cluster epoch is incremented.",
+      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
+      10min)
+  , cloud_topics_epoch_service_local_epoch_cache_duration(
+      *this,
+      "cloud_topics_epoch_service_local_epoch_cache_duration",
+      "The local cache duration of a cluster wide epoch.",
+      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
+      1min)
+  , cloud_topics_epoch_service_max_same_epoch_duration(
+      *this,
+      "cloud_topics_epoch_service_max_same_epoch_duration",
+      "The duration of time that a node can use the exact same epoch.",
+      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
+      24 * 60min)
   , enable_usage(
       *this,
       "enable_usage",
@@ -2095,8 +2113,7 @@ configuration::configuration()
       "default_redpanda_storage_mode",
       "Default storage mode for newly-created topics. Determines how topic "
       "data is stored: `local` for broker-local storage only, `tiered` for "
-      "both local and object storage, `cloud` for object-only storage using "
-      "the Cloud Topics architecture, or `unset` to use legacy "
+      "both local and object storage, or `unset` to use legacy "
       "remote.read/write configs for backwards compatibility.",
       {.needs_restart = needs_restart::no,
        .example = "tiered",
@@ -2104,24 +2121,7 @@ configuration::configuration()
       model::redpanda_storage_mode::unset,
       {model::redpanda_storage_mode::local,
        model::redpanda_storage_mode::tiered,
-       model::redpanda_storage_mode::cloud,
        model::redpanda_storage_mode::unset})
-  , default_redpanda_storage_mode_tiered_impl(
-      *this,
-      "default_redpanda_storage_mode_tiered_impl",
-      "Default implementation of the `tiered` storage mode for "
-      "newly-created topics. When `redpanda.storage.mode` is set to "
-      "`tiered`, this property determines whether the topic uses the "
-      "classic tiered-storage architecture (`tiered_v1`) or the new "
-      "tiered-storage architecture (`tiered_v2`). The implementation of "
-      "each topic is reported by the read-only `redpanda.storage.mode.impl` "
-      "topic property.",
-      {.needs_restart = needs_restart::no,
-       .example = "tiered_v2",
-       .visibility = visibility::user},
-      model::redpanda_storage_mode_tiered_impl::tiered_v1,
-      {model::redpanda_storage_mode_tiered_impl::tiered_v1,
-       model::redpanda_storage_mode_tiered_impl::tiered_v2})
   , cloud_storage_disable_archiver_manager(
       *this,
       "cloud_storage_disable_archiver_manager",
@@ -2503,21 +2503,6 @@ configuration::configuration()
       "Disables the cluster recovery loop. This property is used to simplify "
       "testing and should not be set in production.",
       {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
-      false)
-  , cloud_topics_disable_metastore_flush_loop_for_tests(
-      *this,
-      "cloud_topics_disable_metastore_flush_loop_for_tests",
-      "Disables the metastore flush loop in cloud topics. The property exists "
-      "to simplify testing of read replicas and shouldn't be set in "
-      "production.",
-      {.needs_restart = needs_restart::yes, .visibility = visibility::tunable},
-      false)
-  , cloud_topics_disable_level_zero_gc_for_tests(
-      *this,
-      "cloud_topics_disable_level_zero_gc_for_tests",
-      "Disables the level-zero garbage collector in cloud topics. This "
-      "property exists to simplify testing and shouldn't be set in production.",
-      {.needs_restart = needs_restart::yes, .visibility = visibility::tunable},
       false)
   , enable_cluster_metadata_upload_loop(
       *this,
@@ -4348,417 +4333,6 @@ configuration::configuration()
       "Default timeout for RPC requests between Redpanda nodes.",
       {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
       10s)
-  , cloud_topics_enabled(*this, "cloud_topics_enabled")
-  , cloud_topics_produce_batching_size_threshold(
-      *this,
-      "cloud_topics_produce_batching_size_threshold",
-      "The size limit for the object size in cloud topics. When the "
-      "amount of data on a shard reaches this limit, an upload is triggered.",
-      {.needs_restart = needs_restart::no, .visibility = visibility::user},
-      4_MiB)
-  , cloud_topics_produce_upload_interval(
-      *this,
-      "cloud_topics_produce_upload_interval",
-      "Time interval after which the upload is triggered.",
-      {.needs_restart = needs_restart::no, .visibility = visibility::user},
-      250ms)
-  , cloud_topics_produce_cardinality_threshold(
-      *this,
-      "cloud_topics_produce_cardinality_threshold",
-      "Threshold for the object cardinality in cloud topics. When the "
-      "number of partitions in waiting for the upload reach this limit, an "
-      "upload is triggered.",
-      {.needs_restart = needs_restart::no, .visibility = visibility::user},
-      1000)
-  , cloud_topics_disable_reconciliation_loop(
-      *this,
-      "cloud_topics_disable_reconciliation_loop",
-      "Disables the cloud topics reconciliation loop. Disabling the loop can "
-      "negatively impact performance and stability of the cluster.",
-      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
-      false)
-  , cloud_topics_reconciliation_min_interval(
-      *this,
-      "cloud_topics_reconciliation_min_interval",
-      "Minimum reconciliation interval for adaptive scheduling. The "
-      "reconciler will not run more frequently than this.",
-      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
-      250ms)
-  , cloud_topics_reconciliation_max_interval(
-      *this,
-      "cloud_topics_reconciliation_max_interval",
-      "Maximum reconciliation interval for adaptive scheduling.",
-      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
-      10s)
-  , cloud_topics_reconciliation_target_fill_ratio(
-      *this,
-      "cloud_topics_reconciliation_target_fill_ratio",
-      "Target fill ratio for L1 objects. The reconciler adapts its interval "
-      "to produce objects at approximately this fill level (0.0 to 1.0).",
-      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
-      0.8,
-      validate_0_to_1_ratio)
-  , cloud_topics_reconciliation_speedup_blend(
-      *this,
-      "cloud_topics_reconciliation_speedup_blend",
-      "Blend factor for speeding up reconciliation (0.0 to 1.0). Higher "
-      "values mean reconciliation increases its frequency faster when trying "
-      "to find a frequency that produces well-sized objects.",
-      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
-      0.9,
-      validate_0_to_1_ratio)
-  , cloud_topics_reconciliation_slowdown_blend(
-      *this,
-      "cloud_topics_reconciliation_slowdown_blend",
-      "Blend factor for slowing down reconciliation (0.0 to 1.0). Higher "
-      "values mean reconciliation lowers its frequency faster when trying to "
-      "find a frequency that produces well-sized objects. Generally this "
-      "should be lower than the speedup blend, because reconciliation has less "
-      "opportunities to adapt its frequency when it runs less frequently.",
-      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
-      0.4,
-      validate_0_to_1_ratio)
-  , cloud_topics_reconciliation_max_object_size(
-      *this,
-      "cloud_topics_reconciliation_max_object_size",
-      "Maximum size in bytes for L1 objects produced by the reconciler. "
-      "With the default target fill ratio of 0.8, this gives an effective "
-      "target object size of 64 MiB.",
-      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
-      80_MiB)
-  , cloud_topics_upload_part_size(
-      *this,
-      "cloud_topics_upload_part_size",
-      "The part size in bytes used for multipart uploads. The minimum of "
-      "5 MiB is the smallest non-terminal part size allowed by cloud "
-      "object storage providers.",
-      {.needs_restart = needs_restart::yes, .visibility = visibility::tunable},
-      16_MiB,
-      {.min = 5_MiB, .max = 128_MiB})
-  , cloud_topics_reconciliation_parallelism(
-      *this,
-      "cloud_topics_reconciliation_parallelism",
-      "Maximum number, per shard, of concurrent objects built by "
-      "reconciliation",
-      {.needs_restart = needs_restart::yes, .visibility = visibility::tunable},
-      8,
-      {.min = size_t{1}, .max = size_t{64}})
-  , cloud_topics_allow_materialization_failure(
-      *this,
-      "cloud_topics_allow_materialization_failure",
-      "When enabled, the reconciler tolerates missing L0 extent objects "
-      "(404 errors) during materialization. Failed extents are skipped, "
-      "producing L1 state with empty offset ranges where deleted data was. "
-      "Use this to recover partitions after accidental deletion of live "
-      "extent objects.",
-      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
-      false)
-  , cloud_topics_compaction_max_object_size(
-      *this,
-      "cloud_topics_compaction_max_object_size",
-      "Maximum size in bytes for L1 objects produced by cloud topics "
-      "compaction.",
-      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
-      128_MiB)
-  , cloud_topics_l1_indexing_interval(
-      *this,
-      "cloud_topics_indexing_interval",
-      "The byte interval at which index entries are created within long term"
-      " storage objects for cloud topics. Index entries are stored in the "
-      "object metadata and enable efficient seeking by offset or timestamp "
-      "within a partition. Lower values produce more index entries (better "
-      "seek granularity) at the cost of a larger footer.",
-      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
-      4_MiB)
-  , cloud_topics_compaction_interval_ms(
-      *this,
-      "cloud_topics_compaction_interval_ms",
-      "How often to trigger background compaction for cloud topics.",
-      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
-      30s)
-  , cloud_topics_leveling_interval_ms(
-      *this,
-      "cloud_topics_leveling_interval_ms",
-      "How often to scan managed cloud-topic partitions for leveling work "
-      "(rewrites of runs of undersized L1 objects).",
-      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
-      5min)
-  , cloud_topics_max_concurrent_leveling_jobs_per_shard(
-      *this,
-      "cloud_topics_max_concurrent_leveling_jobs_per_shard",
-      "Maximum number of leveling jobs that may run concurrently on a single "
-      "shard. Live-adjustable.",
-      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
-      1,
-      {.min = size_t{1}, .max = size_t{64}})
-  , cloud_topics_leveling_min_extent_size_ratio(
-      *this,
-      "cloud_topics_leveling_min_extent_size_ratio",
-      "An L1 extent shorter than this ratio of "
-      "cloud_topics_reconciliation_max_object_size is considered undersized "
-      "and eligible for leveling.",
-      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
-      0.5,
-      {.min = 0.0, .max = 1.0})
-  , cloud_topics_leveling_max_range_bytes(
-      *this,
-      "cloud_topics_leveling_max_range_bytes",
-      "Maximum total bytes per leveling job (one contiguous run of "
-      "undersized extents). Runs exceeding this are split into multiple "
-      "jobs so that each job's rewrite and metastore commit stays bounded "
-      "in time and blast radius. Lower values mean more, smaller jobs.",
-      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
-      1_GiB)
-  , cloud_topics_leveling_max_ranges_per_partition(
-      *this,
-      "cloud_topics_leveling_max_ranges_per_partition",
-      "Maximum number of levelable ranges returned per partition by a single "
-      "leveling scan. Bounds the scan reply's size as well as the rate at "
-      "which leveling work is produced along with "
-      "`cloud_topics_leveling_interval_ms`.",
-      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
-      5)
-  , cloud_topics_compaction_disabled(
-      *this,
-      "cloud_topics_compaction_disabled",
-      "When true, completely disables compaction of cloud topics.",
-      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
-      false)
-  , cloud_topics_leveling_disabled(
-      *this,
-      "cloud_topics_leveling_disabled",
-      "When true, completely disables leveling of cloud topics.",
-      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
-      false)
-  , cloud_topics_compaction_key_map_memory(
-      *this,
-      "cloud_topics_compaction_key_map_memory",
-      "Maximum number of bytes that may be used on each shard by cloud topics "
-      "compaction key-offset maps.",
-      {.needs_restart = needs_restart::yes,
-       .example = "134217728",
-       .visibility = visibility::tunable},
-      128_MiB,
-      {.min = 16_MiB, .max = 100_GiB})
-  , cloud_topics_l1_streaming_read_chunk_size(
-      *this,
-      "cloud_topics_l1_streaming_read_chunk_size",
-      "Maximum number of object-storage bytes that a cache-bypassing L1 "
-      "streaming read (used by leveling and compaction) buffers in memory at "
-      "once before serving them to the reader. Bounds both peak per-read "
-      "memory and how much of an object is downloaded under a single held "
-      "cloud storage client connection.",
-      {.needs_restart = needs_restart::no,
-       .example = "16777216",
-       .visibility = visibility::tunable},
-      32_MiB,
-      {.min = 1_MiB, .max = 128_MiB})
-  , cloud_topics_long_term_garbage_collection_interval(
-      *this,
-      "cloud_topics_long_term_garbage_collection_interval",
-      "Time interval after which data is garbage collected from long "
-      "term storage.",
-      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
-      5min)
-  , cloud_topics_long_term_flush_interval(
-      *this,
-      "cloud_topics_long_term_flush_interval",
-      "Time interval at which long term storage metadata is flushed to object "
-      "storage.",
-      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
-      10min)
-  , cloud_topics_epoch_service_epoch_increment_interval(
-      *this,
-      "cloud_topics_epoch_service_epoch_increment_interval",
-      "The interval at which the cluster epoch is incremented.",
-      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
-      10min)
-  , cloud_topics_epoch_service_local_epoch_cache_duration(
-      *this,
-      "cloud_topics_epoch_service_local_epoch_cache_duration",
-      "The local cache duration of a cluster wide epoch.",
-      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
-      1min)
-  , cloud_topics_epoch_service_max_same_epoch_duration(
-      *this,
-      "cloud_topics_epoch_service_max_same_epoch_duration",
-      "The duration of time that a node can use the exact same epoch.",
-      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
-      24 * 60min)
-  , cloud_topics_short_term_gc_minimum_object_age(
-      *this,
-      "cloud_topics_short_term_gc_minimum_object_age",
-      "The minimum age of an L0 object before it becomes eligible for garbage "
-      "collection.",
-      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
-      12h)
-  , cloud_topics_short_term_gc_interval(
-      *this,
-      "cloud_topics_short_term_gc_interval",
-      "The interval between invocations of the L0 garbage collection work loop "
-      "when progress is being made.",
-      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
-      10s)
-  , cloud_topics_short_term_gc_backoff_interval(
-      *this,
-      "cloud_topics_short_term_gc_backoff_interval",
-      "The interval between invocations of the L0 garbage collection work loop "
-      "when no progress is being made or errors are occurring.",
-      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
-      1min)
-  , cloud_topics_gc_health_check_interval(
-      *this,
-      "cloud_topics_gc_health_check_interval",
-      "The interval at which the L0 garbage collector checks cluster health. "
-      "GC will not proceed while the cluster is unhealthy.",
-      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
-      10s)
-  , cloud_topics_metastore_replication_timeout_ms(
-      *this,
-      "cloud_topics_metastore_replication_timeout_ms",
-      "Timeout for L1 metastore Raft replication and waiting for the STM to "
-      "apply the replicated write batch.",
-      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
-      30s)
-  , cloud_topics_metastore_lsm_apply_timeout_ms(
-      *this,
-      "cloud_topics_metastore_lsm_apply_timeout_ms",
-      "Timeout for applying a replicated write batch to the local LSM "
-      "database. This may take longer than usual when L0 compaction is "
-      "behind and writes are being throttled.",
-      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
-      5min)
-  , cloud_topics_metastore_rpc_timeout_ms(
-      *this,
-      "cloud_topics_metastore_rpc_timeout_ms",
-      "Timeout for a single L1 metastore RPC to the metastore partition "
-      "leader. Bounds one attempt; the overall operation may retry until "
-      "cloud_topics_metastore_retry_timeout_ms elapses.",
-      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
-      30s)
-  , cloud_topics_metastore_retry_timeout_ms(
-      *this,
-      "cloud_topics_metastore_retry_timeout_ms",
-      "Overall deadline for retrying an L1 metastore operation on transport "
-      "errors. To allow more than one attempt, keep this larger than "
-      "cloud_topics_metastore_rpc_timeout_ms.",
-      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
-      90s)
-  , cloud_topics_metastore_block_cache_size(
-      *this,
-      "cloud_topics_metastore_block_cache_size",
-      "Size in bytes of the per-database uncompressed-block cache used by the "
-      "L1 metastore LSM database. Only takes effect when an LSM database is "
-      "opened (broker restart or metastore partition leadership transfer).",
-      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
-      10_MiB,
-      {.min = 1_MiB, .max = 64_GiB})
-  , cloud_topics_metastore_write_buffer_size(
-      *this,
-      "cloud_topics_metastore_write_buffer_size",
-      "Size in bytes of the memtable for the L1 metastore LSM database. Also "
-      "parameterizes per-level target SST file sizes (each level is sized "
-      "proportionally to this value). Only takes effect when an LSM database "
-      "is opened (broker restart or metastore partition leadership transfer).",
-      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
-      16_MiB,
-      {.min = 1_MiB, .max = 1_GiB})
-  , cloud_topics_metastore_max_pre_open_fibers(
-      *this,
-      "cloud_topics_metastore_max_pre_open_fibers",
-      "If non-zero, the number of fibers used to pre-open every SST file in "
-      "the L1 metastore LSM database at open time (broker restart or "
-      "partition leadership transfer), populating caches before the first "
-      "read. Set to 0 to open SSTs lazily.",
-      {.needs_restart = needs_restart::yes, .visibility = visibility::tunable},
-      10,
-      {.min = 0, .max = 1024})
-  , cloud_topics_parallel_fetch_enabled(
-      *this,
-      "cloud_topics_parallel_fetch_enabled",
-      "Enable parallel fetching in cloud topics. This mechanism improves the "
-      "throughput by allowing the broker to download data needed by the fetch "
-      "request using multiple shards.",
-      {.needs_restart = needs_restart::yes, .visibility = visibility::user},
-      true)
-  , cloud_topics_fetch_debounce_enabled(
-      *this,
-      "cloud_topics_fetch_debounce_enabled",
-      "Enables fetch debouncing in cloud topics. This mechanism guarantees "
-      "that the broker fetches every object only once improving the "
-      "performance and lowering the cost.",
-      {.needs_restart = needs_restart::yes, .visibility = visibility::user},
-      true)
-  , cloud_topics_preregistered_object_ttl(
-      *this,
-      "cloud_topics_preregistered_object_ttl",
-      "Time-to-live for pre-registered L1 objects before they are expired.",
-      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
-      1h)
-  , cloud_topics_long_term_file_deletion_delay(
-      *this,
-      "cloud_topics_long_term_file_deletion_delay",
-      "Delay before deleting stale long term files, allowing concurrent "
-      "readers (e.g. read replica topics) to finish reading them before "
-      "removal.",
-      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
-      1h)
-  , cloud_topics_num_metastore_partitions(
-      *this,
-      "cloud_topics_num_metastore_partitions",
-      "Number of partitions for the cloud topics metastore topic, used to "
-      "spread metastore load across the cluster. Higher values allow more "
-      "parallel metadata operations but reduce the amount of work each "
-      "partition can batch together. Only takes effect when the metastore "
-      "topic is first created.",
-      {.needs_restart = needs_restart::yes, .visibility = visibility::tunable},
-      3,
-      {.min = 1})
-  , cloud_topics_metastore_sst_chunk_size(
-      *this,
-      "cloud_topics_metastore_sst_chunk_size",
-      "Size of the byte ranges used to read metastore LSM SST files from "
-      "object storage into the local cache. Reads hydrate only the chunks they "
-      "cover, and a read spanning several uncached chunks fetches them in "
-      "parallel. Smaller chunks reduce read and cache amplification for point "
-      "reads; larger chunks reduce request count for scans. Changing the value "
-      "invalidates previously cached chunks.",
-      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
-      24_MiB,
-      {.min = 1_MiB})
-  , cloud_topics_produce_write_inflight_limit(
-      *this,
-      "cloud_topics_produce_write_inflight_limit",
-      "Maximum number of in-flight write requests per shard in the cloud "
-      "topics write pipeline. Requests that exceed this limit are queued "
-      "until a slot becomes available.",
-      {.needs_restart = needs_restart::yes, .visibility = visibility::tunable},
-      1024,
-      {.min = 1})
-  , cloud_topics_produce_no_pid_concurrency(
-      *this,
-      "cloud_topics_produce_no_pid_concurrency",
-      "Maximum number of concurrent raft replication requests for producers "
-      "without a producer ID (idempotency disabled). Limits how many no-PID "
-      "writes can proceed past the producer queue into raft simultaneously.",
-      {.needs_restart = needs_restart::yes, .visibility = visibility::tunable},
-      32,
-      {.min = 1})
-  , cloud_topics_l1_reader_cache_eviction_timeout_ms(
-      *this,
-      "cloud_topics_l1_reader_cache_eviction_timeout_ms",
-      "Time after which idle L1 readers are evicted from the per-shard "
-      "reader cache.",
-      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
-      60'000ms)
-  , cloud_topics_l1_reader_cache_max_size(
-      *this,
-      "cloud_topics_l1_reader_cache_max_size",
-      "Maximum number of L1 readers cached per shard. When the cache exceeds "
-      "this limit, the oldest idle reader is evicted.",
-      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
-      128,
-      {.min = 0, .max = 10000})
   , code_hugepages_enabled(
       *this,
       "code_hugepages_enabled",

@@ -133,10 +133,6 @@ std::string_view to_string_view(feature f) {
         return "group_based_authorization";
     case feature::user_based_client_quota:
         return "user_based_client_quota";
-    case feature::cloud_topics:
-        return "cloud_topics";
-    case feature::tiered_cloud_topics:
-        return "tiered_cloud_topics";
     case feature::fetch_controller_snapshot_rpc:
         return "fetch_controller_snapshot_rpc";
 

@@ -80,23 +80,6 @@ inline topic_properties non_remote_topic_properties() {
     return props;
 }
 
-inline topic_properties cloud_topic_properties() {
-    topic_properties props;
-    props.storage_mode = model::redpanda_storage_mode::cloud;
-    props.shadow_indexing = model::shadow_indexing_mode::disabled;
-    props.recovery = std::nullopt;
-    props.read_replica = std::nullopt;
-    props.cleanup_policy_bitflags = model::cleanup_policy_bitflags::deletion;
-    return props;
-}
-
-inline topic_properties read_replica_cloud_topic_properties() {
-    auto props = cloud_topic_properties();
-    props.read_replica = std::make_optional(true);
-    props.read_replica_bucket = "replica-bucket";
-    return props;
-}
-
 // Reads the given partition, returning the sequence of recovery stages
 // recorded in its log.
 inline ss::future<std::vector<cluster::recovery_stage>>

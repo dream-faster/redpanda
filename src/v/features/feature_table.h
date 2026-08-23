@@ -53,8 +53,6 @@ enum class feature : std::uint64_t {
     coordinated_compaction = 1ULL << 10U,
     cloud_retention = 1ULL << 11U,
     group_based_authorization = 1ULL << 12U,
-    cloud_topics = 1ULL << 13U,
-    tiered_cloud_topics = 1ULL << 14U,
     batch_mirror_topic_status = 1ULL << 15U,
     shadow_link_sr_api_sync = 1ULL << 16U,
     fetch_controller_snapshot_rpc = 1ULL << 18U,
@@ -527,18 +525,6 @@ inline constexpr std::array feature_schema{
     release_version::v26_1_1,
     "ordered_leaders_pinning",
     feature::ordered_leaders_pinning,
-    feature_spec::available_policy::always,
-    feature_spec::prepare_policy::always},
-  feature_spec{
-    release_version::v26_1_1,
-    "cloud_topics",
-    feature::cloud_topics,
-    feature_spec::available_policy::always,
-    feature_spec::prepare_policy::always},
-  feature_spec{
-    release_version::v26_2_1,
-    "tiered_cloud_topics",
-    feature::tiered_cloud_topics,
     feature_spec::available_policy::always,
     feature_spec::prepare_policy::always},
   feature_spec{

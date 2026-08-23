@@ -51,8 +51,6 @@ public:
           },
           _default_topic_replication.bind());
 
-        // Left un-activated: tests exercising the tiered_cloud_topics gate
-        // activate features themselves; the other tests never hit it.
         co_await _feature_table.start();
         _reconciler = std::make_unique<topic_reconciler>(
           _ftc.get(),
@@ -245,41 +243,6 @@ TEST_F_CORO(topic_reconciler_test, test_topic_creation_and_property_updates) {
                  && topic_cfg->properties.timestamp_type
                       == ::model::timestamp_type::append_time;
       });
-}
-
-TEST_F_CORO(topic_reconciler_test, storage_mode_update_gated_until_upgrade) {
-    // The shadow-link apply path bypasses the kafka handlers, so it must
-    // enforce the tiered_cloud_topics upgrade gate itself: no mirror topic
-    // may move to the tiered_v2 impl while the cluster is not fully
-    // upgraded to v26.2.
-    cluster::topic_configuration cfg(
-      ::model::kafka_namespace, ::model::topic("mirror"), 1, 1);
-    cfg.properties.storage_mode = ::model::redpanda_storage_mode::cloud;
-    cluster::topic_properties_update update(
-      {::model::kafka_namespace, ::model::topic("mirror")});
-
-    EXPECT_THROW(
-      utils::maybe_append_storage_mode_update(
-        update,
-        std::make_optional<ss::sstring>("tiered"),
-        std::make_optional<ss::sstring>("tiered_v2"),
-        cfg,
-        _feature_table.local()),
-      kafka::validation_error);
-
-    co_await _feature_table.invoke_on_all(
-      [](features::feature_table& ft) { ft.testing_activate_all(); });
-    EXPECT_TRUE(
-      utils::maybe_append_storage_mode_update(
-        update,
-        std::make_optional<ss::sstring>("tiered"),
-        std::make_optional<ss::sstring>("tiered_v2"),
-        cfg,
-        _feature_table.local()));
-    EXPECT_EQ(
-      update.properties.storage_mode.value,
-      ::model::redpanda_storage_mode::tiered_cloud);
-    co_return;
 }
 
 TEST_F_CORO(topic_reconciler_test, test_topic_failure) {

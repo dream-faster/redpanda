@@ -299,39 +299,18 @@ bool maybe_append_update(
 bool maybe_append_storage_mode_update(
   cluster::topic_properties_update& update,
   const std::optional<ss::sstring>& mode_value,
-  const std::optional<ss::sstring>& impl_value,
-  const cluster::topic_configuration& topic_config,
-  const features::feature_table& feature_table) {
-    std::optional<::model::redpanda_storage_mode> mode;
-    if (impl_value.has_value()) {
-        // The impl property is exact and always present on sources that
-        // emit it, so it takes precedence over the ambiguous mode value.
-        mode = ::model::redpanda_storage_mode_from_impl_string(*impl_value);
-        if (!mode.has_value()) {
-            throw kafka::validation_error(
-              fmt::format("Unrecognized storage mode impl '{}'", *impl_value));
-        }
-    } else if (mode_value.has_value()) {
-        // Sources that predate the impl property sync only the mode, where
-        // 'tiered' meant the classic tiered storage.
-        mode = ::model::redpanda_storage_mode_from_string(*mode_value);
-        if (!mode.has_value()) {
-            throw kafka::validation_error(
-              fmt::format("Unrecognized storage mode '{}'", *mode_value));
-        }
-    } else {
+  const cluster::topic_configuration& topic_config) {
+    if (!mode_value.has_value()) {
         return false;
+    }
+    auto mode = ::model::redpanda_storage_mode_from_string(*mode_value);
+    if (!mode.has_value()) {
+        throw kafka::validation_error(
+          fmt::format("Unrecognized storage mode '{}'", *mode_value));
     }
     auto current = topic_config.properties.storage_mode;
     if (*mode == current) {
         return false;
-    }
-    if (
-      *mode == ::model::redpanda_storage_mode::tiered_cloud
-      && !feature_table.is_active(features::feature::tiered_cloud_topics)) {
-        throw kafka::validation_error(
-          "Cannot use the tiered_v2 storage mode until the cluster is fully "
-          "upgraded to at least v26.2.1");
     }
     if (!kafka::is_storage_mode_transition_permitted(current, *mode)) {
         throw kafka::validation_error(

@@ -13,7 +13,6 @@
 #include "cloud_io/tests/s3_imposter.h"
 #include "cloud_storage/configuration.h"
 #include "cloud_storage_clients/configuration.h"
-#include "cloud_topics/test_fixture_cfg.h"
 #include "cluster/archival/types.h"
 #include "cluster/cluster_utils.h"
 #include "cluster/controller.h"      // IWYU pragma: keep; public member devex
@@ -85,9 +84,7 @@ public:
       = empty_seed_starts_cluster::yes,
       bool enable_data_transforms = false,
       bool enable_legacy_upload_mode = true,
-      bool development_cluster_linking_enabled = false,
-      cloud_topics::test_fixture_cfg ct_test_cfg
-      = cloud_topics::disable_cloud_topics_test_cfg);
+      bool development_cluster_linking_enabled = false);
 
     // creates single node with default configuration
     redpanda_thread_fixture();
@@ -102,19 +99,7 @@ public:
       init_cloud_storage_tag,
       std::optional<uint16_t> port = std::nullopt,
       cloud_storage_clients::s3_url_style url_style = default_url_style,
-      model::node_id node_id = model::node_id(1),
-      cloud_topics::test_fixture_cfg ct_test_cfg
-      = cloud_topics::disable_cloud_topics_test_cfg);
-
-    struct init_cloud_topics_tag {};
-
-    // Start redpanda with shadow indexing enabled
-    explicit redpanda_thread_fixture(
-      init_cloud_topics_tag,
-      std::optional<uint16_t> port = std::nullopt,
-      cloud_storage_clients::s3_url_style url_style = default_url_style,
-      model::node_id node_id = model::node_id(1),
-      cloud_topics::test_fixture_cfg ct_test_cfg = {});
+      model::node_id node_id = model::node_id(1));
 
     struct init_cloud_storage_no_archiver_tag {};
 
@@ -124,9 +109,7 @@ public:
     explicit redpanda_thread_fixture(
       init_cloud_storage_no_archiver_tag,
       std::optional<uint16_t> port = std::nullopt,
-      cloud_storage_clients::s3_url_style url_style = default_url_style,
-      cloud_topics::test_fixture_cfg ct_test_cfg
-      = cloud_topics::disable_cloud_topics_test_cfg);
+      cloud_storage_clients::s3_url_style url_style = default_url_style);
 
     ~redpanda_thread_fixture();
 
@@ -330,6 +313,4 @@ public:
     ss::sharded<kafka::server> proto;
     bool remove_on_shutdown;
     std::unique_ptr<::stop_signal> app_signal;
-    cloud_topics::test_fixture_cfg ct_test_cfg{
-      cloud_topics::disable_cloud_topics_test_cfg};
 };

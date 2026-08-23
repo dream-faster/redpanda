@@ -13,7 +13,6 @@
 #include "absl/container/node_hash_map.h"
 #include "absl/container/node_hash_set.h"
 #include "base/format_to.h"
-#include "cloud_topics/level_zero/stm/ctp_stm.h"
 #include "cluster/cloud_storage_size_reducer.h"
 #include "cluster/controller_service.h"
 #include "cluster/drain_manager.h"
@@ -1055,11 +1054,6 @@ partition_status build_partition_status(const partition& p) {
     status.revision_id = p.get_revision_id();
     status.size_bytes = p.size_bytes() + p.non_log_disk_size_bytes();
     status.reclaimable_size_bytes = p.reclaimable_size_bytes();
-    auto ctp_stm = p.raft()->stm_manager()->get<cloud_topics::ctp_stm>();
-    if (ctp_stm) {
-        status.cloud_topic_max_gc_eligible_epoch
-          = ctp_stm->estimate_inactive_epoch();
-    }
     status.shard = ss::this_shard_id();
 
     if (p.ntp().ns == model::kafka_namespace && p.started()) {

@@ -153,7 +153,6 @@ struct partition_status
      * std::nullopt. If the reduced value is std::nullopt then the partition
      * should be treated as if it contains no GC eligible data.
      */
-    std::optional<int64_t> cloud_topic_max_gc_eligible_epoch;
 
     /**
      * Kafka log start offset (first readable offset) for this partition
@@ -174,7 +173,6 @@ struct partition_status
           shard,
           followers_stats,
           high_watermark,
-          cloud_topic_max_gc_eligible_epoch,
           log_start_offset);
     }
 

@@ -156,27 +156,11 @@ public:
 
     // If compaction is enabled for local storage.
     bool is_locally_compacted() const {
-        if (cloud_topic_enabled()) {
-            return false;
-        }
         return model::is_compaction_enabled(cleanup_policy());
-    }
-
-    // If compaction is enabled for remote storage.
-    //
-    // NOTE: currently this is only supported for cloud topics
-    bool is_remotely_compacted() const {
-        return cloud_topic_enabled()
-               && model::is_compaction_enabled(cleanup_policy());
     }
 
     // If time/bytes based retention is enabled for local storage.
     bool is_locally_collectable() const {
-        if (cloud_topic_enabled()) {
-            // Cloud topics always manually retains the log based
-            // on what has been written to L1.
-            return false;
-        }
         return model::is_deletion_enabled(cleanup_policy());
     }
 
@@ -237,9 +221,6 @@ public:
     }
 
     topic_recovery_enabled recovery_enabled() const {
-        if (cloud_topic_enabled()) {
-            return topic_recovery_enabled::no;
-        }
         return _overrides != nullptr ? _overrides->recovery_enabled
                                      : topic_recovery_enabled::no;
     }
@@ -347,7 +328,7 @@ public:
     }
 
     bool write_caching() const {
-        if (!model::is_user_topic(_ntp) || cloud_topic_enabled()) {
+        if (!model::is_user_topic(_ntp)) {
             return false;
         }
         auto cluster_default
@@ -425,20 +406,6 @@ public:
         const auto& cluster_default
           = config::shard_local_cfg().log_cleanup_policy();
         return cleanup_policy_override().value_or(cluster_default);
-    }
-
-    bool cloud_topic_enabled() const {
-        return _overrides
-               && (_overrides->storage_mode
-                     == model::redpanda_storage_mode::cloud
-                   || _overrides->storage_mode
-                        == model::redpanda_storage_mode::tiered_cloud);
-    }
-
-    bool is_tiered_cloud() const {
-        return _overrides
-               && _overrides->storage_mode
-                    == model::redpanda_storage_mode::tiered_cloud;
     }
 
     std::optional<double> min_cleanable_dirty_ratio() const {

@@ -620,7 +620,7 @@ void application::wire_up_and_start(
       "config::node().node_id() should have an assigned value at this point in "
       "the start-up process.");
     auto node_id = config::node().node_id().value();
-    wire_up_runtime_services(node_id, app_signal, cfg.ct_test_cfg);
+    wire_up_runtime_services(node_id, app_signal);
 
     if (test_mode) {
         // When running inside a unit test fixture, we may fast-forward
@@ -656,7 +656,7 @@ void application::wire_up_and_start(
         controller->set_ready().get();
     }
 
-    start_runtime_services(app_signal, cfg.ct_test_cfg);
+    start_runtime_services(app_signal);
 
     if (_proxy_config && !config::node().recovery_mode_enabled) {
         _proxy->start().get();

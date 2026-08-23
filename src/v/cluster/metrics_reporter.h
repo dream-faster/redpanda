@@ -112,7 +112,6 @@ public:
         uint32_t partition_count{0};
 
         uint32_t local_topic_count{0};
-        uint32_t cloud_topic_count{0};
 
         cluster_version active_logical_version{invalid_version};
         cluster_version original_logical_version{invalid_version};

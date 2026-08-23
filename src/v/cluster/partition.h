@@ -30,10 +30,6 @@
 
 #include <seastar/core/shared_ptr.hh>
 
-namespace cloud_topics {
-class state_accessors;
-}; // namespace cloud_topics
-
 namespace cluster {
 class partition_manager;
 
@@ -56,8 +52,7 @@ public:
       ss::lw_shared_ptr<const archival::configuration>,
       ss::sharded<features::feature_table>&,
       ss::sharded<archival::upload_housekeeping_service>&,
-      std::optional<cloud_storage_clients::bucket_name> read_replica_bucket,
-      ss::sharded<cloud_topics::state_accessors>* ct_state);
+      std::optional<cloud_storage_clients::bucket_name> read_replica_bucket);
 
     ~partition() = default;
 
@@ -398,11 +393,6 @@ public:
     // Acquire a shared lock for producing to the partition.
     ss::future<result<ss::rwlock::holder>> hold_writes_enabled();
 
-    // Returns a pointer to cloud topics state accessors if available on the
-    // cluster, or nullptr otherwise.
-    ss::sharded<cloud_topics::state_accessors>*
-    get_cloud_topics_state() noexcept;
-
     fmt::iterator format_to(fmt::iterator it) const;
 
 private:
@@ -430,7 +420,6 @@ private:
     ss::shared_ptr<cluster::rm_stm> _rm_stm;
     ss::shared_ptr<archival_metadata_stm> _archival_meta_stm;
     ss::shared_ptr<partition_properties_stm> _partition_properties_stm;
-    ss::sharded<cloud_topics::state_accessors>* _cloud_topics_state;
     ss::abort_source _as;
     partition_probe _probe;
     ss::sharded<features::feature_table>& _feature_table;

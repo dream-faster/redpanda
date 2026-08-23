@@ -110,25 +110,14 @@ struct data_migration_table_fixture : public seastar_test {
     }
 
     ss::future<> populate_topic_table_with_topics(
-      const chunked_vector<model::topic_namespace>& to_create,
-      bool cloud_topic_enabled = false) {
+      const chunked_vector<model::topic_namespace>& to_create) {
         for (const auto& tp_ns : to_create) {
             auto p_cnt = random_generators::get_int(1, 64);
 
             topic_configuration cfg(tp_ns.ns, tp_ns.tp, p_cnt, 3);
-            // Cloud topics don't use tiered storage, but regular topics need it
-            // enabled for unmount to work.
-            if (cloud_topic_enabled) {
-                cfg.properties.shadow_indexing
-                  = model::shadow_indexing_mode::disabled;
-                cfg.properties.storage_mode
-                  = model::redpanda_storage_mode::cloud;
-            } else {
-                cfg.properties.shadow_indexing
-                  = model::shadow_indexing_mode::full;
-                cfg.properties.storage_mode
-                  = model::redpanda_storage_mode::tiered;
-            }
+            // Topics need tiered storage enabled for unmount to work.
+            cfg.properties.shadow_indexing = model::shadow_indexing_mode::full;
+            cfg.properties.storage_mode = model::redpanda_storage_mode::tiered;
             ss::chunked_fifo<partition_assignment> assignments;
             for (auto i = 0; i < p_cnt; ++i) {
                 assignments.push_back(
@@ -557,23 +546,5 @@ TEST_F_CORO(data_migration_table_fixture, test_resource_validation) {
     validate_topic_resource_state({
       {"alias-of-topic-1",
        data_migrations::migrated_resource_state::metadata_locked},
-    });
-}
-
-TEST_F_CORO(data_migration_table_fixture, test_cloud_topic_unmount_rejected) {
-    auto cloud_topics = create_topic_vector({"cloud-topic-1"});
-    co_await populate_topic_table_with_topics(
-      cloud_topics, /*cloud_topic_enabled=*/true);
-
-    data_migrations::outbound_migration odm{
-      .topics = cloud_topics.copy(), .groups = {}};
-
-    auto r = co_await try_create_migration(odm.copy());
-    EXPECT_TRUE(r.has_error());
-    EXPECT_EQ(r.error(), cluster::errc::data_migration_invalid_resources);
-
-    validate_topic_resource_state({
-      {"cloud-topic-1",
-       data_migrations::migrated_resource_state::non_restricted},
     });
 }

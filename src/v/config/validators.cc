@@ -250,16 +250,6 @@ std::optional<ss::sstring> validate_tombstone_retention_ms(
 }
 
 std::optional<ss::sstring>
-
-
-
-std::optional<ss::sstring>
-
-std::optional<ss::sstring>
-
-std::optional<ss::sstring>
-
-std::optional<ss::sstring>
 validate_consumer_group_metrics(const std::vector<ss::sstring>& metrics) {
     constexpr auto supported = std::to_array<std::string_view>(
       {"group", "partition", "consumer_lag"});
@@ -308,22 +298,6 @@ validate_cloud_storage_cluster_name(const std::optional<ss::sstring>& input) {
 }
 
 std::optional<ss::sstring>
-validate_cloud_topics_reconciliation_intervals(const configuration& config) {
-    auto min_interval = config.cloud_topics_reconciliation_min_interval();
-    auto max_interval = config.cloud_topics_reconciliation_max_interval();
-
-    if (min_interval > max_interval) {
-        return fmt::format(
-          "cloud_topics_reconciliation_min_interval ({}) must be less than or "
-          "equal to cloud_topics_reconciliation_max_interval ({})",
-          min_interval.count(),
-          max_interval.count());
-    }
-
-    return std::nullopt;
-}
-
-std::optional<ss::sstring>
 validate_default_redpanda_storage_mode(const configuration& config) {
     auto mode = config.default_redpanda_storage_mode();
 
@@ -332,22 +306,6 @@ validate_default_redpanda_storage_mode(const configuration& config) {
       && !config.cloud_storage_enabled()) {
         return fmt::format(
           "default_redpanda_storage_mode cannot be set to tiered when "
-          "cloud_storage_enabled is false");
-    }
-
-    if (
-      mode == model::redpanda_storage_mode::cloud
-      && !config.cloud_storage_enabled()) {
-        return fmt::format(
-          "default_redpanda_storage_mode cannot be set to cloud when "
-          "cloud_storage_enabled is false");
-    }
-
-    if (
-      mode == model::redpanda_storage_mode::tiered_cloud
-      && !config.cloud_storage_enabled()) {
-        return fmt::format(
-          "default_redpanda_storage_mode cannot be set to tiered_cloud when "
           "cloud_storage_enabled is false");
     }
 

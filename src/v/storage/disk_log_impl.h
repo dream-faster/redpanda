@@ -423,7 +423,7 @@ private:
 
     bool is_archival_active() const;
     // True when local segments are a reclaimable cache of cloud-resident data
-    // (legacy tiered storage or tiered_cloud); broader than
+    // (legacy tiered storage); broader than
     // is_archival_active(), which is archival-only.
     bool is_cloud_gc_active() const;
 

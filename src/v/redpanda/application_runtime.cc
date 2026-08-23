@@ -8,7 +8,6 @@
 // by the Apache License, Version 2.0
 
 #include "cloud_storage_clients/types.h"
-#include "cloud_topics/app.h"
 #include "cluster/controller.h"
 #include "cluster/utils/partition_change_notifier_impl.h"
 #include "cluster_link/service.h"
@@ -33,11 +32,9 @@
 #include <seastar/core/metrics.hh>
 
 void application::wire_up_runtime_services(
-  model::node_id node_id,
-  ::stop_signal& app_signal,
-  cloud_topics::test_fixture_cfg ct_test_cfg) {
+  model::node_id node_id, ::stop_signal& app_signal) {
     std::optional<cloud_storage_clients::bucket_name> bucket;
-    wire_up_redpanda_services(node_id, app_signal, bucket, ct_test_cfg);
+    wire_up_redpanda_services(node_id, app_signal, bucket);
     if (_proxy_config) {
         construct_single_service(
           _proxy,

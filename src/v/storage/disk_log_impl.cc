@@ -1240,11 +1240,8 @@ disk_log_impl::maybe_apply_local_storage_overrides(gc_config cfg) const {
         return cfg;
     }
 
-    // cloud_retention is disabled, do not override. Cloud-topic partitions
-    // (storage.mode in {cloud, tiered_cloud}) bypass this gate:
-    // is_archival_active() is false for them, but ctp_stm still needs
-    // the local-target override to engage under retention_local_strict.
-    if (!is_archival_active() && !config().cloud_topic_enabled()) {
+    // cloud_retention is disabled, do not override.
+    if (!is_archival_active()) {
         return cfg;
     }
 
@@ -1329,9 +1326,7 @@ bool disk_log_impl::is_archival_active() const {
            && (config().is_archival_enabled());
 }
 
-bool disk_log_impl::is_cloud_gc_active() const {
-    return is_archival_active() || config().is_tiered_cloud();
-}
+bool disk_log_impl::is_cloud_gc_active() const { return is_archival_active(); }
 
 /*
  * applies overrides for non-cloud storage settings
@@ -1787,10 +1782,6 @@ ss::future<> disk_log_impl::gc(gc_config cfg) {
 
 ss::future<std::optional<model::offset>> disk_log_impl::do_gc(gc_config cfg) {
     vassert(!_closed, "gc on closed log - {}", *this);
-    vassert(
-      !config().cloud_topic_enabled(),
-      "[{}] gc on cloud topic partition",
-      config().ntp());
 
     cfg = apply_overrides(cfg);
 
@@ -1939,7 +1930,6 @@ disk_log_impl::compute_gc_offset(gc_config cfg) {
     // unless space management has pinned _cloud_gc_offset, which then takes
     // precedence. maybe_apply_local_storage_overrides
     // bypasses the is_archival_active() gate for cloud-topic partitions
-    // (the gate is false for storage.mode in {cloud, tiered_cloud}), so the
     // local-target override engages there under retention_local_strict.
     cfg = apply_kafka_retention_overrides(cfg);
     if (_cloud_gc_offset.has_value()) {

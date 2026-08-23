@@ -264,24 +264,6 @@ ss::future<> topic_reconciler::maybe_create_mirror_topic(
         _default_topic_replication()),
       topic_configs);
 
-    // This path bypasses the kafka create validators, so it must enforce
-    // the same upgrade gate: no tiered_v2 topic may come into existence
-    // while the cluster is not fully upgraded to v26.2. Skipping is safe -
-    // the reconciler retries and creates the mirror topic once the feature
-    // activates.
-    if (
-      cfg.properties.storage_mode
-        == ::model::redpanda_storage_mode::tiered_cloud
-      && !_feature_table->local().is_active(
-        features::feature::tiered_cloud_topics)) {
-        vlog(
-          cllog.warn,
-          "Not creating mirror topic {}: cannot use the tiered_v2 storage "
-          "mode until the cluster is fully upgraded to at least v26.2.1",
-          topic);
-        co_return;
-    }
-
     auto res = co_await _topic_creator->create_topic(
       {::model::kafka_namespace, topic},
       mirror_topic_config.partition_count,
@@ -339,9 +321,7 @@ topic_reconciler::maybe_create_update_mirror_topic(
           utils::maybe_append_storage_mode_update(
             update,
             find_config(kafka::topic_property_redpanda_storage_mode),
-            find_config(kafka::topic_property_redpanda_storage_mode_impl),
-            local_topic_config,
-            _feature_table->local())) {
+            local_topic_config)) {
             config_updated = true;
         }
     } catch (const std::exception& e) {
@@ -357,10 +337,8 @@ topic_reconciler::maybe_create_update_mirror_topic(
          mirror_topic_config.topic_configs) {
         if (
           source_topic_config_name
-            == kafka::topic_property_redpanda_storage_mode
-          || source_topic_config_name
-               == kafka::topic_property_redpanda_storage_mode_impl) {
-            // Handled jointly above.
+          == kafka::topic_property_redpanda_storage_mode) {
+            // Handled above.
             continue;
         }
         // Need to check the current value of the local topic config

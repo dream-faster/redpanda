@@ -269,8 +269,7 @@ ss::future<> controller::start(
     offsets_recovery,
   std::chrono::milliseconds application_start_time,
   ss::sharded<cluster::data_migrations::group_proxy>&
-    data_migrations_group_proxy,
-  ss::sharded<cloud_topics::state_accessors>* ct_state) {
+    data_migrations_group_proxy) {
     /**
      * Switch to cluster scheduling group to ensure that all the controller
      * services are started within that scheduling group.

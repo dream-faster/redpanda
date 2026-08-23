@@ -664,34 +664,4 @@ TEST_F_CORO(unsupported_describe_configs_test, unsupported_describe_configs) {
                             source_topic_syncer::task_name);
     EXPECT_EQ(task_report.task_state, model::task_state::link_unavailable);
 }
-TEST_F_CORO(source_topic_syncer_test, cloud_topic_mirrored) {
-    auto cloud_topic = ::model::topic("cloud-topic");
-    auto normal_topic = ::model::topic("normal-topic");
-
-    fixture()->get_cluster_mock().add_topic(
-      cloud_topic, 3, 3, kafka::topic_authorized_operations(0x508));
-    fixture()->get_cluster_mock().add_topic(
-      normal_topic, 3, 3, kafka::topic_authorized_operations(0x508));
-
-    ::cluster::topic_properties cloud_props;
-    cloud_props.storage_mode = ::model::redpanda_storage_mode::cloud;
-    fixture()->get_cluster_mock().set_topic_properties(
-      cloud_topic, std::move(cloud_props));
-
-    co_await fixture()->upsert_link(get_default_metadata());
-
-    // Both topics should be mirrored
-    RPTEST_REQUIRE_EVENTUALLY_CORO(5s, [this, &normal_topic] {
-        auto link_metadata = fixture()->find_link_by_name(
-          model::name_t("test_link"));
-        return link_metadata->state.mirror_topics.contains(normal_topic);
-    });
-
-    RPTEST_REQUIRE_EVENTUALLY_CORO(5s, [this, &cloud_topic] {
-        auto link_metadata = fixture()->find_link_by_name(
-          model::name_t("test_link"));
-        return link_metadata->state.mirror_topics.contains(cloud_topic);
-    });
-}
-
 } // namespace cluster_link::tests

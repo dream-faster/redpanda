@@ -18,7 +18,29 @@ namespace cluster {
 fmt::iterator topic_properties::format_to(fmt::iterator it) const {
     return fmt::format_to(
       it,
-      "{{ compression: {}, cleanup_policy_bitflags: {}, compaction_strategy: {}, retention_bytes: {}, retention_duration_ms: {}, segment_size: {}, timestamp_type: {}, recovery_enabled: {}, shadow_indexing: {}, read_replica: {}, read_replica_bucket: {}, remote_topic_namespace_override: {}, remote_topic_properties: {}, remote_topic_allow_gaps: {}, batch_max_bytes: {}, retention_local_target_bytes: {}, retention_local_target_ms: {}, remote_delete: {}, segment_ms: {}, schema_registry_context: {}, record_key_schema_id_validation: {}, record_key_schema_id_validation_compat: {}, record_key_subject_name_strategy: {}, record_key_subject_name_strategy_compat: {}, record_value_schema_id_validation: {}, record_value_schema_id_validation_compat: {}, record_value_subject_name_strategy: {}, record_value_subject_name_strategy_compat: {}, initial_retention_local_target_bytes: {}, initial_retention_local_target_ms: {}, mpx_virtual_cluster_id: {}, write_caching: {}, flush_ms: {}, flush_bytes: {}, remote_label: {}leaders_preference: {}, delete_retention_ms: {}min_cleanable_dirty_ratio: {}, min_compaction_lag_ms: {}, max_compaction_lag_ms: {}, message_timestamp_before_max_ms: {}, message_timestamp_after_max_ms: {}, redpanda_storage_mode: {}}}",
+      "{{ compression: {}, cleanup_policy_bitflags: {}, compaction_strategy: "
+      "{}, retention_bytes: {}, retention_duration_ms: {}, segment_size: {}, "
+      "timestamp_type: {}, recovery_enabled: {}, shadow_indexing: {}, "
+      "read_replica: {}, read_replica_bucket: {}, "
+      "remote_topic_namespace_override: {}, remote_topic_properties: {}, "
+      "remote_topic_allow_gaps: {}, batch_max_bytes: {}, "
+      "retention_local_target_bytes: {}, retention_local_target_ms: {}, "
+      "remote_delete: {}, segment_ms: {}, schema_registry_context: {}, "
+      "record_key_schema_id_validation: {}, "
+      "record_key_schema_id_validation_compat: {}, "
+      "record_key_subject_name_strategy: {}, "
+      "record_key_subject_name_strategy_compat: {}, "
+      "record_value_schema_id_validation: {}, "
+      "record_value_schema_id_validation_compat: {}, "
+      "record_value_subject_name_strategy: {}, "
+      "record_value_subject_name_strategy_compat: {}, "
+      "initial_retention_local_target_bytes: {}, "
+      "initial_retention_local_target_ms: {}, mpx_virtual_cluster_id: {}, "
+      "write_caching: {}, flush_ms: {}, flush_bytes: {}, remote_label: "
+      "{}leaders_preference: {}, delete_retention_ms: "
+      "{}min_cleanable_dirty_ratio: {}, min_compaction_lag_ms: {}, "
+      "max_compaction_lag_ms: {}, message_timestamp_before_max_ms: {}, "
+      "message_timestamp_after_max_ms: {}, redpanda_storage_mode: {}}}",
       compression,
       cleanup_policy_bitflags,
       compaction_strategy,
@@ -69,10 +91,6 @@ bool topic_properties::is_local_topic() const {
     case model::redpanda_storage_mode::local:
         return true;
     case model::redpanda_storage_mode::tiered:
-        return false;
-    case model::redpanda_storage_mode::cloud:
-        return false;
-    case model::redpanda_storage_mode::tiered_cloud:
         return false;
     case model::redpanda_storage_mode::unset:
         // Unset storage mode, infer from archival and remote fetch settings.
@@ -148,15 +166,6 @@ bool topic_properties::requires_tiered_remote_erase() const {
     auto mode = shadow_indexing.value_or(model::shadow_indexing_mode::disabled);
     return mode != model::shadow_indexing_mode::disabled;
 }
-
-bool topic_properties::requires_cloud_topic_remote_erase() const {
-    // A cloud topic requires remote erase if it matches all of:
-    // * Using cloud topics
-    // * Not a read replica
-    // * Has redpanda.remote.delete=true
-    return is_cloud_topic() && !read_replica.value_or(false) && remote_delete;
-}
-
 
 bool topic_properties::is_archival_enabled() const {
     // Explicit tiered

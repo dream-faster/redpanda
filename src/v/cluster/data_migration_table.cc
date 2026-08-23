@@ -304,14 +304,6 @@ migrations_table::validate_migrated_resources(
                  "topic with name {} does not exists in current cluster", t)}};
         }
 
-        if (maybe_topic_cfg->is_cloud_topic()) {
-            return {
-              {errc::data_migration_invalid_resources,
-               ssx::sformat(
-                 "topic with name {} is a cloud topic and cannot be unmounted",
-                 t)}};
-        }
-
         if (!maybe_topic_cfg->properties.is_archival_enabled()) {
             return {
               {errc::data_migration_invalid_resources,

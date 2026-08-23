@@ -45,32 +45,6 @@ redpanda_test_cc_library(
 )
 
 redpanda_test_cc_library(
-    name = "db_s3_imposter",
-    srcs = [
-        "db_s3_imposter_fixture.cc",
-    ],
-    hdrs = [
-        "db_s3_imposter_fixture.h",
-    ],
-    implementation_deps = [
-        "//src/v/http:utils",
-        "//src/v/lsm/io:disk_persistence",
-        "//src/v/ssx:mutex",
-        "//src/v/utils:unresolved_address",
-        "@abseil-cpp//absl/container:btree",
-    ],
-    visibility = ["//visibility:public"],
-    deps = [
-        "//src/v/base",
-        "//src/v/bytes:iobuf",
-        "//src/v/cloud_storage_clients",
-        "//src/v/http/tests:utils",
-        "//src/v/lsm",
-        "@seastar",
-    ],
-)
-
-redpanda_test_cc_library(
     name = "cloud_io_cache_fixture",
     hdrs = [
         "cache_test_fixture.h",
@@ -125,25 +99,6 @@ redpanda_cc_bench(
         "@abseil-cpp//absl/container:btree",
         "@seastar",
         "@seastar//:benchmark",
-    ],
-)
-
-redpanda_cc_gtest(
-    name = "db_s3_imposter_test",
-    timeout = "short",
-    srcs = [
-        "db_s3_imposter_test.cc",
-    ],
-    deps = [
-        ":db_s3_imposter",
-        ":scoped_remote",
-        "//src/v/bytes:iobuf",
-        "//src/v/bytes:iobuf_parser",
-        "//src/v/cloud_io:io_result",
-        "//src/v/cloud_io:remote",
-        "//src/v/cloud_storage_clients",
-        "//src/v/test_utils:gtest",
-        "@googletest//:gtest",
     ],
 )
 

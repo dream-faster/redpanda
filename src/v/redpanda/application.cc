@@ -203,10 +203,6 @@ void application::shutdown() {
     // in-flight replication is stopped, and _after_ the kafka server in order
     // to ensure we don't serve any last minute requests with cloud topics
     // machinery mid tear-down.
-    if (cloud_topics_app) {
-        shutdown_with_watchdog(
-          cloud_topics_app, [](auto& app) { return app->stop(); });
-    }
 
     if (_kafka_conn_quotas.local_is_initialized()) {
         shutdown_with_watchdog(_kafka_conn_quotas, [](auto& conn_quotas) {
@@ -330,14 +326,7 @@ int application::run(int ac, char** av) {
                 initialize();
                 check_environment();
                 setup_metrics();
-                test_cfg cfg;
-                cfg.ct_test_cfg.skip_flush_loop
-                  = config::shard_local_cfg()
-                      .cloud_topics_disable_metastore_flush_loop_for_tests();
-                cfg.ct_test_cfg.skip_level_zero_gc
-                  = config::shard_local_cfg()
-                      .cloud_topics_disable_level_zero_gc_for_tests();
-                wire_up_and_start(app_signal, false, cfg);
+                wire_up_and_start(app_signal, false, test_cfg{});
                 post_start_tasks();
                 app_signal.wait().get();
                 if (!audit_mgr.local().report_redpanda_app_event(

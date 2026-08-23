@@ -85,9 +85,6 @@ get_enterprise_features(const cluster::topic_configuration& cfg) {
         if (cfg.is_read_replica()) {
             features.emplace_back("remote read replicas");
         }
-        if (cfg.is_cloud_topic()) {
-            features.emplace_back("cloud topics");
-        }
     }
 
     // Only enforce schema ID validation topic configs if Schema ID validation
@@ -140,9 +137,6 @@ std::vector<std::string_view> get_enterprise_features(
           || (old_storage_mode != tiered && new_storage_mode == tiered)
           || (properties.remote_delete < updated_properties.remote_delete)) {
             features.emplace_back("tiered storage");
-        }
-        if (updated_properties.is_cloud_topic()) {
-            features.emplace_back("cloud topics");
         }
     }
 
@@ -634,18 +628,7 @@ topic_result topics_frontend::validate_topic_configuration(
           errc::topic_invalid_config, "Tiered storage is not enabled");
     }
 
-    // the only way that cloud topics can be enabled on a topic is if cloud
-    // storage is also enabled.
     if (!config::shard_local_cfg().cloud_storage_enabled()) {
-        if (
-          assignable_config.cfg.properties.storage_mode
-          == model::redpanda_storage_mode::cloud) {
-            auto msg = ssx::sformat(
-              "Cloud storage mode on {} is set but cloud storage is disabled",
-              assignable_config.cfg.tp_ns);
-            vlog(clusterlog.error, "{}", msg);
-            return make_result(errc::topic_invalid_config, std::move(msg));
-        }
     }
 
     if (
@@ -729,8 +712,6 @@ ss::future<topic_result> topics_frontend::do_create_topic(
         co_return result;
     }
 
-    auto is_cloud_topic = assignable_config.cfg.properties.storage_mode
-                          == model::redpanda_storage_mode::cloud;
     if (assignable_config.is_read_replica()) {
         if (!assignable_config.cfg.properties.read_replica_bucket) {
             co_return make_error_result(
@@ -761,8 +742,7 @@ ss::future<topic_result> topics_frontend::do_create_topic(
               ->remote_partition_count;
     }
 
-    // TODO: implement a recovery primitive for cloud topics.
-    if (assignable_config.is_recovery_enabled() && !is_cloud_topic) {
+    if (assignable_config.is_recovery_enabled()) {
         // Before running the recovery we need to download topic_manifest.
 
         const auto& bucket_config
@@ -857,16 +837,8 @@ ss::future<topic_result> topics_frontend::do_create_topic(
       && _features.local().is_active(features::feature::remote_labels)
       && !config::shard_local_cfg()
             .cloud_storage_disable_remote_labels_for_tests.value()) {
-        auto ct_metastore_label
-          = _topics.local()
-              .get_topic_metadata_ref(model::l1_metastore_nt)
-              .and_then([](const topic_metadata& m) {
-                  return m.get_configuration().properties.remote_label;
-              });
-        auto remote_label = is_cloud_topic && ct_metastore_label
-                              ? *ct_metastore_label
-                              : cloud_storage::remote_label(
-                                  _storage.local().get_cluster_uuid().value());
+        auto remote_label = cloud_storage::remote_label(
+          _storage.local().get_cluster_uuid().value());
         assignable_config.cfg.properties.remote_label = remote_label;
         vlog(
           clusterlog.debug,
@@ -1163,10 +1135,6 @@ ss::future<topic_result> topics_frontend::do_purged_topic(
     switch (domain) {
     case topic_purge_domain::cloud_storage:
         marker_exists = _topics.local().get_lifecycle_markers().contains(topic);
-        break;
-    case topic_purge_domain::cloud_topic:
-        marker_exists = _topics.local().get_cloud_topic_tombstones().contains(
-          topic);
         break;
     }
 

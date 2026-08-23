@@ -43,10 +43,6 @@ namespace cloud_storage {
 class topic_mount_handler;
 }
 
-namespace cloud_topics {
-class state_accessors;
-} // namespace cloud_topics
-
 namespace cluster {
 
 class cluster_discovery;
@@ -246,8 +242,7 @@ public:
       ss::shared_ptr<cluster::cloud_metadata::producer_id_recovery_manager>,
       ss::shared_ptr<cluster::cloud_metadata::offsets_recovery_requestor>,
       std::chrono::milliseconds application_start_time,
-      ss::sharded<cluster::data_migrations::group_proxy>&,
-      ss::sharded<cloud_topics::state_accessors>* ct_state = nullptr);
+      ss::sharded<cluster::data_migrations::group_proxy>&);
 
     // prevents controller from accepting new requests
     ss::future<> shutdown_input();

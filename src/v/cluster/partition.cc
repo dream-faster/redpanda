@@ -49,10 +49,8 @@ partition::partition(
   ss::lw_shared_ptr<const archival::configuration> archival_conf,
   ss::sharded<features::feature_table>& feature_table,
   ss::sharded<archival::upload_housekeeping_service>& upload_hks,
-  std::optional<cloud_storage_clients::bucket_name> read_replica_bucket,
-  ss::sharded<cloud_topics::state_accessors>* ct_state)
+  std::optional<cloud_storage_clients::bucket_name> read_replica_bucket)
   : _raft(std::move(r))
-  , _cloud_topics_state(ct_state)
   , _probe(std::make_unique<replicated_partition_probe>(*this))
   , _feature_table(feature_table)
   , _archival_conf(std::move(archival_conf))
@@ -168,7 +166,7 @@ cluster::cloud_storage_mode partition::get_cloud_storage_mode() const {
 
     const auto& cfg = _raft->log_config();
 
-    if (cfg.is_read_replica_mode_enabled() && !cfg.cloud_topic_enabled()) {
+    if (cfg.is_read_replica_mode_enabled()) {
         return cluster::cloud_storage_mode::read_replica;
     }
     if (cfg.is_tiered_storage()) {
@@ -789,7 +787,6 @@ bool partition::should_construct_archiver() {
            // for it.
            && _raft->ntp().ns == model::kafka_namespace
            && _raft->ntp().tp.topic != model::kafka_consumer_offsets_topic
-           && !ntp_config.cloud_topic_enabled()
            && (ntp_config.is_archival_enabled() || ntp_config.is_read_replica_mode_enabled());
 }
 
@@ -1860,11 +1857,6 @@ ss::future<result<ss::rwlock::holder>> partition::hold_writes_enabled() {
     }
 
     co_return *std::move(maybe_units);
-}
-
-ss::sharded<cloud_topics::state_accessors>*
-partition::get_cloud_topics_state() noexcept {
-    return _cloud_topics_state;
 }
 
 } // namespace cluster

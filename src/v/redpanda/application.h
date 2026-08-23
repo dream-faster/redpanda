@@ -13,8 +13,6 @@
 
 #include "base/seastarx.h"
 #include "cloud_storage/fwd.h"
-#include "cloud_topics/app.h"
-#include "cloud_topics/test_fixture_cfg.h"
 #include "cluster/archival/fwd.h"
 #include "cluster/cluster_discovery.h"
 #include "cluster/config_manager.h"
@@ -91,7 +89,6 @@ inline const auto redpanda_start_time{
 // the defaults apply.
 struct test_cfg {
     // Cloud-topics test-fixture overrides (flush loop, level-zero GC, etc.).
-    cloud_topics::test_fixture_cfg ct_test_cfg{};
     // Whether to eagerly pre-allocate the per-shard chunk cache pool on
     // storage start. Multi-node fixture tests that run several brokers in one
     // reactor may want to disable it to avoid N-way memory allocations for each
@@ -208,7 +205,6 @@ public:
     kafka::server_app _kafka_server;
     ss::sharded<rpc::connection_cache> _connection_cache;
     ss::sharded<kafka::group_manager> _group_manager;
-    std::unique_ptr<cloud_topics::app> cloud_topics_app;
 
     ss::sharded<cluster_link::service> _cluster_link_service;
 
@@ -272,16 +268,13 @@ private:
     void start_storage_services(test_cfg cfg);
 
     // Constructs services across shards meant for Redpanda runtime.
-    void wire_up_runtime_services(
-      model::node_id node_id,
-      ::stop_signal& app_signal,
-      cloud_topics::test_fixture_cfg ct_test_cfg);
+    void
+    wire_up_runtime_services(model::node_id node_id, ::stop_signal& app_signal);
     void configure_admin_server(model::node_id);
     void wire_up_redpanda_services(
       model::node_id,
       ::stop_signal& app_signal,
-      std::optional<cloud_storage_clients::bucket_name>& bucket_name,
-      cloud_topics::test_fixture_cfg ct_test_cfg);
+      std::optional<cloud_storage_clients::bucket_name>& bucket_name);
 
     // Marks the shard_local_cfg as ready (or not ready) per the provided flag.
     ss::future<> mark_config_ready(bool ready);
@@ -345,8 +338,7 @@ private:
 
     // Starts the services meant for Redpanda runtime. Must be called after
     // having constructed the subsystems via the corresponding `wire_up` calls.
-    void start_runtime_services(
-      ::stop_signal&, cloud_topics::test_fixture_cfg ct_test_cfg);
+    void start_runtime_services(::stop_signal&);
     void start_kafka(const model::node_id&, ::stop_signal&);
     void add_runtime_rpc_services(rpc::rpc_server&, bool start_raft_rpc_early);
 

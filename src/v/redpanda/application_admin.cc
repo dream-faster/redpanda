@@ -7,7 +7,6 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0
 
-#include "cloud_topics/app.h"
 #include "cluster/controller.h"
 #include "config/node_config.h"
 #include "redpanda/admin/proxy/client.h"
@@ -16,8 +15,6 @@
 #include "redpanda/admin/services/features.h"
 #include "redpanda/admin/services/internal/breakglass.h"
 #include "redpanda/admin/services/internal/debug.h"
-#include "redpanda/admin/services/internal/level_zero.h"
-#include "redpanda/admin/services/internal/metastore.h"
 #include "redpanda/admin/services/internal/shadow_link_internal.h"
 #include "redpanda/admin/services/security.h"
 #include "redpanda/admin/services/shadow_link/shadow_link.h"
@@ -100,26 +97,6 @@ void application::configure_admin_server(model::node_id node_id) {
           s.add_service(
             std::make_unique<admin::internal::breakglass_service_impl>(
               controller.get()));
-          if (cloud_topics_app) {
-              s.add_service(
-                std::make_unique<admin::metastore_service_impl>(
-                  create_client(),
-                  cloud_topics_app->get_sharded_replicated_metastore(),
-                  &controller->get_topics_state(),
-                  &metadata_cache,
-                  &controller->get_shard_table(),
-                  cloud_topics_app->get_sharded_l1_domain_supervisor(),
-                  cloud_topics_app->get_sharded_l1_metastore_router()));
-              s.add_service(
-                std::make_unique<admin::level_zero_service_impl>(
-                  node_id,
-                  create_client(),
-                  cloud_topics_app->get_level_zero_gc(),
-                  &controller->get_members_table(),
-                  &controller->get_partition_manager(),
-                  &controller->get_partition_leaders(),
-                  &controller->get_shard_table()));
-          }
           s.add_service(
             std::make_unique<
               admin::internal::shadow_link_internal_service_impl>(

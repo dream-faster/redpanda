@@ -15,7 +15,6 @@
 #include "cloud_storage/remote.h"
 #include "cloud_storage/remote_partition.h"
 #include "cloud_storage/remote_path_provider.h"
-#include "cloud_topics/level_zero/stm/ctp_stm.h"
 #include "cluster/archival/archival_metadata_stm.h"
 #include "cluster/archival/ntp_archiver_service.h"
 #include "cluster/archival/types.h"
@@ -49,8 +48,7 @@ partition_manager::partition_manager(
   ss::lw_shared_ptr<const archival::configuration> archival_conf,
   ss::sharded<features::feature_table>& feature_table,
   ss::sharded<archival::upload_housekeeping_service>& upload_hks,
-  config::binding<std::chrono::milliseconds> partition_shutdown_timeout,
-  ss::sharded<cloud_topics::state_accessors>* cloud_topics_state)
+  config::binding<std::chrono::milliseconds> partition_shutdown_timeout)
   : _storage(storage.local())
   , _raft_manager(raft)
   , _partition_recovery_mgr(recovery_mgr)
@@ -59,8 +57,7 @@ partition_manager::partition_manager(
   , _archival_conf(std::move(archival_conf))
   , _feature_table(feature_table)
   , _upload_hks(upload_hks)
-  , _partition_shutdown_timeout(std::move(partition_shutdown_timeout))
-  , _cloud_topics_state(cloud_topics_state) {
+  , _partition_shutdown_timeout(std::move(partition_shutdown_timeout)) {
     _leader_notify_handle
       = _raft_manager.local().register_leadership_notification(
         [this](
@@ -166,15 +163,6 @@ ss::future<consensus_ptr> partition_manager::manage(
           bootstrap_params->initial_term,
           initial_nodes);
 
-        if (ntp_cfg.cloud_topic_enabled()) {
-            co_await cloud_topics::create_ctp_stm_bootstrap_snapshot(
-              std::filesystem::path(ntp_cfg.work_directory()),
-              cloud_topics::ctp_stm_seed_offsets{
-                .start_offset = model::offset_cast(
-                  bootstrap_params->start_offset),
-                .next_offset = model::offset_cast(
-                  bootstrap_params->next_offset)});
-        }
     } else {
         // NOTE: while the source cluster UUIDs of the path providers will
         // ultimately be the same, this is a different path provider than what
@@ -327,8 +315,7 @@ ss::future<consensus_ptr> partition_manager::manage(
       _archival_conf,
       _feature_table,
       _upload_hks,
-      read_replica_bucket,
-      _cloud_topics_state);
+      read_replica_bucket);
 
     _ntp_table.emplace(log->config().ntp(), p);
     _raft_table.emplace(group, p);
@@ -371,11 +358,6 @@ partition_manager::maybe_download_log(
           "Logs can't be downloaded because cloud storage is not configured. "
           "Continue creating {} without downloading the logs.",
           ntp_cfg);
-        co_return cloud_storage::log_recovery_result{};
-    }
-
-    // TODO: implement a recovery primitive for cloud topics.
-    if (ntp_cfg.cloud_topic_enabled()) {
         co_return cloud_storage::log_recovery_result{};
     }
 

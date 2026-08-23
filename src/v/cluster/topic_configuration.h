@@ -70,7 +70,6 @@ struct topic_configuration
                || properties.record_value_schema_id_validation_compat.value_or(
                  false);
     }
-    bool is_cloud_topic() const { return properties.is_cloud_topic(); }
     bool is_compacted() const { return properties.is_compacted(); }
 
     const model::topic_namespace& remote_tp_ns() const {

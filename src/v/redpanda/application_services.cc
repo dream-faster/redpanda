@@ -17,7 +17,6 @@
 #include "cloud_storage_clients/client_pool.h"
 #include "cloud_storage_clients/configuration.h"
 #include "cloud_storage_clients/upstream_registry.h"
-#include "cloud_topics/app.h"
 #include "cluster/archival/archiver_manager.h"
 #include "cluster/archival/ntp_archiver_service.h"
 #include "cluster/archival/purger.h"
@@ -82,8 +81,7 @@ make_upload_controller_config(ss::scheduling_group sg, uint64_t fs_avail);
 void application::wire_up_redpanda_services(
   model::node_id node_id,
   ::stop_signal& app_signal,
-  std::optional<cloud_storage_clients::bucket_name>& bucket_name,
-  cloud_topics::test_fixture_cfg ct_test_cfg) {
+  std::optional<cloud_storage_clients::bucket_name>& bucket_name) {
     ss::smp::invoke_on_all([] {
         resources::available_memory::local().register_metrics();
     }).get();
@@ -281,22 +279,6 @@ void application::wire_up_redpanda_services(
     producer_manager.invoke_on_all(&cluster::tx::producer_state_manager::start)
       .get();
 
-    if (
-      config::shard_local_cfg().cloud_storage_enabled()
-      && !ct_test_cfg.disable_cloud_topics) {
-        vassert(
-          archival_storage_enabled(),
-          "cloud topics currently requires archival storage to be enabled");
-        syschecks::systemd_message("Initializing cloud topics subsystems")
-          .get();
-
-        // Initialize the cloud topics app to be able to pass it around to the
-        // partition manager.
-        // NOTE: this only instantiates the app; underlying services are
-        // constructed separately once more of the subsystems are available.
-        cloud_topics_app = std::make_unique<cloud_topics::app>(
-          fmt::format("{}/cloud_topics", _log.name()));
-    }
     syschecks::systemd_message("Adding partition manager").get();
     construct_service(
       partition_manager,
@@ -321,8 +303,7 @@ void application::wire_up_redpanda_services(
       ss::sharded_parameter([] {
           return config::shard_local_cfg()
             .partition_manager_shutdown_watchdog_timeout.bind();
-      }),
-      cloud_topics_app ? cloud_topics_app->get_state() : nullptr)
+      }))
       .get();
     vlog(_log.info, "Partition manager started");
     construct_service(
@@ -706,25 +687,6 @@ void application::wire_up_redpanda_services(
       &storage_node,
       &shadow_index_cache,
       &partition_manager);
-
-    if (cloud_topics_app) {
-        syschecks::systemd_message("Starting cloud topics subsystems").get();
-        cloud_topics_app
-          ->construct(
-            node_id,
-            controller.get(),
-            &controller->get_partition_leaders(),
-            &controller->get_shard_table(),
-            &cloud_io,
-            &shadow_index_cache,
-            &metadata_cache,
-            &_connection_cache,
-            bucket_name.value(),
-            &storage,
-            ct_test_cfg.skip_flush_loop,
-            ct_test_cfg.skip_level_zero_gc)
-          .get();
-    }
 
     // group membership
     syschecks::systemd_message("Creating kafka group manager").get();

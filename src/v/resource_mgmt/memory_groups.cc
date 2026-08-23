@@ -29,10 +29,6 @@ bool wasm_enabled() {
            && !config::node().emergency_disable_data_transforms.value();
 }
 
-bool cloud_storage_enabled() {
-    return config::shard_local_cfg().cloud_storage_enabled();
-}
-
 struct memory_shares {
     constexpr static size_t chunk_cache = 15;
     constexpr static size_t kafka = 30;
@@ -41,16 +37,12 @@ struct memory_shares {
     constexpr static size_t tiered_storage = 10;
     constexpr static size_t admin = 2;
     constexpr static size_t data_transforms = 10;
-    constexpr static size_t cloud_topics = 10;
 
-    static size_t total_shares(bool with_wasm, bool with_cloud_storage) {
+    static size_t total_shares(bool with_wasm) {
         size_t total = chunk_cache + kafka + rpc + recovery + tiered_storage
                        + admin;
         if (with_wasm) {
             total += data_transforms;
-        }
-        if (with_cloud_storage) {
-            total += cloud_topics;
         }
         return total;
     }
@@ -72,24 +64,16 @@ partitions_memory_reservation::reserved_bytes(size_t total_memory) const {
 system_memory_groups::system_memory_groups(
   size_t total_available_memory,
   compaction_memory_reservation compaction,
-  cloud_topics_compaction_memory_reservation cloud_topics_compaction,
-  cloud_topics_reconciler_memory_reservation cloud_topics_reconciler,
   data_transforms_memory_reservation data_transforms,
   bool wasm_enabled,
-  bool cloud_storage_enabled,
   partitions_memory_reservation partitions)
   : _compaction_reserved_memory(
       compaction.reserved_bytes(total_available_memory))
-  , _cloud_topics_compaction_reserved_memory(
-      cloud_topics_compaction.reserved_bytes())
-  , _cloud_topics_reconciler_reserved_memory(
-      cloud_topics_reconciler.reserved_bytes())
   , _data_transforms_reserved_memory(data_transforms.reserved_bytes())
   , _partitions_reserved_memory(
       partitions.reserved_bytes(total_available_memory))
   , _total_available_memory(total_available_memory)
-  , _wasm_enabled(wasm_enabled)
-  , _cloud_storage_enabled(cloud_storage_enabled) {}
+  , _wasm_enabled(wasm_enabled) {}
 
 size_t system_memory_groups::chunk_cache_min_memory() const {
     return chunk_cache_max_memory() / 3;
@@ -126,22 +110,13 @@ size_t system_memory_groups::data_transforms_max_memory() const {
     return subsystem_memory<memory_shares::data_transforms>();
 }
 
-size_t system_memory_groups::cloud_topics_memory() const {
-    if (!_cloud_storage_enabled) {
-        return 0;
-    }
-    return subsystem_memory<memory_shares::cloud_topics>();
-}
-
 size_t system_memory_groups::partitions_max_memory() const {
     return _partitions_reserved_memory;
 }
 
 size_t system_memory_groups::total_reserved_memory() const {
-    return _compaction_reserved_memory
-           + _cloud_topics_compaction_reserved_memory
-           + _cloud_topics_reconciler_reserved_memory
-           + _data_transforms_reserved_memory + _partitions_reserved_memory;
+    return _compaction_reserved_memory + _data_transforms_reserved_memory
+           + _partitions_reserved_memory;
 }
 
 double system_memory_groups::partitions_max_memory_share() const {
@@ -152,8 +127,7 @@ double system_memory_groups::partitions_max_memory_share() const {
 template<size_t shares>
 size_t system_memory_groups::subsystem_memory() const {
     size_t per_share_amount = total_memory()
-                              / memory_shares::total_shares(
-                                _wasm_enabled, _cloud_storage_enabled);
+                              / memory_shares::total_shares(_wasm_enabled);
     return per_share_amount * shares;
 }
 
@@ -178,8 +152,7 @@ void system_memory_groups::log_memory_group_allocations(seastar::logger& log) {
       "Per shard memory group allocations: total memory: {}, reserved memory: "
       "{}, total memory minus pre-share reservations: {}, chunk cache: {}, "
       "kafka: {}, rpc: {}, recovery: {}, tiered storage: {}, admin: {}, data "
-      "transforms: {}, compaction: {}, cloud topics compaction: {}, cloud "
-      "topics reconciler: {}, data transforms reserved: {}, "
+      "transforms: {}, compaction: {}, data transforms reserved: {}, "
       "partitions: {}",
       human::bytes(ss::memory::stats().total_memory()),
       human::bytes(total_reserved_memory()),
@@ -192,8 +165,6 @@ void system_memory_groups::log_memory_group_allocations(seastar::logger& log) {
       human::bytes(admin_max_memory()),
       human::bytes(data_transforms_max_memory()),
       human::bytes(compaction_reserved_memory()),
-      human::bytes(cloud_topics_compaction_reserved_memory()),
-      human::bytes(cloud_topics_reconciler_reserved_memory()),
       human::bytes(data_transforms_reserved_memory()),
       human::bytes(partitions_max_memory()));
 }
@@ -211,7 +182,6 @@ system_memory_groups& memory_groups() {
 
     auto sliding_window_compaction = sliding_window_compaction_enabled();
     auto wasm = wasm_enabled();
-    auto cloud_storage = cloud_storage_enabled();
 
     const auto& cfg = config::shard_local_cfg();
     compaction_memory_reservation compaction{
@@ -224,26 +194,13 @@ system_memory_groups& memory_groups() {
       .max_bytes = wasm
                      ? cfg.data_transforms_per_core_memory_reservation.value()
                      : 0};
-    cloud_topics_compaction_memory_reservation cloud_topics_compaction{
-      .max_bytes = cloud_storage
-                     ? cfg.cloud_topics_compaction_key_map_memory.value()
-                         + cfg.cloud_topics_upload_part_size()
-                     : 0};
-    cloud_topics_reconciler_memory_reservation cloud_topics_reconciler{
-      .max_bytes = cloud_storage
-                     ? cfg.cloud_topics_upload_part_size()
-                         * cfg.cloud_topics_reconciliation_parallelism()
-                     : 0};
     partitions_memory_reservation partitions{
       .max_limit_pct = cfg.topic_partitions_memory_allocation_percent()};
     groups.emplace(
       ss::memory::stats().total_memory(),
       compaction,
-      cloud_topics_compaction,
-      cloud_topics_reconciler,
       data_transforms,
       wasm,
-      cloud_storage,
       partitions);
     return *groups;
 }

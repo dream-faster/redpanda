@@ -87,16 +87,14 @@ redpanda_thread_fixture::redpanda_thread_fixture(
   const empty_seed_starts_cluster empty_seed_starts_cluster_val,
   bool enable_data_transforms,
   bool enable_legacy_upload_mode,
-  bool development_cluster_linking_enabled,
-  cloud_topics::test_fixture_cfg ct_test_cfg)
+  bool development_cluster_linking_enabled, )
   : app(ssx::sformat("redpanda-{}", node_id()))
   , proxy_port(proxy_port)
   , schema_reg_port(schema_reg_port)
   , kafka_port(kafka_port)
   , data_dir(std::move(base_dir))
   , remove_on_shutdown(remove_on_shutdown)
-  , app_signal(std::make_unique<::stop_signal>())
-  , ct_test_cfg(ct_test_cfg) {
+  , app_signal(std::make_unique<::stop_signal>()) {
     configure(
       node_id,
       kafka_port,
@@ -130,9 +128,7 @@ redpanda_thread_fixture::redpanda_thread_fixture(
         app.establish_cluster_view(app_signal->abort_source());
         app.check_environment();
         app.wire_up_and_start(
-          *app_signal,
-          true,
-          test_cfg{.ct_test_cfg = ct_test_cfg, .chunk_cache_prealloc = false});
+          *app_signal, true, test_cfg{.chunk_cache_prealloc = false});
     } catch (...) {
         // shutdown half-initialized app nicely so that its destructor doesn't
         // assert and the exception bubbles up
@@ -209,8 +205,7 @@ redpanda_thread_fixture::redpanda_thread_fixture(
   init_cloud_storage_tag,
   std::optional<uint16_t> port,
   cloud_storage_clients::s3_url_style url_style,
-  model::node_id node_id,
-  cloud_topics::test_fixture_cfg ct_test_cfg)
+  model::node_id node_id, )
   : redpanda_thread_fixture(
       node_id,
       9092,
@@ -228,41 +223,12 @@ redpanda_thread_fixture::redpanda_thread_fixture(
       false,
       true,
       false,
-      false,
-      ct_test_cfg) {}
-
-// Start redpanda with shadow indexing enabled
-redpanda_thread_fixture::redpanda_thread_fixture(
-  init_cloud_topics_tag,
-  std::optional<uint16_t> port,
-  cloud_storage_clients::s3_url_style url_style,
-  model::node_id node_id,
-  cloud_topics::test_fixture_cfg ct_test_cfg)
-  : redpanda_thread_fixture(
-      node_id,
-      9092,
-      33145,
-      8082,
-      8081,
-      {},
-      test_directory(),
-      true,
-      get_s3_config(port, url_style),
-      get_archival_config(),
-      get_cloud_config(port, url_style),
-      configure_node_id::yes,
-      empty_seed_starts_cluster::yes,
-      false,
-      true,
-      false,
-      false,
-      ct_test_cfg) {}
+      false) {}
 
 redpanda_thread_fixture::redpanda_thread_fixture(
   init_cloud_storage_no_archiver_tag,
   std::optional<uint16_t> port,
-  cloud_storage_clients::s3_url_style url_style,
-  cloud_topics::test_fixture_cfg ct_test_cfg)
+  cloud_storage_clients::s3_url_style url_style, )
   : redpanda_thread_fixture(
       model::node_id(1),
       9092,
@@ -280,8 +246,7 @@ redpanda_thread_fixture::redpanda_thread_fixture(
       false,
       true,
       false,
-      false,
-      ct_test_cfg) {}
+      false) {}
 
 redpanda_thread_fixture::~redpanda_thread_fixture() {
     shutdown();
@@ -358,9 +323,7 @@ void redpanda_thread_fixture::restart(should_wipe w) {
     app.establish_cluster_view(app_signal->abort_source());
     app.check_environment();
     app.wire_up_and_start(
-      *app_signal,
-      true,
-      test_cfg{.ct_test_cfg = ct_test_cfg, .chunk_cache_prealloc = false});
+      *app_signal, true, test_cfg{.chunk_cache_prealloc = false});
 }
 
 void redpanda_thread_fixture::configure(
