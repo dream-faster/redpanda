@@ -46,25 +46,7 @@ ss::future<usage>
 usage_manager::usage_accounting_fiber::close_current_window() {
     auto u = co_await _um.map_reduce0(
       [](usage_manager& um) { return um.sample(); }, usage{}, std::plus<>());
-    u.bytes_cloud_storage = co_await get_cloud_usage_data();
     co_return u;
-}
-
-ss::future<std::optional<uint64_t>>
-usage_manager::usage_accounting_fiber::get_cloud_usage_data() {
-    vassert(
-      ss::this_shard_id() == usage_manager::usage_manager_main_shard
-        && ss::this_shard_id() == ss::shard_id(0),
-      "Usage manager accounting fiber must run on shard 0");
-    const auto is_leader = _controller->is_raft0_leader();
-    if (!is_leader) {
-        co_return std::nullopt;
-    }
-    const auto expiry = std::min<std::chrono::seconds>(
-      max_history(), std::chrono::seconds(10));
-    auto health_overview = co_await _health_monitor.get_cluster_health_overview(
-      ss::lowres_clock::now() + expiry);
-    co_return health_overview.bytes_in_cloud_storage;
 }
 
 usage_manager::usage_manager(

@@ -12,15 +12,10 @@
 #include "absl/log/globals.h"
 #include "base/vlog.h"
 #include "cli_parser.h"
-#include "cloud_io/cache_service.h"
-#include "cloud_storage_clients/client_pool.h"
-#include "cluster/cloud_metadata/offsets_upload_router.h"
-#include "cluster/cloud_metadata/offsets_uploader.h"
 #include "cluster/cluster_discovery.h"
 #include "cluster/config_manager.h"
 #include "cluster/controller.h"
 #include "cluster/node_isolation_watcher.h"
-#include "cluster/topic_recovery_service.h"
 #include "compression/async_stream_zstd.h"
 #include "compression/lz4_decompression_buffers.h"
 #include "compression/stream_zstd.h"
@@ -99,21 +94,6 @@ void application::shutdown() {
             return rpc_server.invoke_on_all(&rpc::rpc_server::shutdown_input);
         });
     }
-    // Stop routing upload requests, as each may take a while to finish.
-    if (offsets_upload_router.local_is_initialized()) {
-        shutdown_with_watchdog(
-          offsets_upload_router, [](auto& offsets_upload_router) {
-              return offsets_upload_router.invoke_on_all(
-                &cluster::cloud_metadata::offsets_upload_router::request_stop);
-          });
-    }
-    if (offsets_uploader.local_is_initialized()) {
-        shutdown_with_watchdog(offsets_uploader, [](auto& offsets_uploader) {
-            return offsets_uploader.invoke_on_all(
-              &cluster::cloud_metadata::offsets_uploader::request_stop);
-        });
-    }
-
     // We schedule shutting down controller input and aborting its operation as
     // one of the first shutdown steps. This way we terminate all long running
     // operations before shutting down the RPC server, preventing it from
@@ -140,35 +120,6 @@ void application::shutdown() {
         });
     }
 
-    if (topic_recovery_service.local_is_initialized()) {
-        shutdown_with_watchdog(
-          topic_recovery_service, [](auto& topic_recovery_service) {
-              return topic_recovery_service.invoke_on_all(
-                &cloud_storage::topic_recovery_service::shutdown_recovery);
-          });
-    }
-
-    if (upstreams.local_is_initialized()) {
-        upstreams
-          .invoke_on_all(
-            &cloud_storage_clients::upstream_registry::prepare_stop)
-          .get();
-    }
-
-    // Stop any I/O to object store: this will cause any readers in flight
-    // to abort and enables partition shutdown to proceed reliably.
-    if (cloud_storage_clients.local_is_initialized()) {
-        shutdown_with_watchdog(
-          cloud_storage_clients, [](auto& cloud_storage_clients) {
-              return cloud_storage_clients.invoke_on_all(
-                &cloud_storage_clients::client_pool::shutdown_connections);
-          });
-    }
-    if (cloud_io.local_is_initialized()) {
-        shutdown_with_watchdog(cloud_io, [](auto& cloud_io) {
-            return cloud_io.invoke_on_all(&cloud_io::remote::request_stop);
-        });
-    }
     // Stop all partitions before destructing the subsystems (transaction
     // coordinator, etc). This interrupts ongoing replication requests,
     // allowing higher level state machines to shutdown cleanly.
@@ -189,11 +140,6 @@ void application::shutdown() {
             return kafka_server.stop();
         });
     }
-
-    // Shutdown cloud topics _after_ partitions have been shut down to ensure
-    // in-flight replication is stopped, and _after_ the kafka server in order
-    // to ensure we don't serve any last minute requests with cloud topics
-    // machinery mid tear-down.
 
     if (_kafka_conn_quotas.local_is_initialized()) {
         shutdown_with_watchdog(_kafka_conn_quotas, [](auto& conn_quotas) {
@@ -790,8 +736,6 @@ void application::check_environment() {
     storage::directories::initialize(
       config::node().data_directory().as_sstring())
       .get();
-    cloud_io::cache::initialize(config::node().cloud_storage_cache_path())
-      .get();
 
     if (config::shard_local_cfg().storage_strict_data_init()) {
         // Look for the special file that indicates a user intends
@@ -880,13 +824,6 @@ void application::schedule_crash_tracker_file_cleanup() {
             _crash_tracker_service->stop().get();
         }
     });
-}
-
-bool application::requires_cloud_io() { return archival_storage_enabled(); }
-
-bool application::archival_storage_enabled() {
-    const auto& cfg = config::shard_local_cfg();
-    return cfg.cloud_storage_enabled();
 }
 
 void application::trigger_abort_source() {

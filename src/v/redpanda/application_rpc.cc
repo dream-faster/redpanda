@@ -7,9 +7,7 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0
 
-#include "cluster/cloud_metadata/offsets_recovery_service.h"
 #include "cluster/controller.h"
-#include "cluster/data_migration_service_handler.h"
 #include "cluster/ephemeral_credential_service.h"
 #include "cluster/id_allocator.h"
 #include "cluster/metadata_dissemination_handler.h"
@@ -19,7 +17,6 @@
 #include "cluster/partition_manager.h"
 #include "cluster/self_test_rpc_handler.h"
 #include "cluster/service.h"
-#include "cluster/topic_recovery_status_rpc_handler.h"
 #include "cluster/tx_gateway.h"
 #include "config/configuration.h"
 #include "config/node_config.h"
@@ -35,13 +32,6 @@ void application::add_runtime_rpc_services(
   rpc::rpc_server& s, bool start_raft_rpc_early) {
     std::vector<std::unique_ptr<rpc::service>> runtime_services;
     runtime_services.push_back(
-      std::make_unique<cluster::cloud_metadata::offsets_recovery_rpc_service>(
-        scheduling_groups::instance().archival_upload(),
-        smp_service_groups.cluster_smp_sg(),
-        std::ref(offsets_lookup),
-        std::ref(offsets_recovery_router),
-        std::ref(offsets_upload_router)));
-    runtime_services.push_back(
       std::make_unique<cluster::id_allocator>(
         scheduling_groups::instance().raft_recv_sg(),
         smp_service_groups.raft_smp_sg(),
@@ -56,12 +46,6 @@ void application::add_runtime_rpc_services(
         _rm_group_proxy.get(),
         std::ref(rm_partition_frontend)));
 
-    runtime_services.push_back(
-      std::make_unique<cluster::topic_recovery_status_rpc_handler>(
-        scheduling_groups::instance().cluster_sg(),
-        smp_service_groups.cluster_smp_sg(),
-        std::ref(topic_recovery_service)));
-
     if (config::node().recovery_mode_enabled()) {
         runtime_services.push_back(
           std::make_unique<cluster::tx_manager_migrator_handler>(
@@ -75,13 +59,6 @@ void application::add_runtime_rpc_services(
             config::node().node_id().value(),
             _as.local()));
     }
-    runtime_services.push_back(
-      std::make_unique<cluster::data_migrations::service_handler>(
-        scheduling_groups::instance().cluster_sg(),
-        smp_service_groups.cluster_smp_sg(),
-        std::ref(controller->get_data_migration_frontend()),
-        std::ref(controller->get_data_migration_irpc_frontend()),
-        std::ref(controller->get_data_migration_router())));
     runtime_services.push_back(
       std::make_unique<admin::proxy::service_impl>(
         scheduling_groups::instance().admin_sg(),

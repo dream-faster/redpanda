@@ -93,7 +93,7 @@ void application::wire_up_storage_services() {
     construct_single_service_sharded(
       storage_node,
       config::node().data_directory().as_sstring(),
-      config::node().cloud_storage_cache_path().string())
+      config::node().data_directory().as_sstring())
       .get();
     construct_single_service_sharded(
       local_monitor,
@@ -631,9 +631,6 @@ void application::wire_up_and_start(
         }
     } else {
         // Only populate migrators in non-unit-test mode
-        _migrators.push_back(
-          std::make_unique<features::migrators::cloud_storage_config>(
-            *controller));
         _migrators.push_back(
           std::make_unique<features::migrators::rbac_migrator>(*controller));
         _migrators.push_back(

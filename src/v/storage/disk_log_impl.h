@@ -174,26 +174,7 @@ public:
 
     ss::future<usage_report> disk_usage(gc_config) override;
 
-    /*
-     * Interface for disk space management (see resource_mgmt/storage.cc).
-     *
-     * Manager will use `cloud_gc_eligible_segments` to determine the point at
-     * which the partition should be prefix truncated, subject to data being
-     * uploaded into the cloud.
-     *
-     * Finally, the target offset is set via `set_cloud_gc_offset` which will be
-     * used to configure garbage collection during the next GC pass at which
-     * point the request will be cleared.
-     *
-     * Caller will generally configure many partitions and then trigger GC
-     * across all partitions.
-     */
     auto& gate() { return _compaction_housekeeping_gate; }
-    chunked_vector<ss::lw_shared_ptr<segment>> cloud_gc_eligible_segments();
-    void set_cloud_gc_offset(model::offset) override;
-
-    ss::future<reclaimable_offsets>
-    get_reclaimable_offsets(gc_config cfg) override;
 
     std::optional<ssx::semaphore_units> try_segment_roll_lock() {
         return _segments_rolling_lock.try_get_units();
@@ -211,7 +192,6 @@ public:
     /// adjusts bogus (future) retention timestamps, mutating segment indexes
     /// when an entire segment is bogus, then returns the offset GC would
     /// evict to. Usually derived from local retention; when space management
-    /// has set _cloud_gc_offset, that offset is returned and consumed (reset)
     /// here, so the caller is responsible for acting on it.
     ss::future<std::optional<model::offset>>
     compute_gc_offset(gc_config cfg) final;
@@ -421,12 +401,6 @@ private:
     gc_config maybe_apply_local_storage_overrides(gc_config) const;
     gc_config apply_local_storage_overrides(gc_config) const;
 
-    bool is_archival_active() const;
-    // True when local segments are a reclaimable cache of cloud-resident data
-    // (legacy tiered storage); broader than
-    // is_archival_active(), which is archival-only.
-    bool is_cloud_gc_active() const;
-
     // returns retention_offset(cfg) but may also first apply adjustments to
     // future timestamps if this option is turned on in configuration.
     ss::future<std::optional<model::offset>>
@@ -530,8 +504,6 @@ private:
     // This counter is incremented when the log is truncated. It doesn't
     // count logical truncations and can be incremented multiple times.
     size_t _suffix_truncation_indicator{0};
-
-    std::optional<model::offset> _cloud_gc_offset;
 
     // The offset at which the last window compaction finished, above which keys
     // have been fully deduplicated. The next round of window compaction

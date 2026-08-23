@@ -158,30 +158,6 @@ struct replication_factor_must_be_greater_or_equal_to_minimum {
     }
 };
 
-struct remote_read_and_write_are_not_supported_for_read_replica {
-    static constexpr error_code ec = error_code::invalid_config;
-    static constexpr const char* error_message
-      = "remote read and write are not supported for read replicas";
-
-    static bool is_valid(const creatable_topic& c, features::feature_table*) {
-        auto config_entries = config_map(c.configs);
-        auto end = config_entries.end();
-        bool is_recovery
-          = (config_entries.find(topic_property_recovery) != end);
-        bool is_read_replica
-          = (config_entries.find(topic_property_read_replica) != end);
-        bool remote_read
-          = (config_entries.find(topic_property_remote_read) != end);
-        bool remote_write
-          = (config_entries.find(topic_property_remote_write) != end);
-
-        if (is_read_replica && (remote_read || remote_write || is_recovery)) {
-            return false;
-        }
-        return true;
-    }
-};
-
 struct batch_max_bytes_limits {
     static constexpr error_code ec = error_code::invalid_config;
     static constexpr const char* error_message
@@ -375,46 +351,6 @@ struct min_max_compaction_lag_ms_validator {
         const auto max_lag = get_config_value<int64_t>(
           entries, topic_property_max_compaction_lag_ms);
         return !(min_lag && max_lag && (min_lag > max_lag));
-    }
-};
-
-/*
- * Validates that storage_mode is compatible with the cluster configuration:
- * - 'tiered' mode requires cloud_storage_enabled()
- * - 'local' mode is always allowed
- */
-struct storage_mode_config_validator {
-    static constexpr const char* error_message
-      = "Invalid storage mode: redpanda.storage.mode accepts local, tiered or "
-        "unset. The tiered mode requires cloud storage to be enabled.";
-    static constexpr error_code ec = error_code::invalid_config;
-
-    static bool is_valid(const creatable_topic& c, features::feature_table*) {
-        auto it = std::find_if(
-          c.configs.begin(),
-          c.configs.end(),
-          [](const createable_topic_config& cfg) {
-              return cfg.name == topic_property_redpanda_storage_mode;
-          });
-        if (it == c.configs.end() || !it->value.has_value()) {
-            return true;
-        }
-        auto mode = model::redpanda_storage_mode_from_user_string(
-          it->value.value());
-        if (!mode.has_value()) {
-            return false;
-        }
-        switch (*mode) {
-        case model::redpanda_storage_mode::local:
-            return true;
-        case model::redpanda_storage_mode::tiered:
-            return config::shard_local_cfg().cloud_storage_enabled();
-        case model::redpanda_storage_mode::unset:
-            // unset is always valid - actual behavior depends on
-            // shadow_indexing
-            return true;
-        }
-        return false;
     }
 };
 

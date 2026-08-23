@@ -118,7 +118,6 @@ void usage_window::reset(uint64_t now) {
     end = 0;
     u.bytes_sent = 0;
     u.bytes_received = 0;
-    u.bytes_cloud_storage = std::nullopt;
 }
 
 template<typename clock_type>
@@ -319,8 +318,6 @@ ss::future<> usage_aggregator<clock_type>::grab_data(size_t idx) {
         const auto usage_data = co_await close_current_window();
         if (!is_bucket_stale(idx, ts)) {
             _buckets[idx].u += usage_data;
-            _buckets[idx].u.bytes_cloud_storage
-              = usage_data.bytes_cloud_storage;
         }
     } catch (const std::exception& e) {
         vlog(

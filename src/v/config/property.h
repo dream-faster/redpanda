@@ -12,7 +12,6 @@
 #pragma once
 #include "base/oncore.h"
 #include "base/type_traits.h"
-#include "cloud_io/admission_control_types.h"
 #include "config/base_property.h"
 #include "config/logger.h"
 #include "config/rjson_serialization.h"
@@ -746,17 +745,7 @@ consteval std::string_view property_type_name() {
         return "number";
     } else if constexpr (std::is_integral_v<type>) {
         return "integer";
-    } else if constexpr (
-      std::is_same_v<type, model::cloud_credentials_source>) {
-        return "string";
-    } else if constexpr (std::is_same_v<type, s3_url_style>) {
-        return "string";
-    } else if constexpr (std::is_same_v<type, model::cloud_storage_backend>) {
-        return "string";
     } else if constexpr (std::is_same_v<type, std::filesystem::path>) {
-        return "string";
-    } else if constexpr (
-      std::is_same_v<type, model::cloud_storage_chunk_eviction_strategy>) {
         return "string";
     } else if constexpr (std::is_same_v<type, model::leader_balancer_mode>) {
         return "string";
@@ -764,9 +753,6 @@ consteval std::string_view property_type_name() {
         return "string";
     } else if constexpr (std::is_same_v<type, model::write_caching_mode>) {
         return "string";
-    } else if constexpr (
-      std::is_same_v<type, model::recovery_validation_mode>) {
-        return "recovery_validation_mode";
     } else if constexpr (std::is_same_v<type, config::fips_mode_flag>) {
         return "string";
     } else if constexpr (std::is_same_v<type, config::tls_version>) {
@@ -786,10 +772,6 @@ consteval std::string_view property_type_name() {
         return "string";
     } else if constexpr (
       std::is_same_v<type, security::oidc::nested_group_behavior>) {
-        return "string";
-    } else if constexpr (std::is_same_v<type, model::redpanda_storage_mode>) {
-        return "string";
-    } else if constexpr (std::is_same_v<type, cloud_io::policy_type>) {
         return "string";
     } else {
         static_assert(

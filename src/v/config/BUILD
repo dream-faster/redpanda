@@ -53,7 +53,6 @@ redpanda_cc_library(
     visibility = ["//visibility:public"],
     deps = [
         "//src/v/base",
-        "//src/v/cloud_io:admission_control_types",
         "//src/v/container:chunked_hash_map",
         "//src/v/container:intrusive",
         "//src/v/features:enterprise_feature_messages",

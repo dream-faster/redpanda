@@ -427,26 +427,6 @@ fmt::iterator format_to(cloud_credentials_source cs, fmt::iterator out) {
     return fmt::format_to(out, "unknown");
 }
 
-fmt::iterator format_to(shadow_indexing_mode si, fmt::iterator out) {
-    switch (si) {
-    case shadow_indexing_mode::disabled:
-        return fmt::format_to(out, "disabled");
-    case shadow_indexing_mode::archival:
-        return fmt::format_to(out, "archival");
-    case shadow_indexing_mode::fetch:
-        return fmt::format_to(out, "fetch");
-    case shadow_indexing_mode::full:
-        return fmt::format_to(out, "full");
-    case shadow_indexing_mode::drop_archival:
-        return fmt::format_to(out, "drop_archival");
-    case shadow_indexing_mode::drop_fetch:
-        return fmt::format_to(out, "drop_fetch");
-    case shadow_indexing_mode::drop_full:
-        return fmt::format_to(out, "drop_full");
-    }
-    return fmt::format_to(out, "unknown");
-}
-
 fmt::iterator format_to(control_record_type crt, fmt::iterator out) {
     switch (crt) {
     case control_record_type::tx_abort:
@@ -528,89 +508,6 @@ write_caching_mode_from_string(std::string_view s) {
           model::write_caching_mode::disabled),
         model::write_caching_mode::disabled)
       .default_match(std::nullopt);
-}
-
-fmt::iterator format_to(redpanda_storage_mode mode, fmt::iterator out) {
-    return fmt::format_to(out, "{}", redpanda_storage_mode_to_string(mode));
-}
-
-std::istream& operator>>(std::istream& i, redpanda_storage_mode& mode) {
-    ss::sstring s;
-    i >> s;
-    auto value = redpanda_storage_mode_from_string(s);
-    if (!value) {
-        i.setstate(std::ios::failbit);
-        return i;
-    }
-    mode = *value;
-    return i;
-}
-
-std::optional<redpanda_storage_mode>
-redpanda_storage_mode_from_string(std::string_view s) {
-    return string_switch<std::optional<redpanda_storage_mode>>(s)
-      .match(
-        model::redpanda_storage_mode_to_string(
-          model::redpanda_storage_mode::local),
-        model::redpanda_storage_mode::local)
-      .match(
-        model::redpanda_storage_mode_to_string(
-          model::redpanda_storage_mode::tiered),
-        model::redpanda_storage_mode::tiered)
-      .match(
-        model::redpanda_storage_mode_to_string(
-          model::redpanda_storage_mode::unset),
-        model::redpanda_storage_mode::unset)
-      .default_match(std::nullopt);
-}
-
-std::optional<redpanda_storage_mode>
-redpanda_storage_mode_from_user_string(std::string_view s) {
-    return string_switch<std::optional<redpanda_storage_mode>>(s)
-      .match(
-        redpanda_storage_mode_to_string(redpanda_storage_mode::local),
-        redpanda_storage_mode::local)
-      .match(
-        redpanda_storage_mode_to_string(redpanda_storage_mode::tiered),
-        redpanda_storage_mode::tiered)
-      .match(
-        redpanda_storage_mode_to_string(redpanda_storage_mode::unset),
-        redpanda_storage_mode::unset)
-      .default_match(std::nullopt);
-}
-
-const char* redpanda_storage_mode_user_name(redpanda_storage_mode mode) {
-    return redpanda_storage_mode_to_string(mode);
-}
-
-fmt::iterator format_to(recovery_validation_mode vm, fmt::iterator out) {
-    using enum recovery_validation_mode;
-    switch (vm) {
-    case check_manifest_existence:
-        return fmt::format_to(out, "check_manifest_existence");
-    case check_manifest_and_segment_metadata:
-        return fmt::format_to(out, "check_manifest_and_segment_metadata");
-    case no_check:
-        return fmt::format_to(out, "no_check");
-    }
-    return fmt::format_to(out, "unknown");
-}
-
-std::istream& operator>>(std::istream& is, recovery_validation_mode& vm) {
-    using enum recovery_validation_mode;
-    auto s = ss::sstring{};
-    is >> s;
-    try {
-        vm = string_switch<recovery_validation_mode>(s)
-               .match("check_manifest_existence", check_manifest_existence)
-               .match(
-                 "check_manifest_and_segment_metadata",
-                 check_manifest_and_segment_metadata)
-               .match("no_check", no_check);
-    } catch (const std::runtime_error&) {
-        is.setstate(std::ios::failbit);
-    }
-    return is;
 }
 
 fmt::iterator format_to(fips_mode_flag f, fmt::iterator out) {

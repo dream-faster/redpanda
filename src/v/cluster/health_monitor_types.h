@@ -344,8 +344,6 @@ struct cluster_health_report
     // node
     std::vector<node_health_report_ptr> node_reports;
 
-    // cluster-wide cached information about total cloud storage usage
-    std::optional<size_t> bytes_in_cloud_storage;
     fmt::iterator format_to(fmt::iterator it) const;
 
     friend bool operator==(
@@ -365,7 +363,6 @@ struct cluster_health_report
         for (auto& nr : node_reports) {
             co_await write_async(out, node_health_report_serde{*nr});
         }
-        write(out, bytes_in_cloud_storage);
     }
 
     ss::future<> serde_async_read(iobuf_parser& in, const serde::header& h) {
@@ -385,9 +382,6 @@ struct cluster_health_report
               ss::make_lw_shared<node_health_report>(
                 std::move(r).to_in_memory()));
         }
-        bytes_in_cloud_storage = read_nested<std::optional<size_t>>(
-          in, h._bytes_left_limit);
-
         if (in.bytes_left() > h._bytes_left_limit) {
             in.skip(in.bytes_left() - h._bytes_left_limit);
         }
@@ -404,7 +398,6 @@ struct cluster_health_report
         for (auto& nr : node_reports) {
             write(out, node_health_report_serde{*nr});
         }
-        write(out, bytes_in_cloud_storage);
     }
 
     void serde_read(iobuf_parser& in, const serde::header& h) {
@@ -423,9 +416,6 @@ struct cluster_health_report
               ss::make_lw_shared<node_health_report>(
                 std::move(r).to_in_memory()));
         }
-        bytes_in_cloud_storage = read_nested<std::optional<size_t>>(
-          in, h._bytes_left_limit);
-
         if (in.bytes_left() > h._bytes_left_limit) {
             in.skip(in.bytes_left() - h._bytes_left_limit);
         }
@@ -481,7 +471,6 @@ struct cluster_health_overview {
     size_t leaderless_count{};
     std::vector<model::ntp> under_replicated_partitions;
     size_t under_replicated_count{};
-    std::optional<size_t> bytes_in_cloud_storage;
     // True if the refresh attempted at assembly time errored. False on
     // success, or if no refresh was needed (cache fresh enough to skip).
     // Also surfaced as "no_health_report" in unhealthy_reasons.

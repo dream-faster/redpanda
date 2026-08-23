@@ -13,8 +13,6 @@
 #include "cluster/cluster_utils.h"
 #include "cluster/commands.h"
 #include "cluster/controller_snapshot.h"
-#include "cluster/data_migrated_resources.h"
-#include "cluster/data_migration_types.h"
 #include "cluster/errc.h"
 #include "cluster/fwd.h"
 #include "cluster/logger.h"
@@ -33,11 +31,8 @@
 
 namespace cluster {
 
-topic_table::topic_table(
-  data_migrations::migrated_resources& migrated_resources,
-  model::node_id node_id)
-  : _probe(*this, node_id)
-  , _migrated_resources(migrated_resources) {}
+topic_table::topic_table(model::node_id node_id)
+  : _probe(*this, node_id) {}
 
 ss::future<std::error_code>
 topic_table::apply(create_topic_cmd cmd, model::offset offset) {
@@ -52,22 +47,8 @@ topic_table::apply(create_topic_cmd cmd, model::offset offset) {
         co_return errc::topic_id_already_exists;
     }
 
-    const auto migration_state = _migrated_resources.get_topic_state(cmd.key);
-    if (
-      !cmd.value.cfg.is_migrated
-      && migration_state
-           != data_migrations::migrated_resource_state::non_restricted) {
-        vlog(clusterlog.debug, "topic {} already migrated", cmd.key);
-        co_return errc::topic_already_exists;
-    }
-
-    std::optional<model::initial_revision_id> remote_revision
-      = cmd.value.cfg.properties.remote_topic_properties
-          ? std::make_optional(
-              cmd.value.cfg.properties.remote_topic_properties->remote_revision)
-          : std::nullopt;
-    auto md = topic_metadata_item{topic_metadata(
-      std::move(cmd.value), model::revision_id(offset()), remote_revision)};
+    auto md = topic_metadata_item{
+      topic_metadata(std::move(cmd.value), model::revision_id(offset()))};
 
     // generate deltas
 
@@ -117,14 +98,7 @@ topic_table::apply(delete_topic_cmd cmd, model::offset offset) {
 }
 
 ss::future<std::error_code> topic_table::do_local_delete(
-  model::topic_namespace nt, model::offset offset, bool ignore_migration) {
-    const auto migration_state = _migrated_resources.get_topic_state(nt);
-    if (
-      !ignore_migration
-      && migration_state
-           != data_migrations::migrated_resource_state::non_restricted) {
-        co_return errc::resource_is_being_migrated;
-    }
+  model::topic_namespace nt, model::offset offset, bool) {
     auto tp = _topics.find(nt);
     if (tp == _topics.end()) {
         co_return errc::topic_not_exists;
@@ -237,18 +211,6 @@ topic_table::apply(topic_lifecycle_transition soft_del, model::offset offset) {
 
 ss::future<std::error_code>
 topic_table::apply(create_partition_cmd cmd, model::offset offset) {
-    const auto migration_state = _migrated_resources.get_topic_state(
-      cmd.value.cfg.tp_ns);
-    vlog(
-      clusterlog.trace,
-      "attempting to create a partition in {}, migration state = {}",
-      cmd.value.cfg.tp_ns,
-      migration_state);
-    if (
-      migration_state
-      != data_migrations::migrated_resource_state::non_restricted) {
-        co_return errc::resource_is_being_migrated;
-    }
     _last_applied_revision_id = model::revision_id(offset);
     auto tp = _topics.find(cmd.key);
     if (tp == _topics.end()) {
@@ -843,103 +805,6 @@ void incremental_update(
     }
 }
 
-// This is a deprecated (as of `v24.3`) function here for legacy purposes. Bug
-// prone. Utilize `incremental_update` overload below for `remote_read` and
-// `remote_write` updates. See:
-// https://github.com/redpanda-data/redpanda/issues/9191
-// https://github.com/redpanda-data/redpanda/pull/23220
-template<>
-void incremental_update(
-  std::optional<model::shadow_indexing_mode>& property,
-  property_update<std::optional<model::shadow_indexing_mode>> override) {
-    if (override.op != incremental_update_operation::none) {
-        vlog(
-          clusterlog.trace,
-          "Performing deprecated incremental_update to shadow_indexing_mode");
-    }
-    switch (override.op) {
-    case incremental_update_operation::remove:
-        if (!override.value || !property) {
-            break;
-        }
-        // It's guaranteed that the remove operation will only be
-        // used with one of the 'drop_' flags.
-        property = model::add_shadow_indexing_flag(*property, *override.value);
-        if (*property == model::shadow_indexing_mode::disabled) {
-            property = std::nullopt;
-        }
-        return;
-    case incremental_update_operation::set:
-        // set new value
-        if (!override.value) {
-            break;
-        }
-        property = model::add_shadow_indexing_flag(
-          property ? *property : model::shadow_indexing_mode::disabled,
-          *override.value);
-        return;
-    case incremental_update_operation::none:
-        // do nothing
-        return;
-    }
-}
-
-void incremental_update(
-  std::optional<model::shadow_indexing_mode>& property,
-  property_update<bool> overrides,
-  model::shadow_indexing_mode m) {
-    switch (overrides.op) {
-    case incremental_update_operation::remove: {
-        // This codepath is currently unused, as remove operation at Kafka layer
-        // causes a set operation to the default cluster value.
-        if (!property.has_value()) {
-            break;
-        }
-        auto simode = property.value();
-        property = model::add_shadow_indexing_flag(
-          simode, model::negate_shadow_indexing_flag(m));
-        return;
-    }
-    case incremental_update_operation::set: {
-        // set new value
-        auto simode = property.value_or(model::shadow_indexing_mode::disabled);
-        auto si_flag_update = overrides.value
-                                ? m
-                                : model::negate_shadow_indexing_flag(m);
-        property = model::add_shadow_indexing_flag(simode, si_flag_update);
-        return;
-    }
-    case incremental_update_operation::none:
-        // do nothing
-        return;
-    }
-}
-
-void incremental_update(
-  model::redpanda_storage_mode& property,
-  property_update<std::optional<model::redpanda_storage_mode>> override,
-  model::redpanda_storage_mode /*default_value*/) {
-    // Validation of storage mode transitions is done at the kafka layer.
-    // This function only applies the update.
-    switch (override.op) {
-    case incremental_update_operation::remove:
-        // Cannot remove redpanda.storage.mode - it can only be set explicitly
-        vlog(
-          clusterlog.warn,
-          "Cannot remove property redpanda.storage.mode - it can only be set "
-          "explicitly. Current value: {}",
-          property);
-        return;
-    case incremental_update_operation::set:
-        if (override.value) {
-            property = *override.value;
-        }
-        return;
-    case incremental_update_operation::none:
-        return;
-    }
-}
-
 template<typename T>
 void incremental_update(
   tristate<T>& property, property_update<tristate<T>> override) {
@@ -1000,29 +865,6 @@ topic_properties topic_table::update_topic_properties(
     incremental_update(
       updated_properties.retention_local_target_ms,
       overrides.retention_local_target_ms);
-    // These tiered storage properties shouldn't be set at the
-    // same time, due to feature gating from
-    // `shadow_indexing_split_topic_property_update`, but still set the
-    // deprecated update to `none` as a sanity check.
-    if (
-      overrides.remote_read.op != incremental_update_operation::none
-      || overrides.remote_write.op != incremental_update_operation::none) {
-        overrides.get_shadow_indexing().op = incremental_update_operation::none;
-    }
-    incremental_update(
-      updated_properties.shadow_indexing, overrides.get_shadow_indexing());
-    incremental_update(
-      updated_properties.shadow_indexing,
-      overrides.remote_read,
-      model::shadow_indexing_mode::fetch);
-    incremental_update(
-      updated_properties.shadow_indexing,
-      overrides.remote_write,
-      model::shadow_indexing_mode::archival);
-    incremental_update(
-      updated_properties.remote_delete,
-      overrides.remote_delete,
-      storage::ntp_config::default_remote_delete);
     incremental_update(updated_properties.segment_ms, overrides.segment_ms);
     incremental_update(
       updated_properties.initial_retention_local_target_bytes,
@@ -1048,18 +890,11 @@ topic_properties topic_table::update_topic_properties(
       updated_properties.max_compaction_lag_ms,
       overrides.max_compaction_lag_ms);
     incremental_update(
-      updated_properties.remote_topic_allow_gaps, overrides.remote_allow_gaps);
-    incremental_update(
       updated_properties.message_timestamp_before_max_ms,
       overrides.message_timestamp_before_max_ms);
     incremental_update(
       updated_properties.message_timestamp_after_max_ms,
       overrides.message_timestamp_after_max_ms);
-    incremental_update(updated_properties.remote_label, overrides.remote_label);
-    incremental_update(
-      updated_properties.storage_mode,
-      overrides.storage_mode,
-      storage::ntp_config::default_storage_mode);
     return updated_properties;
 }
 
@@ -1071,13 +906,6 @@ topic_table::apply(update_topic_properties_cmd cmd, model::offset o) {
     if (tp == _topics.end()) {
         co_return make_error_code(errc::topic_not_exists);
     }
-    const auto migration_state = _migrated_resources.get_topic_state(key);
-    if (
-      migration_state
-      != data_migrations::migrated_resource_state::non_restricted) {
-        co_return errc::resource_is_being_migrated;
-    }
-
     if (cmd.value.topic_id.op == incremental_update_operation::set) {
         auto& tp_id = cmd.value.topic_id.value;
         if (tp_id && _topics.get_name(*tp_id)) {

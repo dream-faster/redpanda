@@ -82,8 +82,6 @@ struct metadata_cache_info {
     virtual std::optional<size_t> get_default_retention_bytes() const = 0;
     virtual model::timestamp_type get_default_timestamp_type() const = 0;
     virtual uint32_t get_default_batch_max_bytes() const = 0;
-    virtual model::shadow_indexing_mode
-    get_default_shadow_indexing_mode() const = 0;
     virtual std::optional<size_t>
     get_default_retention_local_target_bytes() const = 0;
     virtual std::chrono::milliseconds
@@ -124,8 +122,6 @@ public:
     std::optional<size_t> get_default_retention_bytes() const override;
     model::timestamp_type get_default_timestamp_type() const override;
     uint32_t get_default_batch_max_bytes() const override;
-    model::shadow_indexing_mode
-    get_default_shadow_indexing_mode() const override;
     std::optional<size_t>
     get_default_retention_local_target_bytes() const override;
     std::chrono::milliseconds

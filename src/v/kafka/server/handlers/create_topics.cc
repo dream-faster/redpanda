@@ -41,37 +41,31 @@ namespace kafka {
 namespace {
 
 bool is_supported(std::string_view name) {
-    static constexpr auto supported_configs = std::to_array(
-      {topic_property_compression,
-       topic_property_cleanup_policy,
-       topic_property_timestamp_type,
-       topic_property_segment_size,
-       topic_property_compaction_strategy,
-       topic_property_retention_bytes,
-       topic_property_retention_duration,
-       topic_property_recovery,
-       topic_property_remote_write,
-       topic_property_remote_read,
-       topic_property_remote_delete,
-       topic_property_read_replica,
-       topic_property_max_message_bytes,
-       topic_property_retention_local_target_bytes,
-       topic_property_retention_local_target_ms,
-       topic_property_segment_ms,
-       topic_property_initial_retention_local_target_bytes,
-       topic_property_initial_retention_local_target_ms,
-       topic_property_write_caching,
-       topic_property_flush_ms,
-       topic_property_flush_bytes,
-       topic_property_leaders_preference,
-       topic_property_delete_retention_ms,
-       topic_property_min_cleanable_dirty_ratio,
-       topic_property_min_compaction_lag_ms,
-       topic_property_max_compaction_lag_ms,
-       topic_property_remote_allow_gaps,
-       topic_property_message_timestamp_before_max_ms,
-       topic_property_message_timestamp_after_max_ms,
-       topic_property_redpanda_storage_mode});
+    static constexpr auto supported_configs = std::to_array({
+      topic_property_compression,
+      topic_property_cleanup_policy,
+      topic_property_timestamp_type,
+      topic_property_segment_size,
+      topic_property_compaction_strategy,
+      topic_property_retention_bytes,
+      topic_property_retention_duration,
+      topic_property_max_message_bytes,
+      topic_property_retention_local_target_bytes,
+      topic_property_retention_local_target_ms,
+      topic_property_segment_ms,
+      topic_property_initial_retention_local_target_bytes,
+      topic_property_initial_retention_local_target_ms,
+      topic_property_write_caching,
+      topic_property_flush_ms,
+      topic_property_flush_bytes,
+      topic_property_leaders_preference,
+      topic_property_delete_retention_ms,
+      topic_property_min_cleanable_dirty_ratio,
+      topic_property_min_compaction_lag_ms,
+      topic_property_max_compaction_lag_ms,
+      topic_property_message_timestamp_before_max_ms,
+      topic_property_message_timestamp_after_max_ms,
+    });
 
     if (
       std::any_of(
@@ -85,24 +79,7 @@ bool is_supported(std::string_view name) {
 }
 } // namespace
 
-using validators = make_validator_types<
-  creatable_topic,
-  custom_partition_assignment_negative_partition_count,
-  partition_count_must_be_positive,
-  replication_factor_must_be_positive,
-  replication_factor_must_be_odd,
-  replicas_diversity,
-  compression_type_validator,
-  compaction_strategy_validator,
-  timestamp_type_validator,
-  cleanup_policy_validator,
-  remote_read_and_write_are_not_supported_for_read_replica,
-  batch_max_bytes_limits,
-  replication_factor_must_be_greater_or_equal_to_minimum,
-  vcluster_id_validator,
-  write_caching_configs_validator,
-  min_max_compaction_lag_ms_validator,
-  storage_mode_config_validator>;
+using validators = make_validator_types<creatable_topic, custom_partition_assignment_negative_partition_count, partition_count_must_be_positive, replication_factor_must_be_positive, replication_factor_must_be_odd, replicas_diversity, compression_type_validator, compaction_strategy_validator, timestamp_type_validator, cleanup_policy_validator, batch_max_bytes_limits, replication_factor_must_be_greater_or_equal_to_minimum, vcluster_id_validator, write_caching_configs_validator, min_max_compaction_lag_ms_validator, >;
 
 static void
 append_topic_configs(request_context& ctx, create_topics_response& response) {

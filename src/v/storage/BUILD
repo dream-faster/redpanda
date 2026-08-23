@@ -172,7 +172,6 @@ redpanda_cc_library(
         "@seastar",
     ],
     visibility = [
-        "//src/v/cluster/archival/tests:__pkg__",
         "//src/v/cluster/tests:__pkg__",
         "//src/v/debug_bundle/tests:__pkg__",
         "//src/v/storage/tests:__pkg__",

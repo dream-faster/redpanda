@@ -272,9 +272,6 @@ feature_manager::report_enterprise_features() const {
     report.set(
       features::license_required_feature::audit_logging, cfg.audit_enabled());
     report.set(
-      features::license_required_feature::cloud_storage,
-      cfg.cloud_storage_enabled());
-    report.set(
       features::license_required_feature::partition_auto_balancing_continuous,
       cfg.partition_autobalancing_mode()
         == model::partition_autobalancing_mode::continuous);

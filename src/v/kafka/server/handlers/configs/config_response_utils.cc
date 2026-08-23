@@ -54,10 +54,6 @@ metadata_cache_adapter::get_default_timestamp_type() const {
 uint32_t metadata_cache_adapter::get_default_batch_max_bytes() const {
     return _metadata_cache.get_default_batch_max_bytes();
 }
-model::shadow_indexing_mode
-metadata_cache_adapter::get_default_shadow_indexing_mode() const {
-    return _metadata_cache.get_default_shadow_indexing_mode();
-}
 std::optional<size_t>
 metadata_cache_adapter::get_default_retention_local_target_bytes() const {
     return _metadata_cache.get_default_retention_local_target_bytes();
@@ -150,8 +146,7 @@ consteval describe_configs_type property_config_type() {
         std::is_same_v<T, config::data_directory_path> ||
         std::is_same_v<T, model::vcluster_id> ||
         std::is_same_v<T, model::write_caching_mode> ||
-        std::is_same_v<T, config::leaders_preference> ||
-        std::is_same_v<T, model::redpanda_storage_mode>;
+        std::is_same_v<T, config::leaders_preference>;
 
     constexpr auto is_long_type = is_long<T> ||
         // Long type since seconds is atleast a 35-bit signed integral
@@ -352,7 +347,7 @@ static void add_topic_config(
 
 /**
  * For faking DEFAULT_CONFIG status for properties that are actually
- * topic overrides: cloud storage properties.  We do not support cluster
+ * topic overrides.  We do not support cluster
  * defaults for these, the values are always "sticky" to topics, but
  * some Kafka clients insist that after an AlterConfig RPC, anything
  * they didn't set should be DEFAULT_CONFIG.
@@ -697,43 +692,6 @@ config_response_container_t make_topic_configs(
         config::shard_local_cfg().raft_replica_max_flush_delay_ms.desc()),
       &describe_as_string<std::chrono::milliseconds>);
 
-    // Shadow indexing properties
-    add_topic_config_if_requested(
-      config_keys,
-      result,
-      topic_property_remote_read,
-      model::is_fetch_enabled(
-        metadata_cache.get_default_shadow_indexing_mode()),
-      topic_property_remote_read,
-      topic_properties.shadow_indexing.has_value()
-        ? std::make_optional(
-            model::is_fetch_enabled(*topic_properties.shadow_indexing))
-        : std::nullopt,
-      include_synonyms,
-      maybe_make_documentation(
-        include_documentation,
-        config::shard_local_cfg().cloud_storage_enable_remote_read.desc()),
-      &describe_as_string<bool>,
-      true);
-
-    add_topic_config_if_requested(
-      config_keys,
-      result,
-      topic_property_remote_write,
-      model::is_archival_enabled(
-        metadata_cache.get_default_shadow_indexing_mode()),
-      topic_property_remote_write,
-      topic_properties.shadow_indexing.has_value()
-        ? std::make_optional(
-            model::is_archival_enabled(*topic_properties.shadow_indexing))
-        : std::nullopt,
-      include_synonyms,
-      maybe_make_documentation(
-        include_documentation,
-        config::shard_local_cfg().cloud_storage_enable_remote_write.desc()),
-      &describe_as_string<bool>,
-      true);
-
     add_topic_config_if_requested(
       config_keys,
       result,
@@ -758,23 +716,6 @@ config_response_container_t make_topic_configs(
       maybe_make_documentation(
         include_documentation,
         config::shard_local_cfg().retention_local_target_ms_default.desc()));
-
-    if (config_property_requested(config_keys, topic_property_remote_delete)) {
-        add_topic_config<bool>(
-          result,
-          topic_property_remote_delete,
-          storage::ntp_config::default_remote_delete,
-          topic_property_remote_delete,
-          override_if_not_default(
-            std::make_optional<bool>(topic_properties.remote_delete),
-            storage::ntp_config::default_remote_delete),
-          true,
-          maybe_make_documentation(
-            include_documentation,
-            "Controls whether topic deletion should imply deletion in "
-            "S3"),
-          [](const bool& b) { return b ? "true" : "false"; });
-    }
 
     add_topic_config_if_requested(
       config_keys,
@@ -901,20 +842,6 @@ config_response_container_t make_topic_configs(
     add_topic_config_if_requested(
       config_keys,
       result,
-      config::shard_local_cfg().cloud_storage_enable_remote_allow_gaps.name(),
-      config::shard_local_cfg().cloud_storage_enable_remote_allow_gaps(),
-      topic_property_remote_allow_gaps,
-      topic_properties.remote_topic_allow_gaps,
-      include_synonyms,
-      maybe_make_documentation(
-        include_documentation,
-        config::shard_local_cfg()
-          .cloud_storage_enable_remote_allow_gaps.desc()),
-      &describe_as_string<bool>);
-
-    add_topic_config_if_requested(
-      config_keys,
-      result,
       topic_property_message_timestamp_before_max_ms,
       metadata_cache.get_default_message_timestamp_before_max_ms(),
       topic_property_message_timestamp_before_max_ms,
@@ -938,25 +865,6 @@ config_response_container_t make_topic_configs(
         config::shard_local_cfg().log_message_timestamp_after_max_ms.desc()),
       describe_as_string<std::chrono::milliseconds>);
 
-    add_topic_config_if_requested(
-      config_keys,
-      result,
-      config::shard_local_cfg().default_redpanda_storage_mode.name(),
-      config::shard_local_cfg().default_redpanda_storage_mode(),
-      topic_property_redpanda_storage_mode,
-      override_if_not_default(
-        std::make_optional<model::redpanda_storage_mode>(
-          topic_properties.storage_mode),
-        config::shard_local_cfg().default_redpanda_storage_mode()),
-      include_synonyms,
-      maybe_make_documentation(
-        include_documentation,
-        config::shard_local_cfg().default_redpanda_storage_mode.desc()),
-      [](const model::redpanda_storage_mode& mode) {
-          return ss::sstring(model::redpanda_storage_mode_user_name(mode));
-      });
-
-    // Read-only companion of redpanda.storage.mode: the exact
     return result;
 }
 

@@ -206,7 +206,6 @@ public:
       ss::sharded<topics_frontend>&,
       ss::sharded<storage::api>&,
       ss::sharded<features::feature_table>&,
-      ss::sharded<cluster::cluster_recovery_table>&,
       config::binding<std::chrono::milliseconds> housekeeping_interval,
       config::binding<std::optional<size_t>>
         initial_retention_local_target_bytes,
@@ -395,7 +394,6 @@ private:
     ss::sharded<topics_frontend>& _topics_frontend;
     ss::sharded<storage::api>& _storage;
     ss::sharded<features::feature_table>& _features;
-    ss::sharded<cluster_recovery_table>& _recovery_table;
     model::node_id _self;
     ss::sstring _data_directory;
     config::binding<std::chrono::milliseconds> _housekeeping_interval;

@@ -53,15 +53,13 @@ std::optional<ss::sstring>
 validate_consumer_group_metrics(const std::vector<ss::sstring>& metrics);
 
 std::optional<ss::sstring>
-validate_cloud_storage_cluster_name(const std::optional<ss::sstring>&);
+
+  std::optional<ss::sstring>
+  validate_sane_partition_balancer_timeouts(const configuration& config);
 
 std::optional<ss::sstring>
-validate_sane_partition_balancer_timeouts(const configuration& config);
 
-std::optional<ss::sstring>
-validate_default_redpanda_storage_mode(const configuration& config);
-
-std::optional<ss::sstring>
-validate_oidc_http_proxy_url(const configuration& config);
+  std::optional<ss::sstring>
+  validate_oidc_http_proxy_url(const configuration& config);
 
 }; // namespace config

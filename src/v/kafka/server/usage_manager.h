@@ -51,8 +51,6 @@ public:
         virtual ss::future<usage> close_current_window() final;
 
     private:
-        ss::future<std::optional<uint64_t>> get_cloud_usage_data();
-
     private:
         cluster::controller* _controller;
         cluster::health_monitor_frontend& _health_monitor;

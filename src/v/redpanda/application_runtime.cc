@@ -7,7 +7,6 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0
 
-#include "cloud_storage_clients/types.h"
 #include "cluster/controller.h"
 #include "cluster/utils/partition_change_notifier_impl.h"
 #include "config/configuration.h"
@@ -25,8 +24,7 @@
 
 void application::wire_up_runtime_services(
   model::node_id node_id, ::stop_signal& app_signal) {
-    std::optional<cloud_storage_clients::bucket_name> bucket;
-    wire_up_redpanda_services(node_id, app_signal, bucket);
+    wire_up_redpanda_services(node_id, app_signal);
     syschecks::systemd_message("Creating kafka usage manager frontend").get();
     construct_service(
       usage_manager,
@@ -40,12 +38,10 @@ void application::wire_up_runtime_services(
     construct_service(_debug_bundle_service, &storage.local().kvs()).get();
 
     auto data_dir = config::node().data_directory().as_sstring();
-    auto cache_dir = ss::sstring(
-      config::node().cloud_storage_cache_path().string());
     construct_single_service(
-      _host_metrics_watcher, std::ref(_log), data_dir, cache_dir);
+      _host_metrics_watcher, std::ref(_log), data_dir, data_dir);
 
-    // Expose cloud instance info as metrics (detected in the background).
+    // Expose instance info as metrics (detected in the background).
     construct_single_service(_instance_metrics, std::ref(_as.local()));
     _instance_metrics->start();
 

@@ -9,7 +9,6 @@
 
 #include "cluster/partition_probe.h"
 
-#include "cluster/archival/archival_metadata_stm.h"
 #include "cluster/partition.h"
 #include "config/configuration.h"
 #include "metrics/metrics.h"
@@ -24,11 +23,7 @@ static const ss::sstring cluster_metrics_name
 
 replicated_partition_probe::replicated_partition_probe(
   const partition& p) noexcept
-  : _partition(p)
-  , _enable_scrubbing_bind(
-      config::shard_local_cfg().cloud_storage_enable_scrubbing.bind()) {
-    _enable_scrubbing_bind.watch([this]() { reconfigure_metrics(); });
-}
+  : _partition(p) {}
 
 void replicated_partition_probe::reconfigure_metrics() {
     clear_metrics();
@@ -151,19 +146,6 @@ void replicated_partition_probe::setup_internal_metrics(const model::ntp& ntp) {
             "Total number of bytes fetched from follower (not all might be "
             "returned to the client)"),
           labels),
-        sm::make_total_bytes(
-          "cloud_storage_segments_metadata_bytes",
-          [this] {
-              return _partition.archival_meta_stm()
-                       ? _partition.archival_meta_stm()
-                           ->manifest()
-                           .segments_metadata_bytes()
-                       : 0;
-          },
-          sm::description(
-            "Current number of bytes consumed by remote segments "
-            "managed for this partition"),
-          labels),
       },
       {},
       {sm::shard_label, metrics::partition_label});
@@ -201,13 +183,6 @@ void replicated_partition_probe::setup_public_metrics(const model::ntp& ntp) {
           [this] {
               // TODO: this code should instead probably be served with a
               // partition_proxy::impl.
-              if (_partition.is_read_replica_mode_enabled()) {
-                  if (_partition.cloud_data_available()) {
-                      return _partition.next_cloud_offset();
-                  }
-                  // This is a read replica and there's no data in the cloud.
-                  return model::offset(0);
-              }
               auto log_offset = _partition.high_watermark();
 
               try {
@@ -279,141 +254,6 @@ void replicated_partition_probe::setup_public_metrics(const model::ntp& ntp) {
            topic_label(ntp.tp.topic()),
            partition_label(ntp.tp.partition())})
           .aggregate({sm::shard_label, partition_label}),
-      });
-    setup_public_scrubber_metric(ntp);
-}
-
-void replicated_partition_probe::setup_public_scrubber_metric(
-  const model::ntp& ntp) {
-    namespace sm = ss::metrics;
-
-    // No point in setting up the scrubber metrics if there's no
-    // archival metadata STM to pull values from or if scrubbing is not enabled
-    if (!_partition.archival_meta_stm() || !_enable_scrubbing_bind()) {
-        return;
-    }
-
-    auto ns_label = metrics::make_namespaced_label("namespace");
-    auto topic_label = metrics::make_namespaced_label("topic");
-    auto partition_label = metrics::make_namespaced_label("partition");
-
-    const std::vector<sm::label_instance> common_labels{
-      ns_label(ntp.ns()),
-      topic_label(ntp.tp.topic()),
-      partition_label(ntp.tp.partition()),
-    };
-
-    auto anomaly_type_label = metrics::make_namespaced_label("type");
-    auto severity_type_label = metrics::make_namespaced_label("severity");
-
-    auto generate = [&, this](
-                      ss::sstring name,
-                      ss::sstring description,
-                      ss::sstring severity,
-                      auto extractor) -> ss::metrics::metric_definition {
-        auto labels = common_labels;
-        labels.push_back(anomaly_type_label(std::move(name)));
-        labels.push_back(severity_type_label(std::move(severity)));
-
-        return sm::make_gauge(
-                 "anomalies",
-                 [this, extractor = std::move(extractor)] {
-                     if (
-                       !_partition.is_elected_leader()
-                       || !_partition.archival_meta_stm()) {
-                         return size_t{0};
-                     }
-
-                     const auto& anomalies = _partition.archival_meta_stm()
-                                               ->manifest()
-                                               .detected_anomalies();
-
-                     return extractor(anomalies);
-                 },
-                 sm::description(std::move(description)),
-                 labels)
-          .aggregate({sm::shard_label, partition_label});
-    };
-
-    _public_metrics.add_group(
-      prometheus_sanitize::metrics_name("cloud_storage"),
-      {
-        generate(
-          "missing_partition_manifest",
-          "Count of missing partition manifest anomalies for the topic",
-          "high",
-          [](const cloud_storage::anomalies& anomalies) {
-              return anomalies.missing_partition_manifest ? size_t{1}
-                                                          : size_t{0};
-          }),
-        generate(
-          "missing_segments",
-          "Count of segments referenced by metadata which are not present in "
-          "cloud storage",
-          "high",
-          [](const cloud_storage::anomalies& anomalies) {
-              return anomalies.missing_segments.size();
-          }),
-        generate(
-          "missing_spillover_manifests",
-          "Count of spillover manifests referenced by metadata which are not "
-          "present in cloud storage",
-          "high",
-          [](const cloud_storage::anomalies& anomalies) {
-              return anomalies.missing_spillover_manifests.size();
-          }),
-        generate(
-          "offset_gaps",
-          "Count of offset gaps in the cloud storage metadata",
-          "high",
-          [](const cloud_storage::anomalies& anomalies) {
-              return anomalies.count_segment_meta_anomaly_type(
-                cloud_storage::anomaly_type::offset_gap);
-          }),
-        generate(
-          "missing_deltas",
-          "Count of segment metadata where the delta offset is not present",
-          "low",
-          [](const cloud_storage::anomalies& anomalies) {
-              return anomalies.count_segment_meta_anomaly_type(
-                cloud_storage::anomaly_type::missing_delta);
-          }),
-        generate(
-          "non_monotonic_deltas",
-          "Count of segment metadata where the delta offset are not "
-          "monotonic",
-          "low",
-          [](const cloud_storage::anomalies& anomalies) {
-              return anomalies.count_segment_meta_anomaly_type(
-                cloud_storage::anomaly_type::non_monotonical_delta);
-          }),
-        generate(
-          "end_deltas_smaller",
-          "Count of segment metadata where the end delta offset is smaller "
-          "than the base delta",
-          "low",
-          [](const cloud_storage::anomalies& anomalies) {
-              return anomalies.count_segment_meta_anomaly_type(
-                cloud_storage::anomaly_type::end_delta_smaller);
-          }),
-        generate(
-          "commited_smaller",
-          "Count of segment metadata where the end committed offset is smaller "
-          "than the base offset",
-          "low",
-          [](const cloud_storage::anomalies& anomalies) {
-              return anomalies.count_segment_meta_anomaly_type(
-                cloud_storage::anomaly_type::committed_smaller);
-          }),
-        generate(
-          "offset_overlap",
-          "Count of segments metadata where offsets overlap with the previous "
-          "segment",
-          "low",
-          [](const cloud_storage::anomalies& anomalies) {
-              return anomalies.count_segment_meta_anomaly_type(
-                cloud_storage::anomaly_type::offset_overlap);
-          }),
       });
 }
 

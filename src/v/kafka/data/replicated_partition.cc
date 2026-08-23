@@ -10,7 +10,6 @@
  */
 #include "kafka/data/replicated_partition.h"
 
-#include "cloud_storage/types.h"
 #include "cluster/partition.h"
 #include "cluster/partition_kafka_offsets.h"
 #include "cluster/rm_stm.h"
@@ -40,20 +39,6 @@ storage::local_log_reader_config kafka_to_local_log_reader_config(
     return storage::local_log_reader_config(
       /*start_offset=*/start_offset,
       /*max_offset=*/max_offset,
-      /*max_bytes=*/cfg.max_bytes,
-      /*type_filter=*/std::nullopt,
-      /*first_timestamp=*/cfg.first_timestamp,
-      /*abort_source=*/cfg.abort_source,
-      /*client_address=*/cfg.client_address,
-      /*strict_max_bytes=*/cfg.strict_max_bytes);
-}
-
-cloud_storage::cloud_log_reader_config
-kafka_to_cloud_log_reader_config(kafka::log_reader_config cfg) {
-    return cloud_storage::cloud_log_reader_config(
-      /*start_offset=*/cfg.start_offset,
-      /*max_offset=*/cfg.max_offset,
-      /*min_bytes=*/cfg.min_bytes,
       /*max_bytes=*/cfg.max_bytes,
       /*type_filter=*/std::nullopt,
       /*first_timestamp=*/cfg.first_timestamp,
@@ -124,13 +109,6 @@ model::offset replicated_partition::high_watermark() const {
  * is assigned to the next record produced to a log
  */
 model::offset replicated_partition::log_end_offset() const {
-    if (_partition->is_read_replica_mode_enabled()) {
-        if (_partition->cloud_data_available()) {
-            return model::next_offset(_partition->next_cloud_offset());
-        } else {
-            return model::offset(0);
-        }
-    }
     /**
      * If a local log is empty we return start offset as this is the offset
      * assigned to the next batch produced to the log.
@@ -146,22 +124,11 @@ model::offset replicated_partition::log_end_offset() const {
 }
 
 model::offset replicated_partition::leader_high_watermark() const {
-    if (_partition->is_read_replica_mode_enabled()) {
-        return high_watermark();
-    }
     return _translator->from_log_offset(_partition->leader_high_watermark());
 }
 
 checked<model::offset, error_code>
 replicated_partition::last_stable_offset() const {
-    if (_partition->is_read_replica_mode_enabled()) {
-        if (_partition->cloud_data_available()) {
-            // There is no difference between HWM and LO in this mode
-            return _partition->next_cloud_offset();
-        } else {
-            return model::offset(0);
-        }
-    }
     auto maybe_lso = _partition->last_stable_offset();
     if (maybe_lso == model::invalid_lso) {
         return error_code::offset_not_available;
@@ -190,25 +157,6 @@ kafka::leader_epoch replicated_partition::leader_epoch() const {
 // TODO: use previous translation speed up lookup
 ss::future<storage::translating_reader>
 replicated_partition::make_reader(kafka::log_reader_config cfg) {
-    if (
-      _partition->is_read_replica_mode_enabled()
-      && _partition->cloud_data_available()) {
-        // No need to translate the offsets in this case since all fetch
-        // requestS in read replica are served via remote_partition which
-        // does its own translation.
-        auto config = kafka_to_cloud_log_reader_config(cfg);
-        co_return co_await _partition->make_cloud_reader(config);
-    }
-
-    if (
-      may_read_from_cloud(cfg.start_offset)
-      && cfg.start_offset
-           >= model::offset_cast(_partition->start_cloud_offset())) {
-        auto config = kafka_to_cloud_log_reader_config(cfg);
-        config.type_filter = {model::record_batch_type::raft_data};
-        co_return co_await _partition->make_cloud_reader(config);
-    }
-
     auto config = kafka_to_local_log_reader_config(cfg, _translator);
     config.type_filter = {model::record_batch_type::raft_data};
     config.translate_offsets = model::translate_offsets::yes;
@@ -219,32 +167,20 @@ replicated_partition::make_reader(kafka::log_reader_config cfg) {
 
 ss::future<std::vector<cluster::tx::tx_range>>
 replicated_partition::aborted_transactions_local(
-  cloud_storage::offset_range offsets,
+  model::offset begin_rp,
+  model::offset end_rp,
   ss::lw_shared_ptr<const storage::offset_translator_state> ot_state) {
-    // Note: here we expect that local _partition contains aborted transaction
-    // ids for both local and remote offset ranges. This is true as long as
-    // rm_stm state has not been reset (for example when there is a partition
-    // transfer or when a stale replica recovers its log from beyond the log
-    // eviction point). See
+    // Note: rm_stm state may have been reset (for example when there is a
+    // partition transfer or when a stale replica recovers its log from beyond
+    // the log eviction point). See
     // https://github.com/redpanda-data/redpanda/issues/3001
 
-    auto source = co_await _partition->aborted_transactions(
-      offsets.begin_rp, offsets.end_rp);
+    auto source = co_await _partition->aborted_transactions(begin_rp, end_rp);
 
-    // We trim beginning of aborted ranges to `trim_at` because we don't have
-    // offset translation info for earlier offsets.
-    model::offset trim_at;
-    if (offsets.begin_rp >= _partition->raft_start_offset()) {
-        // Local fetch. Trim to start of the log - it is safe because clients
-        // can't read earlier offsets.
-        trim_at = _partition->raft_start_offset();
-    } else {
-        // Fetch from cloud data. Trim to start of the read range - this is
-        // incorrect because clients can still see earlier offsets but will work
-        // if they won't use aborted ranges from this request to filter batches
-        // belonging to earlier offsets.
-        trim_at = offsets.begin_rp;
-    }
+    // We trim beginning of aborted ranges to the start of the log because we
+    // don't have offset translation info for earlier offsets, and it is safe
+    // because clients can't read earlier offsets.
+    const auto trim_at = _partition->raft_start_offset();
 
     std::vector<cluster::tx::tx_range> target;
     target.reserve(source.size());
@@ -259,90 +195,13 @@ replicated_partition::aborted_transactions_local(
 }
 
 ss::future<std::vector<cluster::tx::tx_range>>
-replicated_partition::aborted_transactions_remote(
-  cloud_storage::offset_range offsets,
-  ss::lw_shared_ptr<const storage::offset_translator_state> ot_state) {
-    auto source = co_await _partition->aborted_transactions_cloud(offsets);
-    std::vector<cluster::tx::tx_range> target;
-    target.reserve(source.size());
-    for (const auto& range : source) {
-        target.emplace_back(
-          range.pid,
-          ot_state->from_log_offset(std::max(offsets.begin_rp, range.first)),
-          ot_state->from_log_offset(range.last));
-    }
-    co_return target;
-}
-
-/**
- * Based on the lower offset of an incoming request, decide whether it should
- * be sent to cloud storage (return true), or local raft storage (return false)
- */
-bool replicated_partition::may_read_from_cloud(
-  kafka::offset start_offset) const {
-    return _partition->is_remote_fetch_enabled()
-           && _partition->cloud_data_available()
-           && (start_offset < model::offset_cast(_translator->from_log_offset(_partition->raft_start_offset())));
-}
-
-ss::future<std::vector<cluster::tx::tx_range>>
 replicated_partition::aborted_transactions(
   model::offset base,
   model::offset last,
   ss::lw_shared_ptr<const storage::offset_translator_state> ot_state) {
-    // We can extract information about aborted transactions from local raft log
-    // or from the S3 bucket. The decision is made using the following logic:
-    // - if the record batches were produced by shadow indexing (downloaded from
-    // S3)
-    //   then we should use the same source for transactions metadata. It's
-    //   guaranteed that in this case we will find the corresponding manifest
-    //   (it's downloaded alongside the segment to SI cache). This also means
-    //   that we will have the manifests hydrated on disk (since we just
-    //   downloaded corresponding segments from S3 to produce batches).
-    // - if the source of data is local raft log then we should use abroted
-    // transactions
-    //   snapshot.
-    //
-    // Sometimes the snapshot will have data for the offset range even if the
-    // source is S3 bucket. In this case we won't be using this data because
-    // it's not guaranteed that it has the data for the entire offset range and
-    // we won't be able to tell the difference by looking at the results (for
-    // instance, the offset range is 0-100, but the snapshot has data starting
-    // from offset 50, it will return data for range 50-100 and we won't be able
-    // to tell if it didn't have data for 0-50 or there wasn't any transactions
-    // in that range).
     vassert(ot_state, "ntp {}: offset translator state must be present", ntp());
-    auto base_rp = ot_state->to_log_offset(base);
-    auto last_rp = ot_state->to_log_offset(last);
-    cloud_storage::offset_range offsets = {
-      .begin = model::offset_cast(base),
-      .end = model::offset_cast(last),
-      .begin_rp = base_rp,
-      .end_rp = last_rp,
-    };
-    if (_partition->is_read_replica_mode_enabled()) {
-        // Always use SI for read replicas
-        co_return co_await aborted_transactions_remote(offsets, ot_state);
-    }
-    if (may_read_from_cloud(model::offset_cast(base))) {
-        // The fetch request was satisfied using shadow indexing.
-        auto tx_remote = co_await aborted_transactions_remote(
-          offsets, ot_state);
-        if (!tx_remote.empty()) {
-            // NOTE: we don't have a way to upload tx-manifests to the cloud
-            // for segments which was uploaded by old redpanda version because
-            // we can't guarantee that the local snapshot still has the data.
-            // This means that 'aborted_transaction_remote' might return empty
-            // result in case if the segment was uploaded by previous version of
-            // redpanda. In this case we will try to fetch the aborted
-            // transactions metadata from local snapshot. This approach provide
-            // the same guarantees that we have in v22.1 for data produced by
-            // v22.1 and earlier. But for new data we will guarantee that the
-            // metadata is always available in S3.
-            co_return tx_remote;
-        }
-    }
-    co_return co_await aborted_transactions_local(offsets, ot_state);
+    co_return co_await aborted_transactions_local(
+      ot_state->to_log_offset(base), ot_state->to_log_offset(last), ot_state);
 }
 
 ss::future<std::optional<storage::timequery_result>>
@@ -354,11 +213,6 @@ replicated_partition::timequery(storage::timequery_config cfg) {
 ss::future<result<model::offset>> replicated_partition::replicate(
   chunked_vector<model::record_batch> batches, raft::replicate_options opts) {
     using ret_t = result<model::offset>;
-    if (_partition->is_read_replica_mode_enabled()) {
-        return ss::make_ready_future<ret_t>(
-          kafka::error_code::invalid_topic_exception);
-    }
-
     return _partition->replicate(std::move(batches), opts)
       .then([](result<cluster::kafka_result> r) {
           if (!r) {
@@ -373,12 +227,6 @@ raft::replicate_stages replicated_partition::replicate(
   model::record_batch batch,
   raft::replicate_options opts) {
     using ret_t = result<raft::replicate_result>;
-    if (_partition->is_read_replica_mode_enabled()) {
-        return {
-          ss::now(),
-          ss::make_ready_future<result<raft::replicate_result>>(
-            make_error_code(kafka::error_code::invalid_topic_exception))};
-    }
     auto res = _partition->replicate_in_stages(
       batch_id, std::move(batch), opts);
 
@@ -419,42 +267,16 @@ replicated_partition::get_leader_epoch_last_offset_unbounded(
     const auto first_local_offset = _partition->raft_start_offset();
     const auto first_local_term = _partition->get_term(first_local_offset);
     const auto last_local_term = _partition->term();
-    const auto is_read_replica = _partition->is_read_replica_mode_enabled();
 
     vlog(
       kdlog.debug,
       "{} get_leader_epoch_last_offset_unbounded, term {}, first local offset "
-      "{}, first local term {}, last local term {}, is read replica {}",
+      "{}, first local term {}, last local term {}",
       _partition->get_ntp_config().ntp(),
       term,
       first_local_offset,
       first_local_term,
-      last_local_term,
-      is_read_replica);
-
-    if (is_read_replica) {
-        if (!_partition->cloud_data_available()) {
-            // If we didn't sync the manifest yet the cloud_data_available will
-            // return false. We can't call `get_cloud_term_last_offset` in this
-            // case but we also can't use `first_local_offset` for read replica.
-            co_return std::nullopt;
-        }
-        auto last_offset = co_await _partition->get_cloud_term_last_offset(
-          term);
-        if (last_offset) {
-            co_return last_offset;
-        }
-        // The term was not found in cloud storage.
-        const auto highest_cloud_term = _partition->highest_cloud_term();
-        if (highest_cloud_term.has_value() && term > *highest_cloud_term) {
-            // A read replica has no local log, so a term above the highest
-            // cloud term is an unknown (future) epoch for it.
-            co_return std::nullopt;
-        }
-        // The term is below the earliest cloud segment; the next-highest term
-        // still lives in cloud, so return the cloud start offset.
-        co_return _partition->start_cloud_offset();
-    }
+      last_local_term);
 
     if (term > last_local_term) {
         // Request for term that is in the future
@@ -469,34 +291,8 @@ replicated_partition::get_leader_epoch_last_offset_unbounded(
             co_return _translator->from_log_offset(*last_offset);
         }
     }
-    // The requested term falls below our earliest local segment. Check cloud
-    // storage for a viable offset.
-    if (
-      _partition->is_remote_fetch_enabled()
-      && _partition->cloud_data_available()) {
-        auto last_offset = co_await _partition->get_cloud_term_last_offset(
-          term);
-        if (last_offset) {
-            co_return last_offset;
-        }
-        // The requested term is below the first local term (so its data is not
-        // in the local log) and was not found in cloud storage. Here, we use
-        // the highest cloud term to disambiguate two cases.
-        const auto highest_cloud_term = _partition->highest_cloud_term();
-        if (highest_cloud_term.has_value() && term <= *highest_cloud_term) {
-            // The term must be lower than the lowest cloud term: the
-            // next-highest term still lives in cloud, so the answer is the
-            // cloud start offset (the effective log start).
-            co_return _partition->start_cloud_offset();
-        }
-        // The term is higher than the highest cloud term: its data lives
-        // only in the local log (e.g. the local start offset advanced ahead
-        // of the cloud upload watermark during partition movement). The
-        // next-highest term begins at the first local offset.
-        co_return _translator->from_log_offset(first_local_offset);
-    }
-
-    // Return the offset of this next-highest term.
+    // The requested term falls below our earliest local segment: the
+    // next-highest term begins at the first local offset.
     co_return _translator->from_log_offset(first_local_offset);
 }
 
@@ -681,12 +477,6 @@ size_t replicated_partition::estimate_size_between(
     if (begin > end) {
         return 0;
     }
-    if (
-      _partition->is_read_replica_mode_enabled()
-      && _partition->cloud_data_available()) {
-        auto& m = _partition->archival_meta_stm()->manifest();
-        return m.estimate_size_between(begin, end);
-    }
     auto ot = _partition->log()->get_offset_translator_state();
     auto local_log_start = _partition->raft_start_offset();
     auto local_kafka_start = model::offset_cast(
@@ -694,18 +484,6 @@ size_t replicated_partition::estimate_size_between(
     auto local_kafka_end = kafka::prev_offset(
       model::offset_cast(ot->from_log_offset(_partition->high_watermark())));
 
-    size_t cloud_sz = 0;
-    if (may_read_from_cloud(begin)) {
-        // There is some data that falls below the local log and should be
-        // served from the cloud.
-
-        // Clamp the target end point to just below the local log so we don't
-        // double account for data that is both in the local log and in cloud.
-        auto cloud_clamped_kafka_end = std::min(
-          end, kafka::prev_offset(local_kafka_start));
-        auto& m = _partition->archival_meta_stm()->manifest();
-        cloud_sz = m.estimate_size_between(begin, cloud_clamped_kafka_end);
-    }
     size_t local_sz = 0;
     if (end >= local_kafka_start) {
         // There is some data that will be served from the local log.
@@ -725,25 +503,15 @@ size_t replicated_partition::estimate_size_between(
           local_clamped_end);
         local_sz = local_sz_from_begin - local_sz_after_end;
     }
-    return cloud_sz + local_sz;
+    return local_sz;
 }
 
 size_t replicated_partition::local_size_bytes() const {
     return _partition->size_bytes();
 }
 
-ss::future<std::optional<size_t>>
-replicated_partition::cloud_size_bytes() const {
-    co_return _partition->cloud_log_size();
-}
-
 model::offset replicated_partition::offset_lag() const {
     return _partition->high_watermark() - _partition->dirty_offset();
-}
-
-ss::future<cluster::partition_cloud_storage_status>
-replicated_partition::get_cloud_storage_status() const {
-    co_return _partition->get_cloud_storage_status();
 }
 
 } // namespace kafka

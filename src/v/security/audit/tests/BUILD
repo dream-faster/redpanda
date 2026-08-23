@@ -23,7 +23,6 @@ redpanda_cc_gtest(
         "//src/v/base",
         "//src/v/cluster:cluster_utils",
         "//src/v/cluster:controller_log_limiter",
-        "//src/v/cluster:data_migration_table",
         "//src/v/cluster:feature_backend",
         "//src/v/cluster:leader_balancer_strategy",
         "//src/v/cluster:node_status_backend",

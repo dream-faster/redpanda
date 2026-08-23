@@ -93,8 +93,6 @@ private:
     void setup_public_metrics(const model::ntp&);
     void setup_internal_metrics(const model::ntp&);
 
-    void setup_public_scrubber_metric(const model::ntp&);
-
 private:
     static constexpr int64_t metric_default_initialized_state{-2};
     static constexpr int64_t metric_feature_disabled_state{-1};
@@ -105,7 +103,6 @@ private:
     uint64_t _batches_produced{0};
     uint64_t _bytes_fetched{0};
     uint64_t _bytes_fetched_from_follower{0};
-    config::binding<bool> _enable_scrubbing_bind;
     metrics::internal_metric_groups _metrics;
     metrics::public_metric_groups _public_metrics;
 };

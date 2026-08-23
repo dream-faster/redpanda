@@ -223,33 +223,3 @@ compaction_controller_config(ss::scheduling_group sg, uint64_t fs_avail) {
       config::shard_local_cfg().compaction_ctrl_min_shares.bind(),
       config::shard_local_cfg().compaction_ctrl_max_shares.bind());
 }
-
-storage::backlog_controller_config
-make_upload_controller_config(ss::scheduling_group sg, uint64_t fs_avail) {
-    // This settings are similar to compaction_controller_config.
-    // The desired setpoint for archival is set to 0 since the goal is to upload
-    // all data that we have.
-    // If the size of the backlog (the data which should be uploaded to S3) is
-    // larger than this value we need to bump the scheduling priority.
-    // Otherwise, we're good with the minimal.
-    // Since the setpoint is 0 we can't really use integral component of the
-    // controller. This is because upload backlog size never gets negative so
-    // once integral part will rump up high enough it won't be able to go down
-    // even if everything is uploaded.
-
-    auto setpoint_function = []() { return 0; };
-    int64_t normalization = static_cast<int64_t>(fs_avail)
-                            / (1000 * ss::this_smp_shard_count());
-    return {
-      config::shard_local_cfg().cloud_storage_upload_ctrl_p_coeff.bind(),
-      config::mock_binding(0.0),
-      config::shard_local_cfg().cloud_storage_upload_ctrl_d_coeff.bind(),
-      normalization,
-      std::move(setpoint_function),
-      static_cast<int>(sg.get_shares()),
-      config::shard_local_cfg()
-        .cloud_storage_upload_ctrl_update_interval_ms.bind(),
-      sg,
-      config::shard_local_cfg().cloud_storage_upload_ctrl_min_shares.bind(),
-      config::shard_local_cfg().cloud_storage_upload_ctrl_max_shares.bind()};
-}

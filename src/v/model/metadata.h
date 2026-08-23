@@ -447,17 +447,6 @@ struct topic_metadata
     auto serde_fields() { return std::tie(tp_ns, partitions); }
 };
 
-enum class cloud_credentials_source {
-    config_file = 0,
-    aws_instance_metadata = 1,
-    sts = 2,
-    gcp_instance_metadata = 3,
-    azure_aks_oidc_federation = 4,
-    azure_vm_instance_metadata = 5,
-};
-
-fmt::iterator format_to(cloud_credentials_source cs, fmt::iterator out);
-
 enum class partition_autobalancing_mode {
     off = 0,
     node_add,
@@ -473,36 +462,6 @@ format_to(partition_autobalancing_mode m, fmt::iterator out) {
         return fmt::format_to(out, "node_add");
     case partition_autobalancing_mode::continuous:
         return fmt::format_to(out, "continuous");
-    }
-    return fmt::format_to(out, "unknown");
-}
-
-enum class cloud_storage_backend : uint8_t {
-    aws = 0,
-    google_s3_compat = 1,
-    azure = 2,
-    minio = 3,
-    oracle_s3_compat = 4,
-    linode_s3_compat = 5,
-    unknown
-};
-
-inline fmt::iterator format_to(cloud_storage_backend csb, fmt::iterator out) {
-    switch (csb) {
-    case cloud_storage_backend::aws:
-        return fmt::format_to(out, "aws");
-    case cloud_storage_backend::google_s3_compat:
-        return fmt::format_to(out, "google_s3_compat");
-    case cloud_storage_backend::azure:
-        return fmt::format_to(out, "azure");
-    case cloud_storage_backend::minio:
-        return fmt::format_to(out, "minio");
-    case cloud_storage_backend::oracle_s3_compat:
-        return fmt::format_to(out, "oracle_s3_compat");
-    case cloud_storage_backend::linode_s3_compat:
-        return fmt::format_to(out, "linode_s3_compat");
-    case cloud_storage_backend::unknown:
-        return fmt::format_to(out, "unknown");
     }
     return fmt::format_to(out, "unknown");
 }
@@ -529,25 +488,6 @@ leader_balancer_mode_to_string(leader_balancer_mode mode) {
 
 inline fmt::iterator format_to(leader_balancer_mode mode, fmt::iterator out) {
     return fmt::format_to(out, "{}", leader_balancer_mode_to_string(mode));
-}
-
-enum class cloud_storage_chunk_eviction_strategy {
-    eager = 0,
-    capped = 1,
-    predictive = 2,
-};
-
-inline fmt::iterator
-format_to(cloud_storage_chunk_eviction_strategy st, fmt::iterator out) {
-    switch (st) {
-    case cloud_storage_chunk_eviction_strategy::eager:
-        return fmt::format_to(out, "eager");
-    case cloud_storage_chunk_eviction_strategy::capped:
-        return fmt::format_to(out, "capped");
-    case cloud_storage_chunk_eviction_strategy::predictive:
-        return fmt::format_to(out, "predictive");
-    }
-    return fmt::format_to(out, "unknown");
 }
 
 enum class fetch_read_strategy : uint8_t {
@@ -611,56 +551,6 @@ std::optional<write_caching_mode>
 
 fmt::iterator format_to(write_caching_mode s, fmt::iterator out);
 std::istream& operator>>(std::istream&, write_caching_mode&);
-
-// Storage mode for a Redpanda topic
-// unset (255) enables fallback to legacy shadow_indexing behavior during
-// deprecation. When storage_mode is explicit (local/tiered/cloud), it is
-// authoritative. When unset, legacy shadow_indexing configs are used.
-enum class redpanda_storage_mode : uint8_t {
-    local = 0,
-    tiered = 1,
-    unset = 255
-};
-
-constexpr const char* redpanda_storage_mode_to_string(redpanda_storage_mode m) {
-    switch (m) {
-    case redpanda_storage_mode::local:
-        return "local";
-    case redpanda_storage_mode::tiered:
-        return "tiered";
-    case redpanda_storage_mode::unset:
-        return "unset";
-    }
-    throw std::invalid_argument("unknown redpanda_storage_mode");
-}
-
-std::optional<redpanda_storage_mode>
-  redpanda_storage_mode_from_string(std::string_view);
-
-fmt::iterator format_to(redpanda_storage_mode m, fmt::iterator out);
-std::istream& operator>>(std::istream&, redpanda_storage_mode&);
-
-/// Parse a user-supplied storage mode string (the redpanda.storage.mode topic
-/// property). The user vocabulary is local/tiered/unset.
-std::optional<redpanda_storage_mode>
-  redpanda_storage_mode_from_user_string(std::string_view);
-
-/// The user-facing name of a storage mode.
-const char* redpanda_storage_mode_user_name(redpanda_storage_mode);
-
-enum class recovery_validation_mode : std::uint16_t {
-    // ensure that either the manifest is in TS or that no manifest is present.
-    // download issues will fail the validation
-    check_manifest_existence = 0,
-    // download the manifest and check the most recent segments up to
-    // max_segment_depth
-    check_manifest_and_segment_metadata = 1,
-    // do not perform any check, validation is considered successful
-    no_check = 0xff,
-};
-
-fmt::iterator format_to(recovery_validation_mode vm, fmt::iterator out);
-std::istream& operator>>(std::istream&, recovery_validation_mode&);
 
 enum class kafka_batch_validation_mode : uint8_t {
     legacy = 0,

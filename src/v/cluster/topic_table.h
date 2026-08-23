@@ -485,7 +485,7 @@ public:
         const in_progress_update* update = nullptr;
     };
 
-    explicit topic_table(data_migrations::migrated_resources&, model::node_id);
+    explicit topic_table(model::node_id);
 
     cluster::notification_id_type
     register_topic_delta_notification(topic_delta_cb_t cb) {
@@ -920,7 +920,6 @@ private:
     topic_table_probe _probe;
     force_recoverable_partitions_t _partitions_to_force_reconfigure;
     model::revision_id _partitions_to_force_reconfigure_revision{0};
-    data_migrations::migrated_resources& _migrated_resources;
     friend class topic_table_partition_generator;
 };
 

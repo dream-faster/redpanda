@@ -12,7 +12,6 @@
 #pragma once
 
 #include "absl/container/flat_hash_map.h"
-#include "cloud_storage/fwd.h"
 #include "cluster/errc.h"
 #include "cluster/fwd.h"
 #include "cluster/partition_balancer_types.h"
@@ -61,14 +60,12 @@ public:
       ss::sharded<topic_table>&,
       ss::sharded<health_monitor_frontend>&,
       ss::sharded<ss::abort_source>&,
-      ss::sharded<cloud_storage::remote>&,
       ss::sharded<features::feature_table>&,
       ss::sharded<cluster::members_table>&,
       ss::sharded<partition_manager>&,
       ss::sharded<shard_table>&,
       ss::sharded<shard_balancer>&,
       ss::sharded<storage::api>&,
-      data_migrations::migrated_resources&,
       metadata_cache&,
       config::binding<unsigned> hard_max_disk_usage_ratio,
       config::binding<int16_t> minimum_topic_replication,
@@ -82,8 +79,6 @@ public:
     ss::future<std::vector<topic_result>> delete_topics(
       std::vector<model::topic_namespace>, model::timeout_clock::time_point);
 
-    ss::future<errc> delete_topic_after_migration(
-      model::topic_namespace, model::timeout_clock::time_point);
     /**
      * In contrast to simple delete topics this method may use RPC to forward
      * delete topics request to controller.
@@ -307,7 +302,6 @@ private:
     ss::sharded<topic_table>& _topics;
     ss::sharded<health_monitor_frontend>& _hm_frontend;
     ss::sharded<ss::abort_source>& _as;
-    ss::sharded<cloud_storage::remote>& _cloud_storage_api;
     ss::sharded<features::feature_table>& _features;
     ss::sharded<shard_balancer>& _shard_balancer;
     ss::sharded<storage::api>& _storage;
@@ -316,7 +310,6 @@ private:
     ss::sharded<cluster::members_table>& _members_table;
     ss::sharded<partition_manager>& _pm;
     ss::sharded<shard_table>& _shard_table;
-    data_migrations::migrated_resources& _migrated_resources;
 
     config::binding<unsigned> _hard_max_disk_usage_ratio;
     config::binding<int16_t> _minimum_topic_replication;

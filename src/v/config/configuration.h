@@ -11,7 +11,6 @@
 
 #pragma once
 
-#include "cloud_io/admission_control_types.h"
 #include "config/bounded_property.h"
 #include "config/broker_endpoint.h"
 #include "config/config_store.h"
@@ -368,184 +367,20 @@ struct configuration final : public config_store {
     property<bool> audit_use_rpc;
 
     // Archival storage
-    enterprise<property<bool>> cloud_storage_enabled;
-    property<bool> cloud_storage_enable_remote_read;
-    property<bool> cloud_storage_enable_remote_write;
-    enum_property<model::redpanda_storage_mode> default_redpanda_storage_mode;
-    property<bool> cloud_storage_disable_archiver_manager;
-    property<std::optional<ss::sstring>> cloud_storage_access_key;
-    property<std::optional<ss::sstring>> cloud_storage_secret_key;
-    property<std::optional<ss::sstring>> cloud_storage_region;
-    property<std::optional<ss::sstring>> cloud_storage_bucket;
-    property<std::optional<ss::sstring>> cloud_storage_api_endpoint;
-    enum_property<std::optional<s3_url_style>> cloud_storage_url_style;
-    enum_property<model::cloud_credentials_source>
-      cloud_storage_credentials_source;
-    property<std::optional<ss::sstring>>
-      cloud_storage_azure_managed_identity_id;
-    property<std::chrono::milliseconds>
-      cloud_storage_roles_operation_timeout_ms;
-    property<std::chrono::milliseconds>
-      cloud_storage_upload_loop_initial_backoff_ms;
-    property<std::chrono::milliseconds>
-      cloud_storage_upload_loop_max_backoff_ms;
-    property<int16_t> cloud_storage_max_connections;
-    enum_property<cloud_io::policy_type> cloud_io_admission_control_policy;
-    property<std::vector<ss::sstring>> cloud_io_admission_control_reservation;
-    property<bool> cloud_storage_disable_tls;
-    property<int16_t> cloud_storage_api_endpoint_port;
-    property<std::optional<ss::sstring>> cloud_storage_trust_file;
-    property<std::optional<ss::sstring>> cloud_storage_crl_file;
-    property<std::chrono::milliseconds> cloud_storage_initial_backoff_ms;
-    property<std::chrono::milliseconds> cloud_storage_segment_upload_timeout_ms;
-    property<std::chrono::milliseconds>
-      cloud_storage_manifest_upload_timeout_ms;
-    property<std::chrono::milliseconds>
-      cloud_storage_garbage_collect_timeout_ms;
-    property<std::chrono::milliseconds>
-      cloud_storage_max_connection_idle_time_ms;
-    property<std::optional<std::chrono::seconds>>
-      cloud_storage_segment_max_upload_interval_sec;
-    property<std::optional<std::chrono::seconds>>
-      cloud_storage_manifest_max_upload_interval_sec;
-    property<std::chrono::milliseconds>
-      cloud_storage_readreplica_manifest_sync_timeout_ms;
-    property<std::chrono::milliseconds> cloud_storage_metadata_sync_timeout_ms;
-    property<std::chrono::milliseconds> cloud_storage_housekeeping_interval_ms;
-    property<std::chrono::milliseconds> cloud_storage_idle_timeout_ms;
-    property<std::chrono::milliseconds>
-      cloud_storage_cluster_metadata_upload_interval_ms;
-    property<std::chrono::milliseconds>
-      cloud_storage_cluster_metadata_upload_timeout_ms;
-    property<size_t>
-      cloud_storage_cluster_metadata_num_consumer_groups_per_upload;
-    property<int16_t> cloud_storage_cluster_metadata_retries;
-    property<bool> cloud_storage_attempt_cluster_restore_on_bootstrap;
-    property<double> cloud_storage_idle_threshold_rps;
-    property<int32_t> cloud_storage_background_jobs_quota;
-    property<bool> cloud_storage_enable_segment_merging;
-    property<bool> cloud_storage_enable_scrubbing;
-    property<std::chrono::milliseconds> cloud_storage_partial_scrub_interval_ms;
-    property<std::chrono::milliseconds> cloud_storage_full_scrub_interval_ms;
-    property<std::chrono::milliseconds>
-      cloud_storage_scrubbing_interval_jitter_ms;
-    property<bool> cloud_storage_disable_upload_loop_for_tests;
-    property<bool> cloud_storage_disable_read_replica_loop_for_tests;
     property<bool> disable_cluster_recovery_loop_for_tests;
-    property<bool> enable_cluster_metadata_upload_loop;
-    property<std::optional<ss::sstring>> cloud_storage_cluster_name;
-    property<size_t> cloud_storage_max_segments_pending_deletion_per_partition;
-    bounded_property<size_t> cloud_storage_gc_max_segments_per_run;
-    property<bool> cloud_storage_enable_compacted_topic_reupload;
-    property<size_t> cloud_storage_recovery_temporary_retention_bytes_default;
     // validation of topic manifest during recovery
-    enum_property<model::recovery_validation_mode>
-      cloud_storage_recovery_topic_validation_mode;
-    property<uint32_t> cloud_storage_recovery_topic_validation_depth;
-    property<std::chrono::milliseconds> cloud_storage_client_lease_timeout_ms;
-
-    property<std::optional<size_t>> cloud_storage_segment_size_target;
-    property<std::optional<size_t>> cloud_storage_segment_size_min;
-    property<std::optional<size_t>> cloud_storage_max_throughput_per_shard;
-    bounded_property<std::optional<size_t>>
-      cloud_storage_throughput_limit_percent;
-    property<std::optional<std::chrono::milliseconds>>
-      cloud_storage_graceful_transfer_timeout_ms;
-    enum_property<model::cloud_storage_backend> cloud_storage_backend;
-    property<std::optional<ss::sstring>> cloud_storage_credentials_host;
-    bounded_property<std::optional<size_t>>
-      cloud_storage_spillover_manifest_size;
-    property<std::optional<size_t>>
-      cloud_storage_spillover_manifest_max_segments;
-    bounded_property<size_t> cloud_storage_manifest_cache_size;
-    property<std::chrono::milliseconds> cloud_storage_manifest_cache_ttl_ms;
-    property<std::chrono::milliseconds>
-      cloud_storage_topic_purge_grace_period_ms;
-    property<bool> cloud_storage_disable_upload_consistency_checks;
-    property<bool> cloud_storage_disable_archival_stm_rw_fence;
-    property<std::chrono::milliseconds> cloud_storage_hydration_timeout_ms;
-    property<bool> cloud_storage_disable_remote_labels_for_tests;
 
     // Safe pause/resume functionality
-    property<bool> cloud_storage_enable_segment_uploads;
-    property<bool> cloud_storage_enable_remote_allow_gaps;
 
     // Azure Blob Storage
-    property<std::optional<ss::sstring>> cloud_storage_azure_storage_account;
-    property<std::optional<ss::sstring>> cloud_storage_azure_container;
-    property<std::optional<ss::sstring>> cloud_storage_azure_shared_key;
-    property<std::optional<ss::sstring>> cloud_storage_azure_adls_endpoint;
-    property<std::optional<uint16_t>> cloud_storage_azure_adls_port;
-    property<std::optional<bool>>
-      cloud_storage_azure_hierarchical_namespace_enabled;
 
     // Archival upload controller
-    property<std::chrono::milliseconds>
-      cloud_storage_upload_ctrl_update_interval_ms;
-    property<double> cloud_storage_upload_ctrl_p_coeff;
-    property<double> cloud_storage_upload_ctrl_d_coeff;
-    property<int16_t> cloud_storage_upload_ctrl_min_shares;
-    property<int16_t> cloud_storage_upload_ctrl_max_shares;
 
     // Defaults for local retention for partitions of topics with
     // cloud storage read and write enabled
-    property<std::optional<size_t>> retention_local_target_bytes_default;
-    property<std::chrono::milliseconds> retention_local_target_ms_default;
-    property<bool> retention_local_strict;
-    property<bool> retention_local_strict_override;
-    property<std::optional<uint64_t>> retention_local_target_capacity_bytes;
-    bounded_property<std::optional<double>, numeric_bounds>
-      retention_local_target_capacity_percent;
-    property<std::chrono::milliseconds> retention_local_trim_interval;
-    property<double> retention_local_trim_overage_coeff;
-    property<bool> space_management_enable;
-    deprecated_property space_management_enable_override;
-    bounded_property<double, numeric_bounds> disk_reservation_percent;
-    bounded_property<uint16_t> space_management_max_log_concurrency;
-    bounded_property<uint16_t> space_management_max_segment_concurrency;
     property<std::vector<ss::sstring>> log_eviction_exempt_topics;
-    property<std::optional<size_t>>
-      initial_retention_local_target_bytes_default;
-    property<std::optional<std::chrono::milliseconds>>
-      initial_retention_local_target_ms_default;
 
     // Archival cache
-    property<uint64_t> cloud_storage_cache_size;
-    bounded_property<std::optional<double>, numeric_bounds>
-      cloud_storage_cache_size_percent;
-    property<uint32_t> cloud_storage_cache_max_objects;
-    property<uint32_t> cloud_storage_cache_trim_carryover_bytes;
-    property<std::chrono::milliseconds> cloud_storage_cache_check_interval_ms;
-    bounded_property<uint16_t> cloud_storage_cache_trim_walk_concurrency;
-    property<std::optional<uint32_t>>
-      cloud_storage_max_segment_readers_per_shard;
-    property<std::optional<uint32_t>>
-      cloud_storage_max_partition_readers_per_shard;
-    property<std::optional<uint32_t>>
-      cloud_storage_max_concurrent_hydrations_per_shard;
-    property<std::optional<uint32_t>>
-      cloud_storage_max_materialized_segments_per_shard;
-    property<uint64_t> cloud_storage_cache_chunk_size;
-    property<double> cloud_storage_hydrated_chunks_per_segment_ratio;
-    property<uint64_t> cloud_storage_min_chunks_per_segment_threshold;
-    property<bool> cloud_storage_disable_chunk_reads;
-    enum_property<model::cloud_storage_chunk_eviction_strategy>
-      cloud_storage_chunk_eviction_strategy;
-    property<uint16_t> cloud_storage_chunk_prefetch;
-    property<uint16_t> cloud_storage_prefetch_segments_max;
-    bounded_property<uint32_t> cloud_storage_cache_num_buckets;
-    bounded_property<std::optional<double>, numeric_bounds>
-      cloud_storage_cache_trim_threshold_percent_size;
-    bounded_property<std::optional<double>, numeric_bounds>
-      cloud_storage_cache_trim_threshold_percent_objects;
-
-    property<bool> cloud_storage_inventory_based_scrub_enabled;
-    property<ss::sstring> cloud_storage_inventory_id;
-    property<ss::sstring> cloud_storage_inventory_reports_prefix;
-    property<bool> cloud_storage_inventory_self_managed_report_config;
-    property<std::chrono::milliseconds>
-      cloud_storage_inventory_report_check_interval_ms;
-    property<uint64_t> cloud_storage_inventory_max_hash_size_during_parse;
 
     one_or_many_property<ss::sstring> superusers;
 
@@ -655,7 +490,6 @@ struct configuration final : public config_store {
 
     bounded_property<int64_t> node_isolation_heartbeat_timeout;
 
-    property<std::chrono::seconds> controller_snapshot_max_age_sec;
     // security controls
     property<bool> legacy_permit_unsafe_log_operation;
     property<std::chrono::seconds> legacy_unsafe_log_warning_interval_sec;

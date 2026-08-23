@@ -23,7 +23,6 @@ redpanda_cc_library(
     ],
     implementation_deps = [
         ":logger",
-        "//src/v/cloud_io:admission_control_types",
         "//src/v/cluster",
         "//src/v/cluster:types",
         "@boost//:numeric_conversion",
@@ -31,7 +30,6 @@ redpanda_cc_library(
     visibility = ["//visibility:public"],
     deps = [
         "//src/v/base",
-        "//src/v/cloud_storage:types",
         "//src/v/cluster:errc",
         "//src/v/cluster:fwd",
         "//src/v/cluster:ntp_callbacks",

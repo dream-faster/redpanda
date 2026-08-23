@@ -42,13 +42,6 @@ inline constexpr std::string_view topic_property_compaction_strategy
   = "compaction.strategy";
 inline constexpr std::string_view topic_property_segment_size = "segment.bytes";
 
-inline constexpr std::string_view topic_property_remote_write
-  = "redpanda.remote.write";
-inline constexpr std::string_view topic_property_remote_read
-  = "redpanda.remote.read";
-
-inline constexpr std::string_view topic_property_remote_delete
-  = "redpanda.remote.delete";
 inline constexpr std::string_view topic_property_segment_ms = "segment.ms";
 inline constexpr std::string_view topic_property_write_caching
   = "write.caching";
@@ -159,8 +152,5 @@ get_tristate_value(const config_map_t& config, std::string_view key) {
 
 std::optional<bool>
 get_bool_value(const config_map_t& config, std::string_view key);
-
-model::shadow_indexing_mode
-get_shadow_indexing_mode(const config_map_t& config);
 
 } // namespace kafka

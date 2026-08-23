@@ -113,34 +113,6 @@ get_bool_value(const config_map_t& config, std::string_view key) {
     return std::nullopt;
 }
 
-model::shadow_indexing_mode
-get_shadow_indexing_mode(const config_map_t& config) {
-    auto arch_enabled = get_bool_value(config, topic_property_remote_write);
-    auto si_enabled = get_bool_value(config, topic_property_remote_read);
-
-    // If topic properties are missing, patch them with the cluster config.
-    if (!arch_enabled) {
-        arch_enabled
-          = config::shard_local_cfg().cloud_storage_enable_remote_write();
-    }
-
-    if (!si_enabled) {
-        si_enabled
-          = config::shard_local_cfg().cloud_storage_enable_remote_read();
-    }
-
-    model::shadow_indexing_mode mode = model::shadow_indexing_mode::disabled;
-    if (*arch_enabled) {
-        mode = model::shadow_indexing_mode::archival;
-    }
-    if (*si_enabled) {
-        mode = mode == model::shadow_indexing_mode::archival
-                 ? model::shadow_indexing_mode::full
-                 : model::shadow_indexing_mode::fetch;
-    }
-    return mode;
-}
-
 template<typename T>
 static std::optional<T>
 get_enum_value(const config_map_t& config, std::string_view key) {
@@ -195,9 +167,6 @@ to_cluster_type(const creatable_topic& t) {
       t.replication_factor,
       config_map(t.configs));
 
-    /// Final topic_property not decoded here is \ref remote_topic_properties,
-    /// is more of an implementation detail no need to ever show user
-
     auto ret = cluster::custom_assignable_topic_configuration(cfg);
     /**
      * handle custom assignments
@@ -246,29 +215,14 @@ cluster::topic_configuration to_topic_config(
     cfg.properties.retention_duration
       = get_tristate_value<std::chrono::milliseconds>(
         config_entries, topic_property_retention_duration);
-    cfg.properties.recovery = get_bool_value(
-      config_entries, topic_property_recovery);
-    cfg.properties.shadow_indexing = get_shadow_indexing_mode(config_entries);
-    cfg.properties.read_replica_bucket = get_string_value(
-      config_entries, topic_property_read_replica);
     cfg.properties.batch_max_bytes = get_config_value<uint32_t>(
       config_entries, topic_property_max_message_bytes);
-    if (cfg.properties.read_replica_bucket.has_value()) {
-        cfg.properties.read_replica = true;
-    }
 
     cfg.properties.retention_local_target_bytes = get_tristate_value<size_t>(
       config_entries, topic_property_retention_local_target_bytes);
     cfg.properties.retention_local_target_ms
       = get_tristate_value<std::chrono::milliseconds>(
         config_entries, topic_property_retention_local_target_ms);
-
-    cfg.properties.remote_delete
-      = get_bool_value(config_entries, topic_property_remote_delete)
-          .value_or(storage::ntp_config::default_remote_delete);
-
-    cfg.properties.remote_topic_allow_gaps = get_bool_value(
-      config_entries, topic_property_remote_allow_gaps);
 
     cfg.properties.segment_ms = get_tristate_value<std::chrono::milliseconds>(
       config_entries, topic_property_segment_ms);
@@ -324,13 +278,6 @@ cluster::topic_configuration to_topic_config(
         config_entries,
         topic_property_message_timestamp_after_max_ms,
         /*clamp_to_duration_max=*/true);
-
-    cfg.properties.storage_mode
-      = get_string_value(config_entries, topic_property_redpanda_storage_mode)
-          .and_then([](const ss::sstring& raw) {
-              return model::redpanda_storage_mode_from_user_string(raw);
-          })
-          .value_or(config::shard_local_cfg().default_redpanda_storage_mode());
 
     return cfg;
 }

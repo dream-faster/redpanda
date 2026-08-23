@@ -24,20 +24,11 @@
 
 namespace storage {
 using with_cache = ss::bool_class<struct log_cache_tag>;
-using topic_recovery_enabled
-  = ss::bool_class<struct topic_recovery_enabled_tag>;
-
 class ntp_config {
 public:
     // Remote deletes are enabled by default in new tiered storage topics,
     // disabled by default in legacy topics during upgrade (the legacy path
     // is handled during adl/serde decode).
-    static constexpr bool default_remote_delete{true};
-    static constexpr bool legacy_remote_delete{false};
-    static constexpr model::redpanda_storage_mode default_storage_mode{
-      model::redpanda_storage_mode::unset};
-
-    static constexpr std::chrono::milliseconds read_replica_retention{3600000};
 
     struct default_overrides {
         // if not set use the log_manager's configuration
@@ -53,20 +44,9 @@ public:
         tristate<std::chrono::milliseconds> retention_time{std::nullopt};
         // if set, log will not use batch cache
         with_cache cache_enabled = with_cache::yes;
-        // if set the value will be used during partition recovery
-        topic_recovery_enabled recovery_enabled = topic_recovery_enabled::yes;
-        // if set the value will control how data is uploaded and retrieved
-        // to/from S3
-        std::optional<model::shadow_indexing_mode> shadow_indexing_mode;
-
-        std::optional<bool> read_replica;
-
         tristate<size_t> retention_local_target_bytes{std::nullopt};
         tristate<std::chrono::milliseconds> retention_local_target_ms{
           std::nullopt};
-
-        // Controls whether topic deletion should imply deletion in S3
-        std::optional<bool> remote_delete;
 
         // time before rolling a segment, from first write
         tristate<std::chrono::milliseconds> segment_ms{std::nullopt};
@@ -88,10 +68,7 @@ public:
         std::optional<std::chrono::milliseconds> max_compaction_lag_ms;
 
         // Controls behavior during pause
-        std::optional<bool> remote_allow_gaps;
-
         // Storage mode for the topic (local, tiered, or cloud)
-        model::redpanda_storage_mode storage_mode{default_storage_mode};
 
         fmt::iterator format_to(fmt::iterator it) const;
     };
@@ -211,100 +188,7 @@ public:
             // If no value set, fall through and use the cluster-wide default.
         }
 
-        if (is_read_replica_mode_enabled()) {
-            // Read replicas have a special hardcoded default, because they do
-            // not retain user data in local raft log, just configuration.
-            return read_replica_retention;
-        }
-
         return config::shard_local_cfg().log_retention_ms();
-    }
-
-    topic_recovery_enabled recovery_enabled() const {
-        return _overrides != nullptr ? _overrides->recovery_enabled
-                                     : topic_recovery_enabled::no;
-    }
-
-    bool is_archival_enabled() const {
-        if (_overrides == nullptr) {
-            return false;
-        }
-        // Explicit tiered
-        if (_overrides->storage_mode == model::redpanda_storage_mode::tiered) {
-            return true;
-        }
-        // Explicit local or cloud
-        if (_overrides->storage_mode != model::redpanda_storage_mode::unset) {
-            return false;
-        }
-        // Unset, fall back to legacy shadow_indexing
-        return _overrides->shadow_indexing_mode
-               && model::is_archival_enabled(
-                 _overrides->shadow_indexing_mode.value());
-    }
-
-    bool is_remote_fetch_enabled() const {
-        if (_overrides == nullptr) {
-            return false;
-        }
-        // Explicit tiered
-        if (_overrides->storage_mode == model::redpanda_storage_mode::tiered) {
-            return true;
-        }
-        // Explicit local or cloud
-        if (_overrides->storage_mode != model::redpanda_storage_mode::unset) {
-            return false;
-        }
-        // Unset, fall back to legacy shadow_indexing
-        return _overrides->shadow_indexing_mode
-               && model::is_fetch_enabled(
-                 _overrides->shadow_indexing_mode.value());
-    }
-
-    bool is_read_replica_mode_enabled() const {
-        return _overrides != nullptr && _overrides->read_replica
-               && _overrides->read_replica.value();
-    }
-
-    bool is_remote_allow_gaps_enabled() const {
-        auto cluster_default
-          = config::shard_local_cfg().cloud_storage_enable_remote_allow_gaps();
-        if (_overrides == nullptr) {
-            return cluster_default;
-        }
-        return _overrides->remote_allow_gaps.value_or(cluster_default);
-    }
-
-    /**
-     * True if the topic is configured for "normal" tiered storage, i.e.
-     * both reads and writes to S3, and is not a read replica.
-     */
-    bool is_tiered_storage() const {
-        if (_overrides == nullptr) {
-            return false;
-        }
-        if (_overrides->read_replica.value_or(false)) {
-            return false;
-        }
-        // Explicit tiered
-        if (_overrides->storage_mode == model::redpanda_storage_mode::tiered) {
-            return true;
-        }
-        // Explicit local or cloud
-        if (_overrides->storage_mode != model::redpanda_storage_mode::unset) {
-            return false;
-        }
-        // Unset, fall back to legacy shadow_indexing
-        return _overrides->shadow_indexing_mode
-               == model::shadow_indexing_mode::full;
-    }
-
-    bool remote_delete() const {
-        if (_overrides == nullptr) {
-            return default_remote_delete;
-        } else {
-            return _overrides->remote_delete.value_or(default_remote_delete);
-        }
     }
 
     auto segment_ms() const -> std::optional<std::chrono::milliseconds> {
@@ -316,12 +200,6 @@ public:
                 return _overrides->segment_ms.value();
             }
             // fall through to server config
-        }
-
-        if (is_read_replica_mode_enabled()) {
-            // Read replicas have a special hardcoded default, because they do
-            // not retain user data in local raft log, just configuration.
-            return read_replica_retention;
         }
 
         return config::shard_local_cfg().log_segment_ms;
@@ -368,13 +246,6 @@ public:
             // 2) this prefix is truncated away locally
             // 3) correspondent tombstone (or tx end marker) is compacted away
             // locally.
-            if (is_archival_enabled() || is_remote_fetch_enabled()) {
-                return std::nullopt;
-            }
-        }
-        if (is_read_replica_mode_enabled()) {
-            // RRR sanity check.
-            return std::nullopt;
         }
         auto& cluster_default
           = config::shard_local_cfg().tombstone_retention_ms();

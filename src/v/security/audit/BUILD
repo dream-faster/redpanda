@@ -41,8 +41,6 @@ redpanda_cc_library(
         "types.h",
     ],
     implementation_deps = [
-        "//src/v/cluster:data_migration_group_proxy",
-        "//src/v/cluster:data_migration_table",
         "//src/v/cluster:ephemeral_credential_frontend",
         "//src/v/cluster:feature_backend",
         "//src/v/cluster:leader_balancer_strategy",
@@ -60,8 +58,6 @@ redpanda_cc_library(
         "//src/v/base",
         "//src/v/cluster",
         "//src/v/cluster:client_quota_backend",
-        "//src/v/cluster:cloud_metadata_types",
-        "//src/v/cluster:cluster_recovery_table",
         "//src/v/cluster:controller_log_limiter",
         "//src/v/cluster:fwd",
         "//src/v/cluster:logger",

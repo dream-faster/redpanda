@@ -436,7 +436,7 @@ SEASTAR_THREAD_TEST_CASE(partition_status_v7_log_start_offset_compat_test) {
               reclaimable_size_bytes,
               shard,
               followers_stats,
-              high_watermark,
+              high_watermark);
         }
     };
 

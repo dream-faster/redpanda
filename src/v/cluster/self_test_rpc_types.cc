@@ -49,8 +49,6 @@ ss::sstring self_test_stage_as_string(self_test_stage sts) {
         return "disk";
     case self_test_stage::net:
         return "net";
-    case self_test_stage::cloud:
-        return "cloud";
     }
 }
 fmt::iterator format_to(self_test_stage sts, fmt::iterator out) {
@@ -61,8 +59,6 @@ fmt::iterator format_to(self_test_stage sts, fmt::iterator out) {
         return fmt::format_to(out, "disk");
     case self_test_stage::net:
         return fmt::format_to(out, "net");
-    case self_test_stage::cloud:
-        return fmt::format_to(out, "cloud");
     }
     return fmt::format_to(out, "");
 }
@@ -89,8 +85,7 @@ make_netcheck_request(model::node_id src, size_t sz) {
 }
 
 void parse_self_test_checks(start_test_request& r) {
-    static constexpr auto known_checks = std::to_array(
-      {"disk", "network", "cloud"});
+    static constexpr auto known_checks = std::to_array({"disk", "network"});
     for (auto it = r.unparsed_checks.begin(); it != r.unparsed_checks.end();) {
         const auto& test_type = it->test_type;
         if (
@@ -106,8 +101,6 @@ void parse_self_test_checks(start_test_request& r) {
                 r.dtos.push_back(cluster::diskcheck_opts::from_json(obj));
             } else if (test_type == "network") {
                 r.ntos.push_back(cluster::netcheck_opts::from_json(obj));
-            } else if (test_type == "cloud") {
-                r.ctos.push_back(cluster::cloudcheck_opts::from_json(obj));
             }
             it = r.unparsed_checks.erase(it);
         } else {

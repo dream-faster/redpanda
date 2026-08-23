@@ -55,9 +55,6 @@ validate_at_topic_level(request_context& ctx, const delete_records_topic& t) {
     }
 
     const auto is_deletable = [](const cluster::topic_configuration& cfg) {
-        if (cfg.is_read_replica()) {
-            return false;
-        }
         /// Immitates the logic in ntp_config::is_*_collectable
         if (
           !cfg.properties.has_overrides()

@@ -11,7 +11,6 @@
 
 #pragma once
 
-#include "cloud_io/admission_control_types.h"
 #include "config/leaders_preference.h"
 #include "config/types.h"
 #include "model/compression.h"
@@ -243,73 +242,6 @@ struct convert<config::s3_url_style> {
 };
 
 template<>
-struct convert<model::cloud_credentials_source> {
-    using type = model::cloud_credentials_source;
-
-    static constexpr auto acceptable_values = std::to_array(
-      {"config_file",
-       "aws_instance_metadata",
-       "gcp_instance_metadata",
-       "sts",
-       "azure_aks_oidc_federation",
-       "azure_vm_instance_metadata"});
-
-    static Node encode(const type& rhs) {
-        Node node;
-        switch (rhs) {
-        case model::cloud_credentials_source::config_file:
-            node = "config_file";
-            break;
-        case model::cloud_credentials_source::aws_instance_metadata:
-            node = "aws_instance_metadata";
-            break;
-        case model::cloud_credentials_source::sts:
-            node = "sts";
-            break;
-        case model::cloud_credentials_source::gcp_instance_metadata:
-            node = "gcp_instance_metadata";
-            break;
-        case model::cloud_credentials_source::azure_aks_oidc_federation:
-            node = "azure_aks_oidc_federation";
-            break;
-        case model::cloud_credentials_source::azure_vm_instance_metadata:
-            node = "azure_vm_instance_metadata";
-            break;
-        }
-        return node;
-    }
-
-    static bool decode(const Node& node, type& rhs) {
-        auto value = node.as<std::string>();
-
-        if (
-          std::find(acceptable_values.begin(), acceptable_values.end(), value)
-          == acceptable_values.end()) {
-            return false;
-        }
-
-        rhs = string_switch<type>(std::string_view{value})
-                .match(
-                  "config_file", model::cloud_credentials_source::config_file)
-                .match(
-                  "aws_instance_metadata",
-                  model::cloud_credentials_source::aws_instance_metadata)
-                .match(
-                  "gcp_instance_metadata",
-                  model::cloud_credentials_source::gcp_instance_metadata)
-                .match("sts", model::cloud_credentials_source::sts)
-                .match(
-                  "azure_aks_oidc_federation",
-                  model::cloud_credentials_source::azure_aks_oidc_federation)
-                .match(
-                  "azure_vm_instance_metadata",
-                  model::cloud_credentials_source::azure_vm_instance_metadata);
-
-        return true;
-    }
-};
-
-template<>
 struct convert<model::partition_autobalancing_mode> {
     using type = model::partition_autobalancing_mode;
     static Node encode(const type& rhs) { return Node(fmt::format("{}", rhs)); }
@@ -362,49 +294,6 @@ struct convert<std::unordered_map<typename T::key_type, T>> {
             auto elem_val = node.as<T>();
             rhs.emplace(elem_val.key(), elem_val);
         }
-        return true;
-    }
-};
-
-template<>
-struct convert<model::cloud_storage_backend> {
-    using type = model::cloud_storage_backend;
-
-    static constexpr auto acceptable_values = std::to_array(
-      {"aws",
-       "google_s3_compat",
-       "azure",
-       "minio",
-       "oracle_s3_compat",
-       "linode_s3_compat",
-       "unknown"});
-
-    static Node encode(const type& rhs) { return Node(fmt::format("{}", rhs)); }
-
-    static bool decode(const Node& node, type& rhs) {
-        auto value = node.as<std::string>();
-
-        if (
-          std::find(acceptable_values.begin(), acceptable_values.end(), value)
-          == acceptable_values.end()) {
-            return false;
-        }
-
-        rhs = string_switch<type>(std::string_view{value})
-                .match("aws", model::cloud_storage_backend::aws)
-                .match(
-                  "google_s3_compat",
-                  model::cloud_storage_backend::google_s3_compat)
-                .match("minio", model::cloud_storage_backend::minio)
-                .match("azure", model::cloud_storage_backend::azure)
-                .match(
-                  "oracle_s3_compat",
-                  model::cloud_storage_backend::oracle_s3_compat)
-                .match(
-                  "linode_s3_compat",
-                  model::cloud_storage_backend::linode_s3_compat)
-                .match("unknown", model::cloud_storage_backend::unknown);
-
         return true;
     }
 };
@@ -465,37 +354,6 @@ struct convert<std::filesystem::path> {
 };
 
 template<>
-struct convert<model::cloud_storage_chunk_eviction_strategy> {
-    using type = model::cloud_storage_chunk_eviction_strategy;
-
-    static constexpr auto acceptable_values = std::to_array(
-      {"eager", "capped", "predictive"});
-
-    static Node encode(const type& rhs) { return Node(fmt::format("{}", rhs)); }
-
-    static bool decode(const Node& node, type& rhs) {
-        auto value = node.as<std::string>();
-
-        if (
-          std::find(acceptable_values.begin(), acceptable_values.end(), value)
-          == acceptable_values.end()) {
-            return false;
-        }
-
-        rhs = string_switch<type>(std::string_view{value})
-                .match(
-                  "eager", model::cloud_storage_chunk_eviction_strategy::eager)
-                .match(
-                  "capped",
-                  model::cloud_storage_chunk_eviction_strategy::capped)
-                .match(
-                  "predictive",
-                  model::cloud_storage_chunk_eviction_strategy::predictive);
-        return true;
-    }
-};
-
-template<>
 struct convert<model::fetch_read_strategy> {
     using type = model::fetch_read_strategy;
 
@@ -546,23 +404,6 @@ struct convert<model::write_caching_mode> {
     static bool decode(const Node& node, type& rhs) {
         auto value = node.as<std::string>();
         auto mode = model::write_caching_mode_from_string(value);
-        if (!mode) {
-            return false;
-        }
-        rhs = mode.value();
-        return true;
-    }
-};
-
-template<>
-struct convert<model::redpanda_storage_mode> {
-    using type = model::redpanda_storage_mode;
-
-    static Node encode(const type& rhs) { return Node(fmt::format("{}", rhs)); }
-
-    static bool decode(const Node& node, type& rhs) {
-        auto value = node.as<std::string>();
-        auto mode = model::redpanda_storage_mode_from_string(value);
         if (!mode) {
             return false;
         }
@@ -754,26 +595,6 @@ struct convert<security::oidc::nested_group_behavior> {
         std::istringstream iss(value);
         iss >> rhs;
         return true;
-    }
-};
-
-template<>
-struct convert<cloud_io::policy_type> {
-    static Node encode(cloud_io::policy_type rhs) {
-        return Node(fmt::format("{}", rhs));
-    }
-
-    static bool decode(const Node& node, cloud_io::policy_type& rhs) {
-        using type = cloud_io::policy_type;
-        try {
-            rhs = string_switch<type>(node.as<std::string>())
-                    .match(to_string_view(type::passthrough), type::passthrough)
-                    .match(
-                      to_string_view(type::reservation), type::reservation);
-            return true;
-        } catch (const std::runtime_error&) {
-            return false;
-        }
     }
 };
 

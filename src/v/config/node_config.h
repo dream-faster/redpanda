@@ -57,12 +57,6 @@ public:
     property<ss::sstring> admin_api_doc_dir;
     deprecated_property dashboard_dir;
 
-    // Shadow indexing/S3 cache location
-    property<std::optional<ss::sstring>> cloud_storage_cache_directory;
-
-    // Path to store inventory file hashes for cloud storage scrubber
-    property<std::optional<ss::sstring>> cloud_storage_inventory_hash_store;
-
     deprecated_property enable_central_config;
 
     property<std::optional<uint32_t>> crash_loop_limit;
@@ -120,26 +114,6 @@ public:
 
     std::filesystem::path crash_report_dir_path() const {
         return data_directory().path / "crash_reports";
-    }
-
-    /**
-     * Return the configured cache path if set, otherwise a default
-     * path within the data directory.
-     */
-    std::filesystem::path cloud_storage_cache_path() const {
-        if (cloud_storage_cache_directory().has_value()) {
-            return std::string(cloud_storage_cache_directory().value());
-        } else {
-            return data_directory().path / "cloud_storage_cache";
-        }
-    }
-
-    std::filesystem::path cloud_storage_inventory_hash_path() const {
-        if (cloud_storage_inventory_hash_store().has_value()) {
-            return std::filesystem::path{
-              cloud_storage_inventory_hash_store().value()};
-        }
-        return data_directory().path / "cloud_storage_inventory";
     }
 
     std::filesystem::path l1_staging_path() const {

@@ -10,13 +10,11 @@
 #include "cluster/topics_frontend.h"
 
 #include "base/type_traits.h"
-#include "cloud_storage/remote.h"
 #include "cluster/cluster_utils.h"
 #include "cluster/commands.h"
 #include "cluster/controller_service.h"
 #include "cluster/controller_stm.h"
 #include "cluster/controller_utils.h"
-#include "cluster/data_migration_types.h"
 #include "cluster/errc.h"
 #include "cluster/fwd.h"
 #include "cluster/health_monitor_frontend.h"
@@ -26,18 +24,15 @@
 #include "cluster/metadata_cache.h"
 #include "cluster/partition_leaders_table.h"
 #include "cluster/partition_manager.h"
-#include "cluster/remote_topic_configuration_source.h"
 #include "cluster/scheduling/constraints.h"
 #include "cluster/scheduling/partition_allocator.h"
 #include "cluster/shard_balancer.h"
 #include "cluster/shard_table.h"
 #include "cluster/topic_configuration.h"
 #include "cluster/topic_properties.h"
-#include "cluster/topic_recovery_validator.h"
 #include "cluster/types.h"
 #include "config/configuration.h"
 #include "config/leaders_preference.h"
-#include "data_migration_types.h"
 #include "features/enterprise_feature_messages.h"
 #include "features/feature_table.h"
 #include "model/errc.h"
@@ -70,22 +65,6 @@ namespace {
 std::vector<std::string_view>
 get_enterprise_features(const cluster::topic_configuration& cfg) {
     std::vector<std::string_view> features;
-    static const auto si_disabled = model::shadow_indexing_mode::disabled;
-    // Only enforce tiered storage topic config sanctions when cloud storage is
-    // enabled for the cluster
-    if (config::shard_local_cfg().cloud_storage_enabled.is_restricted()) {
-        if (
-          (cfg.properties.shadow_indexing.value_or(si_disabled) != si_disabled)
-          || (cfg.properties.storage_mode == model::redpanda_storage_mode::tiered)) {
-            features.emplace_back("tiered storage");
-        }
-        if (cfg.is_recovery_enabled()) {
-            features.emplace_back("topic recovery");
-        }
-        if (cfg.is_read_replica()) {
-            features.emplace_back("remote read replicas");
-        }
-    }
 
     // We are always enforcing leadership preference restrictions
     if (
@@ -113,24 +92,6 @@ std::vector<std::string_view> get_enterprise_features(
       properties, {update.tp_ns, update.properties});
 
     std::vector<std::string_view> features;
-    static const auto si_disabled = model::shadow_indexing_mode::disabled;
-    static const auto tiered = model::redpanda_storage_mode::tiered;
-    // Only enforce tiered storage topic config sanctions when cloud storage is
-    // enabled for the cluster
-    if (config::shard_local_cfg().cloud_storage_enabled.is_restricted()) {
-        // Check if tiered storage is being enabled (wasn't before, is now)
-        auto old_si_mode = properties.shadow_indexing.value_or(si_disabled);
-        auto new_si_mode = updated_properties.shadow_indexing.value_or(
-          si_disabled);
-        auto old_storage_mode = properties.storage_mode;
-        auto new_storage_mode = updated_properties.storage_mode;
-        if (
-          old_si_mode < new_si_mode
-          || (old_storage_mode != tiered && new_storage_mode == tiered)
-          || (properties.remote_delete < updated_properties.remote_delete)) {
-            features.emplace_back("tiered storage");
-        }
-    }
 
     if (
       const auto& updated_pref = updated_properties.leaders_preference;
@@ -207,14 +168,12 @@ topics_frontend::topics_frontend(
   ss::sharded<topic_table>& topics,
   ss::sharded<health_monitor_frontend>& hm_frontend,
   ss::sharded<ss::abort_source>& as,
-  ss::sharded<cloud_storage::remote>& cloud_storage_api,
   ss::sharded<features::feature_table>& features,
   ss::sharded<cluster::members_table>& members_table,
   ss::sharded<partition_manager>& pm,
   ss::sharded<shard_table>& shard_table,
   ss::sharded<shard_balancer>& sb,
   ss::sharded<storage::api>& storage,
-  data_migrations::migrated_resources& migrated_resources,
   metadata_cache& metadata_cache,
   config::binding<unsigned> hard_max_disk_usage_ratio,
   config::binding<int16_t> minimum_topic_replication,
@@ -228,7 +187,6 @@ topics_frontend::topics_frontend(
   , _topics(topics)
   , _hm_frontend(hm_frontend)
   , _as(as)
-  , _cloud_storage_api(cloud_storage_api)
   , _features(features)
   , _shard_balancer(sb)
   , _storage(storage)
@@ -236,7 +194,6 @@ topics_frontend::topics_frontend(
   , _members_table(members_table)
   , _pm(pm)
   , _shard_table(shard_table)
-  , _migrated_resources(migrated_resources)
   , _hard_max_disk_usage_ratio(hard_max_disk_usage_ratio)
   , _minimum_topic_replication(minimum_topic_replication)
   , _partition_autobalancing_topic_aware(
@@ -264,29 +221,6 @@ bool needs_linearizable_barrier(const R& results) {
 ss::future<std::vector<topic_result>> topics_frontend::create_topics(
   custom_assignable_topic_configuration_vector topics,
   model::timeout_clock::time_point timeout) {
-    for (auto& tp : topics) {
-        /**
-         * The shadow_indexing properties
-         * ('redpanda.remote.(read|write|delete)') are special "sticky" topic
-         * properties that are always set as a topic-level override.
-         *
-         * See: https://github.com/redpanda-data/redpanda/issues/7451
-         *
-         * Note that a manually created topic will have this assigned already by
-         * kafka/server/handlers/topics/types.cc::to_cluster_type, dependent on
-         * client-provided topic properties.
-         *
-         * tp.cfg.properties.remote_delete is stored as a bool (not
-         * std::optional<bool>) defaulted to its default value
-         * (ntp_config::default_remote_delete) on the construction of
-         * topic_properties(), so there is no need to overwrite it here.
-         */
-        if (!tp.cfg.properties.shadow_indexing.has_value()) {
-            tp.cfg.properties.shadow_indexing
-              = _metadata_cache.get_default_shadow_indexing_mode();
-        }
-    }
-
     vlog(clusterlog.info, "Create topics {}", topics);
     // make sure that STM is up to date (i.e. we have the most recent state
     // available) before allocating topics
@@ -365,19 +299,6 @@ topics_frontend::update_topic_properties(
     if (!cluster_leader) {
         co_return make_error_topic_results<chunked_vector>(
           updates, errc::no_leader_controller);
-    }
-
-    if (!_features.local().is_active(features::feature::cloud_retention)) {
-        // The ADL encoding for cluster::incremental_topic_updates has evolved
-        // in v22.3. ADL is not forwards compatible, so we need to safe-guard
-        // against sending a message from the future to older nodes.
-
-        vlog(
-          clusterlog.info,
-          "Refusing to update topics as not all cluster nodes are running "
-          "v22.3");
-        co_return make_error_topic_results<chunked_vector>(
-          updates, errc::feature_disabled);
     }
 
     // current node is a leader, just replicate
@@ -474,19 +395,6 @@ ss::future<std::error_code> topics_frontend::do_update_replication_factor(
 
 ss::future<topic_result> topics_frontend::do_update_topic_properties(
   topic_properties_update update, model::timeout_clock::time_point timeout) {
-    auto state = _migrated_resources.get_topic_state(update.tp_ns);
-    if (state != data_migrations::migrated_resource_state::non_restricted) {
-        vlog(
-          clusterlog.warn,
-          "cannot update topic {} properties as the topic is being migrated; "
-          "restriction is {}",
-          update.tp_ns,
-          state);
-
-        co_return topic_result{
-          std::move(update.tp_ns), errc::resource_is_being_migrated};
-    }
-
     update_topic_properties_cmd cmd(update.tp_ns, update.properties);
     try {
         auto update_rf_res = co_await do_update_replication_factor(
@@ -554,17 +462,6 @@ topic_result topics_frontend::validate_topic_configuration(
         }
     }
     if (
-      (assignable_config.is_read_replica()
-       || assignable_config.is_recovery_enabled())
-      && !_cloud_storage_api.local_is_initialized()) {
-        return make_result(
-          errc::topic_invalid_config, "Tiered storage is not enabled");
-    }
-
-    if (!config::shard_local_cfg().cloud_storage_enabled()) {
-    }
-
-    if (
       _features.local().should_sanction()
       && is_user_topic(assignable_config.cfg.tp_ns)) {
         if (
@@ -614,22 +511,6 @@ ss::future<topic_result> topics_frontend::do_create_topic(
         }
     }
 
-    bool blocked = assignable_config.cfg.is_migrated
-                     ? _migrated_resources.get_topic_state(tp_ns)
-                         > data_migrations::migrated_resource_state::create_only
-                     : _migrated_resources.is_already_migrated(tp_ns);
-    if (blocked) {
-        vlog(
-          clusterlog.warn,
-          "unable to create topic {} as it is being migrated: "
-          "cfg.is_migrated={}, migrated resource state is {}",
-          assignable_config.cfg.tp_ns,
-          assignable_config.cfg.is_migrated,
-          _migrated_resources.get_topic_state(tp_ns));
-        co_return topic_result(
-          assignable_config.cfg.tp_ns, errc::resource_is_being_migrated);
-    }
-
     if (!assignable_config.cfg.tp_id.has_value()) {
         assignable_config.cfg.tp_id = model::create_topic_id();
         vlog(
@@ -643,141 +524,6 @@ ss::future<topic_result> topics_frontend::do_create_topic(
 
     if (result.ec != errc::success) {
         co_return result;
-    }
-
-    if (assignable_config.is_read_replica()) {
-        if (!assignable_config.cfg.properties.read_replica_bucket) {
-            co_return make_error_result(
-              assignable_config.cfg.tp_ns, errc::topic_invalid_config);
-        }
-        auto rr_manager = remote_topic_configuration_source(
-          _cloud_storage_api.local());
-
-        errc download_res = co_await rr_manager.set_remote_properties_in_config(
-          assignable_config,
-          cloud_storage_clients::bucket_name(
-            assignable_config.cfg.properties.read_replica_bucket.value()),
-          _as.local());
-
-        if (download_res != errc::success) {
-            co_return make_error_result(
-              assignable_config.cfg.tp_ns, errc::topic_operation_error);
-        }
-
-        if (!assignable_config.cfg.properties.remote_topic_properties) {
-            vassert(
-              assignable_config.cfg.properties.remote_topic_properties,
-              "remote_topic_properties not set after successful download of "
-              "valid topic manifest");
-        }
-        assignable_config.cfg.partition_count
-          = assignable_config.cfg.properties.remote_topic_properties
-              ->remote_partition_count;
-    }
-
-    if (assignable_config.is_recovery_enabled()) {
-        // Before running the recovery we need to download topic_manifest.
-
-        const auto& bucket_config
-          = cloud_storage::configuration::get_bucket_config();
-        if (!bucket_config.value().has_value()) {
-            vlog(
-              clusterlog.error,
-              "Can't run topic recovery for the topic {}, {} is not set",
-              assignable_config.cfg.tp_ns,
-              bucket_config.name());
-            co_return make_error_result(
-              assignable_config.cfg.tp_ns, errc::topic_operation_error);
-        }
-
-        auto bucket = cloud_storage_clients::bucket_name{
-          bucket_config.value().value()};
-
-        auto cfg_source = remote_topic_configuration_source(
-          _cloud_storage_api.local());
-
-        // If the caller is supplying the remote topic properties, presumably
-        // the correct remote properties are already known (e.g. because this
-        // is a part of a cluster recovery and the topic config is already
-        // known).
-        if (!assignable_config.cfg.properties.remote_topic_properties
-               .has_value()) {
-            errc download_res
-              = co_await cfg_source.set_recovered_topic_properties(
-                assignable_config, bucket, _as.local());
-
-            if (download_res != errc::success) {
-                vlog(
-                  clusterlog.error,
-                  "Can't run topic recovery for the topic {}",
-                  assignable_config.cfg.tp_ns);
-                co_return make_error_result(
-                  assignable_config.cfg.tp_ns, errc::topic_invalid_config);
-            }
-            vassert(
-              static_cast<bool>(
-                assignable_config.cfg.properties.remote_topic_properties),
-              "remote_topic_properties not set after successful download of "
-              "valid topic manifest");
-        }
-        auto validation_map = co_await maybe_validate_recovery_topic(
-          assignable_config, bucket, _cloud_storage_api.local(), _as.local());
-        if (
-          std::ranges::any_of(
-            validation_map,
-            [](const std::pair<model::partition_id, validation_result>& vp) {
-                using enum validation_result;
-                switch (vp.second) {
-                case passed:
-                case missing_manifest:
-                    // passed or missing_manifest do not fail validation
-                    return false;
-                case anomaly_detected:
-                case download_issue:
-                    // failure needs to be handled by an operator,
-                    // download_issue likely is a config issue
-                    return true;
-                }
-            })) {
-            vlog(
-              clusterlog.error,
-              "Stopping recovery of {} due to validation error",
-              assignable_config.cfg.tp_ns);
-            co_return make_error_result(
-              assignable_config.cfg.tp_ns,
-              make_error_code(errc::validation_of_recovery_topic_failed));
-        }
-
-        vlog(
-          clusterlog.info,
-          "Configured topic recovery for {}, topic configuration: {}",
-          assignable_config.cfg.tp_ns,
-          assignable_config.cfg);
-    }
-    bool configured_label_from_manifest
-      = assignable_config.is_read_replica()
-        || assignable_config.is_recovery_enabled();
-    // We set a remote label if:
-    // - we haven't got a remote label from the cloud (i.e. this isn't a read
-    //   replica or recovery topic),
-    // - there is a cluster UUID (always expected),
-    // - the remote labels feature is active,
-    // - the config to disable remote labels is False
-    if (
-      !configured_label_from_manifest
-      && !assignable_config.cfg.properties.remote_label.has_value()
-      && _storage.local().get_cluster_uuid().has_value()
-      && _features.local().is_active(features::feature::remote_labels)
-      && !config::shard_local_cfg()
-            .cloud_storage_disable_remote_labels_for_tests.value()) {
-        auto remote_label = cloud_storage::remote_label(
-          _storage.local().get_cluster_uuid().value());
-        assignable_config.cfg.properties.remote_label = remote_label;
-        vlog(
-          clusterlog.debug,
-          "Configuring topic {} with remote label {}",
-          assignable_config.cfg.tp_ns,
-          remote_label);
     }
 
     auto units = co_await _allocator.invoke_on(
@@ -912,15 +658,6 @@ ss::future<std::vector<topic_result>> topics_frontend::delete_topics(
       });
 }
 
-ss::future<errc> topics_frontend::delete_topic_after_migration(
-  model::topic_namespace nt, model::timeout_clock::time_point timeout) {
-    auto result = co_await do_delete_topic(std::move(nt), timeout, true);
-    if (result.ec == errc::success) {
-        std::ignore = co_await stm_linearizable_barrier(timeout);
-    }
-    co_return result.ec;
-}
-
 ss::future<topic_result> topics_frontend::do_delete_topic(
   model::topic_namespace tp_ns,
   model::timeout_clock::time_point timeout,
@@ -931,58 +668,6 @@ ss::future<topic_result> topics_frontend::do_delete_topic(
         topic_result result(std::move(tp_ns), errc::topic_not_exists);
         return ss::make_ready_future<topic_result>(result);
     }
-    if (!migrated_away) {
-        auto state = _migrated_resources.get_topic_state(tp_ns);
-        if (state != data_migrations::migrated_resource_state::non_restricted) {
-            vlog(
-              clusterlog.warn,
-              "can not delete topic as it is being {} by migration",
-              state);
-            topic_result result(
-              std::move(tp_ns), errc::resource_is_being_migrated);
-            return ss::make_ready_future<topic_result>(result);
-        }
-    }
-    // Lifecycle marker driven deletion is added alongside the v2 manifest
-    // format in Redpanda 23.2.  Before that, we write legacy one-shot
-    // deletion records.
-    if (
-      !migrated_away
-      && !_features.local().is_active(
-        features::feature::cloud_storage_manifest_format_v2)) {
-        // This is not unsafe, but emit a warning in case we have some bug that
-        // causes a cluster to indefinitely use the legacy path, so that
-        // someone has a chance to notice.
-        vlog(
-          clusterlog.warn,
-          "Cluster upgrade in progress, using legacy deletion.",
-          tp_ns);
-        delete_topic_cmd cmd(tp_ns, tp_ns);
-
-        return replicate_and_wait(_stm, _as, std::move(cmd), timeout)
-          .then_wrapped(
-            [tp_ns = std::move(tp_ns)](ss::future<std::error_code> f) mutable {
-                try {
-                    auto ec = f.get();
-                    if (ec != errc::success) {
-                        return topic_result(std::move(tp_ns), map_errc(ec));
-                    } else {
-                        vlog(clusterlog.info, "Deleting topic {}", tp_ns);
-                    }
-                    return topic_result(std::move(tp_ns), errc::success);
-                } catch (...) {
-                    vlog(
-                      clusterlog.warn,
-                      "Unable to delete topic - {}",
-                      std::current_exception());
-                    return topic_result(
-                      std::move(tp_ns), errc::replication_error);
-                }
-            });
-    }
-
-    // Default to traditional deletion, without tombstones
-    // Use tombstones for tiered storage topics that require remote erase
     auto& topic_meta = topic_meta_opt.value().get();
     topic_lifecycle_transition_mode mode;
     if (migrated_away) {
@@ -1603,17 +1288,6 @@ ss::future<topic_result> topics_frontend::do_create_partition(
     if (!tp_cfg || !replication_factor) {
         co_return make_error_result(p_cfg.tp_ns, errc::topic_not_exists);
     }
-    auto state = _migrated_resources.get_topic_state(p_cfg.tp_ns);
-    if (state != data_migrations::migrated_resource_state::non_restricted) {
-        vlog(
-          clusterlog.warn,
-          "can not create {} topic partitions as the topic is being migrated",
-          p_cfg.tp_ns);
-
-        co_return topic_result{
-          std::move(p_cfg.tp_ns), errc::resource_is_being_migrated};
-    }
-
     // we only support increasing number of partitions
     if (p_cfg.new_total_partition_count <= tp_cfg->partition_count) {
         co_return make_error_result(

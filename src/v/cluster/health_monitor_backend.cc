@@ -13,7 +13,6 @@
 #include "absl/container/node_hash_map.h"
 #include "absl/container/node_hash_set.h"
 #include "base/format_to.h"
-#include "cluster/cloud_storage_size_reducer.h"
 #include "cluster/controller_service.h"
 #include "cluster/drain_manager.h"
 #include "cluster/errc.h"
@@ -240,8 +239,7 @@ cluster_health_report health_monitor_backend::build_cluster_report(
     return cluster_health_report{
       .raft0_leader = _raft0->get_leader_id(),
       .node_states = std::move(statuses),
-      .node_reports = std::move(reports),
-      .bytes_in_cloud_storage = _bytes_in_cloud_storage};
+      .node_reports = std::move(reports)};
 }
 
 node_health_report::topics_t filter_topic_status(
@@ -942,28 +940,6 @@ ss::future<std::error_code> health_monitor_backend::collect_cluster_health() {
     }
     _reports_data_disk_health = cluster_data_disk_health;
 
-    if (config::shard_local_cfg().enable_usage()) {
-        vlog(clusterlog.info, "collecting cloud health statistics");
-
-        cluster::cloud_storage_size_reducer reducer(
-          _topic_table,
-          _members,
-          _partition_leaders_table,
-          _connections,
-          topic_table_partition_generator::default_batch_size,
-          cloud_storage_size_reducer::default_retries_allowed);
-
-        try {
-            /// TODO: https://github.com/redpanda-data/redpanda/issues/12515
-            /// Eventually move the cloud storage size metrics into the node
-            /// health report which will reduce the number of redundent RPCs
-            /// needed to be made
-            _bytes_in_cloud_storage = co_await reducer.reduce();
-        } catch (const std::exception& ex) {
-            // All exceptions are already logged by this class, in this case
-        }
-    }
-
     auto not_in_members_table = [this](const auto& value) {
         return !_members.local().contains(value.first);
     };
@@ -1515,14 +1491,6 @@ void health_monitor_backend::health_probe::setup_overview_metrics() {
             "Informational: total number of known cluster members. Does NOT "
             "contribute to cluster health status."))
           .aggregate({sm::shard_label}),
-        sm::make_gauge(
-          "bytes_in_cloud_storage",
-          [this] { return _cache.bytes_in_cloud_storage.value_or(0); },
-          sm::description(
-            "Informational: total bytes stored in cloud (tiered) storage "
-            "across the cluster, or 0 if unavailable. Does NOT contribute "
-            "to cluster health status."))
-          .aggregate({sm::shard_label}),
       });
 }
 
@@ -1617,8 +1585,6 @@ health_monitor_backend::get_cluster_health_overview(
         ret.unhealthy_reasons.emplace_back("no_health_report");
         ret.refresh_failed = true;
     }
-
-    ret.bytes_in_cloud_storage = _bytes_in_cloud_storage;
 
     // True only when every known member produced a successful health
     // report. Distinct from refresh_failed, which only catches errors

@@ -13,10 +13,6 @@
 
 #include "absl/container/flat_hash_map.h"
 #include "base/format_to.h"
-#include "cloud_storage/fwd.h"
-#include "cloud_storage/remote_path_provider.h"
-#include "cloud_storage/types.h"
-#include "cluster/archival/fwd.h"
 #include "cluster/fwd.h"
 #include "cluster/ntp_callbacks.h"
 #include "cluster/partition.h"
@@ -44,12 +40,7 @@ public:
     partition_manager(
       ss::sharded<storage::api>&,
       ss::sharded<raft::group_manager>&,
-      ss::sharded<cloud_storage::partition_recovery_manager>&,
-      ss::sharded<cloud_storage::remote>&,
-      ss::sharded<cloud_io::cache>&,
-      ss::lw_shared_ptr<const archival::configuration>,
       ss::sharded<features::feature_table>&,
-      ss::sharded<archival::upload_housekeeping_service>&,
       config::binding<std::chrono::milliseconds>);
 
     ~partition_manager();
@@ -96,8 +87,6 @@ public:
       raft::with_learner_recovery_throttle,
       raft::keep_snapshotted_log,
       std::optional<xshard_transfer_state>,
-      std::optional<remote_topic_properties> = std::nullopt,
-      std::optional<cloud_storage_clients::bucket_name> = std::nullopt,
       const topic_configuration* = nullptr,
       std::optional<partition_bootstrap_params> = std::nullopt);
 
@@ -204,13 +193,6 @@ public:
      */
     ss::future<size_t> non_log_disk_size_bytes() const;
 
-    /*
-     * Accumulates the target cache usage for all remote partitions. The result
-     * reflects partitions across all shards.
-     */
-    ss::future<cloud_storage::cache_usage_target>
-    get_cloud_cache_disk_usage_target() const;
-
     template<typename T, typename... Args>
     void register_factory(Args&&... args) {
         _stm_registry.register_factory<T>(std::forward<Args>(args)...);
@@ -226,8 +208,7 @@ private:
         stopping_partition,
         removing_persistent_state,
         stopping_storage,
-        removing_storage,
-        finalizing_remote_storage
+        removing_storage
     };
 
     struct partition_shutdown_state {
@@ -250,23 +231,6 @@ private:
         intrusive_list_hook hook;
     };
 
-    /// Download log if partition_recovery_manager is initialized
-    /// and there is no archival_metadata_stm snapshot.
-    ///
-    /// Partition recovery manager might not be initialized if cloud storage is
-    /// disabled. Archival metadata stm snapshot presence acts as recovery
-    /// process completion marker: if it is there we don't need to re-download.
-    /// If we do not attempt to download logs because of one of the conditions
-    /// above not met, method returns false.
-    ///
-    /// \param ntp_cfg is an ntp_config instance to recover
-    /// \return .logs_recovered=true if the recovery was invoked, false
-    /// otherwise
-    ss::future<cloud_storage::log_recovery_result> maybe_download_log(
-      storage::ntp_config& ntp_cfg,
-      std::optional<remote_topic_properties> rtp,
-      cloud_storage::remote_path_provider& path_provider);
-
     ss::future<xshard_transfer_state> do_shutdown(ss::lw_shared_ptr<partition>);
 
     void check_partitions_shutdown_state();
@@ -282,13 +246,7 @@ private:
     ntp_table_container _ntp_table;
     chunked_hash_map<raft::group_id, ss::lw_shared_ptr<partition>> _raft_table;
 
-    ss::sharded<cloud_storage::partition_recovery_manager>&
-      _partition_recovery_mgr;
-    ss::sharded<cloud_storage::remote>& _cloud_storage_api;
-    ss::sharded<cloud_io::cache>& _cloud_storage_cache;
-    ss::lw_shared_ptr<const archival::configuration> _archival_conf;
     ss::sharded<features::feature_table>& _feature_table;
-    ss::sharded<archival::upload_housekeeping_service>& _upload_hks;
     intrusive_list<partition_shutdown_state, &partition_shutdown_state::hook>
       _partitions_shutting_down;
     ss::gate _gate;

@@ -54,7 +54,6 @@ public:
     using with_leaders = ss::bool_class<struct with_leaders_tag>;
     metadata_cache(
       ss::sharded<topic_table>&,
-      ss::sharded<data_migrations::migrated_resources>&,
       ss::sharded<members_table>&,
       ss::sharded<partition_leaders_table>&,
       ss::sharded<health_monitor_frontend>&);
@@ -127,10 +126,6 @@ public:
 
     bool should_reject_writes() const;
 
-    /// Check whether migrations block topic writes/reads
-    bool should_reject_reads(model::topic_namespace_view) const;
-    bool should_reject_writes(model::topic_namespace_view) const;
-
     bool contains(const model::kitp& kitp) const;
     bool contains(model::topic_namespace_view, model::partition_id) const;
     bool contains(model::topic_namespace_view) const;
@@ -197,7 +192,6 @@ public:
     get_default_initial_retention_local_target_bytes() const;
     std::optional<std::chrono::milliseconds>
     get_default_initial_retention_local_target_ms() const;
-    model::shadow_indexing_mode get_default_shadow_indexing_mode() const;
     uint32_t get_default_batch_max_bytes() const;
     std::optional<std::chrono::milliseconds> get_default_segment_ms() const;
     std::optional<std::chrono::milliseconds>
@@ -209,7 +203,6 @@ public:
     get_default_message_timestamp_before_max_ms() const;
     std::chrono::milliseconds
     get_default_message_timestamp_after_max_ms() const;
-    model::redpanda_storage_mode get_default_storage_mode() const;
 
     topic_properties get_default_properties() const;
     std::optional<partition_assignment>
@@ -228,7 +221,6 @@ public:
 
 private:
     ss::sharded<topic_table>& _topics_state;
-    ss::sharded<data_migrations::migrated_resources>& _migrated_resources;
     ss::sharded<members_table>& _members_table;
     ss::sharded<partition_leaders_table>& _leaders;
     ss::sharded<health_monitor_frontend>& _health_monitor;

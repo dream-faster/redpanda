@@ -15,7 +15,6 @@
 #include "base/format_to.h"
 #include "base/outcome.h"
 #include "base/vassert.h"
-#include "cluster/archival/archival_metadata_stm.h"
 #include "cluster/cluster_utils.h"
 #include "cluster/controller_utils.h"
 #include "cluster/errc.h"
@@ -262,7 +261,6 @@ controller_backend::controller_backend(
   ss::sharded<topics_frontend>& frontend,
   ss::sharded<storage::api>& storage,
   ss::sharded<features::feature_table>& features,
-  ss::sharded<cluster_recovery_table>& recovery_table,
   config::binding<std::chrono::milliseconds> housekeeping_interval,
   config::binding<std::optional<size_t>> initial_retention_local_target_bytes,
   config::binding<std::optional<std::chrono::milliseconds>>
@@ -281,7 +279,6 @@ controller_backend::controller_backend(
   , _topics_frontend(frontend)
   , _storage(storage)
   , _features(features)
-  , _recovery_table(recovery_table)
   , _self(*config::node().node_id())
   , _data_directory(config::node().data_directory().as_sstring())
   , _housekeeping_interval(std::move(housekeeping_interval))
@@ -476,192 +473,14 @@ ss::future<std::error_code> do_update_replica_set(
       std::move(nodes), cmd_revision, learner_initial_offset);
 }
 
-/**
- * Retrieve topic property based on the following logic
- *
- *
- * +---------------------------------+---------------+----------+-------------+
- * |Cluster(optional)\Topic(tristate)|     Empty     | Disabled |    Value    |
- * +---------------------------------+---------------+----------+-------------+
- * |Empty                            | OFF           | OFF      | Topic Value |
- * |Value                            | Cluster Value | OFF      | Topic Value |
- * +---------------------------------+---------------+----------+-------------+
- *
- */
-template<typename T>
-std::optional<T> get_topic_property(
-  std::optional<T> cluster_level_property, tristate<T> topic_property) {
-    // disabled
-    if (topic_property.is_disabled()) {
-        return std::nullopt;
-    }
-    // has value
-    if (topic_property.has_optional_value()) {
-        return *topic_property;
-    }
-    return cluster_level_property;
-}
-
 } // namespace
 
 std::optional<model::offset>
 controller_backend::calculate_learner_initial_offset(
-  reconfiguration_policy policy, const ss::lw_shared_ptr<partition>& p) const {
-    /**
-     * Initial learner start offset only makes sense for partitions with cloud
-     * storage data
-     */
-    if (
-      auto tp_cfg = p->get_topic_config();
-      tp_cfg.has_value() && tp_cfg->get().is_internal()) {
-        vlog(clusterlog.trace, "{} is part of an internal topic", p->ntp());
-        return std::nullopt;
-    }
-
-    if (!p->cloud_data_available()) {
-        vlog(clusterlog.trace, "no cloud data available for: {}", p->ntp());
-        return std::nullopt;
-    }
-
-    if (p->get_cloud_storage_mode() != cluster::cloud_storage_mode::full) {
-        vlog(
-          clusterlog.trace,
-          "cloud storage not fully enabled for: {}",
-          p->ntp());
-        return std::nullopt;
-    }
-
-    if (
-      config::shard_local_cfg().cloud_storage_enable_segment_uploads()
-      == false) {
-        vlog(clusterlog.trace, "segment uploads are paused");
-        return std::nullopt;
-    }
-
-    if (p->archival_meta_stm() == nullptr) {
-        vlog(clusterlog.trace, "no archival_meta_stm for {}", p->ntp());
-        return std::nullopt;
-    }
-
-    auto log = p->log();
-
-    /**
-     * Calculate retention targets based on cluster and topic configuration
-     */
-    auto initial_retention_bytes = get_topic_property(
-      _initial_retention_local_target_bytes(),
-      log->config().has_overrides()
-        ? log->config().get_overrides().initial_retention_local_target_bytes
-        : tristate<size_t>{std::nullopt});
-
-    auto initial_retention_ms = get_topic_property(
-      _initial_retention_local_target_ms(),
-      log->config().has_overrides()
-        ? log->config().get_overrides().initial_retention_local_target_ms
-        : tristate<std::chrono::milliseconds>{std::nullopt});
-
-    /**
-     * There are two possibilities for learner start offset calculation:
-     *
-     * >>> fast partition movement <<<
-     * - the reconfiguration policy is set to use target_initial_retention and
-     *   initial retention is configured, in this case the initial learner
-     *   offset will be calculated based on the initial target retention
-     *   settings
-     *
-     * >>> full local retention move <<<
-     * - with non strict local retention the storage manager may allow
-     *   partitions to grow beyond their configured local retention target. In
-     *   this case the controller backend will use the local retention target
-     *   properties and will schedule move delivering only the data that would
-     *   be retained if local retention was working in strict mode regardless of
-     *   initial retention settings and configured move policy.
-     */
-    const bool no_initial_retention_settings = !(
-      initial_retention_bytes.has_value() || initial_retention_ms.has_value());
-
-    bool full_move = policy == reconfiguration_policy::full_local_retention
-                     || no_initial_retention_settings;
-    // full local retention move
-    if (full_move) {
-        // strict local retention, no need to override learner start
-        if (_retention_local_strict()) {
-            return std::nullopt;
-        }
-
-        // use default target local retention settings
-        initial_retention_bytes = get_topic_property(
-          _retention_local_target_bytes_default(),
-          log->config().has_overrides()
-            ? log->config().get_overrides().retention_local_target_bytes
-            : tristate<size_t>{std::nullopt});
-
-        initial_retention_ms = get_topic_property(
-          {_retention_local_target_ms_default()},
-          log->config().has_overrides()
-            ? log->config().get_overrides().retention_local_target_ms
-            : tristate<std::chrono::milliseconds>{std::nullopt});
-
-        vlog(
-          clusterlog.trace,
-          "[{}] full partition move requested. Using default target local "
-          "retention settings for the topic - target bytes: {}, target ms: {}",
-          p->ntp(),
-          initial_retention_bytes,
-          initial_retention_ms->count());
-    }
-
-    model::timestamp retention_timestamp_threshold(0);
-    if (initial_retention_ms) {
-        retention_timestamp_threshold = model::timestamp(
-          model::timestamp::now().value() - initial_retention_ms->count());
-    }
-
-    auto retention_offset = log->retention_offset(
-      storage::gc_config(
-        retention_timestamp_threshold, initial_retention_bytes));
-
-    if (!retention_offset) {
-        return std::nullopt;
-    }
-
-    auto max_removable_local_log_offset = p->max_removable_local_log_offset();
-    auto archival_safe_removable
-      = p->archival_meta_stm()->cloud_recoverable_offset();
-
-    /**
-     * Last offset uploaded to the cloud is target learner retention upper
-     * bound. We can not start retention recover from the point which is not yet
-     * uploaded to Cloud Storage.
-     *
-     * In general max_removable_local_log_offset should not exceed
-     * last_uploaded, but can if, for example, archival is disabled or paused.
-     */
-
-    if (max_removable_local_log_offset > archival_safe_removable) {
-        vlog(
-          clusterlog.info,
-          "[{}] max_removable_local_log_offset {} exceeds last uploaded to "
-          "cloud {}, clamping to {}",
-          p->ntp(),
-          max_removable_local_log_offset,
-          archival_safe_removable,
-          archival_safe_removable);
-        max_removable_local_log_offset = archival_safe_removable;
-    }
-
-    vlog(
-      clusterlog.info,
-      "[{}] calculated retention offset: {}, last uploaded to cloud: {}, "
-      "manifest clean offset: {}, max_removable_local_log_offset: {}",
-      p->ntp(),
-      *retention_offset,
-      archival_safe_removable,
-      p->archival_meta_stm()->get_last_clean_at(),
-      max_removable_local_log_offset);
-
-    return model::next_offset(
-      std::min(max_removable_local_log_offset, *retention_offset));
+  reconfiguration_policy, const ss::lw_shared_ptr<partition>&) const {
+    // Learners always recover the full local log: there is no cloud-resident
+    // prefix to skip.
+    return std::nullopt;
 }
 
 void controller_backend::process_delta(const topic_table::ntp_delta& d) {
@@ -757,81 +576,6 @@ controller_backend::force_replica_set_update(
     partition->unblock_new_leadership();
     auto [voters, learners] = split_voters_learners_for_force_reconfiguration(
       previous_replicas, new_replicas, initial_replicas_revisions, cmd_rev);
-    if (partition->cloud_data_available()) {
-        auto last_cloud_offset
-          = co_await partition->fetch_latest_cloud_offset_from_manifest(
-            model::timeout_clock::now()
-            + config::shard_local_cfg()
-                .cloud_storage_manifest_upload_timeout_ms());
-        if (last_cloud_offset.has_error()) {
-            vlog(
-              clusterlog.warn,
-              "[{}] force-update replica set - error getting latest cloud "
-              "offset: {}",
-              partition->ntp(),
-              last_cloud_offset.error());
-            co_return last_cloud_offset.error();
-        }
-
-        vlog(
-          clusterlog.info,
-          "[{}] force-update replica set - last cloud offset {}, dirty offset: "
-          "{}",
-          partition->ntp(),
-          last_cloud_offset.value(),
-          partition->dirty_offset());
-
-        /**
-         * This variable indicates whether the partition can be recovered
-         * by the leader.
-         *
-         * When force reconfiguring partition controller backend decides which
-         * of the new replicas should be added to the partition configuration as
-         * learners. The logic here is relatively simple: if a replica is
-         * already in the replica set (it is the disaster survivor), it is
-         * added to the replica set as a voter serving as a source of truth.
-         * Nodes that join the replica set are added to the configuration as
-         * learners in order to prevent them from reaching a majority and
-         * overcoming the current minority (the survivors).
-         *
-         * After establishing which replicas are learners vs voters the
-         * condition below decides if the survivor should be treated as a
-         * source of truth or if cloud data contains more up to date state.
-         *
-         * If replica dirty offset is greater than last cloud offset it means
-         * that the replica is more up to date, otherwise data in the bucket are
-         * newer and they should be used. This condition should only be verified
-         * if a node is not a learner and can not be recovered from the cloud.
-         * Otherwise all learners would face multiple deletions while being
-         * recovered by the leader as their dirty offset may be smaller than
-         * last cloud offset for a very long time.
-         *
-         */
-        const auto can_be_recovered_by_leader = contains_node(learners, _self);
-        if (
-          !can_be_recovered_by_leader
-          && last_cloud_offset.value() > partition->dirty_offset()) {
-            vlog(
-              clusterlog.info,
-              "[{}] force-update replica set - last cloud offset {} is greater "
-              "than dirty offset: {}, removing local replica to force recovery",
-              partition->ntp(),
-              last_cloud_offset.value(),
-              partition->dirty_offset());
-
-            co_await remove_from_shard_table(
-              partition->ntp(),
-              partition->group(),
-              partition->get_log_revision_id());
-            co_await _partition_manager.local().remove(
-              partition->ntp(), partition_removal_mode::local_only);
-
-            // do not stop iteration as partition replica must be created again
-            // with recovered state
-            co_return ss::stop_iteration::no;
-        }
-    }
-
     vlog(
       clusterlog.debug,
       "[{}] force updating replica set with: [voters: {}, learners: {}]",
@@ -1227,8 +971,7 @@ ss::future<result<ss::stop_iteration>> controller_backend::reconcile_ntp_step(
         auto topic_md = _topics.local().get_topic_metadata_ref(
           model::topic_namespace_view(ntp));
         vassert(topic_md, "topic metadata disappeared for {}", ntp);
-        auto bootstrap_params
-          = _recovery_table.local().get_partition_bootstrap_params(ntp);
+        std::optional<partition_bootstrap_params> bootstrap_params;
         auto ec = co_await create_partition(
           ntp,
           group_id,
@@ -1416,7 +1159,7 @@ ss::future<std::error_code> controller_backend::create_partition(
   model::revision_id log_revision,
   replicas_t initial_replicas,
   const replicas_revision_map& replica_revision_map,
-  force_reconfiguration is_force_reconfigured,
+  force_reconfiguration,
   const topic_metadata& topic_md,
   std::optional<partition_bootstrap_params> bootstrap_params) {
     vlog(
@@ -1431,9 +1174,6 @@ ss::future<std::error_code> controller_backend::create_partition(
     // may not need them eventually.
     topic_configuration cfg = topic_md.get_configuration();
     model::revision_id topic_rev = topic_md.get_revision();
-    // Remote revision is used for cloud storage paths. If the topic was
-    // recovered, this is the value from the original manifest, and if topic
-    // is read replica, the value from remote topic manifest is used.
     model::initial_revision_id remote_rev
       = topic_md.get_remote_revision().value_or(
         model::initial_revision_id{topic_rev});
@@ -1450,12 +1190,6 @@ ss::future<std::error_code> controller_backend::create_partition(
 
     // no partition exists, create one
     if (likely(!partition)) {
-        std::optional<cloud_storage_clients::bucket_name> read_replica_bucket;
-        if (cfg.is_read_replica()) {
-            read_replica_bucket = cloud_storage_clients::bucket_name(
-              cfg.properties.read_replica_bucket.value());
-        }
-
         std::optional<xshard_transfer_state> xst_state;
         if (auto it = _xst_states.find(ntp); it != _xst_states.end()) {
             xst_state = it->second;
@@ -1495,44 +1229,10 @@ ss::future<std::error_code> controller_backend::create_partition(
             }
         }
 
-        auto rtp = cfg.properties.remote_topic_properties;
-        const bool is_tiered_storage_topic
-          = ntp_config.is_archival_enabled()
-            || ntp_config.is_remote_fetch_enabled();
-        const bool is_internal = ntp.ns == model::kafka_internal_namespace;
-        /**
-         * Here we decide if a partition needs recovery from tiered storage, it
-         * may be the case if partition was force reconfigured. In this case we
-         * simply set the remote topic properties to initialize recovery of data
-         * from the tiered storage.
-         */
-        if (
-          is_force_reconfigured && is_tiered_storage_topic && !is_internal
-          && !ntp_config.get_overrides().recovery_enabled) {
-            // topic being cloud enabled implies existence of overrides
-            ntp_config.get_overrides().recovery_enabled
-              = storage::topic_recovery_enabled::yes;
-            rtp.emplace(remote_rev, cfg.partition_count);
-        }
-        /**
-         * Reset remote topic properties if a topic is recovered from tiered
-         * storage and current node is joining replica set. A node is joining
-         * replica set if its initial nodes set is empty.
-         */
+        // Bootstrap params should only be used to seed the partition when
+        // the topic is first created. When a replica is added to an existing
+        // partition, bootstrap_params should be reset.
         if (initial_nodes.empty()) {
-            if (rtp.has_value()) {
-                // reset remote topic properties
-                vlog(
-                  clusterlog.info,
-                  "[{}] Disabling remote recovery while creating partition "
-                  "replica. Current node is added to the replica set as "
-                  "learner.",
-                  ntp);
-                rtp.reset();
-            }
-            // Bootstrap params should only be used to seed the partition when
-            // the topic is first created. When a replica is added to an
-            // existing partition, bootstrap_params should be reset.
             bootstrap_params.reset();
         }
         // we use offset as an rev as it is always increasing and it
@@ -1545,8 +1245,6 @@ ss::future<std::error_code> controller_backend::create_partition(
               raft::with_learner_recovery_throttle::yes,
               raft::keep_snapshotted_log::no,
               std::move(xst_state),
-              rtp,
-              read_replica_bucket,
               &cfg,
               bootstrap_params);
 

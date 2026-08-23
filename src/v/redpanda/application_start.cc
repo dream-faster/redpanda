@@ -8,11 +8,6 @@
 // by the Apache License, Version 2.0
 
 #include "base/vlog.h"
-#include "cluster/archival/archival_metadata_stm.h"
-#include "cluster/archival/archiver_manager.h"
-#include "cluster/archival/upload_controller.h"
-#include "cluster/cloud_metadata/offsets_recovery_manager.h"
-#include "cluster/cloud_metadata/offsets_upload_router.h"
 #include "cluster/cluster_discovery.h"
 #include "cluster/controller.h"
 #include "cluster/feature_manager.h"
@@ -62,10 +57,6 @@ void application::start_runtime_services(::stop_signal& app_signal) {
             feature_table);
           pm.register_factory<cluster::log_eviction_stm_factory>(
             storage.local().kvs());
-          pm.register_factory<cluster::archival_metadata_stm_factory>(
-            config::shard_local_cfg().cloud_storage_enabled(),
-            cloud_storage_api,
-            feature_table);
           pm.register_factory<kafka::group_tx_tracker_stm_factory>(
             feature_table);
           pm.register_factory<cluster::partition_properties_stm_factory>(
@@ -107,31 +98,10 @@ void application::start_runtime_services(::stop_signal& app_signal) {
           .get();
     }
     syschecks::systemd_message("Starting controller").get();
-    ss::shared_ptr<cluster::cloud_metadata::offsets_upload_requestor>
-      offsets_upload_requestor;
-    if (offsets_upload_router.local_is_initialized()) {
-        offsets_upload_requestor = offsets_upload_router.local_shared();
-    }
-    ss::shared_ptr<cluster::cloud_metadata::offsets_recovery_requestor>
-      offsets_recovery_requestor;
-    if (offsets_recovery_router.local_is_initialized()) {
-        offsets_recovery_requestor = offsets_recovery_manager;
-    }
     controller
       ->start(
-        *_cluster_discovery,
-        app_signal.abort_source(),
-        std::move(offsets_upload_requestor),
-        producer_id_recovery_manager,
-        std::move(offsets_recovery_requestor),
-        redpanda_start_time,
-        _data_migrations_group_proxy)
+        *_cluster_discovery, app_signal.abort_source(), redpanda_start_time)
       .get();
-
-    if (archiver_manager.local_is_initialized()) {
-        archiver_manager.invoke_on_all(&archival::archiver_manager::start)
-          .get();
-    }
 
     // FIXME: in first patch explain why this is started after the
     // controller so the broker set will be available. Then next patch fix.
@@ -207,15 +177,10 @@ void application::start_runtime_services(::stop_signal& app_signal) {
 
     _compaction_controller.invoke_on_all(&storage::compaction_controller::start)
       .get();
-    _archival_upload_controller
-      .invoke_on_all(&archival::upload_controller::start)
-      .get();
 
     for (const auto& m : _migrators) {
         m->start(controller->get_abort_source().local());
     }
-
-    space_manager->start().get();
 }
 
 /**

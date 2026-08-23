@@ -12,8 +12,6 @@
 #pragma once
 
 #include "base/seastarx.h"
-#include "cloud_storage/fwd.h"
-#include "cluster/archival/fwd.h"
 #include "cluster/cluster_discovery.h"
 #include "cluster/config_manager.h"
 #include "cluster/fwd.h"
@@ -36,7 +34,6 @@
 #include "kafka/data/rpc/client.h"
 #include "kafka/data/rpc/service.h"
 #include "kafka/server/app.h"
-#include "kafka/server/data_migration_group_proxy_impl.h"
 #include "kafka/server/snc_quota_manager.h"
 #include "metrics/aggregate_metrics_watcher.h"
 #include "metrics/host_metrics_watcher.h"
@@ -49,7 +46,6 @@
 #include "resource_mgmt/memory_sampling.h"
 #include "resource_mgmt/scheduling_groups_probe.h"
 #include "resource_mgmt/smp_groups.h"
-#include "resource_mgmt/storage.h"
 #include "rpc/rpc_server.h"
 #include "ssx/sharded_service_container.h"
 #include "storage/api.h"
@@ -68,11 +64,6 @@ class admin_server;
 namespace cluster {
 class cluster_discovery;
 } // namespace cluster
-
-namespace cloud_storage_clients {
-class client_pool;
-class upstream_registry;
-} // namespace cloud_storage_clients
 
 inline const auto redpanda_start_time{
   std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -112,21 +103,6 @@ public:
     ss::sharded<stress_fiber_manager> stress_fiber_manager;
 
     // Sorted list of services (public members)
-    ss::sharded<cloud_io::cache> shadow_index_cache;
-    ss::sharded<cloud_storage::partition_recovery_manager>
-      partition_recovery_manager;
-    ss::sharded<cloud_storage_clients::upstream_registry> upstreams;
-    ss::sharded<cloud_storage_clients::client_pool> cloud_storage_clients;
-    ss::sharded<cloud_io::remote> cloud_io;
-    ss::sharded<cloud_storage::remote> cloud_storage_api;
-    ss::sharded<archival::upload_housekeeping_service>
-      archival_upload_housekeeping;
-    ss::sharded<archival::archiver_manager> archiver_manager;
-    ss::sharded<cluster::topic_recovery_status_frontend>
-      topic_recovery_status_frontend;
-    ss::sharded<cloud_storage::topic_recovery_service> topic_recovery_service;
-    ss::sharded<cluster::inventory_service> inventory_service;
-
     ss::sharded<cluster::tx_coordinator_mapper> tx_coordinator_ntp_mapper;
     ss::sharded<cluster::id_allocator_frontend> id_allocator_frontend;
     ss::sharded<cluster::metadata_cache> metadata_cache;
@@ -146,23 +122,6 @@ public:
 
     ss::sharded<features::feature_table> feature_table;
 
-    // Services required for consumer offsets trimming and recovery.
-    ss::sharded<cluster::cloud_metadata::offsets_lookup> offsets_lookup;
-    ss::sharded<cluster::cloud_metadata::offsets_recoverer> offsets_recoverer;
-    ss::sharded<cluster::cloud_metadata::offsets_recovery_router>
-      offsets_recovery_router;
-
-    ss::shared_ptr<cluster::cloud_metadata::offsets_recovery_manager>
-      offsets_recovery_manager;
-
-    // Services required for consumer offsets snapshotting.
-    ss::sharded<cluster::cloud_metadata::offsets_uploader> offsets_uploader;
-    ss::sharded<cluster::cloud_metadata::offsets_upload_router>
-      offsets_upload_router;
-
-    ss::shared_ptr<cluster::cloud_metadata::producer_id_recovery_manager>
-      producer_id_recovery_manager;
-
     ss::sharded<kafka::coordinator_ntp_mapper> coordinator_ntp_mapper;
     ss::sharded<kafka::group_router> group_router;
     ss::sharded<kafka::quota_manager> quota_mgr;
@@ -180,7 +139,6 @@ public:
     ss::sharded<storage::api> storage;
     ss::sharded<storage::node> storage_node;
     ss::sharded<cluster::node::local_monitor> local_monitor;
-    std::unique_ptr<storage::disk_space_manager> space_manager;
 
     std::unique_ptr<cluster::controller> controller;
 
@@ -247,10 +205,7 @@ private:
     void
     wire_up_runtime_services(model::node_id node_id, ::stop_signal& app_signal);
     void configure_admin_server(model::node_id);
-    void wire_up_redpanda_services(
-      model::node_id,
-      ::stop_signal& app_signal,
-      std::optional<cloud_storage_clients::bucket_name>& bucket_name);
+    void wire_up_redpanda_services(model::node_id, ::stop_signal& app_signal);
 
     // Marks the shard_local_cfg as ready (or not ready) per the provided flag.
     ss::future<> mark_config_ready(bool ready);
@@ -324,10 +279,6 @@ private:
     YAML::Node hydrate_node_config(const po::variables_map&);
     void log_cluster_config();
 
-    bool requires_cloud_io();
-
-    bool archival_storage_enabled();
-
     void setup_metrics();
     void setup_public_metrics();
     void setup_internal_metrics();
@@ -361,15 +312,11 @@ private:
     ss::sharded<admin_server> _admin;
     ss::sharded<net::conn_quota> _kafka_conn_quotas;
     ss::sharded<storage::compaction_controller> _compaction_controller;
-    ss::sharded<archival::upload_controller> _archival_upload_controller;
     std::unique_ptr<monitor_unsafe> _monitor_unsafe;
-    ss::sharded<archival::purger> _archival_purger;
 
     metrics::internal_metric_groups _metrics;
     ss::sharded<metrics::public_metrics_group_service> _public_metrics;
     std::unique_ptr<kafka::rm_group_proxy_impl> _rm_group_proxy;
-    ss::sharded<cluster::data_migrations::group_proxy>
-      _data_migrations_group_proxy;
 
     ss::sharded<resources::cpu_profiler> _cpu_profiler;
     ss::sharded<debug_bundle::service> _debug_bundle_service;

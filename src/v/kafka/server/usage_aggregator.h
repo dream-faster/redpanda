@@ -61,20 +61,16 @@ struct usage
   : serde::envelope<usage, serde::version<1>, serde::compat_version<0>> {
     uint64_t bytes_sent{0};
     uint64_t bytes_received{0};
-    std::optional<uint64_t> bytes_cloud_storage;
     usage operator+(const usage&) const;
     usage& operator+=(const usage&);
-    auto serde_fields() {
-        return std::tie(bytes_sent, bytes_received, bytes_cloud_storage);
-    }
+    auto serde_fields() { return std::tie(bytes_sent, bytes_received); }
     friend bool operator==(const usage&, const usage&) = default;
     fmt::iterator format_to(fmt::iterator it) const {
         return fmt::format_to(
           it,
-          "{{ bytes_sent: {} bytes_received: {} bytes_cloud_storage: {} }}",
+          "{{ bytes_sent: {} bytes_received: {} }}",
           bytes_sent,
-          bytes_received,
-          bytes_cloud_storage ? std::to_string(*bytes_cloud_storage) : "n/a");
+          bytes_received);
     }
 };
 

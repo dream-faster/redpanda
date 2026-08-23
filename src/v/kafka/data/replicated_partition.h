@@ -10,7 +10,6 @@
  */
 #pragma once
 
-#include "cloud_storage/types.h"
 #include "kafka/data/partition_proxy.h"
 #include "kafka/protocol/errors.h"
 #include "model/fundamental.h"
@@ -102,10 +101,7 @@ public:
     size_t estimate_size_between(kafka::offset, kafka::offset) const final;
 
     size_t local_size_bytes() const override;
-    ss::future<std::optional<size_t>> cloud_size_bytes() const override;
     model::offset offset_lag() const override;
-    ss::future<cluster::partition_cloud_storage_status>
-    get_cloud_storage_status() const override;
 
 private:
     // Returns the highest offset in the given term, without considering
@@ -114,14 +110,9 @@ private:
       get_leader_epoch_last_offset_unbounded(kafka::leader_epoch) const;
 
     ss::future<std::vector<model::tx_range>> aborted_transactions_local(
-      cloud_storage::offset_range,
+      model::offset begin_rp,
+      model::offset end_rp,
       ss::lw_shared_ptr<const storage::offset_translator_state>);
-
-    ss::future<std::vector<model::tx_range>> aborted_transactions_remote(
-      cloud_storage::offset_range offsets,
-      ss::lw_shared_ptr<const storage::offset_translator_state> ot_state);
-
-    bool may_read_from_cloud(kafka::offset) const;
 
     ss::lw_shared_ptr<cluster::partition> _partition;
     ss::lw_shared_ptr<const storage::offset_translator_state> _translator;

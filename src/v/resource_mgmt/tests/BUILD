@@ -59,12 +59,10 @@ redpanda_cc_btest(
     name = "storage_test",
     timeout = "short",
     srcs = [
-        "storage_test.cc",
     ],
     deps = [
         "//src/v/config",
         "//src/v/random:generators",
-        "//src/v/resource_mgmt:storage",
         "//src/v/test_utils:seastar_boost",
         "@boost//:test",
         "@seastar",

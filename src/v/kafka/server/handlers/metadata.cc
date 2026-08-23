@@ -241,10 +241,6 @@ autocreate_topic_configuration(request_context& ctx, model::topic topic) {
       std::move(topic),
       config::shard_local_cfg().default_topic_partitions(),
       config::shard_local_cfg().default_topic_replications()};
-    // Need to respect the default_redpanda_storage_mode when autocreating a
-    // topic.
-    cfg.properties.storage_mode
-      = config::shard_local_cfg().default_redpanda_storage_mode();
     return cfg;
 }
 

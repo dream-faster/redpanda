@@ -1230,20 +1230,9 @@ bool disk_log_impl::has_local_retention_override() const {
 
 gc_config
 disk_log_impl::maybe_apply_local_storage_overrides(gc_config cfg) const {
-    // Read replica topics have a different default retention
-    if (config().is_read_replica_mode_enabled()) {
-        cfg.eviction_time = std::max(
-          model::timestamp(
-            model::timestamp::now().value()
-            - ntp_config::read_replica_retention.count()),
-          cfg.eviction_time);
-        return cfg;
-    }
-
-    // cloud_retention is disabled, do not override.
-    if (!is_archival_active()) {
-        return cfg;
-    }
+    // Local retention overrides only apply to tiered topics, of which there
+    // are none.
+    return cfg;
 
     /*
      * don't override with local retention settings--let partition data expand
@@ -1320,13 +1309,6 @@ gc_config disk_log_impl::apply_local_storage_overrides(gc_config cfg) const {
 
     return cfg;
 }
-
-bool disk_log_impl::is_archival_active() const {
-    return config::shard_local_cfg().cloud_storage_enabled()
-           && (config().is_archival_enabled());
-}
-
-bool disk_log_impl::is_cloud_gc_active() const { return is_archival_active(); }
 
 /*
  * applies overrides for non-cloud storage settings
@@ -1785,36 +1767,6 @@ ss::future<std::optional<model::offset>> disk_log_impl::do_gc(gc_config cfg) {
 
     cfg = apply_overrides(cfg);
 
-    /*
-     * _cloud_gc_offset is used to communicate the intent to collect
-     * partition data in excess of normal retention settings (and for infinite
-     * retention / no retention settings). it is expected that an external
-     * process such as disk space management drives this process such that after
-     * a round of gc has run the intent flag can be cleared.
-     */
-    if (_cloud_gc_offset.has_value()) {
-        const auto offset = _cloud_gc_offset.value();
-        _cloud_gc_offset.reset();
-
-        if (!is_archival_active()) {
-            vlog(
-              gclog.warn,
-              "[{}] expected remote retention to be active",
-              config().ntp());
-            co_return std::nullopt;
-        }
-
-        vlog(
-          gclog.info,
-          "[{}] applying 'deletion' log cleanup with remote retention override "
-          "offset {} and config {}",
-          config().ntp(),
-          offset,
-          cfg);
-
-        co_return request_eviction_until_offset(offset);
-    }
-
     if (!config().is_locally_collectable()) {
         co_return std::nullopt;
     }
@@ -1925,16 +1877,8 @@ disk_log_impl::maybe_adjusted_retention_offset(gc_config cfg) {
 
 ss::future<std::optional<model::offset>>
 disk_log_impl::compute_gc_offset(gc_config cfg) {
-    // Single GC-offset computation shared by gc() housekeeping and by
-    // ctp_stm for cloud-topic partitions. The offset is retention-driven
-    // unless space management has pinned _cloud_gc_offset, which then takes
-    // precedence. maybe_apply_local_storage_overrides
-    // bypasses the is_archival_active() gate for cloud-topic partitions
-    // local-target override engages there under retention_local_strict.
+    // Retention-driven GC offset computation for gc() housekeeping.
     cfg = apply_kafka_retention_overrides(cfg);
-    if (_cloud_gc_offset.has_value()) {
-        co_return std::exchange(_cloud_gc_offset, std::nullopt);
-    }
     co_await maybe_adjust_retention_timestamps();
     cfg = maybe_apply_local_storage_overrides(cfg);
     co_return retention_offset(cfg);
@@ -3932,30 +3876,8 @@ disk_log_impl::disk_usage_and_reclaimable_space(gc_config input_cfg) {
           retention_offset.has_value()
           && seg->offsets().get_dirty_offset() <= retention_offset.value()) {
             retention_segments.push_back(seg);
-        } else if (
-          is_cloud_gc_active()
-          && seg->offsets().get_dirty_offset() <= max_removable) {
-            available_segments.push_back(seg);
         } else {
             remaining_segments.push_back(seg);
-        }
-
-        /*
-         * track segments that are reclaimable and above local retention.
-         * effectively identcal to the condition in get_reclaimable_offsets. it
-         * is repeated here because it is convenient to roll up these stats into
-         * the usage information for consumption by the health monitor. the end
-         * state is that the usage reporting here and the work in
-         * get_reclaimable_offsets is going to be merged together.
-         */
-        if (
-          !config().is_read_replica_mode_enabled() && is_cloud_gc_active()
-          && seg != _segs.back()
-          && seg->offsets().get_dirty_offset() <= max_removable
-          && local_retention_offset.has_value()
-          && seg->offsets().get_dirty_offset()
-               <= local_retention_offset.value()) {
-            local_retention_segments.push_back(seg);
         }
     }
 
@@ -4290,277 +4212,13 @@ ss::future<usage_report> disk_log_impl::disk_usage(gc_config cfg) {
     co_return usage_report(use, reclaim, target);
 }
 
-chunked_vector<ss::lw_shared_ptr<segment>>
-disk_log_impl::cloud_gc_eligible_segments() {
-    vassert(
-      is_cloud_gc_active(),
-      "Expected cloud GC to be active for {}",
-      config().ntp());
-
-    constexpr size_t keep_segs = 1;
-
-    // must-have restriction
-    if (_segs.size() <= keep_segs) {
-        return {};
-    }
-
-    /*
-     * how much are we allowed to collect? sub-systems (e.g. transactions)
-     * may signal restrictions through the max removable offset. for cloud
-     * topics max removable will include a reflection of how much data has
-     * been uploaded into the cloud.
-     */
-    const auto max_removable = stm_hookset()->max_removable_local_log_offset();
-
-    // collect eligible segments
-    chunked_vector<segment_set::type> segments;
-    for (auto remaining = _segs.size() - keep_segs; auto& seg : _segs) {
-        if (seg->offsets().get_committed_offset() <= max_removable) {
-            segments.push_back(seg);
-        }
-        if (--remaining <= 0) {
-            break;
-        }
-    }
-
-    return segments;
-}
-
-void disk_log_impl::set_cloud_gc_offset(model::offset offset) {
-    if (!is_cloud_gc_active()) {
-        vlog(
-          stlog.debug,
-          "Ignoring request to set GC offset on non-cloud enabled partition "
-          "{}. Configuration may have recently changed.",
-          config().ntp());
-        return;
-    }
-    if (deletion_exempt(config().ntp())) {
-        vlog(
-          stlog.debug,
-          "Ignoring request to trim at GC offset for exempt partition {}",
-          config().ntp());
-        return;
-    }
-    _cloud_gc_offset = offset;
-}
-
-ss::future<reclaimable_offsets>
-disk_log_impl::get_reclaimable_offsets(gc_config cfg) {
-    // protect against concurrent log removal with housekeeping loop
-    auto gate = _compaction_housekeeping_gate.hold();
-
-    reclaimable_offsets res;
-
-    if (!is_cloud_gc_active()) {
-        vlog(
-          stlog.debug,
-          "Reporting no reclaimable offsets for non-cloud partition {}",
-          config().ntp());
-        co_return res;
-    }
-
-    /*
-     * there is currently a bug with read replicas that makes the max
-     * removable offset unreliable. the read replica topics still have a
-     * retention setting, but we are going to exempt them from forced reclaim
-     * until this bug is fixed to avoid any complications.
-     *
-     * https://github.com/redpanda-data/redpanda/issues/11936
-     */
-    if (config().is_read_replica_mode_enabled()) {
-        vlog(
-          stlog.debug,
-          "Reporting no reclaimable offsets for read replica partition {}",
-          config().ntp());
-        co_return res;
-    }
-
-    // see comment on deletion_exempt
-    if (deletion_exempt(config().ntp())) {
-        vlog(
-          stlog.debug,
-          "Reporting no reclaimable space for exempt partition {}",
-          config().ntp());
-        co_return res;
-    }
-
-    /*
-     * calculate the effective local retention. this forces the local retention
-     * override in contrast to housekeeping GC where the overrides are applied
-     * only when local retention is non-advisory.
-     */
-    cfg = apply_kafka_retention_overrides(cfg);
-    cfg = apply_local_storage_overrides(cfg);
-    const auto local_retention_offset
-      = co_await maybe_adjusted_retention_offset(cfg);
-
-    /*
-     * when local retention is based off an explicit override, then we treat it
-     * as the partition having a retention hint and use it to deprioritize
-     * selection of data to reclaim over data without any hints.
-     */
-    const auto hinted = has_local_retention_override();
-
-    /*
-     * for a cloud-backed topic the max collecible offset is the threshold below
-     * which data has been uploaded and can safely be removed from local disk.
-     */
-    const auto max_removable = stm_hookset()->max_removable_local_log_offset();
-
-    /*
-     * lightweight segment set copy for safe iteration
-     */
-    chunked_vector<segment_set::type> segments;
-    for (const auto& seg : _segs) {
-        segments.push_back(seg);
-    }
-
-    /*
-     * currently we use two segments as the low space size
-     */
-    std::optional<model::offset> low_space_offset;
-    if (segments.size() >= 2) {
-        low_space_offset
-          = segments[segments.size() - 2]->offsets().get_base_offset();
-    }
-
-    vlog(
-      stlog.debug,
-      "Categorizing {} {} segments for {} with local retention {} low "
-      "space {} max removable {}",
-      segments.size(),
-      (hinted ? "hinted" : "non-hinted"),
-      config().ntp(),
-      local_retention_offset,
-      low_space_offset,
-      max_removable);
-
-    /*
-     * categorize each segment.
-     */
-    for (const auto& seg : segments) {
-        const auto usage = co_await seg->persistent_size();
-        const auto seg_size = usage.total();
-
-        /*
-         * the active segment designation takes precedence because it requires
-         * special consideration related to the implications of force rolling.
-         */
-        if (seg == segments.back()) {
-            /*
-             * since the active segment receives all new data at any given time
-             * it may not be fully uploaded to cloud storage so it is hard to
-             * say anything definitive about it. instead, we report its size as
-             * a potential:
-             *
-             *   1. rolling the active segment will bound progress towards
-             *   making its current full size reclaimable as max removable
-             *   increases to cover the entire segment.
-             *
-             *   2. finally, we don't report it if max removable hasn't even
-             *   made it to the active segment yet.
-             */
-            if (seg->offsets().get_base_offset() <= max_removable) {
-                res.force_roll = seg_size;
-                vlog(
-                  stlog.trace,
-                  "Reporting partially collectible {} active segment",
-                  human::bytes(seg_size));
-            }
-            break;
-        }
-
-        // to be categorized
-        const reclaimable_offsets::offset point{
-          .offset = seg->offsets().get_dirty_offset(),
-          .size = seg_size,
-        };
-
-        /*
-         * if the current segment is not fully collectible, then subsequent
-         * segments will not be either, and don't require consideration.
-         */
-        if (point.offset > max_removable) {
-            vlog(
-              stlog.trace,
-              "Stopping collection at offset {}:{} above max removable {}",
-              point.offset,
-              human::bytes(point.size),
-              max_removable);
-            break;
-        }
-
-        /*
-         * when local retention is non-advisory then standard garbage collection
-         * housekeeping will automatically remove data down to local retention.
-         *
-         * however when local retention is advisory, then partition storage is
-         * allowed to expand up to the consumable retention. in this case
-         * housekeeping will remove data above consumable retention, and we
-         * categorize this excess data here down to the local retention.
-         */
-        if (
-          local_retention_offset.has_value()
-          && point.offset <= local_retention_offset.value()) {
-            res.effective_local_retention.push_back(point);
-            vlog(
-              stlog.trace,
-              "Adding offset {}:{} as local retention reclaimable",
-              point.offset,
-              human::bytes(point.size));
-            continue;
-        }
-
-        /*
-         * the low space represents the limit of data we want to remove from
-         * any partition before moving on to more extreme tactics.
-         */
-        if (
-          low_space_offset.has_value()
-          && point.offset <= low_space_offset.value()) {
-            if (hinted) {
-                res.low_space_hinted.push_back(point);
-                vlog(
-                  stlog.trace,
-                  "Adding offset {}:{} as low space hinted",
-                  point.offset,
-                  human::bytes(point.size));
-            } else {
-                res.low_space_non_hinted.push_back(point);
-                vlog(
-                  stlog.trace,
-                  "Adding offset {}:{} as low space non-hinted",
-                  point.offset,
-                  human::bytes(point.size));
-            }
-            continue;
-        }
-
-        res.active_segment.push_back(point);
-        vlog(
-          stlog.trace,
-          "Adding offset {}:{} as active segment bounded",
-          point.offset,
-          human::bytes(point.size));
-    }
-
-    co_return res;
-}
-
 size_t disk_log_impl::reclaimable_size_bytes() const {
     /*
      * circumstances/configuration under which this log will be trimming back to
      * local retention size may change. catch these before reporting potentially
      * stale information.
      */
-    if (!is_cloud_gc_active()) {
-        return 0;
-    }
-    if (config().is_read_replica_mode_enabled()) {
-        // https://github.com/redpanda-data/redpanda/issues/11936
-        return 0;
-    }
+    return 0;
     if (deletion_exempt(config().ntp())) {
         return 0;
     }

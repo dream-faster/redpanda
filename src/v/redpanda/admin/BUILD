@@ -66,14 +66,6 @@ seastar_cc_swagger_library(
 )
 
 seastar_cc_swagger_library(
-    name = "shadow_indexing",
-    src = "api-doc/shadow_indexing.json",
-    definitions = [
-        "api-doc/shadow_indexing.def.json",
-    ],
-)
-
-seastar_cc_swagger_library(
     name = "status",
     src = "api-doc/status.json",
 )
@@ -86,14 +78,6 @@ seastar_cc_swagger_library(
 seastar_cc_swagger_library(
     name = "usage",
     src = "api-doc/usage.json",
-)
-
-seastar_cc_swagger_library(
-    name = "migration",
-    src = "api-doc/migration.json",
-    definitions = [
-        "api-doc/migration.def.json",
-    ],
 )
 
 seastar_cc_swagger_library(
@@ -120,24 +104,6 @@ redpanda_cc_library(
         "//src/v/json",
         "@boost//:range",
         "@seastar",
-    ],
-)
-
-redpanda_cc_library(
-    name = "data_migration_utils",
-    srcs = [
-        "data_migration_utils.cc",
-    ],
-    hdrs = [
-        "data_migration_utils.h",
-    ],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":migration",
-        "//src/v/cluster:data_migration_types",
-        "//src/v/json",
-        "//src/v/model",
-        "@abseil-cpp//absl/strings",
     ],
 )
 
@@ -244,16 +210,13 @@ redpanda_cc_library(
 redpanda_cc_library(
     name = "admin",
     srcs = [
-        "cluster_recovery.cc",
         "debug.cc",
         "debug_bundle.cc",
         "kafka.cc",
-        "migrations.cc",
         "partition.cc",
         "recovery.cc",
         "security.cc",
         "server.cc",
-        "topics.cc",
         "transaction.cc",
         "usage.cc",
         "util.cc",
@@ -267,12 +230,10 @@ redpanda_cc_library(
         "api-doc/debug_bundle.json.hh",
         "api-doc/features.json.hh",
         "api-doc/hbadger.json.hh",
-        "api-doc/migration.json.hh",
         "api-doc/partition.json.hh",
         "api-doc/raft.json.hh",
         "api-doc/recovery.json.hh",
         "api-doc/security.json.hh",
-        "api-doc/shadow_indexing.json.hh",
         "api-doc/status.json.hh",
         "api-doc/transaction.json.hh",
         "api-doc/usage.json.hh",
@@ -282,7 +243,6 @@ redpanda_cc_library(
         "@fmt",
     ],
     implementation_deps = [
-        "//src/v/cluster:data_migration_types",
         "//src/v/cluster:drain_status",
         "//src/v/cluster:errc",
         "//src/v/cluster:health_monitor_types",
@@ -306,34 +266,26 @@ redpanda_cc_library(
         ":cluster_config",
         ":cluster_config_schema_util",
         ":config",
-        ":data_migration_utils",
         ":debug",
         ":debug_bundle",
         ":features",
         ":hbadger",
         ":kafka_connections_service",
-        ":migration",
         ":partition",
         ":raft",
         ":recovery",
         ":security",
-        ":shadow_indexing",
         ":status",
         ":transaction",
         ":usage",
         "//src/v/base",
         "//src/v/bytes:iostream",
         "//src/v/bytes:streambuf",
-        "//src/v/cloud_io:cache",
-        "//src/v/cloud_storage",
         "//src/v/cluster",
         "//src/v/cluster:client_quota_backend",
-        "//src/v/cluster:cloud_metadata_types",
-        "//src/v/cluster:cluster_recovery_table",
         "//src/v/cluster:cluster_utils",
         "//src/v/cluster:commands",
         "//src/v/cluster:controller_log_limiter",
-        "//src/v/cluster:data_migration_table",
         "//src/v/cluster:feature_backend",
         "//src/v/cluster:fwd",
         "//src/v/cluster:ntp_callbacks",

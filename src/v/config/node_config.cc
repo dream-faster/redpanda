@@ -146,20 +146,6 @@ node_config::node_config() noexcept
       {.visibility = visibility::user},
       "/usr/share/redpanda/admin-api-doc")
   , dashboard_dir(*this, "dashboard_dir")
-  , cloud_storage_cache_directory(
-      *this,
-      "cloud_storage_cache_directory",
-      "Directory for archival cache. Should be present when "
-      "`cloud_storage_enabled` is present",
-      {.visibility = visibility::user},
-      std::nullopt)
-  , cloud_storage_inventory_hash_store(
-      *this,
-      "cloud_storage_inventory_hash_path_directory",
-      "Directory to store inventory report hashes for use by cloud storage "
-      "scrubber",
-      {.visibility = visibility::user},
-      std::nullopt)
   , enable_central_config(*this, "enable_central_config")
   , crash_loop_limit(
       *this,

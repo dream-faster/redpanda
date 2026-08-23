@@ -127,19 +127,6 @@ partition_state get_partition_state(ss::lw_shared_ptr<partition> partition) {
       = coco.get_local_max_cleanly_compacted_offset();
     state.max_transaction_free_offset
       = coco.get_local_max_transaction_free_offset();
-    state.is_read_replica_mode_enabled
-      = partition->is_read_replica_mode_enabled();
-    state.is_remote_fetch_enabled = partition->is_remote_fetch_enabled();
-    state.is_cloud_data_available = partition->cloud_data_available();
-    state.read_replica_bucket = partition->is_read_replica_mode_enabled()
-                                  ? partition->get_read_replica_bucket()()
-                                  : "";
-    if (state.is_cloud_data_available) {
-        state.start_cloud_offset = partition->start_cloud_offset();
-        state.next_cloud_offset = partition->next_cloud_offset();
-    } else {
-        state.start_cloud_offset = state.next_cloud_offset = model::offset{-1};
-    }
     state.raft_state = get_partition_raft_state(partition->raft());
     return state;
 }
@@ -244,7 +231,6 @@ std::vector<partition_stm_state> get_partition_stm_state(consensus_ptr ptr) {
 namespace {
 const std::vector<ss::sstring>& stm_snapshot_names() {
     static const std::vector<ss::sstring> names{
-      cluster::archival_stm_snapshot,
       cluster::tm_stm_snapshot,
       cluster::id_allocator_snapshot,
       cluster::rm_stm_snapshot,

@@ -22,7 +22,6 @@ namespace features {
 
 enum class license_required_feature {
     audit_logging,
-    cloud_storage,
     partition_auto_balancing_continuous,
     core_balancing_continuous,
     gssapi,
@@ -37,8 +36,6 @@ inline fmt::iterator format_to(license_required_feature f, fmt::iterator out) {
     switch (f) {
     case license_required_feature::audit_logging:
         return fmt::format_to(out, "audit_logging");
-    case license_required_feature::cloud_storage:
-        return fmt::format_to(out, "cloud_storage");
     case license_required_feature::partition_auto_balancing_continuous:
         return fmt::format_to(out, "partition_auto_balancing_continuous");
     case license_required_feature::core_balancing_continuous:

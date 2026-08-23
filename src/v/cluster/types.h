@@ -14,8 +14,6 @@
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/node_hash_map.h"
 #include "base/format_to.h"
-#include "cloud_storage/remote_label.h"
-#include "cluster/cloud_metadata/cluster_manifest.h"
 #include "cluster/data_policy.h"
 #include "cluster/errc.h"
 #include "cluster/feature_update_action.h"
@@ -692,19 +690,7 @@ struct incremental_topic_updates
     property_update<tristate<size_t>> retention_bytes;
     property_update<tristate<std::chrono::milliseconds>> retention_duration;
     property_update<std::optional<uint32_t>> batch_max_bytes;
-    property_update<tristate<size_t>> retention_local_target_bytes;
-    property_update<tristate<std::chrono::milliseconds>>
-      retention_local_target_ms;
-    property_update<bool> remote_read{
-      false, incremental_update_operation::none};
-    property_update<bool> remote_write{
-      false, incremental_update_operation::none};
-    property_update<bool> remote_delete{
-      false, incremental_update_operation::none};
     property_update<tristate<std::chrono::milliseconds>> segment_ms;
-    property_update<tristate<size_t>> initial_retention_local_target_bytes;
-    property_update<tristate<std::chrono::milliseconds>>
-      initial_retention_local_target_ms;
     property_update<std::optional<model::write_caching_mode>> write_caching;
     property_update<std::optional<std::chrono::milliseconds>> flush_ms;
     property_update<std::optional<size_t>> flush_bytes;
@@ -716,30 +702,14 @@ struct incremental_topic_updates
       min_compaction_lag_ms;
     property_update<std::optional<std::chrono::milliseconds>>
       max_compaction_lag_ms;
-    property_update<std::optional<bool>> remote_allow_gaps;
-
     property_update<std::optional<std::chrono::milliseconds>>
       message_timestamp_before_max_ms;
     property_update<std::optional<std::chrono::milliseconds>>
       message_timestamp_after_max_ms;
-    property_update<std::optional<model::redpanda_storage_mode>> storage_mode;
 
     // Not a regular topic property. Used to assign topic UUIDs to pre-25-2
     // topics that were created without one.
     property_update<std::optional<model::topic_id>> topic_id;
-
-    // Label used to identify the location of the topic's state in the cloud.
-    //
-    // WARNING: NOT meant for use for Kafka topics! Exercise caution when using
-    // this and make sure that changing this is handled gracefully by the topic
-    // being updated. E.g. can be used for the cloud topics metastore topic
-    // after the logical state of a given topic is restored.
-    property_update<std::optional<cloud_storage::remote_label>> remote_label;
-
-    // To allow us to better control use of the deprecated shadow_indexing
-    // field, use getters and setters instead.
-    const auto& get_shadow_indexing() const { return shadow_indexing; }
-    auto& get_shadow_indexing() { return shadow_indexing; }
 
     auto serde_fields() {
         return std::tie(
@@ -750,30 +720,19 @@ struct incremental_topic_updates
           segment_size,
           retention_bytes,
           retention_duration,
-          shadow_indexing,
           batch_max_bytes,
-          retention_local_target_bytes,
-          retention_local_target_ms,
-          remote_delete,
           segment_ms,
-          initial_retention_local_target_bytes,
-          initial_retention_local_target_ms,
           write_caching,
           flush_ms,
           flush_bytes,
           leaders_preference,
-          remote_read,
-          remote_write,
           delete_retention_ms,
           min_cleanable_dirty_ratio,
-          remote_allow_gaps,
           topic_id,
           min_compaction_lag_ms,
           max_compaction_lag_ms,
           message_timestamp_before_max_ms,
-          message_timestamp_after_max_ms,
-          remote_label,
-          storage_mode);
+          message_timestamp_after_max_ms);
     }
 
     fmt::iterator format_to(fmt::iterator it) const;
@@ -781,11 +740,6 @@ struct incremental_topic_updates
     friend bool operator==(
       const incremental_topic_updates&,
       const incremental_topic_updates&) = default;
-
-private:
-    // This field is kept here for legacy purposes, but should be considered
-    // deprecated in favour of remote_read and remote_write.
-    property_update<std::optional<model::shadow_indexing_mode>> shadow_indexing;
 };
 
 using replication_factor
@@ -879,8 +833,6 @@ struct custom_assignable_topic_configuration {
     std::vector<custom_partition_assignment> custom_assignments;
 
     bool has_custom_assignment() const { return !custom_assignments.empty(); }
-    bool is_read_replica() const { return cfg.is_read_replica(); }
-    bool is_recovery_enabled() const { return cfg.is_recovery_enabled(); }
 
     fmt::iterator format_to(fmt::iterator it) const;
 };
@@ -1641,25 +1593,6 @@ struct feature_update_license_update_cmd_data
     fmt::iterator format_to(fmt::iterator it) const;
 };
 
-struct cluster_recovery_init_state
-  : serde::envelope<
-      cluster_recovery_init_state,
-      serde::version<0>,
-      serde::compat_version<0>> {
-    friend bool operator==(
-      const cluster_recovery_init_state&,
-      const cluster_recovery_init_state&) = default;
-
-    auto serde_fields() { return std::tie(manifest, bucket); }
-
-    // Cluster metadata manifest used to define the desired end state of the
-    // recovery.
-    cluster::cloud_metadata::cluster_metadata_manifest manifest;
-
-    // Bucket from which to download the cluster recovery state.
-    cloud_storage_clients::bucket_name bucket;
-};
-
 struct bootstrap_cluster_cmd_data
   : serde::envelope<
       bootstrap_cluster_cmd_data,
@@ -1688,76 +1621,6 @@ struct bootstrap_cluster_cmd_data
     // the node that generated the bootstrap record.
     cluster_version founding_version{invalid_version};
     std::vector<model::broker> initial_nodes;
-
-    // If set, begins a cluster recovery using this state as the basis.
-    std::optional<cluster_recovery_init_state> recovery_state;
-};
-
-struct cluster_recovery_init_cmd_data
-  : serde::envelope<
-      cluster_recovery_init_cmd_data,
-      serde::version<0>,
-      serde::compat_version<0>> {
-    friend bool operator==(
-      const cluster_recovery_init_cmd_data&,
-      const cluster_recovery_init_cmd_data&) = default;
-
-    auto serde_fields() { return std::tie(state); }
-
-    cluster_recovery_init_state state;
-};
-
-enum class recovery_stage : int8_t {
-    // A recovery has been initialized. We've already downloaded and serialized
-    // the manifest. While in this state, a recovery manager may validate that
-    // the recovery materials are downloadable.
-    initialized = 0,
-
-    // Recovery steps are beginning. We've already validated that the recovery
-    // materials are downloadable, though these aren't persisted in the
-    // controller beyond the manifest (it is expected that upon leadership
-    // changes, they are redownloaded).
-    starting = 1,
-
-    recovered_license = 2,
-    recovered_cluster_config = 3,
-    recovered_users = 4,
-    recovered_acls = 5,
-    recovered_remote_topic_data = 6,
-    recovered_topic_data = 7,
-
-    // All state from the controller snapshot has been recovered.
-    // Reconciliation attempts do not need to redownload the controller
-    // snapshot to proceed.
-    recovered_controller_snapshot = 8,
-
-    recovered_offsets_topic = 9,
-    recovered_tx_coordinator = 10,
-
-    // Recovery has completed successfully. This is a terminal state.
-    complete = 100,
-
-    // Recovery has failed. This is a terminal state.
-    failed = 101,
-};
-fmt::iterator format_to(recovery_stage s, fmt::iterator);
-
-struct cluster_recovery_update_cmd_data
-  : serde::envelope<
-      cluster_recovery_update_cmd_data,
-      serde::version<0>,
-      serde::compat_version<0>> {
-    friend bool operator==(
-      const cluster_recovery_update_cmd_data&,
-      const cluster_recovery_update_cmd_data&) = default;
-
-    auto serde_fields() { return std::tie(stage, error_msg); }
-
-    // The stage of the cluster recovery to be updated to.
-    recovery_stage stage;
-
-    // If set, the recovery is failed. Otherwise, it was a success.
-    std::optional<ss::sstring> error_msg;
 };
 
 enum class reconciliation_status : int8_t {
@@ -2341,11 +2204,6 @@ public:
 
     model::revision_id get_revision() const;
     std::optional<model::initial_revision_id> get_remote_revision() const;
-    // Returns location hint that can be passed to topic_manifest_downloader to
-    // disambiguate topic instances in cloud storage. Has the following form:
-    // "<remote label>/<remote revision id>".
-    // Nullopt will be returned for legacy topics without a remote label.
-    std::optional<ss::sstring> get_remote_location_hint() const;
 
     const topic_metadata_fields& get_fields() const { return _fields; }
     topic_metadata_fields& get_fields() { return _fields; }
@@ -2440,42 +2298,6 @@ struct cancel_partition_movements_reply
 
     errc general_error;
     std::vector<move_cancellation_result> partition_results;
-};
-
-struct cloud_storage_usage_request
-  : serde::envelope<
-      cloud_storage_usage_request,
-      serde::version<0>,
-      serde::compat_version<0>> {
-    std::vector<model::ntp> partitions;
-
-    friend bool operator==(
-      const cloud_storage_usage_request&,
-      const cloud_storage_usage_request&) = default;
-
-    auto serde_fields() { return std::tie(partitions); }
-};
-
-struct cloud_storage_usage_reply
-  : serde::envelope<
-      cloud_storage_usage_reply,
-      serde::version<0>,
-      serde::compat_version<0>> {
-    uint64_t total_size_bytes{0};
-
-    // When replies are handled in 'cloud_storage_size_reducer'
-    // only the size of this list is currently used. However,
-    // having the actual missing ntps allws for future optimisations:
-    // the request can be retried only for the 'missing_partitions'.
-    std::vector<model::ntp> missing_partitions;
-
-    friend bool operator==(
-      const cloud_storage_usage_reply&,
-      const cloud_storage_usage_reply&) = default;
-
-    auto serde_fields() {
-        return std::tie(total_size_bytes, missing_partitions);
-    }
 };
 
 struct producer_id_lookup_request
@@ -2670,15 +2492,9 @@ struct partition_state
     model::offset high_water_mark;
     model::offset dirty_offset;
     model::offset latest_configuration_offset;
-    model::offset start_cloud_offset;
-    model::offset next_cloud_offset;
     model::revision_id revision_id;
     size_t log_size_bytes;
     size_t non_log_disk_size_bytes;
-    bool is_read_replica_mode_enabled;
-    bool is_remote_fetch_enabled;
-    bool is_cloud_data_available;
-    ss::sstring read_replica_bucket;
     partition_raft_state raft_state;
     model::offset max_tombstone_removable_offset;
     model::offset max_transaction_removable_offset;
@@ -2693,15 +2509,9 @@ struct partition_state
           high_water_mark,
           dirty_offset,
           latest_configuration_offset,
-          start_cloud_offset,
-          next_cloud_offset,
           revision_id,
           log_size_bytes,
           non_log_disk_size_bytes,
-          is_read_replica_mode_enabled,
-          is_remote_fetch_enabled,
-          is_cloud_data_available,
-          read_replica_bucket,
           raft_state,
           max_tombstone_removable_offset,
           max_transaction_removable_offset,
@@ -2906,42 +2716,6 @@ struct node_decommission_progress {
       allocation_failures;
     // list of currently ongoing partition reconfigurations
     chunked_vector<partition_reconfiguration_state> current_reconfigurations;
-};
-
-enum class cloud_storage_mode : uint8_t {
-    disabled = 0,
-    write_only = 1,
-    read_only = 2,
-    full = 3,
-    read_replica = 4
-};
-fmt::iterator format_to(cloud_storage_mode, fmt::iterator);
-
-struct partition_cloud_storage_status {
-    cloud_storage_mode mode;
-
-    std::optional<std::chrono::milliseconds> since_last_manifest_upload;
-    std::optional<std::chrono::milliseconds> since_last_segment_upload;
-    std::optional<std::chrono::milliseconds> since_last_manifest_sync;
-
-    size_t total_log_size_bytes{0};
-    size_t cloud_log_size_bytes{0};
-    size_t stm_region_size_bytes{0};
-    size_t archive_size_bytes{0};
-    size_t local_log_size_bytes{0};
-
-    size_t stm_region_segment_count{0};
-    size_t local_log_segment_count{0};
-
-    // Friendlier name for archival_metadata_stm::get_dirty
-    bool cloud_metadata_update_pending{false};
-
-    std::optional<kafka::offset> cloud_log_start_offset;
-    std::optional<kafka::offset> stm_region_start_offset;
-    std::optional<kafka::offset> local_log_last_offset;
-
-    std::optional<kafka::offset> cloud_log_last_offset;
-    std::optional<kafka::offset> local_log_start_offset;
 };
 
 struct metrics_reporter_cluster_info

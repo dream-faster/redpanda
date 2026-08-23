@@ -266,52 +266,6 @@ validate_consumer_group_metrics(const std::vector<ss::sstring>& metrics) {
 }
 
 std::optional<ss::sstring>
-validate_cloud_storage_cluster_name(const std::optional<ss::sstring>& input) {
-    // Long enough to be useful, short enough not to hit object storage name
-    // length limits in most cases.
-    constexpr size_t max_cluster_name_length = 64;
-
-    if (!input.has_value()) {
-        return std::nullopt;
-    }
-
-    if (
-      auto non_empty_string_opt = validate_non_empty_string_opt(input);
-      non_empty_string_opt.has_value()) {
-        return non_empty_string_opt;
-    }
-
-    if (input->length() > max_cluster_name_length) {
-        return fmt::format(
-          "Length must be at most {} characters", max_cluster_name_length);
-    }
-
-    for (char c : *input) {
-        if (!std::isalnum(c) && !(c == '-' || c == '_')) {
-            return "Only alphanumeric characters, hyphens, and underscores are "
-                   "allowed";
-        }
-    }
-
-    return std::nullopt;
-}
-
-std::optional<ss::sstring>
-validate_default_redpanda_storage_mode(const configuration& config) {
-    auto mode = config.default_redpanda_storage_mode();
-
-    if (
-      mode == model::redpanda_storage_mode::tiered
-      && !config.cloud_storage_enabled()) {
-        return fmt::format(
-          "default_redpanda_storage_mode cannot be set to tiered when "
-          "cloud_storage_enabled is false");
-    }
-
-    return std::nullopt;
-}
-
-std::optional<ss::sstring>
 validate_sane_partition_balancer_timeouts(const configuration& config) {
     // how often node status sends an rpc
     auto node_status = config.node_status_interval();
