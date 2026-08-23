@@ -16,6 +16,7 @@
 #include "cluster/client_quota_backend.h"
 #include "cluster/config_manager.h"
 #include "cluster/controller_log_limiter.h"
+#include "cluster/controller_snapshot.h"
 #include "cluster/feature_backend.h"
 #include "cluster/security_manager.h"
 #include "cluster/topic_updates_dispatcher.h"
