@@ -16,6 +16,7 @@
 #include "storage/types.h"
 
 #include <seastar/core/gate.hh>
+#include <seastar/core/sharded.hh>
 #include <seastar/core/sstring.hh>
 
 #include <sys/statvfs.h>

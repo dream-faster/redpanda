@@ -16,6 +16,7 @@
 #include "security/acl_store.h"
 #include "serde/read_header.h"
 #include "serde/rw/rw.h"
+#include "strings/string_switch.h"
 #include "utils/to_string.h"
 
 #include <seastar/core/loop.hh>
