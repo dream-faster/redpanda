@@ -46,7 +46,8 @@ public:
       raft::consensus*,
       ss::logger&,
       storage::kvstore&,
-      config::binding<std::chrono::milliseconds> sync_timeout);
+      config::binding<std::chrono::milliseconds> sync_timeout,
+      size_t max_entries);
 
     /// Filter and replicate one plain produce batch. The dedup window and
     /// generation are read from the partition's ntp_config, the same source
@@ -160,7 +161,7 @@ private:
     kafka::offset from_log_offset(model::offset) const;
 
     config::binding<std::chrono::milliseconds> _sync_timeout;
-    dedup_window_filter _state{std::chrono::milliseconds{0}};
+    dedup_window_filter _state;
     int64_t _generation{0};
     // Append-order fence: resolves once the most recently admitted request's
     // batch has been appended to the leader log. A request that observed a
@@ -178,7 +179,8 @@ class dedup_stm_factory : public state_machine_factory {
 public:
     dedup_stm_factory(
       storage::kvstore&,
-      config::binding<std::chrono::milliseconds> sync_timeout);
+      config::binding<std::chrono::milliseconds> sync_timeout,
+      size_t max_entries);
 
     bool is_applicable_for(const storage::ntp_config&) const final;
 
@@ -190,6 +192,7 @@ public:
 private:
     storage::kvstore& _kvstore;
     config::binding<std::chrono::milliseconds> _sync_timeout;
+    size_t _max_entries;
 };
 
 } // namespace cluster

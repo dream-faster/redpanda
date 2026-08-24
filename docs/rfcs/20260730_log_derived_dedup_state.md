@@ -61,7 +61,7 @@ bookkeeping, which only shifts when expired entries are swept.
 
 # Semantics contract
 
-Guarantees (unchanged from the current branch):
+Guarantees:
 
 - **G1** — On a stable leader, a keyed record is dropped iff a record with the
   same key and a timestamp within `dedup_window_ms` was previously admitted.
@@ -101,6 +101,15 @@ Guarantees (unchanged from the current branch):
 - **G6** — Idempotent and transactional producers bypass the filter
   (unchanged). Null-key records are always admitted and never indexed
   (unchanged).
+- **G7** — Each partition indexes at most
+  `dedup_max_entries_per_partition` distinct identities (one million by
+  default). Once the index reaches that ceiling, previously indexed identities
+  continue to deduplicate, while new identities are admitted without being
+  indexed until an opportunistic eviction sweep frees capacity. This fail-open
+  behavior keeps produce available and bounds both steady-state index memory
+  and future snapshot size even when producer timestamps do not advance or the
+  configured window and identity cardinality are unexpectedly large. Changing
+  the cluster property requires a broker restart.
 
 Best-effort boundaries (all bounded by one dedup window, all documented):
 
@@ -221,11 +230,14 @@ Best-effort boundaries (all bounded by one dedup window, all documented):
    new generation.
 3. `set_window(config window)`.
 4. Decompress if compressed; for each record with a key:
-   `populate(key, first_timestamp + timestamp_delta)`.
+   `populate(key, first_timestamp + timestamp_delta)`. `populate()` never lets
+   the index exceed its hard per-partition entry limit; when full, new
+   identities remain unindexed until a periodic eviction sweep makes room.
 
-`populate()` gains eviction accounting (increments the insert counter and
-triggers the existing opportunistic `evict_expired()` sweep) so follower maps
-stay bounded without a separate mechanism.
+`populate()` participates in eviction accounting (increments the new-identity
+attempt counter and triggers the opportunistic `evict_expired()` sweep) so
+follower maps stay bounded without a separate mechanism. Attempts continue to
+advance the sweep counter while the entry ceiling is saturated.
 
 The STM manager already reads every committed batch once and dispatches it to
 all registered STMs (`rm_stm` consumes `raft_data` batches this way), so this

@@ -51,8 +51,10 @@ dedup_identity_digest dedup_digest_of(const iobuf& identity) {
     return {.hi = hi.digest(), .lo = lo.digest()};
 }
 
-dedup_window_filter::dedup_window_filter(std::chrono::milliseconds window)
-  : _window(window) {}
+dedup_window_filter::dedup_window_filter(
+  std::chrono::milliseconds window, size_t max_entries)
+  : _window(window)
+  , _max_entries(max_entries) {}
 
 bool dedup_window_filter::is_duplicate(
   dedup_identity_digest identity,
@@ -82,6 +84,17 @@ bool dedup_window_filter::is_duplicate(
         return false;
     }
     _max_ts = std::max(_max_ts, ts);
+    // Count the attempted new identity even when the index is full. This keeps
+    // eviction sweeps running at an amortized O(1) rate while saturated, so
+    // advancing timestamps eventually reclaim expired entries and reopen
+    // capacity without scanning the full map for every admitted record.
+    maybe_evict();
+    if (_map.size() >= _max_entries) {
+        // Best-effort, fail-open behavior: the record is admitted but this
+        // identity is not remembered. Existing indexed identities retain their
+        // dedup coverage and the map never exceeds its hard ceiling.
+        return false;
+    }
     _map.emplace(identity, ts);
     if (undo) {
         undo->entries.push_back(
@@ -89,7 +102,6 @@ bool dedup_window_filter::is_duplicate(
            .applied_timestamp = ts,
            .previous_timestamp = std::nullopt});
     }
-    maybe_evict();
     return false;
 }
 
@@ -247,11 +259,21 @@ void dedup_window_filter::revert_request(const dedup_request_undo& undo) {
 
 void dedup_window_filter::populate(const iobuf& key, model::timestamp ts) {
     _max_ts = std::max(_max_ts, ts);
-    auto [it, inserted] = _map.emplace(dedup_digest_of(key), ts);
-    if (inserted) {
-        maybe_evict();
-    } else if (ts.value() > it->second.value()) {
-        it->second = ts;
+    auto identity = dedup_digest_of(key);
+    auto it = _map.find(identity);
+    if (it != _map.end()) {
+        if (ts.value() > it->second.value()) {
+            it->second = ts;
+        }
+        return;
+    }
+
+    // Followers use the same fail-open capacity rule as the leader. Calling
+    // maybe_evict() before the capacity check also lets a due sweep make room
+    // for this identity without ever transiently exceeding the limit.
+    maybe_evict();
+    if (_map.size() < _max_entries) {
+        _map.emplace(identity, ts);
     }
 }
 
@@ -267,18 +289,19 @@ void dedup_window_filter::evict_expired() {
 
 void dedup_window_filter::maybe_evict() {
     // evict_expired() scans the whole map, so a fixed interval makes the
-    // amortized per-insertion cost grow linearly with the index (at a million
-    // entries and a 10k interval, every insertion pays for ~100 scanned
+    // amortized per-attempt cost grow linearly with the index (at a million
+    // entries and a 10k interval, every attempt pays for ~100 scanned
     // entries). Scaling the interval with the map keeps that cost flat: a
     // sweep of N entries happens at most once per N/evict_size_divisor
-    // insertions, i.e. evict_size_divisor scanned entries per insertion.
+    // attempts, i.e. evict_size_divisor scanned entries per attempt.
     //
-    // The cost is slack, and it is bounded in insertions rather than in
-    // time: a sweep waits for map_size/evict_size_divisor *new identities*,
-    // so under a sustained arrival rate the map carries about that fraction
-    // above its steady-state working set. A partition that goes idle, or
-    // whose traffic turns into mostly-duplicates, stops inserting and so
-    // stops sweeping -- it holds its expired entries until traffic resumes.
+    // The cost is slack, and it is bounded in attempts rather than in
+    // time: a sweep waits for map_size/evict_size_divisor new identities, so
+    // under a sustained arrival rate the map carries about that fraction above
+    // its steady-state working set. A partition that goes idle, or whose
+    // traffic turns into mostly-duplicates, stops attempting new identities
+    // and so stops sweeping -- it holds its expired entries until traffic
+    // resumes.
     // That was already true of the flat 10k interval; scaling makes the wait
     // proportionally longer at large indexes. Expired entries can never
     // change a dedup decision, only occupy space, and both snapshot paths
@@ -304,8 +327,13 @@ dedup_index_snapshot dedup_window_filter::snapshot() const {
 
 void dedup_window_filter::restore(const dedup_index_snapshot& snapshot) {
     _map.clear();
-    _map.reserve(snapshot.entries.size());
+    const auto restore_count = std::min(snapshot.entries.size(), _max_entries);
+    _map.reserve(restore_count);
+    size_t restored = 0;
     for (const auto& entry : snapshot.entries) {
+        if (restored++ >= restore_count) {
+            break;
+        }
         _map.emplace(entry.identity, entry.timestamp);
     }
     _max_ts = snapshot.max_timestamp;

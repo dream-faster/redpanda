@@ -81,7 +81,8 @@ struct dedup_stm_fixture : raft::stm_raft_fixture<dedup_stm> {
           node.raft().get(),
           clusterlog,
           node.get_kvstore(),
-          sync_timeout.bind());
+          sync_timeout.bind(),
+          dedup_window_filter::default_max_entries);
     }
 
     // The STM apply path reads the dedup window, generation, and key header

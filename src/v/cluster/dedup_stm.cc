@@ -21,6 +21,7 @@
 #include <seastar/core/with_timeout.hh>
 #include <seastar/coroutine/as_future.hh>
 
+#include <algorithm>
 #include <new>
 
 namespace cluster {
@@ -29,10 +30,12 @@ dedup_stm::dedup_stm(
   raft::consensus* raft,
   ss::logger& logger,
   storage::kvstore& kvstore,
-  config::binding<std::chrono::milliseconds> sync_timeout)
+  config::binding<std::chrono::milliseconds> sync_timeout,
+  size_t max_entries)
   : raft::persisted_stm<raft::kvstore_backed_stm_snapshot>(
       dedup_stm_snapshot, logger, raft, kvstore)
-  , _sync_timeout(std::move(sync_timeout)) {}
+  , _sync_timeout(std::move(sync_timeout))
+  , _state(std::chrono::milliseconds{0}, max_entries) {}
 
 raft::stm_initial_recovery_policy
 dedup_stm::get_initial_recovery_policy() const {
@@ -110,8 +113,18 @@ void dedup_stm::restore_snapshot(
     dedup_index_snapshot restored{
       .max_timestamp = snapshot.max_timestamp,
       .inserts_since_evict = static_cast<size_t>(snapshot.inserts_since_evict)};
-    restored.entries.reserve(snapshot.entries.size());
+    // Snapshots from builds predating the hard index ceiling may be larger
+    // than this node will retain. Bound the intermediate copy as well as the
+    // final map so restoring such a snapshot does not recreate the same peak
+    // allocation the ceiling is intended to prevent.
+    const auto restore_count = std::min(
+      snapshot.entries.size(), state.max_entries());
+    restored.entries.reserve(restore_count);
+    size_t restored_count = 0;
     for (const auto& entry : snapshot.entries) {
+        if (restored_count++ >= restore_count) {
+            break;
+        }
         restored.entries.push_back(
           {.identity = {.hi = entry.identity_hi, .lo = entry.identity_lo},
            .timestamp = entry.timestamp});
@@ -462,9 +475,11 @@ dedup_stm::take_local_snapshot(ssx::semaphore_units apply_units) {
 
 dedup_stm_factory::dedup_stm_factory(
   storage::kvstore& kvstore,
-  config::binding<std::chrono::milliseconds> sync_timeout)
+  config::binding<std::chrono::milliseconds> sync_timeout,
+  size_t max_entries)
   : _kvstore(kvstore)
-  , _sync_timeout(std::move(sync_timeout)) {}
+  , _sync_timeout(std::move(sync_timeout))
+  , _max_entries(max_entries) {}
 
 bool dedup_stm_factory::is_applicable_for(
   const storage::ntp_config& cfg) const {
@@ -476,7 +491,7 @@ void dedup_stm_factory::create(
   raft::consensus* raft,
   const cluster::stm_instance_config&) {
     auto stm = builder.create_stm<dedup_stm>(
-      raft, clusterlog, _kvstore, _sync_timeout);
+      raft, clusterlog, _kvstore, _sync_timeout, _max_entries);
     raft->log()->stm_hookset()->add_stm(stm);
 }
 
