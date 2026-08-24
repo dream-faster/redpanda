@@ -25,9 +25,9 @@ namespace cluster {
 ///
 /// The index stores this instead of the identity bytes, so an entry costs the
 /// same regardless of how large the Kafka key or header value is. Two
-/// independently seeded xxhash64 passes give 128 bits: at the ~10^7 live
-/// entries a wide dedup window can hold, the birthday collision probability
-/// is on the order of 10^-25, far below the window-edge and generation-change
+/// independently seeded xxhash64 passes give 128 bits: at the supported
+/// 10^7-entry upper limit, the birthday collision probability is on the order
+/// of 10^-25, far below the window-edge and generation-change
 /// boundaries the feature already documents as best-effort.
 ///
 /// xxhash64 is not collision-resistant against a chosen-input attacker, which
@@ -166,21 +166,33 @@ struct dedup_index_snapshot {
 /// exactly one request's mutations if its replication fails
 /// (revert_request).
 ///
-/// Memory is bounded two ways. Each entry costs the same regardless of
+/// Memory is bounded three ways. Each entry costs the same regardless of
 /// identity size, because the index stores a dedup_identity_digest rather
 /// than the identity bytes. And entries older than the window (relative to
 /// the most recent timestamp seen) can never cause a drop again and are
 /// swept opportunistically as new identities are inserted; the sweep
 /// interval scales with the index so that scanning it stays amortized O(1)
-/// per insertion. The "most recent
-/// timestamp seen" is a client-supplied CreateTime with no ordering
+/// per insertion. Finally, a hard per-partition entry limit prevents a large
+/// window, high-cardinality traffic, or non-advancing producer timestamps from
+/// exhausting shard memory. Once that limit is reached, new identities are
+/// admitted but left unindexed until a later eviction sweep makes room;
+/// already-indexed identities continue to deduplicate normally. The "most
+/// recent timestamp seen" is a client-supplied CreateTime with no ordering
 /// guarantee, so an anomalously future-timestamped record can advance the
 /// eviction cutoff early and evict an entry a later, correctly-ordered
 /// duplicate should still have matched -- see the log-derived dedup RFC,
 /// boundary B5.
 class dedup_window_filter {
 public:
-    explicit dedup_window_filter(std::chrono::milliseconds window);
+    // One million is also the default of the cluster-level
+    // dedup_max_entries_per_partition setting. The constructor parameter keeps
+    // the filter independent of configuration plumbing and makes
+    // small-capacity behavior directly testable.
+    static constexpr size_t default_max_entries = 1'000'000;
+
+    explicit dedup_window_filter(
+      std::chrono::milliseconds window,
+      size_t max_entries = default_max_entries);
 
     /// \brief Filter duplicate records from a batch.
     ///
@@ -258,6 +270,7 @@ public:
     const std::optional<ss::sstring>& key_header() const { return _key_header; }
 
     size_t map_size() const { return _map.size(); }
+    size_t max_entries() const { return _max_entries; }
     model::timestamp max_timestamp() const { return _max_ts; }
 
 private:
@@ -267,16 +280,19 @@ private:
       dedup_request_undo* undo);
     void maybe_evict();
 
-    // Floor on the number of new-identity insertions between opportunistic
-    // eviction sweeps. The actual interval scales with the map (see
-    // maybe_evict()) so that a sweep, which is O(map size), stays amortized
-    // O(1) per insertion instead of degrading linearly as the index grows.
+    // Floor on the number of new-identity attempts between opportunistic
+    // eviction sweeps. Attempts are counted even at the hard entry limit so a
+    // saturated index still rechecks for expired entries periodically. The
+    // actual interval scales with the map (see maybe_evict()) so that a sweep,
+    // which is O(map size), stays amortized O(1) per attempt instead of
+    // degrading linearly as the index grows.
     static constexpr size_t min_evict_interval = 10000;
-    // Fraction of the map that must be newly inserted before sweeping again:
+    // Fraction of the map worth of new-identity attempts before sweeping:
     // interval = max(min_evict_interval, map_size / evict_size_divisor).
     static constexpr size_t evict_size_divisor = 8;
 
     std::chrono::milliseconds _window;
+    const size_t _max_entries;
     std::optional<ss::sstring> _key_header;
     chunked_hash_map<
       dedup_identity_digest,
@@ -285,6 +301,9 @@ private:
       _map;
     // Highest record timestamp seen; used as the reference "now" for eviction.
     model::timestamp _max_ts{model::timestamp::min()};
+    // Kept under its original name because it is persisted in snapshots; at
+    // the entry limit it also counts new-identity attempts that were not
+    // indexed.
     size_t _inserts_since_evict{0};
 };
 

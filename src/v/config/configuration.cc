@@ -560,6 +560,17 @@ configuration::configuration()
       {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
       std::chrono::milliseconds(1000),
       {.min = std::chrono::milliseconds(1)})
+  , dedup_max_entries_per_partition(
+      *this,
+      "dedup_max_entries_per_partition",
+      "Maximum number of distinct deduplication identities retained by each "
+      "partition replica. Once the limit is reached, new identities are "
+      "admitted without being indexed until expired entries are evicted.",
+      {.needs_restart = needs_restart::yes,
+       .example = "1000000",
+       .visibility = visibility::tunable},
+      1'000'000,
+      {.min = 1, .max = 10'000'000})
   , quota_manager_gc_sec(
       *this,
       "quota_manager_gc_sec",

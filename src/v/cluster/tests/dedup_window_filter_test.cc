@@ -581,6 +581,43 @@ TEST(DedupWindowFilter, EvictExpiredDropsStaleEntries) {
     EXPECT_TRUE(r.has_value());
 }
 
+TEST(DedupWindowFilter, EntryLimitFailsOpenWithoutGrowingTheIndex) {
+    cluster::dedup_window_filter f(1h, 2);
+
+    ASSERT_TRUE(f.filter(make_batch("a", "1", ts(1000))).has_value());
+    ASSERT_TRUE(f.filter(make_batch("b", "2", ts(1000))).has_value());
+    ASSERT_EQ(f.map_size(), 2u);
+
+    // A new identity is admitted when the index is full, but is not retained.
+    ASSERT_TRUE(f.filter(make_batch("c", "3", ts(1000))).has_value());
+    EXPECT_EQ(f.map_size(), 2u);
+    EXPECT_TRUE(f.filter(make_batch("c", "4", ts(1000))).has_value());
+    EXPECT_EQ(f.map_size(), 2u);
+
+    // Identities that were already indexed keep their normal dedup coverage.
+    EXPECT_FALSE(f.filter(make_batch("a", "duplicate", ts(1000))).has_value());
+    EXPECT_EQ(f.map_size(), 2u);
+}
+
+TEST(DedupWindowFilter, EntryLimitReopensAfterAnEvictionSweep) {
+    cluster::dedup_window_filter f(1000ms, 2);
+    f.populate(iobuf::from("stale-a"), ts(0));
+    f.populate(iobuf::from("stale-b"), ts(0));
+    ASSERT_EQ(f.map_size(), 2u);
+
+    // Arrange for this attempted insertion to trigger the normal amortized
+    // sweep. Both old entries expire before the capacity check, so the new
+    // identity can be indexed without exceeding the hard limit.
+    auto snapshot = f.snapshot();
+    snapshot.inserts_since_evict = 9'999;
+    f.restore(snapshot);
+    f.populate(iobuf::from("fresh"), ts(5000));
+
+    ASSERT_EQ(f.map_size(), 1u);
+    EXPECT_FALSE(
+      f.filter(make_batch("fresh", "duplicate", ts(5000))).has_value());
+}
+
 // snapshot()/restore() round-trip the full index state.
 TEST(DedupWindowFilter, SnapshotRestoreRoundTrip) {
     cluster::dedup_window_filter f(1000ms);
@@ -835,9 +872,9 @@ TEST(DedupIdentityDigest, IsPinnedForSnapshotCompatibility) {
 // --- Eviction interval ---
 
 // evict_expired() scans the whole map, so a fixed sweep interval makes the
-// amortized cost per insertion grow linearly with the index. The interval
-// scales with the map instead: at 160k entries it is 20k insertions, so
-// 15k insertions must not have triggered a sweep. Under a fixed 10k interval
+// amortized cost per attempt grow linearly with the index. The interval scales
+// with the map instead: at 160k entries it is 20k attempts, so 15k attempts
+// must not have triggered a sweep. Under a fixed 10k interval
 // one would have fired and reset the counter to 5k.
 TEST(DedupWindowFilter, EvictionIntervalScalesWithMapSize) {
     cluster::dedup_window_filter f(1000ms);
@@ -1349,6 +1386,21 @@ TEST(DedupWindowFilter, RestoreReplacesExistingState) {
     // ...and the entry it replaced is gone.
     EXPECT_TRUE(
       target.filter(make_batch("pre-existing", "again", ts(1200))).has_value());
+}
+
+TEST(DedupWindowFilter, RestoreTruncatesOversizedSnapshotsToEntryLimit) {
+    cluster::dedup_window_filter source(1000ms);
+    source.populate(iobuf::from("a"), ts(1000));
+    source.populate(iobuf::from("b"), ts(1000));
+    source.populate(iobuf::from("c"), ts(1000));
+    const auto snapshot = source.snapshot();
+    ASSERT_EQ(snapshot.entries.size(), 3u);
+
+    cluster::dedup_window_filter restored(1000ms, 2);
+    restored.restore(snapshot);
+
+    EXPECT_EQ(restored.map_size(), 2u);
+    EXPECT_EQ(restored.snapshot().entries.size(), 2u);
 }
 
 TEST(DedupWindowFilter, SnapshotCarriesEvictionState) {
