@@ -12,6 +12,7 @@
 #include "cluster/dedup_window_filter.h"
 #include "cluster/state_machine_registry.h"
 #include "cluster/types.h"
+#include "metrics/metrics.h"
 #include "model/fundamental.h"
 #include "raft/persisted_stm.h"
 #include "serde/envelope.h"
@@ -154,6 +155,8 @@ private:
     /// buffer cannot be read. Returns whether the snapshot was applied.
     bool try_restore_snapshot(iobuf);
 
+    void setup_metrics();
+
     void adopt_config(
       std::chrono::milliseconds window,
       int64_t generation,
@@ -173,6 +176,7 @@ private:
     // waiter fenced on it can tell "safe to proceed" apart from "the
     // introducing write never landed" instead of treating both as success.
     ss::lw_shared_ptr<ss::shared_promise<bool>> _append_tail;
+    metrics::internal_metric_groups _metrics;
 };
 
 class dedup_stm_factory : public state_machine_factory {
