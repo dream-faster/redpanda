@@ -21,6 +21,8 @@
 #include "model/record.h"
 #include "storage/record_batch_builder.h"
 
+#include <seastar/core/lowres_clock.hh>
+
 #include <fmt/format.h>
 #include <gtest/gtest.h>
 
@@ -36,6 +38,20 @@ using namespace std::chrono_literals;
 namespace {
 
 model::timestamp ts(int64_t ms) { return model::timestamp{ms}; }
+
+// The same clock the filter clamps against. Tests that exercise clamping have
+// to be anchored to it; the fixed ts() values above all sit in 1970, far
+// behind broker time, so the clamp is the identity for every other test.
+model::timestamp broker_now() {
+    return model::timestamp{
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+        ss::lowres_system_clock::now().time_since_epoch())
+        .count()};
+}
+
+model::timestamp shift(model::timestamp t, std::chrono::milliseconds by) {
+    return model::timestamp{t.value() + by.count()};
+}
 
 // Build a single-record batch with an explicit key, value, and timestamp.
 model::record_batch make_batch(
@@ -596,6 +612,104 @@ TEST(DedupWindowFilter, EntryLimitFailsOpenWithoutGrowingTheIndex) {
 
     // Identities that were already indexed keep their normal dedup coverage.
     EXPECT_FALSE(f.filter(make_batch("a", "duplicate", ts(1000))).has_value());
+    EXPECT_EQ(f.map_size(), 2u);
+}
+
+// A record timestamped in the future must not evict entries that a later,
+// correctly-ordered duplicate should still match against. Redpanda accepts
+// records up to log_message_timestamp_after_max_ms (one hour by default) ahead
+// of the broker, so this is legal traffic, not a malformed request. Before the
+// broker-time clamp this single record pushed the eviction cutoff an hour
+// ahead and the next sweep emptied the whole index. See RFC boundary B5.
+TEST(DedupWindowFilter, FutureTimestampDoesNotPoisonEvictionCutoff) {
+    cluster::dedup_window_filter f(5min);
+    const auto now = broker_now();
+
+    ASSERT_TRUE(f.filter(make_batch("a", "1", now)).has_value());
+    ASSERT_TRUE(
+      f.filter(make_batch("skewed", "2", shift(now, 1h))).has_value());
+
+    f.evict_expired();
+
+    EXPECT_FALSE(f.filter(make_batch("a", "duplicate", now)).has_value());
+}
+
+TEST(DedupWindowFilter, FutureTimestampIsClampedAndCounted) {
+    cluster::dedup_window_filter f(5min);
+    const auto before = broker_now();
+
+    ASSERT_TRUE(
+      f.filter(make_batch("skewed", "1", shift(before, 1h))).has_value());
+
+    EXPECT_EQ(f.skew_clamped_records(), 1u);
+    EXPECT_GE(f.max_timestamp().value(), before.value());
+    EXPECT_LE(f.max_timestamp().value(), broker_now().value());
+}
+
+// The clamp applies to the stored entry too, not just the watermark. Clamping
+// only the watermark would leave a forward-skewed entry permanently above the
+// eviction cutoff, where it could never expire and would pin index capacity.
+TEST(DedupWindowFilter, FutureTimestampIsClampedInTheStoredEntry) {
+    cluster::dedup_window_filter f(5min);
+    const auto before = broker_now();
+
+    f.populate(iobuf::from("skewed"), shift(before, 1h));
+
+    auto snap = f.snapshot();
+    ASSERT_EQ(snap.entries.size(), 1u);
+    EXPECT_GE(snap.entries[0].timestamp.value(), before.value());
+    EXPECT_LE(snap.entries[0].timestamp.value(), broker_now().value());
+    EXPECT_EQ(f.skew_clamped_records(), 1u);
+}
+
+// A snapshot written by a broker without the clamp can carry a poisoned
+// watermark. Clamping on restore lets such a partition heal on restart rather
+// than needing a dedup_generation bump.
+TEST(DedupWindowFilter, RestoreClampsPoisonedSnapshotWatermark) {
+    cluster::dedup_window_filter f(5min);
+    const auto before = broker_now();
+
+    cluster::dedup_index_snapshot snap;
+    snap.max_timestamp = shift(before, 1h);
+    snap.entries.push_back(
+      {.identity = cluster::dedup_digest_of(iobuf::from("a")),
+       .timestamp = before});
+    f.restore(snap);
+
+    EXPECT_LE(f.max_timestamp().value(), broker_now().value());
+    // A restore is not a record, so it does not move the skew counter.
+    EXPECT_EQ(f.skew_clamped_records(), 0u);
+
+    // The restored entry survives the first sweep instead of being wiped by a
+    // cutoff an hour in the future, and still deduplicates.
+    f.evict_expired();
+    ASSERT_EQ(f.map_size(), 1u);
+    EXPECT_FALSE(f.filter(make_batch("a", "duplicate", before)).has_value());
+}
+
+TEST(DedupWindowFilter, DropsAndSaturationAreCounted) {
+    cluster::dedup_window_filter f(1h, 2);
+
+    ASSERT_TRUE(f.filter(make_batch("a", "1", ts(1000))).has_value());
+    ASSERT_TRUE(f.filter(make_batch("b", "2", ts(1000))).has_value());
+    EXPECT_EQ(f.unindexed_records(), 0u);
+    EXPECT_EQ(f.dropped_records(), 0u);
+
+    // A duplicate of an indexed identity is dropped and counted.
+    ASSERT_FALSE(f.filter(make_batch("a", "dup", ts(1000))).has_value());
+    EXPECT_EQ(f.dropped_records(), 1u);
+
+    // At the entry limit new identities are admitted unindexed, and each one
+    // is counted so the silent loss of coverage is visible.
+    ASSERT_TRUE(f.filter(make_batch("c", "3", ts(1000))).has_value());
+    EXPECT_EQ(f.unindexed_records(), 1u);
+    ASSERT_TRUE(f.filter(make_batch("c", "4", ts(1000))).has_value());
+    EXPECT_EQ(f.unindexed_records(), 2u);
+    EXPECT_EQ(f.dropped_records(), 1u);
+
+    // The apply path counts saturation the same way.
+    f.populate(iobuf::from("d"), ts(1000));
+    EXPECT_EQ(f.unindexed_records(), 3u);
     EXPECT_EQ(f.map_size(), 2u);
 }
 
