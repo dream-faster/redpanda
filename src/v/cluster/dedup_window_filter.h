@@ -178,10 +178,16 @@ struct dedup_index_snapshot {
 /// admitted but left unindexed until a later eviction sweep makes room;
 /// already-indexed identities continue to deduplicate normally. The "most
 /// recent timestamp seen" is a client-supplied CreateTime with no ordering
-/// guarantee, so an anomalously future-timestamped record can advance the
-/// eviction cutoff early and evict an entry a later, correctly-ordered
-/// duplicate should still have matched -- see the log-derived dedup RFC,
-/// boundary B5.
+/// guarantee, so every record timestamp is clamped to the broker's clock
+/// before it reaches the index; without that, one future-dated record would
+/// advance the eviction cutoff past the whole index and silently disable
+/// dedup for the partition -- see the log-derived dedup RFC, boundary B5.
+/// Reordering within the window is still unbounded by the clamp, so
+/// window-edge eviction remains approximate.
+///
+/// Both ways the filter can silently stop deduplicating -- timestamp skew and
+/// entry-limit saturation -- are counted, and dedup_stm exports the counters
+/// per partition.
 class dedup_window_filter {
 public:
     // One million is also the default of the cluster-level
@@ -273,7 +279,23 @@ public:
     size_t max_entries() const { return _max_entries; }
     model::timestamp max_timestamp() const { return _max_ts; }
 
+    /// Records dropped as duplicates. The denominator that makes the two
+    /// counters below readable.
+    size_t dropped_records() const { return _dropped_records; }
+    /// Records whose CreateTime was ahead of the broker's clock and was
+    /// clamped. Non-zero means producer clock skew is reaching the index.
+    size_t skew_clamped_records() const { return _skew_clamped_records; }
+    /// Records admitted without being indexed because the index was at its
+    /// entry limit. Non-zero means dedup coverage is degraded for new
+    /// identities on this partition.
+    size_t unindexed_records() const { return _unindexed_records; }
+
 private:
+    /// Bound a client-supplied CreateTime by the broker's clock, counting the
+    /// record when the clamp bites. A no-op for any timestamp at or behind
+    /// broker time, so log replay is unaffected.
+    model::timestamp clamp_to_broker_time(model::timestamp);
+
     bool is_duplicate(
       dedup_identity_digest identity,
       model::timestamp ts,
@@ -305,6 +327,9 @@ private:
     // the entry limit it also counts new-identity attempts that were not
     // indexed.
     size_t _inserts_since_evict{0};
+    size_t _dropped_records{0};
+    size_t _skew_clamped_records{0};
+    size_t _unindexed_records{0};
 };
 
 } // namespace cluster

@@ -14,7 +14,10 @@
 #include "model/batch_compression.h"
 #include "model/record.h"
 
+#include <seastar/core/lowres_clock.hh>
+
 #include <algorithm>
+#include <chrono>
 #include <ranges>
 
 namespace cluster {
@@ -56,6 +59,38 @@ dedup_window_filter::dedup_window_filter(
   : _window(window)
   , _max_entries(max_entries) {}
 
+namespace {
+
+model::timestamp broker_now() {
+    return model::timestamp{
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+        ss::lowres_system_clock::now().time_since_epoch())
+        .count()};
+}
+
+} // namespace
+
+model::timestamp
+dedup_window_filter::clamp_to_broker_time(model::timestamp ts) {
+    // Client CreateTime is untrusted input. Redpanda admits records up to
+    // log_message_timestamp_after_max_ms (one hour by default) ahead of the
+    // broker, and _max_ts is a running maximum over those values, so a single
+    // future-dated record would push the eviction cutoff (_max_ts - _window)
+    // past every entry in the index. The next sweep would then empty it, and
+    // dedup would stay off for the partition until the generation is bumped.
+    //
+    // Clamping is the identity for any record older than the broker's clock --
+    // which is every record seen during log replay -- so the index remains a
+    // deterministic function of the log rather than of replay timing. See the
+    // log-derived dedup RFC, boundary B5.
+    const auto now = broker_now();
+    if (ts > now) {
+        ++_skew_clamped_records;
+        return now;
+    }
+    return ts;
+}
+
 bool dedup_window_filter::is_duplicate(
   dedup_identity_digest identity,
   model::timestamp ts,
@@ -65,6 +100,7 @@ bool dedup_window_filter::is_duplicate(
         auto stored_ts = it->second;
         auto diff_ms = ts.value() - stored_ts.value();
         if (diff_ms >= -_window.count() && diff_ms <= _window.count()) {
+            ++_dropped_records;
             return true;
         }
         _max_ts = std::max(_max_ts, ts);
@@ -93,6 +129,7 @@ bool dedup_window_filter::is_duplicate(
         // Best-effort, fail-open behavior: the record is admitted but this
         // identity is not remembered. Existing indexed identities retain their
         // dedup coverage and the map never exceeds its hard ceiling.
+        ++_unindexed_records;
         return false;
     }
     _map.emplace(identity, ts);
@@ -161,8 +198,8 @@ dedup_window_filter::filter_request(model::record_batch batch) {
                 return {.missing_required_header = true};
             }
             classified c{
-              .timestamp = model::timestamp{
-                base_ts.value() + r.timestamp_delta()}};
+              .timestamp = clamp_to_broker_time(
+                model::timestamp{base_ts.value() + r.timestamp_delta()})};
             if (lookup == dedup_identity_lookup::identity) {
                 c.identity = dedup_digest_of(*identity);
                 c.has_identity = true;
@@ -258,6 +295,7 @@ void dedup_window_filter::revert_request(const dedup_request_undo& undo) {
 }
 
 void dedup_window_filter::populate(const iobuf& key, model::timestamp ts) {
+    ts = clamp_to_broker_time(ts);
     _max_ts = std::max(_max_ts, ts);
     auto identity = dedup_digest_of(key);
     auto it = _map.find(identity);
@@ -274,6 +312,8 @@ void dedup_window_filter::populate(const iobuf& key, model::timestamp ts) {
     maybe_evict();
     if (_map.size() < _max_entries) {
         _map.emplace(identity, ts);
+    } else {
+        ++_unindexed_records;
     }
 }
 
@@ -336,7 +376,10 @@ void dedup_window_filter::restore(const dedup_index_snapshot& snapshot) {
         }
         _map.emplace(entry.identity, entry.timestamp);
     }
-    _max_ts = snapshot.max_timestamp;
+    // A snapshot written by a broker without the clamp can carry a poisoned
+    // watermark; clamping here lets such a partition heal on restart rather
+    // than needing a dedup_generation bump. Not counted as record skew.
+    _max_ts = std::min(snapshot.max_timestamp, broker_now());
     _inserts_since_evict = snapshot.inserts_since_evict;
 }
 

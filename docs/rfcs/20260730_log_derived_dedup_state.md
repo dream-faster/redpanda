@@ -109,7 +109,19 @@ Guarantees:
   behavior keeps produce available and bounds both steady-state index memory
   and future snapshot size even when producer timestamps do not advance or the
   configured window and identity cardinality are unexpectedly large. Changing
-  the cluster property requires a broker restart.
+  the cluster property requires a broker restart. Because a saturated index
+  degrades dedup coverage silently, every record admitted unindexed is counted
+  in the `dedup:partition` metric group's `records_unindexed` counter, and the
+  condition is logged at warn once per five minutes per shard.
+
+- **G8** — The two ways the filter can stop deduplicating without failing a
+  request -- entry-limit saturation (G7) and producer timestamp skew (B5) --
+  are both counted per partition, alongside the drop count that makes them
+  readable. The `dedup:partition` metric group carries `records_dropped`,
+  `records_skew_clamped` and `records_unindexed` counters plus an
+  `index_entries` gauge, labelled by namespace/topic/partition like
+  `tx:partition`. Internal metrics only; per-partition cardinality is too high
+  for the public endpoint.
 
 Best-effort boundaries (all bounded by one dedup window, all documented):
 
@@ -171,19 +183,43 @@ Best-effort boundaries (all bounded by one dedup window, all documented):
   config propagation delay; residual divergence is again window-bounded.
 - **B5** — The eviction watermark (`_max_ts`, the highest record timestamp
   observed) is a client-supplied `CreateTime` value with no ordering
-  guarantee. A single anomalously-future-timestamped record — clock skew, a
-  misbehaving producer, or simple reordering — can advance `_max_ts` and
-  therefore the eviction cutoff (`_max_ts - window`) ahead of where it should
-  be, evicting entries a subsequent, correctly-ordered duplicate should still
-  have matched against. This predates log-derived state (the eviction
-  strategy is unchanged) and applies identically on the leader's speculative
-  path and the deterministic apply path, since both advance the same
-  `_max_ts`. A wall-clock-based watermark would avoid this but was rejected:
-  `populate()` runs on every replica, including during log replay at
-  arbitrary wall-clock times, so using wall-clock time there would make
-  eviction (and therefore index convergence, see B2) depend on replay timing
-  rather than being purely a function of the log. Bounded by one dedup
-  window, consistent with the feature's overall best-effort framing (point 3
+  guarantee, so record timestamps are clamped to the broker's clock
+  (`clamp_to_broker_time()`) before they reach the index.
+  **This paragraph previously claimed the unclamped damage was "bounded by one
+  dedup window". That was wrong, and the gap was reachable with entirely legal
+  traffic.** Redpanda admits records up to `log_message_timestamp_after_max_ms`
+  ahead of the broker -- one hour by default, under the default `relaxed`
+  validation mode -- and `_max_ts` is a running maximum, so one such record
+  pushed the cutoff (`_max_ts - window`) an hour past every entry in the index.
+  The next sweep emptied the index, and every entry inserted afterwards was
+  already below the cutoff and died at the following sweep: dedup stayed off
+  for the partition, since `_max_ts` only moves forward and `clear()` is
+  reachable only via a `dedup_generation` bump. `restore()` took
+  `snapshot.max_timestamp` unvalidated, so the poisoned watermark also survived
+  restarts. Unbounded in both time and entry count, not window-bounded.
+  The clamp closes this without reintroducing the replay-timing dependence that
+  a wall-clock *watermark* would have. That earlier rejection was of setting
+  `_max_ts = now()`, which would make eviction depend on when a replica happens
+  to replay. A clamp is a different construction: `min(ts, now)` is the
+  identity for any record at or behind the broker's clock, which is every
+  record seen during historical replay, so `populate()`'s behavior there is
+  unchanged and the index stays a deterministic function of the log. Only
+  records ahead of the broker's clock are affected, and those are anomalous by
+  definition. Max-wins idempotency (B2) is preserved because the clamp is a
+  per-record function. Leader/follower divergence is bounded by the clock
+  difference between classification and apply -- milliseconds, well inside the
+  window-edge slop B2 and B4 already accept.
+  The clamp applies to the stored entry timestamp as well as the watermark, not
+  only the latter: clamping the watermark alone would leave the mirror-image
+  bug, where systemic forward skew stores every entry above the cutoff,
+  eviction never fires, and the index runs to the G7 ceiling instead.
+  `restore()` clamps too, so a partition already carrying a poisoned snapshot
+  heals on restart. Clamped records are counted in
+  the `dedup:partition` group's `records_skew_clamped` counter (see G8); a
+  non-zero value means producer clock skew is reaching the index.
+  What the clamp does *not* fix is reordering *within* the window: timestamps
+  behind the watermark are untouched, so window-edge eviction remains
+  approximate, consistent with the feature's best-effort framing (point 3
   above).
 - **B6** — Increasing `dedup_window_ms` on a live topic does not retroactively
   widen coverage. `topic_table`'s generation-bump logic only bumps
