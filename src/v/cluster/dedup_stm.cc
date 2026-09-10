@@ -11,6 +11,9 @@
 
 #include "cluster/logger.h"
 #include "cluster/snapshot.h"
+#include "config/configuration.h"
+#include "metrics/metrics.h"
+#include "metrics/prometheus_sanitize.h"
 #include "model/batch_compression.h"
 #include "model/namespace.h"
 #include "model/record_batch_types.h"
@@ -18,6 +21,7 @@
 #include "ssx/future-util.h"
 #include "storage/types.h"
 
+#include <seastar/core/metrics.hh>
 #include <seastar/core/with_timeout.hh>
 #include <seastar/coroutine/as_future.hh>
 
@@ -35,7 +39,56 @@ dedup_stm::dedup_stm(
   : raft::persisted_stm<raft::kvstore_backed_stm_snapshot>(
       dedup_stm_snapshot, logger, raft, kvstore)
   , _sync_timeout(std::move(sync_timeout))
-  , _state(std::chrono::milliseconds{0}, max_entries) {}
+  , _state(std::chrono::milliseconds{0}, max_entries) {
+    setup_metrics();
+}
+
+void dedup_stm::setup_metrics() {
+    if (config::shard_local_cfg().disable_metrics()) {
+        return;
+    }
+    namespace sm = ss::metrics;
+
+    const auto& ntp = _raft->ntp();
+    const std::vector<sm::label_instance> labels = {
+      metrics::namespace_label(ntp.ns()),
+      metrics::topic_label(ntp.tp.topic()),
+      metrics::partition_label(ntp.tp.partition()),
+    };
+
+    _metrics.add_group(
+      prometheus_sanitize::metrics_name("dedup:partition"),
+      {
+        sm::make_counter(
+          "records_dropped",
+          [this] { return _state.dropped_records(); },
+          sm::description("Number of records dropped as duplicates."),
+          labels),
+        sm::make_counter(
+          "records_skew_clamped",
+          [this] { return _state.skew_clamped_records(); },
+          sm::description(
+            "Number of records whose timestamp was ahead of the broker clock "
+            "and was clamped before reaching the dedup index. A non-zero "
+            "value indicates producer clock skew."),
+          labels),
+        sm::make_counter(
+          "records_unindexed",
+          [this] { return _state.unindexed_records(); },
+          sm::description(
+            "Number of records admitted without being indexed because the "
+            "dedup index was at dedup_max_entries_per_partition. Duplicates "
+            "of these records are not detected."),
+          labels),
+        sm::make_gauge(
+          "index_entries",
+          [this] { return _state.map_size(); },
+          sm::description("Number of identities in the dedup index."),
+          labels),
+      },
+      {},
+      {sm::shard_label, metrics::partition_label});
+}
 
 raft::stm_initial_recovery_policy
 dedup_stm::get_initial_recovery_policy() const {
@@ -251,7 +304,24 @@ ss::future<result<kafka_result>> dedup_stm::do_replicate(
     const auto& cfg = _raft->log()->config();
     if (auto window = cfg.dedup_window_ms(); window) {
         adopt_config(*window, cfg.dedup_generation(), cfg.dedup_key_header());
+        const auto unindexed_before = _state.unindexed_records();
         filtered = _state.filter_request(std::move(batch));
+        if (_state.unindexed_records() != unindexed_before) {
+            // The index is at its ceiling and is admitting new identities
+            // without remembering them, so their duplicates go undetected.
+            // Raising dedup_max_entries_per_partition needs a broker restart,
+            // so operators need to know this is happening.
+            thread_local static ss::logger::rate_limit rate(
+              std::chrono::minutes(5));
+            clusterlog.log(
+              ss::log_level::warn,
+              rate,
+              "Dedup index for {} is full at {} entries; new identities are "
+              "admitted without being deduplicated. Consider raising "
+              "dedup_max_entries_per_partition.",
+              _raft->ntp(),
+              _state.max_entries());
+        }
     } else {
         // Dedup was disabled between the partition's routing check and this
         // point: replicate unfiltered.
