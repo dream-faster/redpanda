@@ -395,8 +395,7 @@ void dedup_window_filter::restore(dedup_index_snapshot snapshot) {
         // for a snapshot larger than this node's ceiling.
         std::nth_element(
           snapshot.entries.begin(),
-          snapshot.entries.begin()
-            + static_cast<std::ptrdiff_t>(restore_count),
+          snapshot.entries.begin() + static_cast<std::ptrdiff_t>(restore_count),
           snapshot.entries.end(),
           [](const dedup_index_entry& a, const dedup_index_entry& b) {
               return a.timestamp > b.timestamp;
