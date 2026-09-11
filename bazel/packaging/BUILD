@@ -141,7 +141,7 @@ script_package(
 # NOTE: this image is currently experimental, don't use this for production.
 oci_image(
     name = "image",
-    base = "@distroless_cc_debian12",
+    base = "@debian_bookworm_slim",
     cmd = [
         "redpanda",
         "start",
@@ -158,7 +158,9 @@ oci_image(
     tars = [
         ":oci_image_contents",
     ],
-    user = "nonroot",
+    # Plain debian has no "nonroot" passwd entry like distroless does; use the
+    # numeric UID directly (it owns the files in oci_image_contents).
+    user = str(NONROOT_USER),
     volumes = ["/var/lib/redpanda/data"],
 )
 

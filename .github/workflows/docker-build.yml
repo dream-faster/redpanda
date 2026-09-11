@@ -1,0 +1,209 @@
+---
+name: docker-build
+on:
+  push:
+    branches:
+      - 'claude/dedup-v26.2'
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Tag for the Docker image (default: commit sha)'
+        required: false
+        type: string
+  workflow_call:
+    inputs:
+      image_tag:
+        description: 'Tag for the Docker image (default: commit sha)'
+        required: false
+        type: string
+    outputs:
+      image_ref:
+        description: 'Full image reference pushed to ghcr'
+        value: ${{ jobs.build.outputs.image_ref }}
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+# A cold build takes ~3h of runner time; don't let pushes pile up overlapping
+# runs. Newer pushes to the same ref cancel the in-flight build.
+concurrency:
+  group: docker-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubicloud-standard-4
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image_ref: ${{ steps.meta.outputs.image_ref }}
+    steps:
+      - uses: actions/checkout@v6
+
+      # A cold build of the full redpanda binary is heavy: the link step is
+      # RAM-hungry and the default output base on / only has ~14GB free, which
+      # a full build exhausts. Redirect Bazel output to /mnt (large ephemeral
+      # volume, typically 60GB+), add swap, and free preinstalled tooling to
+      # give the root filesystem headroom for OS/toolchain files.
+      - name: Prepare build environment
+        run: |
+          echo "=== disk before cleanup ==="
+          df -h
+          # Free tooling we don't need to reclaim root filesystem space.
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          sudo docker image prune --all --force || true
+          # Swap on /mnt keeps the OOM killer away during the RAM-heavy final
+          # link. /mnt has 60GB+, so size it generously as a backstop.
+          sudo fallocate -l 16G /mnt/swapfile
+          sudo chmod 600 /mnt/swapfile
+          sudo mkswap /mnt/swapfile
+          sudo swapon /mnt/swapfile
+          # Bazel output base on /mnt where there is ample disk space.
+          sudo mkdir -p /mnt/bazel-output
+          sudo chown "$(id -u):$(id -g)" /mnt/bazel-output
+          echo "=== disk after cleanup ==="
+          df -h
+          free -h
+          # linux-sandbox needs unprivileged user namespaces. The build runs
+          # non-sandboxed only because an earlier commit assumed these runners
+          # lack the capability; probe it directly so the log says definitively
+          # whether sandboxing (the real fix for the liburing hermeticity error)
+          # can run here.
+          echo "=== sandbox capability ==="
+          echo "unprivileged_userns_clone: $(cat /proc/sys/kernel/unprivileged_userns_clone 2>/dev/null || echo n/a)"
+          echo "max_user_namespaces: $(cat /proc/sys/user/max_user_namespaces 2>/dev/null || echo n/a)"
+          if unshare --user --map-root-user true 2>/dev/null; then
+            echo "unprivileged user namespaces: WORKING (linux-sandbox should run)"
+          else
+            echo "unprivileged user namespaces: BLOCKED (linux-sandbox will fail)"
+          fi
+
+      - name: Install Bazelisk
+        run: |
+          mkdir -p ~/bin
+          wget -O ~/bin/bazel https://github.com/bazelbuild/bazelisk/releases/latest/download/bazelisk-linux-amd64
+          chmod +x ~/bin/bazel
+          echo "$HOME/bin" >> $GITHUB_PATH
+
+      - name: Install system dependencies
+        run: sudo ./bazel/install-deps.sh
+
+      - name: Mount Bazel cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/bazel
+            ~/.cache/bazelisk
+          key: bazel-${{ runner.os }}-${{ hashFiles('.bazelversion', 'MODULE.bazel', 'MODULE.bazel.lock') }}
+          restore-keys: |
+            bazel-${{ runner.os }}-
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Determine image tag
+        id: meta
+        run: |
+          SHA_TAG="${{ github.sha }}"
+          if [[ -n "${{ inputs.image_tag }}" ]]; then
+            TAG="${{ inputs.image_tag }}"
+          else
+            TAG="${SHA_TAG}"
+          fi
+          TAG=$(echo "$TAG" | sed 's/[^a-zA-Z0-9._-]/-/g')
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "image_ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Run dedup unit tests
+        run: |
+          unset CI
+          # Same --config and --output_base as the image build below, on
+          # purpose: a different --config is a different Bazel configuration
+          # and therefore a second full compile of core (~3h) instead of just
+          # the test sources and two links. Runs before the image build so a
+          # failing test blocks publication.
+          bazel \
+            --output_base=/mnt/bazel-output \
+            test \
+            --config=release \
+            --spawn_strategy=sandboxed,local \
+            --verbose_failures \
+            --lockfile_mode=update \
+            '--local_resources=memory=HOST_RAM*.8' \
+            //src/v/cluster/tests:dedup_window_filter_test \
+            //src/v/cluster/tests:dedup_stm_test
+
+      - name: Build OCI image with Bazel
+        run: |
+          unset CI
+          # Prefer the sandbox, fall back to local only for actions that can't
+          # sandbox. The build used to fail with a Bazel hermeticity error --
+          # "undeclared inclusion(s) ... config-host.h" -- on liburing's
+          # generated, force-included config-host.h (see
+          # bazel/thirdparty/liburing.patch). That only trips under
+          # non-sandboxed (--spawn_strategy=local) execution, where strict .d
+          # include validation can't match the generated header's path; redpanda
+          # is designed to build sandboxed. The earlier OOM theory was wrong --
+          # the runner had 31Gi RAM + 19Gi swap and every compile succeeded; the
+          # lone liburing error was just buried ~2000 lines above the log tail.
+          #
+          # --local_resources=memory (replacing Bazel 8.x's removed
+          # --local_ram_resources) still reserves 20% RAM headroom so the
+          # RAM-heavy final link of the full-debug redpanda binary isn't
+          # over-scheduled. Quoted so the shell doesn't glob-expand the '*'.
+          bazel \
+            --output_base=/mnt/bazel-output \
+            build \
+            --config=release \
+            --spawn_strategy=sandboxed,local \
+            --verbose_failures \
+            --lockfile_mode=update \
+            '--local_resources=memory=HOST_RAM*.8' \
+            //bazel/packaging:image
+          echo "=== post-build resources ==="
+          df -h
+          free -h
+
+      - name: Push image to ghcr.io
+        run: |
+          FINAL_REF="${{ steps.meta.outputs.image_ref }}"
+
+          # Copy the Bazel-built redpanda package into a staging directory
+          # that serves as the Docker build context. The tarball extracts to
+          # /opt/redpanda/, /etc/redpanda/, and /var/lib/redpanda/data/.
+          STAGING=$(mktemp -d)
+          cp bazel-bin/bazel/packaging/redpanda_nonroot.tar.gz "$STAGING/"
+
+          # Build the image from a plain Dockerfile: install bash and Helm
+          # lifecycle tools first (apt-get), then ADD the redpanda tarball
+          # (Docker auto-extracts .tar.gz into the destination directory).
+          # -f - reads the Dockerfile from stdin; the positional $STAGING path
+          # is the build context, so ADD can reference the tarball.
+          # <<'EOF' prevents bash from expanding $(...) inside the Dockerfile.
+          docker build -t "$FINAL_REF" -f - "$STAGING" <<'EOF'
+          FROM debian:bookworm-slim
+          RUN apt-get update && \
+              apt-get install -y --no-install-recommends \
+                bash ca-certificates coreutils curl grep sed wget && \
+              rm -rf /var/lib/apt/lists/*
+          ADD redpanda_nonroot.tar.gz /
+          EXPOSE 8081 8082 9092 9644
+          VOLUME ["/var/lib/redpanda/data"]
+          LABEL org.opencontainers.image.authors="Redpanda Data <hi@redpanda.com>"
+          USER 65532
+          ENTRYPOINT ["/opt/redpanda/bin/rpk"]
+          CMD ["redpanda", "start", "--overprovisioned"]
+          EOF
+          docker push "$FINAL_REF"
+
+          if [[ "${{ github.ref_name }}" == "dev" ]] || [[ "${{ github.ref_name }}" == "main" ]]; then
+            docker tag "$FINAL_REF" "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
+            docker push "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
+          fi

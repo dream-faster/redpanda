@@ -16,6 +16,7 @@
 #include "cluster/archival/archival_metadata_stm.h"
 #include "cluster/archival/ntp_archiver_service.h"
 #include "cluster/archival/upload_housekeeping_service.h"
+#include "cluster/dedup_stm.h"
 #include "cluster/id_allocator_stm.h"
 #include "cluster/log_eviction_stm.h"
 #include "cluster/logger.h"
@@ -423,7 +424,20 @@ kafka_stages partition::replicate_in_stages(
         }
     }
 
-    return stages_with_units(
+    // Plain produces use the replicated dedup state machine when the topic
+    // window is enabled. Idempotent and transactional batches bypass it so
+    // their producer sequence numbers remain intact.
+    if (
+      _dedup_stm && !bid.is_idempotent() && !bid.is_transactional
+      && get_ntp_config().dedup_window_ms()) {
+        return stages_with_units(
+          hold_writes_enabled(),
+          [this, batch = std::move(batch), opts = std::move(opts)]() mutable {
+              return _dedup_stm->replicate_in_stages(std::move(batch), opts);
+          });
+    }
+
+    auto stages = stages_with_units(
       hold_writes_enabled(),
       [this,
        bid = std::move(bid),
@@ -447,6 +461,8 @@ kafka_stages partition::replicate_in_stages(
           return kafka_stages(
             std::move(res.request_enqueued), std::move(replicate_finished));
       });
+
+    return stages;
 }
 
 raft::group_id partition::group() const { return _raft->group(); }
@@ -472,6 +488,7 @@ ss::future<> partition::start(
     // store partition properties stm offset for fast access
     _partition_properties_stm
       = _raft->stm_manager()->get<cluster::partition_properties_stm>();
+    _dedup_stm = _raft->stm_manager()->get<cluster::dedup_stm>();
 
     // Start the probe after the partition is fully initialised
     _probe.setup_metrics(ntp);

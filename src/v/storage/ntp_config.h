@@ -96,6 +96,18 @@ public:
         // Storage mode for the topic (local, tiered, or cloud)
         model::redpanda_storage_mode storage_mode{default_storage_mode};
 
+        // Windowed first-wins deduplication by record identity, applied at
+        // produce time before Raft replication. The default is an empty
+        // tristate (no override); both the empty and disabled states are
+        // treated as "dedup off" by the dedup_window_ms() accessor.
+        tristate<std::chrono::milliseconds> dedup_window_ms{std::nullopt};
+        int64_t dedup_generation{0};
+        // When set, the dedup identity for a record is the value of the
+        // first header with this name instead of the Kafka record key
+        // (dedup_key_header() below). Unset (the default) preserves the
+        // original key-based behavior.
+        std::optional<ss::sstring> dedup_key_header;
+
         fmt::iterator format_to(fmt::iterator it) const;
     };
 
@@ -476,6 +488,29 @@ public:
             return _overrides->max_compaction_lag_ms.value();
         }
         return config::shard_local_cfg().max_compaction_lag_ms();
+    }
+
+    std::optional<std::chrono::milliseconds> dedup_window_ms() const {
+        if (_overrides) {
+            if (_overrides->dedup_window_ms.is_disabled()) {
+                return std::nullopt;
+            }
+            if (_overrides->dedup_window_ms.has_optional_value()) {
+                return _overrides->dedup_window_ms.value();
+            }
+        }
+        return std::nullopt;
+    }
+
+    int64_t dedup_generation() const {
+        return _overrides ? _overrides->dedup_generation : 0;
+    }
+
+    // When engaged, the dedup identity for a record is the value of the
+    // first header with this name instead of the Kafka record key.
+    const std::optional<ss::sstring>& dedup_key_header() const {
+        static const std::optional<ss::sstring> none;
+        return _overrides ? _overrides->dedup_key_header : none;
     }
 
     ntp_config copy() const {
