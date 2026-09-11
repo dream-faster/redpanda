@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstddef>
 #include <ranges>
 
 namespace cluster {
@@ -298,6 +299,28 @@ void dedup_window_filter::populate(const iobuf& key, model::timestamp ts) {
     ts = clamp_to_broker_time(ts);
     _max_ts = std::max(_max_ts, ts);
     auto identity = dedup_digest_of(key);
+
+    // Followers apply the same fail-open capacity rule as the leader does in
+    // is_duplicate(); the two must agree or replicas diverge at the ceiling.
+    //
+    // Below the ceiling one try_emplace settles both the new and the existing
+    // identity, so the common case on this -- the busier -- replay path costs
+    // a single probe. The size check comes first so the insert can reach the
+    // limit but never exceed it, which a try_emplace-then-check would.
+    if (_map.size() < _max_entries) {
+        auto [it, inserted] = _map.try_emplace(identity, ts);
+        if (inserted) {
+            // May erase arbitrary entries, invalidating it; nothing below
+            // touches it.
+            maybe_evict();
+        } else if (ts.value() > it->second.value()) {
+            it->second = ts;
+        }
+        return;
+    }
+
+    // At the ceiling a new identity cannot be indexed until a sweep frees
+    // room, so look up first and fail open if it does not.
     auto it = _map.find(identity);
     if (it != _map.end()) {
         if (ts.value() > it->second.value()) {
@@ -305,10 +328,6 @@ void dedup_window_filter::populate(const iobuf& key, model::timestamp ts) {
         }
         return;
     }
-
-    // Followers use the same fail-open capacity rule as the leader. Calling
-    // maybe_evict() before the capacity check also lets a due sweep make room
-    // for this identity without ever transiently exceeding the limit.
     maybe_evict();
     if (_map.size() < _max_entries) {
         _map.emplace(identity, ts);
@@ -365,9 +384,25 @@ dedup_index_snapshot dedup_window_filter::snapshot() const {
     return result;
 }
 
-void dedup_window_filter::restore(const dedup_index_snapshot& snapshot) {
+void dedup_window_filter::restore(dedup_index_snapshot snapshot) {
     _map.clear();
     const auto restore_count = std::min(snapshot.entries.size(), _max_entries);
+    if (restore_count < snapshot.entries.size()) {
+        // Keep the most recent identities. The index is a dense hash map whose
+        // iteration is insertion order, so snapshot() emits roughly oldest
+        // first; taking a prefix would drop exactly the entries most likely to
+        // still match an incoming duplicate. nth_element is O(n) and only runs
+        // for a snapshot larger than this node's ceiling.
+        std::nth_element(
+          snapshot.entries.begin(),
+          snapshot.entries.begin()
+            + static_cast<std::ptrdiff_t>(restore_count),
+          snapshot.entries.end(),
+          [](const dedup_index_entry& a, const dedup_index_entry& b) {
+              return a.timestamp > b.timestamp;
+          });
+        _truncated_entries += snapshot.entries.size() - restore_count;
+    }
     _map.reserve(restore_count);
     size_t restored = 0;
     for (const auto& entry : snapshot.entries) {

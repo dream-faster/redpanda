@@ -25,7 +25,6 @@
 #include <seastar/core/with_timeout.hh>
 #include <seastar/coroutine/as_future.hh>
 
-#include <algorithm>
 #include <new>
 
 namespace cluster {
@@ -79,6 +78,14 @@ void dedup_stm::setup_metrics() {
             "Number of records admitted without being indexed because the "
             "dedup index was at dedup_max_entries_per_partition. Duplicates "
             "of these records are not detected."),
+          labels),
+        sm::make_counter(
+          "snapshot_entries_truncated",
+          [this] { return _state.truncated_entries(); },
+          sm::description(
+            "Number of identities dropped while installing a snapshot larger "
+            "than dedup_max_entries_per_partition on this broker. Non-zero "
+            "means a peer retains a wider dedup window than this broker."),
           labels),
         sm::make_gauge(
           "index_entries",
@@ -166,23 +173,18 @@ void dedup_stm::restore_snapshot(
     dedup_index_snapshot restored{
       .max_timestamp = snapshot.max_timestamp,
       .inserts_since_evict = static_cast<size_t>(snapshot.inserts_since_evict)};
-    // Snapshots from builds predating the hard index ceiling may be larger
-    // than this node will retain. Bound the intermediate copy as well as the
-    // final map so restoring such a snapshot does not recreate the same peak
-    // allocation the ceiling is intended to prevent.
-    const auto restore_count = std::min(
-      snapshot.entries.size(), state.max_entries());
-    restored.entries.reserve(restore_count);
-    size_t restored_count = 0;
+    // No trimming here: restore() owns the entry-limit policy, and it keeps
+    // the most recent identities rather than a prefix. Selecting the newest N
+    // requires seeing all N, so this intermediate is sized by the snapshot
+    // rather than by this node's ceiling -- bounded by the wire snapshot that
+    // is already fully deserialized alongside it.
+    restored.entries.reserve(snapshot.entries.size());
     for (const auto& entry : snapshot.entries) {
-        if (restored_count++ >= restore_count) {
-            break;
-        }
         restored.entries.push_back(
           {.identity = {.hi = entry.identity_hi, .lo = entry.identity_lo},
            .timestamp = entry.timestamp});
     }
-    state.restore(restored);
+    state.restore(std::move(restored));
     generation = snapshot.generation;
 }
 
