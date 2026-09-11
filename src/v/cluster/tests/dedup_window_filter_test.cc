@@ -1515,6 +1515,57 @@ TEST(DedupWindowFilter, RestoreTruncatesOversizedSnapshotsToEntryLimit) {
 
     EXPECT_EQ(restored.map_size(), 2u);
     EXPECT_EQ(restored.snapshot().entries.size(), 2u);
+    EXPECT_EQ(restored.truncated_entries(), 1u);
+}
+
+// The size assertion above passes under any truncation policy, which is how a
+// prefix-keeps-the-oldest policy went unnoticed. Pin which entries survive:
+// the index is a dense map iterated in insertion order, so a prefix would keep
+// exactly the entries closest to expiry.
+TEST(DedupWindowFilter, RestoreKeepsTheNewestEntriesWhenOversized) {
+    cluster::dedup_window_filter source(1h);
+    source.populate(iobuf::from("oldest"), ts(1000));
+    source.populate(iobuf::from("middle"), ts(2000));
+    source.populate(iobuf::from("newest"), ts(3000));
+    const auto snapshot = source.snapshot();
+    ASSERT_EQ(snapshot.entries.size(), 3u);
+
+    cluster::dedup_window_filter restored(1h, 2);
+    restored.restore(snapshot);
+
+    ASSERT_EQ(restored.map_size(), 2u);
+    EXPECT_EQ(restored.truncated_entries(), 1u);
+
+    // The two newest identities still deduplicate; the oldest is gone and so
+    // is re-admitted as a new identity.
+    EXPECT_FALSE(
+      restored.filter(make_batch("newest", "v", ts(3000))).has_value());
+    EXPECT_FALSE(
+      restored.filter(make_batch("middle", "v", ts(2000))).has_value());
+    EXPECT_TRUE(
+      restored.filter(make_batch("oldest", "v", ts(1000))).has_value());
+}
+
+// The entry ceiling is a hard limit: populate() must never overshoot it, even
+// transiently, and an already-indexed identity must still max-wins while full.
+TEST(DedupWindowFilter, PopulateRespectsTheEntryLimit) {
+    cluster::dedup_window_filter f(1h, 2);
+    f.populate(iobuf::from("a"), ts(1000));
+    f.populate(iobuf::from("b"), ts(1000));
+    ASSERT_EQ(f.map_size(), 2u);
+
+    for (int i = 0; i < 8; ++i) {
+        f.populate(iobuf::from(fmt::format("new-{}", i)), ts(1000));
+        EXPECT_LE(f.map_size(), f.max_entries());
+    }
+    EXPECT_EQ(f.map_size(), 2u);
+    EXPECT_EQ(f.unindexed_records(), 8u);
+
+    // An indexed identity keeps max-wins semantics at the ceiling.
+    f.populate(iobuf::from("a"), ts(2500));
+    EXPECT_EQ(f.map_size(), 2u);
+    EXPECT_EQ(f.unindexed_records(), 8u);
+    EXPECT_FALSE(f.filter(make_batch("a", "dup", ts(2500))).has_value());
 }
 
 TEST(DedupWindowFilter, SnapshotCarriesEvictionState) {

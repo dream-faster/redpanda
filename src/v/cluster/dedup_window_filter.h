@@ -10,6 +10,7 @@
 #pragma once
 
 #include "bytes/iobuf.h"
+#include "cluster/dedup_index_limits.h"
 #include "container/chunked_hash_map.h"
 #include "container/chunked_vector.h"
 #include "model/record.h"
@@ -190,11 +191,13 @@ struct dedup_index_snapshot {
 /// per partition.
 class dedup_window_filter {
 public:
-    // One million is also the default of the cluster-level
-    // dedup_max_entries_per_partition setting. The constructor parameter keeps
-    // the filter independent of configuration plumbing and makes
-    // small-capacity behavior directly testable.
-    static constexpr size_t default_max_entries = 1'000'000;
+    // Shared with the cluster-level dedup_max_entries_per_partition setting,
+    // which is what actually supplies this in production
+    // (application_start.cc). The constructor parameter keeps the filter
+    // independent of configuration plumbing and makes small-capacity behavior
+    // directly testable.
+    static constexpr size_t default_max_entries
+      = DEFAULT_DEDUP_MAX_ENTRIES_PER_PARTITION;
 
     explicit dedup_window_filter(
       std::chrono::milliseconds window,
@@ -237,7 +240,13 @@ public:
     void revert_request(const dedup_request_undo&);
 
     dedup_index_snapshot snapshot() const;
-    void restore(const dedup_index_snapshot&);
+
+    /// \brief Install a snapshot, replacing any current index state.
+    ///
+    /// Taken by value: a snapshot holding more than max_entries() identities
+    /// is reduced to the most recent ones, which requires reordering it. This
+    /// is the only place that selection happens, so callers must not pre-trim.
+    void restore(dedup_index_snapshot);
 
     /// \brief Record an identity admitted into the log.
     ///
@@ -289,6 +298,10 @@ public:
     /// entry limit. Non-zero means dedup coverage is degraded for new
     /// identities on this partition.
     size_t unindexed_records() const { return _unindexed_records; }
+    /// Identities dropped while installing a snapshot larger than this node's
+    /// entry limit. Non-zero means a peer was configured with a larger limit,
+    /// so dedup coverage here is narrower than the snapshot it restored.
+    size_t truncated_entries() const { return _truncated_entries; }
 
 private:
     /// Bound a client-supplied CreateTime by the broker's clock, counting the
@@ -330,6 +343,7 @@ private:
     size_t _dropped_records{0};
     size_t _skew_clamped_records{0};
     size_t _unindexed_records{0};
+    size_t _truncated_entries{0};
 };
 
 } // namespace cluster

@@ -109,19 +109,31 @@ Guarantees:
   behavior keeps produce available and bounds both steady-state index memory
   and future snapshot size even when producer timestamps do not advance or the
   configured window and identity cardinality are unexpectedly large. Changing
-  the cluster property requires a broker restart. Because a saturated index
-  degrades dedup coverage silently, every record admitted unindexed is counted
-  in the `dedup:partition` metric group's `records_unindexed` counter, and the
-  condition is logged at warn once per five minutes per shard.
+  the cluster property requires a broker restart, and that restart is not
+  atomic across the cluster -- mid-rollout, replicas of the same partition
+  enforce different ceilings, which the property's own description now spells
+  out. Because a saturated index degrades dedup coverage silently, every
+  record admitted unindexed is counted in the `dedup:partition` metric group's
+  `records_unindexed` counter, and the condition is logged at warn once per
+  five minutes per shard.
+  A snapshot carrying more identities than this broker's ceiling is reduced to
+  the **most recent** ones, not to a prefix: the index is a dense hash map
+  iterated in insertion order, so keeping a prefix kept the entries closest to
+  expiry. `dedup_window_filter::restore()` owns that selection outright --
+  `dedup_stm::restore_snapshot()` deliberately does not pre-trim, so the policy
+  has one implementation -- and the identities dropped are counted in
+  `snapshot_entries_truncated`. A consequence worth having: two replicas with
+  different ceilings now retain a prefix relationship (the smaller keeps a
+  subset of the larger) rather than arbitrary disjoint subsets.
 
 - **G8** — The two ways the filter can stop deduplicating without failing a
   request -- entry-limit saturation (G7) and producer timestamp skew (B5) --
   are both counted per partition, alongside the drop count that makes them
   readable. The `dedup:partition` metric group carries `records_dropped`,
-  `records_skew_clamped` and `records_unindexed` counters plus an
-  `index_entries` gauge, labelled by namespace/topic/partition like
-  `tx:partition`. Internal metrics only; per-partition cardinality is too high
-  for the public endpoint.
+  `records_skew_clamped`, `records_unindexed` and
+  `snapshot_entries_truncated` counters plus an `index_entries` gauge,
+  labelled by namespace/topic/partition like `tx:partition`. Internal metrics
+  only; per-partition cardinality is too high for the public endpoint.
 
 Best-effort boundaries (all bounded by one dedup window, all documented):
 
