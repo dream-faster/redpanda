@@ -38,9 +38,7 @@ dedup_stm::dedup_stm(
   : raft::persisted_stm<raft::kvstore_backed_stm_snapshot>(
       dedup_stm_snapshot, logger, raft, kvstore)
   , _sync_timeout(std::move(sync_timeout))
-  , _state(std::chrono::milliseconds{0}, max_entries) {
-    setup_metrics();
-}
+  , _state(std::chrono::milliseconds{0}, max_entries) {}
 
 void dedup_stm::setup_metrics() {
     if (config::shard_local_cfg().disable_metrics()) {
@@ -97,10 +95,17 @@ void dedup_stm::setup_metrics() {
       {sm::shard_label, metrics::partition_label});
 }
 
+ss::future<> dedup_stm::start() {
+    co_await raft::persisted_stm<raft::kvstore_backed_stm_snapshot>::start();
+    setup_metrics();
+}
+
 ss::future<> dedup_stm::stop() {
-    // Drop the metric registrations before the base class tears the STM down:
-    // every counter above is a lambda reading _state through this, so they
-    // must not outlive it. Mirrors rm_stm::stop().
+    // Every counter is a lambda reading _state through this, so the
+    // registrations must not outlive the STM. Pairing them with start()/stop()
+    // rather than the constructor and destructor keeps that true for an STM
+    // that is constructed and discarded without ever running, which is what
+    // the fixture does when it recreates nodes.
     _metrics.clear();
     co_await raft::persisted_stm<raft::kvstore_backed_stm_snapshot>::stop();
 }
