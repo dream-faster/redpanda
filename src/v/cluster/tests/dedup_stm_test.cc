@@ -18,6 +18,7 @@
 
 #include <gtest/gtest.h>
 
+#include <optional>
 #include <string_view>
 
 using namespace std::chrono_literals;
@@ -77,6 +78,13 @@ struct dedup_stm_fixture : raft::stm_raft_fixture<dedup_stm> {
     stm_shptrs_t create_stms(
       raft::state_machine_manager_builder& builder,
       raft::raft_node_instance& node) final {
+        // Called after node.initialise() has created the consensus instance
+        // but before node.start() starts the state machines, which is the only
+        // point where a recreated node's ntp_config can be seeded before the
+        // dedup STM reads it at startup.
+        if (_dedup_overrides) {
+            node.raft()->log()->set_overrides(*_dedup_overrides);
+        }
         return builder.create_stm<dedup_stm>(
           node.raft().get(),
           clusterlog,
@@ -93,15 +101,24 @@ struct dedup_stm_fixture : raft::stm_raft_fixture<dedup_stm> {
       std::chrono::milliseconds window,
       int64_t generation = 0,
       std::optional<ss::sstring> key_header = std::nullopt) {
+        storage::ntp_config::default_overrides overrides;
+        overrides.dedup_window_ms = tristate<std::chrono::milliseconds>(window);
+        overrides.dedup_generation = generation;
+        overrides.dedup_key_header = std::move(key_header);
+        _dedup_overrides = overrides;
         for (auto& [_, n] : nodes()) {
-            storage::ntp_config::default_overrides overrides;
-            overrides.dedup_window_ms = tristate<std::chrono::milliseconds>(
-              window);
-            overrides.dedup_generation = generation;
-            overrides.dedup_key_header = key_header;
-            n->raft()->log()->set_overrides(overrides);
+            // stop_and_recreate_nodes() replaces every node with a fresh
+            // instance whose consensus pointer stays null until start_nodes()
+            // initialises it. Dereferencing it here is what made
+            // bounded_recovery_survives_mid_batch_timequery segfault; those
+            // nodes pick the config up in create_stms() instead.
+            if (n->raft()) {
+                n->raft()->log()->set_overrides(overrides);
+            }
         }
     }
+
+    std::optional<storage::ntp_config::default_overrides> _dedup_overrides;
 
     ss::future<result<kafka_result>>
     produce_batch(model::node_id leader, model::record_batch batch) {
