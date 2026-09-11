@@ -79,6 +79,8 @@ public:
     ss::future<iobuf> take_raft_snapshot(model::offset) final;
 
 protected:
+    ss::future<> stop() override;
+
     ss::future<> do_apply(const model::record_batch&) final;
     ss::future<> apply_raft_snapshot(const iobuf&) final;
 

@@ -243,10 +243,10 @@ public:
 
     /// \brief Install a snapshot, replacing any current index state.
     ///
-    /// Taken by value: a snapshot holding more than max_entries() identities
-    /// is reduced to the most recent ones, which requires reordering it. This
-    /// is the only place that selection happens, so callers must not pre-trim.
-    void restore(dedup_index_snapshot);
+    /// A snapshot holding more than max_entries() identities is reduced to the
+    /// most recent ones. This is the only place that selection happens, so
+    /// callers must not pre-trim.
+    void restore(const dedup_index_snapshot&);
 
     /// \brief Record an identity admitted into the log.
     ///
