@@ -11,6 +11,7 @@
 
 #include "absl/strings/ascii.h"
 #include "base/units.h"
+#include "cluster/dedup_index_limits.h"
 #include "cluster/scheduling/topic_memory_per_partition_default.h"
 #include "config/base_property.h"
 #include "config/bounded_property.h"
@@ -565,12 +566,17 @@ configuration::configuration()
       "dedup_max_entries_per_partition",
       "Maximum number of distinct deduplication identities retained by each "
       "partition replica. Once the limit is reached, new identities are "
-      "admitted without being indexed until expired entries are evicted.",
+      "admitted without being indexed until expired entries are evicted. Each "
+      "broker reads this value once at startup, so a change does not take "
+      "effect atomically across the cluster: during a rolling restart a "
+      "not-yet-restarted leader still enforces the old limit while a restarted "
+      "follower enforces the new one, and the index divergence that results is "
+      "not reconciled afterwards.",
       {.needs_restart = needs_restart::yes,
        .example = "1000000",
        .visibility = visibility::tunable},
-      1'000'000,
-      {.min = 1, .max = 10'000'000})
+      cluster::DEFAULT_DEDUP_MAX_ENTRIES_PER_PARTITION,
+      {.min = 1, .max = cluster::MAX_DEDUP_MAX_ENTRIES_PER_PARTITION})
   , quota_manager_gc_sec(
       *this,
       "quota_manager_gc_sec",

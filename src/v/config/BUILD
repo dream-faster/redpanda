@@ -47,6 +47,7 @@ redpanda_cc_library(
         "validators.h",
     ],
     implementation_deps = [
+        "//src/v/cluster:dedup_index_limits",
         "//src/v/cluster:topic_memory_per_partition_default",
         "//src/v/datalake:partition_spec_parser",
         "//src/v/datalake:validators",
