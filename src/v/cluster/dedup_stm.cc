@@ -97,6 +97,14 @@ void dedup_stm::setup_metrics() {
       {sm::shard_label, metrics::partition_label});
 }
 
+ss::future<> dedup_stm::stop() {
+    // Drop the metric registrations before the base class tears the STM down:
+    // every counter above is a lambda reading _state through this, so they
+    // must not outlive it. Mirrors rm_stm::stop().
+    _metrics.clear();
+    co_await raft::persisted_stm<raft::kvstore_backed_stm_snapshot>::stop();
+}
+
 raft::stm_initial_recovery_policy
 dedup_stm::get_initial_recovery_policy() const {
     // Only reached when get_initial_recovery_start_offset() returned
@@ -184,7 +192,7 @@ void dedup_stm::restore_snapshot(
           {.identity = {.hi = entry.identity_hi, .lo = entry.identity_lo},
            .timestamp = entry.timestamp});
     }
-    state.restore(std::move(restored));
+    state.restore(restored);
     generation = snapshot.generation;
 }
 

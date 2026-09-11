@@ -384,31 +384,38 @@ dedup_index_snapshot dedup_window_filter::snapshot() const {
     return result;
 }
 
-void dedup_window_filter::restore(dedup_index_snapshot snapshot) {
+void dedup_window_filter::restore(const dedup_index_snapshot& snapshot) {
     _map.clear();
     const auto restore_count = std::min(snapshot.entries.size(), _max_entries);
-    if (restore_count < snapshot.entries.size()) {
+    _map.reserve(restore_count);
+    if (restore_count == snapshot.entries.size()) {
+        for (const auto& entry : snapshot.entries) {
+            _map.emplace(entry.identity, entry.timestamp);
+        }
+    } else {
         // Keep the most recent identities. The index is a dense hash map whose
         // iteration is insertion order, so snapshot() emits roughly oldest
         // first; taking a prefix would drop exactly the entries most likely to
-        // still match an incoming duplicate. nth_element is O(n) and only runs
-        // for a snapshot larger than this node's ceiling.
-        std::nth_element(
-          snapshot.entries.begin(),
-          snapshot.entries.begin() + static_cast<std::ptrdiff_t>(restore_count),
-          snapshot.entries.end(),
-          [](const dedup_index_entry& a, const dedup_index_entry& b) {
-              return a.timestamp > b.timestamp;
-          });
-        _truncated_entries += snapshot.entries.size() - restore_count;
-    }
-    _map.reserve(restore_count);
-    size_t restored = 0;
-    for (const auto& entry : snapshot.entries) {
-        if (restored++ >= restore_count) {
-            break;
+        // still match an incoming duplicate. Ordering a pointer view leaves
+        // the caller's snapshot untouched (and it could not be copied anyway:
+        // chunked_vector is move-only). nth_element is O(n) and only runs when
+        // the snapshot exceeds this node's ceiling.
+        chunked_vector<const dedup_index_entry*> by_recency;
+        by_recency.reserve(snapshot.entries.size());
+        for (const auto& entry : snapshot.entries) {
+            by_recency.push_back(&entry);
         }
-        _map.emplace(entry.identity, entry.timestamp);
+        std::nth_element(
+          by_recency.begin(),
+          by_recency.begin() + static_cast<std::ptrdiff_t>(restore_count),
+          by_recency.end(),
+          [](const dedup_index_entry* a, const dedup_index_entry* b) {
+              return a->timestamp > b->timestamp;
+          });
+        for (size_t i = 0; i < restore_count; ++i) {
+            _map.emplace(by_recency[i]->identity, by_recency[i]->timestamp);
+        }
+        _truncated_entries += snapshot.entries.size() - restore_count;
     }
     // A snapshot written by a broker without the clamp can carry a poisoned
     // watermark; clamping here lets such a partition heal on restart rather
