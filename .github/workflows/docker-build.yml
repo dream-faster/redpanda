@@ -121,6 +121,25 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "image_ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${TAG}" >> "$GITHUB_OUTPUT"
 
+      - name: Run dedup unit tests
+        run: |
+          unset CI
+          # Same --config and --output_base as the image build below, on
+          # purpose: a different --config is a different Bazel configuration
+          # and therefore a second full compile of core (~3h) instead of just
+          # the test sources and two links. Runs before the image build so a
+          # failing test blocks publication.
+          bazel \
+            --output_base=/mnt/bazel-output \
+            test \
+            --config=release \
+            --spawn_strategy=sandboxed,local \
+            --verbose_failures \
+            --lockfile_mode=update \
+            '--local_resources=memory=HOST_RAM*.8' \
+            //src/v/cluster/tests:dedup_window_filter_test \
+            //src/v/cluster/tests:dedup_stm_test
+
       - name: Build OCI image with Bazel
         run: |
           unset CI
