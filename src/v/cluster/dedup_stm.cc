@@ -78,6 +78,16 @@ void dedup_stm::setup_metrics() {
             "of these records are not detected."),
           labels),
         sm::make_counter(
+          "capacity_evicted_entries",
+          [this] { return _state.capacity_evicted_entries(); },
+          sm::description(
+            "Number of still-live identities dropped to make room at "
+            "dedup_max_entries_per_partition. Non-zero means the effective "
+            "dedup window on this partition is narrower than the configured "
+            "one: roughly the entry limit divided by the new-identity "
+            "arrival rate."),
+          labels),
+        sm::make_counter(
           "snapshot_entries_truncated",
           [this] { return _state.truncated_entries(); },
           sm::description(

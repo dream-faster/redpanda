@@ -115,7 +115,9 @@ Guarantees:
   out. Because a saturated index degrades dedup coverage silently, every
   record admitted unindexed is counted in the `dedup:partition` metric group's
   `records_unindexed` counter, and the condition is logged at warn once per
-  five minutes per shard.
+  five minutes per shard. Live identities dropped to make room are counted
+  separately in `capacity_evicted_entries`: non-zero there means the effective
+  window is narrower than the configured one.
   A snapshot carrying more identities than this broker's ceiling is reduced to
   the **most recent** ones, not to a prefix: the index is a dense hash map
   iterated in insertion order, so keeping a prefix kept the entries closest to
@@ -130,7 +132,7 @@ Guarantees:
   request -- entry-limit saturation (G7) and producer timestamp skew (B5) --
   are both counted per partition, alongside the drop count that makes them
   readable. The `dedup:partition` metric group carries `records_dropped`,
-  `records_skew_clamped`, `records_unindexed` and
+  `records_skew_clamped`, `records_unindexed`, `capacity_evicted_entries` and
   `snapshot_entries_truncated` counters plus an `index_entries` gauge,
   labelled by namespace/topic/partition like `tx:partition`. Internal metrics
   only; per-partition cardinality is too high for the public endpoint.
@@ -263,6 +265,21 @@ Best-effort boundaries (all bounded by one dedup window, all documented):
   `rm_stm`) needs verification against `rm_stm`'s locking model before
   changing it, since a wrong fix here risks a deadlock or a fencing hole
   that's harder to detect than the status quo.
+
+- **B8** — Capacity eviction (G7) makes eviction timing decision-affecting.
+  The expired sweep only ever removed entries that could never match again, so
+  replicas sweeping at different points were indistinguishable. Dropping the
+  oldest *live* slice is different: a replica that evicts earlier forgets
+  identities another replica still remembers, so the two can answer the same
+  duplicate differently, including after a failover to an index built purely
+  by `populate()` replay. Both paths apply the identical rule and sweep
+  expired entries before measuring, which keeps their inputs close, and the
+  divergence stays bounded by one slice. It also removes the larger part of
+  the `_inserts_since_evict` divergence it would otherwise have amplified:
+  that double count occurred when the leader's `is_duplicate()` bumped the
+  counter for a record it then failed open on, and at capacity the leader now
+  makes room and indexes the identity instead, so the follower's `populate()`
+  finds it present and does not bump again.
 
 # Design
 

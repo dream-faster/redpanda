@@ -175,9 +175,10 @@ struct dedup_index_snapshot {
 /// interval scales with the index so that scanning it stays amortized O(1)
 /// per insertion. Finally, a hard per-partition entry limit prevents a large
 /// window, high-cardinality traffic, or non-advancing producer timestamps from
-/// exhausting shard memory. Once that limit is reached, new identities are
-/// admitted but left unindexed until a later eviction sweep makes room;
-/// already-indexed identities continue to deduplicate normally. The "most
+/// exhausting shard memory. Once that limit is reached, the oldest slice of
+/// the index is dropped to make room, so the effective window narrows to
+/// roughly the limit divided by the new-identity arrival rate rather than
+/// dedup switching off for new identities. The "most
 /// recent timestamp seen" is a client-supplied CreateTime with no ordering
 /// guarantee, so every record timestamp is clamped to the broker's clock
 /// before it reaches the index; without that, one future-dated record would
@@ -302,12 +303,23 @@ public:
     /// entry limit. Non-zero means a peer was configured with a larger limit,
     /// so dedup coverage here is narrower than the snapshot it restored.
     size_t truncated_entries() const { return _truncated_entries; }
+    /// Still-live identities dropped to make room at the entry limit. Non-zero
+    /// means the effective window is narrower than the configured one:
+    /// roughly max_entries() divided by the new-identity arrival rate.
+    size_t capacity_evicted_entries() const {
+        return _capacity_evicted_entries;
+    }
 
 private:
     /// Bound a client-supplied CreateTime by the broker's clock, counting the
     /// record when the clamp bites. A no-op for any timestamp at or behind
     /// broker time, so log replay is unaffected.
     model::timestamp clamp_to_broker_time(model::timestamp);
+
+    /// Free space for one new identity at the entry limit. Sweeps expired
+    /// entries first, then drops the oldest slice of what remains. Returns
+    /// false when no space could be freed, leaving the caller to fail open.
+    bool make_room_at_capacity();
 
     bool is_duplicate(
       dedup_identity_digest identity,
@@ -325,6 +337,18 @@ private:
     // Fraction of the map worth of new-identity attempts before sweeping:
     // interval = max(min_evict_interval, map_size / evict_size_divisor).
     static constexpr size_t evict_size_divisor = 8;
+
+    // Fraction of the index dropped when it is full of still-live entries:
+    // size/capacity_evict_divisor, so a quarter. Dropping a slice rather than
+    // one entry amortises the two O(n) passes over the next quarter-capacity
+    // of insertions; the cost is that the effective window sawtooths between
+    // three quarters and all of capacity/arrival-rate.
+    static constexpr size_t capacity_evict_divisor = 4;
+    // Buckets in the histogram that locates the cutoff timestamp. Fixed and
+    // stack-allocated, so this adds no per-entry memory -- the entry ceiling
+    // exists to bound this index, and an LRU list would have cost 8-16 bytes
+    // on every entry.
+    static constexpr size_t capacity_evict_buckets = 512;
 
     std::chrono::milliseconds _window;
     const size_t _max_entries;
@@ -344,6 +368,7 @@ private:
     size_t _skew_clamped_records{0};
     size_t _unindexed_records{0};
     size_t _truncated_entries{0};
+    size_t _capacity_evicted_entries{0};
 };
 
 } // namespace cluster
