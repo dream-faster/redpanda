@@ -615,6 +615,77 @@ TEST(DedupWindowFilter, EntryLimitFailsOpenWithoutGrowingTheIndex) {
     EXPECT_EQ(f.map_size(), 2u);
 }
 
+// At the entry limit the index drops its oldest slice to make room, rather
+// than admitting new identities unremembered. That keeps dedup working under
+// saturation with an effective window of roughly the entry limit divided by
+// the new-identity arrival rate, instead of switching it off for everything
+// new until traffic subsides.
+TEST(DedupWindowFilter, CapacityEvictionDropsTheOldestNotTheNewest) {
+    constexpr size_t cap = 8;
+    cluster::dedup_window_filter f(100s, cap);
+    for (size_t i = 0; i < cap; ++i) {
+        const auto stamp = ts(static_cast<int64_t>(i + 1) * 10000);
+        ASSERT_TRUE(
+          f.filter(make_batch(fmt::format("id-{}", i), "v", stamp))
+            .has_value());
+    }
+    ASSERT_EQ(f.map_size(), cap);
+    ASSERT_EQ(f.capacity_evicted_entries(), 0u);
+
+    // Nothing has expired -- every entry is still inside the window -- so room
+    // for this identity has to come from evicting live ones.
+    ASSERT_TRUE(f.filter(make_batch("id-8", "v", ts(90000))).has_value());
+
+    EXPECT_LE(f.map_size(), f.max_entries());
+    EXPECT_GT(f.capacity_evicted_entries(), 0u);
+    // Indexed, not admitted unremembered: the point of the change.
+    EXPECT_EQ(f.unindexed_records(), 0u);
+
+    // The newest entries survive and still deduplicate.
+    EXPECT_FALSE(f.filter(make_batch("id-7", "v", ts(80000))).has_value());
+    // The oldest was what got dropped, so it reads as a new identity again.
+    EXPECT_TRUE(f.filter(make_batch("id-0", "v", ts(10000))).has_value());
+}
+
+TEST(DedupWindowFilter, CapacityEvictionKeepsDedupWorkingWhenSaturated) {
+    constexpr size_t cap = 8;
+    cluster::dedup_window_filter f(100s, cap);
+
+    // Five times more identities than the index can hold, none of them old
+    // enough to expire.
+    for (int64_t i = 1; i <= 40; ++i) {
+        f.populate(iobuf::from(fmt::format("id-{}", i)), ts(i * 2000));
+        ASSERT_LE(f.map_size(), f.max_entries());
+    }
+
+    // Under the old rule every identity past the eighth went unindexed and its
+    // duplicates were admitted. Now the index carries a sliding tail.
+    EXPECT_EQ(f.unindexed_records(), 0u);
+    EXPECT_GT(f.capacity_evicted_entries(), 0u);
+    EXPECT_FALSE(f.filter(make_batch("id-40", "v", ts(80000))).has_value());
+}
+
+// A timestamp cutoff cannot drop a bounded slice when more than that slice
+// shares one narrow timestamp range. Over-evicting would throw away coverage
+// nobody asked to lose, so the record is admitted unindexed instead -- the old
+// behaviour, kept as the floor for a case that needs timestamps far coarser
+// than the window.
+TEST(DedupWindowFilter, CapacityEvictionFailsOpenWhenNoSliceCanBeFreed) {
+    constexpr size_t cap = 4;
+    cluster::dedup_window_filter f(1h, cap);
+    for (int i = 0; i < 4; ++i) {
+        ASSERT_TRUE(
+          f.filter(make_batch(fmt::format("id-{}", i), "v", ts(1000)))
+            .has_value());
+    }
+    ASSERT_EQ(f.map_size(), cap);
+
+    ASSERT_TRUE(f.filter(make_batch("extra", "v", ts(1000))).has_value());
+    EXPECT_EQ(f.map_size(), cap);
+    EXPECT_EQ(f.capacity_evicted_entries(), 0u);
+    EXPECT_EQ(f.unindexed_records(), 1u);
+}
+
 // A record timestamped in the future must not evict entries that a later,
 // correctly-ordered duplicate should still match against. Redpanda accepts
 // records up to log_message_timestamp_after_max_ms (one hour by default) ahead
