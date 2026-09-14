@@ -625,9 +625,8 @@ TEST(DedupWindowFilter, CapacityEvictionDropsTheOldestNotTheNewest) {
     cluster::dedup_window_filter f(100s, cap);
     for (size_t i = 0; i < cap; ++i) {
         const auto stamp = ts(static_cast<int64_t>(i + 1) * 10000);
-        ASSERT_TRUE(
-          f.filter(make_batch(fmt::format("id-{}", i), "v", stamp))
-            .has_value());
+        ASSERT_TRUE(f.filter(make_batch(fmt::format("id-{}", i), "v", stamp))
+                      .has_value());
     }
     ASSERT_EQ(f.map_size(), cap);
     ASSERT_EQ(f.capacity_evicted_entries(), 0u);
@@ -674,9 +673,8 @@ TEST(DedupWindowFilter, CapacityEvictionFailsOpenWhenNoSliceCanBeFreed) {
     constexpr size_t cap = 4;
     cluster::dedup_window_filter f(1h, cap);
     for (int i = 0; i < 4; ++i) {
-        ASSERT_TRUE(
-          f.filter(make_batch(fmt::format("id-{}", i), "v", ts(1000)))
-            .has_value());
+        ASSERT_TRUE(f.filter(make_batch(fmt::format("id-{}", i), "v", ts(1000)))
+                      .has_value());
     }
     ASSERT_EQ(f.map_size(), cap);
 
