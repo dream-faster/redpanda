@@ -31,15 +31,19 @@ public:
 
     static void init_workspace(size_t);
 
+    /// Number of compression contexts created on this shard.
+    ///
+    /// A context owns a workspace sized from the data it is given, so one is
+    /// created on first use and reused afterwards; this counter stops at one.
+    /// Exposed so tests can assert the reuse instead of inferring it.
+    static size_t compressor_allocations();
+
 private:
     iobuf do_compress(const iobuf&);
     iobuf do_uncompress(const iobuf&);
 
-    void reset_compressor();
-    zstd_compress_ctx& compressor();
-    ZSTD_DCtx* decompressor();
-
-    zstd_compress_ctx _compress{nullptr};
+    static ZSTD_CCtx* compressor();
+    static ZSTD_DCtx* decompressor();
 };
 
 } // namespace compression

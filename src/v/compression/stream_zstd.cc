@@ -55,17 +55,38 @@ void stream_zstd::init_workspace(size_t size) {
     }
 }
 
-void stream_zstd::reset_compressor() {
-    _compress.reset(ZSTD_createCCtx());
-    if (!_compress) {
-        throw std::bad_alloc{};
+// Compression context.
+//
+// zstd sizes a context's workspace from the data it is asked to compress and
+// then keeps it for the life of the context, so creating a context per call
+// asks the shard's heap for a fresh several-hundred-KiB-to-megabytes
+// *contiguous* block on every compression. Once the heap is fragmented that
+// allocation fails -- and aborts the reactor -- while the shard still reports
+// most of its memory free. Hold one context per shard and reset the session
+// between uses, which is what the decompression workspace above already does.
+//
+// Resetting does not release the workspace, and a session-and-parameters reset
+// leaves the context in the state a freshly created one would be in, so the
+// compressed output is unchanged.
+static thread_local stream_zstd::zstd_compress_ctx cctx{nullptr};
+static thread_local size_t cctx_allocations = 0;
+
+size_t stream_zstd::compressor_allocations() { return cctx_allocations; }
+
+ZSTD_CCtx* stream_zstd::compressor() {
+    if (unlikely(!cctx)) {
+        cctx.reset(ZSTD_createCCtx());
+        if (!cctx) {
+            throw std::bad_alloc{};
+        }
+        ++cctx_allocations;
+        return cctx.get();
     }
-}
-stream_zstd::zstd_compress_ctx& stream_zstd::compressor() {
-    if (!_compress) {
-        reset_compressor();
-    }
-    return _compress;
+    // Discards whatever the previous compression left behind, including a
+    // compression that threw part way through a stream.
+    throw_if_error(
+      ZSTD_CCtx_reset(cctx.get(), ZSTD_reset_session_and_parameters));
+    return cctx.get();
 }
 
 ZSTD_DCtx* stream_zstd::decompressor() {
@@ -84,8 +105,7 @@ ZSTD_DCtx* stream_zstd::decompressor() {
 }
 
 iobuf stream_zstd::do_compress(const iobuf& x) {
-    reset_compressor();
-    ZSTD_CCtx* ctx = compressor().get();
+    ZSTD_CCtx* ctx = compressor();
     // NOTE: always enable content size. **decompression** depends on this
     throw_if_error(ZSTD_CCtx_setPledgedSrcSize(ctx, x.size_bytes()));
 
