@@ -187,3 +187,44 @@ SEASTAR_THREAD_TEST_CASE(gzip_test) {
     using fn = compression::internal::gzip_compressor;
     roundtrip_compression(fn::compress, fn::uncompress);
 }
+
+// A compression context owns a workspace that zstd sizes from the data it is
+// given, so one created per compression asks the shard heap for a fresh
+// contiguous multi-hundred-KiB block every time -- which fails on a fragmented
+// heap long before the shard is actually out of memory. Pin the reuse here:
+// the per-shard context must be created once and then survive compressions of
+// growing and shrinking sizes.
+SEASTAR_THREAD_TEST_CASE(stream_zstd_reuses_the_compression_context) {
+    // Sizes go up and back down so the workspace both grows for a larger
+    // payload and gets reused while oversized for a smaller one.
+    constexpr std::array<size_t, 8> payload_sizes{
+      1_KiB, 64_KiB, 256_KiB, 1_MiB, 256_KiB, 64_KiB, 1_MiB, 1_KiB};
+
+    for (size_t size : payload_sizes) {
+        iobuf buf = gen(size);
+        auto cbuf = compression::internal::zstd_compressor::compress(buf);
+        BOOST_CHECK_EQUAL(
+          compression::internal::zstd_compressor::uncompress(cbuf), buf);
+    }
+
+    BOOST_CHECK_EQUAL(compression::stream_zstd::compressor_allocations(), 1u);
+}
+
+// Reusing the context must not leak session state between compressions: the
+// same input has to compress to the same bytes whatever ran in between.
+SEASTAR_THREAD_TEST_CASE(stream_zstd_reuse_does_not_change_the_output) {
+    iobuf subject = gen(128_KiB);
+
+    auto first = compression::internal::zstd_compressor::compress(subject);
+
+    // Interleave a differently sized payload, which is what makes zstd pick
+    // different compression parameters for the context.
+    iobuf other = gen(1_MiB);
+    compression::internal::zstd_compressor::compress(other);
+
+    auto second = compression::internal::zstd_compressor::compress(subject);
+
+    BOOST_CHECK_EQUAL(first, second);
+    BOOST_CHECK_EQUAL(
+      compression::internal::zstd_compressor::uncompress(second), subject);
+}
