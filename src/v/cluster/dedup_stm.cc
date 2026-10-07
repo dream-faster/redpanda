@@ -95,6 +95,15 @@ void dedup_stm::setup_metrics() {
             "than dedup_max_entries_per_partition on this broker. Non-zero "
             "means a peer retains a wider dedup window than this broker."),
           labels),
+        sm::make_counter(
+          "requests_rebuilt",
+          [this] { return _state.rebuilt_requests(); },
+          sm::description(
+            "Number of produce requests whose batch had to be rebuilt and "
+            "recompressed because some, but not all, of its records were "
+            "dropped as duplicates. This is the rate that drives the dedup "
+            "feature's cost on the produce path."),
+          labels),
         sm::make_gauge(
           "index_entries",
           [this] { return _state.map_size(); },

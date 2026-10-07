@@ -121,7 +121,7 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "image_ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${TAG}" >> "$GITHUB_OUTPUT"
 
-      - name: Run dedup unit tests
+      - name: Run dedup and compression unit tests
         run: |
           unset CI
           # Same --config and --output_base as the image build below, on
@@ -138,7 +138,8 @@ jobs:
             --lockfile_mode=update \
             '--local_resources=memory=HOST_RAM*.8' \
             //src/v/cluster/tests:dedup_window_filter_test \
-            //src/v/cluster/tests:dedup_stm_test
+            //src/v/cluster/tests:dedup_stm_test \
+            //src/v/compression/tests:zstd_test
 
       - name: Build OCI image with Bazel
         run: |

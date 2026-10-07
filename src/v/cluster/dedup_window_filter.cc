@@ -232,6 +232,8 @@ dedup_window_filter::filter_request(model::record_batch batch) {
         return {.batch = std::nullopt, .undo = std::move(undo)};
     }
 
+    ++_rebuilt_requests;
+
     // Rebuild with surviving records while preserving batch and record
     // metadata. Offset deltas are made contiguous because this is a produce
     // batch, not a compacted batch with intentional offset gaps.
