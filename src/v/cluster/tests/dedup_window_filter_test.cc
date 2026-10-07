@@ -1688,3 +1688,34 @@ TEST(DedupWindowFilter, EvictExpiredKeepsInWindowEntries) {
     EXPECT_FALSE(f.filter(make_batch("recent", "dup", ts(5500))).has_value());
     EXPECT_TRUE(f.filter(make_batch("old", "again", ts(5500))).has_value());
 }
+
+// Only a partial drop rebuilds and recompresses the batch, which is the whole
+// cost of dedup on the produce path. The counter has to distinguish that case
+// from the two pass-through cases, or there is no way to tell from a running
+// broker how often the expensive path is taken.
+TEST(DedupWindowFilter, RebuiltRequestsCountsOnlyPartialDrops) {
+    cluster::dedup_window_filter f(1000ms);
+
+    // All new: returned untouched.
+    auto all_new = f.filter_request(
+      make_multi_batch({{"a", "1"}, {"b", "2"}}, ts(1000)));
+    ASSERT_TRUE(all_new.batch.has_value());
+    EXPECT_EQ(f.rebuilt_requests(), 0u);
+
+    // All duplicates: nothing to rebuild, the request is dropped whole.
+    auto all_dup = f.filter_request(
+      make_multi_batch({{"a", "3"}, {"b", "4"}}, ts(1500)));
+    ASSERT_FALSE(all_dup.batch.has_value());
+    EXPECT_EQ(f.rebuilt_requests(), 0u);
+
+    // Partial: "a" is a duplicate, "c" is new, so the batch is rebuilt.
+    auto partial = f.filter_request(
+      make_multi_batch({{"a", "5"}, {"c", "6"}}, ts(1500)));
+    ASSERT_TRUE(partial.batch.has_value());
+    EXPECT_EQ(record_count(*partial.batch), 1);
+    EXPECT_EQ(f.rebuilt_requests(), 1u);
+
+    // Reverting a request does not un-count the rebuild it paid for.
+    f.revert_request(partial.undo);
+    EXPECT_EQ(f.rebuilt_requests(), 1u);
+}

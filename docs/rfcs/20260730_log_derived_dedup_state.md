@@ -132,10 +132,11 @@ Guarantees:
   request -- entry-limit saturation (G7) and producer timestamp skew (B5) --
   are both counted per partition, alongside the drop count that makes them
   readable. The `dedup:partition` metric group carries `records_dropped`,
-  `records_skew_clamped`, `records_unindexed`, `capacity_evicted_entries` and
-  `snapshot_entries_truncated` counters plus an `index_entries` gauge,
-  labelled by namespace/topic/partition like `tx:partition`. Internal metrics
-  only; per-partition cardinality is too high for the public endpoint.
+  `records_skew_clamped`, `records_unindexed`, `capacity_evicted_entries`,
+  `snapshot_entries_truncated` and `requests_rebuilt` counters plus an
+  `index_entries` gauge, labelled by namespace/topic/partition like
+  `tx:partition`. Internal metrics only; per-partition cardinality is too high
+  for the public endpoint.
 
 Best-effort boundaries (all bounded by one dedup window, all documented):
 
@@ -280,6 +281,22 @@ Best-effort boundaries (all bounded by one dedup window, all documented):
   counter for a record it then failed open on, and at capacity the leader now
   makes room and indexes the identity instead, so the follower's `populate()`
   finds it present and does not bump again.
+
+- **B9** — A request with *some* duplicates is the feature's only expensive
+  case: the batch is rebuilt from the surviving records and recompressed with
+  the producer's codec, which is work stock Redpanda never does on the produce
+  path. `requests_rebuilt` (G8) is the rate, and it is the number to watch
+  when sizing a cluster for this feature. For zstd that recompression also
+  used to allocate a fresh multi-megabyte *contiguous* workspace per batch,
+  because `compression::stream_zstd` created a `ZSTD_CCtx` per call; on a
+  fragmented shard heap that allocation fails and aborts the reactor while the
+  shard still reports most of its memory free. The context is now held per
+  shard and session-reset between uses, matching what the same class already
+  did for decompression and what `async_stream_zstd` does for both. Rebuilding
+  uncompressed instead was considered and rejected: it would inflate those
+  batches on disk and on the wire, and let them past the `batch_max_bytes`
+  check, which the produce handler applies to the compressed request before
+  dedup ever sees it.
 
 # Design
 
