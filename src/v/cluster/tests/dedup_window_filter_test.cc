@@ -1719,3 +1719,31 @@ TEST(DedupWindowFilter, RebuiltRequestsCountsOnlyPartialDrops) {
     f.revert_request(partial.undo);
     EXPECT_EQ(f.rebuilt_requests(), 1u);
 }
+
+// A header can be present with a *null* value, which is distinct from an empty
+// one. The iobuf behind it is empty either way, so digesting it would hand
+// every such record the identity of the empty buffer and quietly deduplicate
+// unrelated records against each other. It has to be rejected like an absent
+// header instead.
+TEST(DedupWindowFilter, NullValuedIdentityHeaderIsRejected) {
+    cluster::dedup_window_filter f(1000ms);
+    f.set_key_header("redpanda-dedup-key");
+
+    storage::record_batch_builder builder(
+      model::record_batch_type::raft_data, model::offset{0});
+    builder.set_timestamp(ts(1000));
+    chunked_vector<model::record_header> hdrs;
+    // {key, nullopt} is a header with a null value, the way a Kafka client
+    // sends one.
+    hdrs.emplace_back(
+      std::make_optional(iobuf::from("redpanda-dedup-key")), std::nullopt);
+    builder.add_record(
+      model::record(
+        {}, 0, 0, iobuf::from("k"), iobuf::from("v1"), std::move(hdrs)));
+
+    auto result = f.filter_request(std::move(builder).build_sync());
+    EXPECT_TRUE(result.missing_required_header);
+    EXPECT_FALSE(result.batch.has_value());
+    // Nothing was indexed, so a later well-formed record is unaffected.
+    EXPECT_EQ(f.map_size(), 0u);
+}

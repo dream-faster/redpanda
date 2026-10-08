@@ -30,10 +30,21 @@ dedup_identity_lookup dedup_identity_for_record(
   const iobuf** out) {
     if (key_header) {
         for (auto& h : r.headers()) {
-            if (h.key() == std::string_view{*key_header}) {
-                *out = &h.value();
-                return dedup_identity_lookup::identity;
+            if (h.key() != std::string_view{*key_header}) {
+                continue;
             }
+            // A header value can be null, which is not the same as empty: the
+            // iobuf behind it is empty either way, so digesting it would give
+            // every record with a null-valued header the identity of the empty
+            // buffer and silently deduplicate them against each other.
+            // Treated like an absent header instead -- the client asked for
+            // header-keyed dedup and supplied no identity -- so the request is
+            // rejected rather than losing records.
+            if (h.value_size() < 0) {
+                return dedup_identity_lookup::missing_header;
+            }
+            *out = &h.value();
+            return dedup_identity_lookup::identity;
         }
         return dedup_identity_lookup::missing_header;
     }
@@ -501,7 +512,13 @@ void dedup_window_filter::restore(const dedup_index_snapshot& snapshot) {
 }
 
 void dedup_window_filter::clear() {
-    _map.clear();
+    // Assigned rather than cleared: this is a dense map, so clear() keeps the
+    // bucket array and value storage it had grown to -- tens of MiB at the
+    // default entry ceiling. The callers that reach here (dedup disabled, a
+    // generation change, a discarded or applied raft snapshot) all want that
+    // memory back. restore() keeps using clear(), since it refills
+    // immediately and the capacity is worth keeping there.
+    _map = {};
     _max_ts = model::timestamp::min();
     _inserts_since_evict = 0;
 }

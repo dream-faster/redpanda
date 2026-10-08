@@ -699,6 +699,11 @@ FIXTURE_TEST(
   test_dedup_generation_tracks_key_header_change, topic_table_fixture) {
     auto& topics = table.local();
     auto create = make_create_topic_cmd("test_dedup_key_header", 1, 1);
+    // The generation only tracks an identity-source change while dedup is
+    // *enabled*, so the window has to be set or every assertion below reads a
+    // generation that was never bumped.
+    create.value.cfg.properties.dedup_window_ms
+      = tristate<std::chrono::milliseconds>(std::chrono::milliseconds{300000});
     const auto tp_ns = create.value.cfg.tp_ns;
     auto ec = topics.apply(create, model::offset{10}).get();
     BOOST_REQUIRE_EQUAL(ec, cluster::errc::success);

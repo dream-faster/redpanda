@@ -110,16 +110,25 @@ jobs:
 
       - name: Determine image tag
         id: meta
+        # image_tag reaches the script through the environment instead of
+        # ${{ }}. Expression interpolation is substituted into the script
+        # source before bash parses it, so a crafted workflow_dispatch or
+        # workflow_call input would run as shell code in a job that holds
+        # packages: write and the registry token. The sanitising sed below
+        # cannot prevent that -- it runs on a value that has already been
+        # pasted in as code.
+        env:
+          INPUT_IMAGE_TAG: ${{ inputs.image_tag }}
+          SHA_TAG: ${{ github.sha }}
         run: |
-          SHA_TAG="${{ github.sha }}"
-          if [[ -n "${{ inputs.image_tag }}" ]]; then
-            TAG="${{ inputs.image_tag }}"
+          if [[ -n "$INPUT_IMAGE_TAG" ]]; then
+            TAG="$INPUT_IMAGE_TAG"
           else
-            TAG="${SHA_TAG}"
+            TAG="$SHA_TAG"
           fi
           TAG=$(echo "$TAG" | sed 's/[^a-zA-Z0-9._-]/-/g')
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "image_ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${TAG}" >> "$GITHUB_OUTPUT"
+          echo "image_ref=${REGISTRY}/${IMAGE_NAME}:${TAG}" >> "$GITHUB_OUTPUT"
 
       - name: Run dedup and compression unit tests
         run: |
@@ -139,6 +148,7 @@ jobs:
             '--local_resources=memory=HOST_RAM*.8' \
             //src/v/cluster/tests:dedup_window_filter_test \
             //src/v/cluster/tests:dedup_stm_test \
+            //src/v/cluster/tests:topic_table_test \
             //src/v/compression/tests:zstd_test
 
       - name: Build OCI image with Bazel
