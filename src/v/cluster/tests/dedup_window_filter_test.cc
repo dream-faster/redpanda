@@ -1729,9 +1729,9 @@ TEST(DedupWindowFilter, NullValuedIdentityHeaderIsRejected) {
     cluster::dedup_window_filter f(1000ms);
     f.set_key_header("redpanda-dedup-key");
 
-    storage::record_batch_builder builder(
-      model::record_batch_type::raft_data, model::offset{0});
-    builder.set_timestamp(ts(1000));
+    model::batch_builder builder;
+    builder.set_batch_type(model::record_batch_type::raft_data);
+    builder.set_batch_timestamp(model::timestamp_type::create_time, ts(1000));
     chunked_vector<model::record_header> hdrs;
     // {key, nullopt} is a header with a null value, the way a Kafka client
     // sends one.
