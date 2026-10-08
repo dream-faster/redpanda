@@ -76,10 +76,12 @@ redpanda_cc_btest(
     cpu = 1,
     deps = [
         "//src/v/base",
+        "//src/v/bytes",
         "//src/v/compression",
         "//src/v/random:generators",
         "//src/v/test_utils:seastar_boost",
         "@seastar//:testing",
+        "@zstd",
     ],
 )
 
