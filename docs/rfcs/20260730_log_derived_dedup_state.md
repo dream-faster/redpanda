@@ -290,9 +290,13 @@ Best-effort boundaries (all bounded by one dedup window, all documented):
   used to allocate a fresh multi-megabyte *contiguous* workspace per batch,
   because `compression::stream_zstd` created a `ZSTD_CCtx` per call; on a
   fragmented shard heap that allocation fails and aborts the reactor while the
-  shard still reports most of its memory free. The context is now held per
-  shard and session-reset between uses, matching what the same class already
-  did for decompression and what `async_stream_zstd` does for both. Rebuilding
+  shard still reports most of its memory free. Compression now runs on a
+  static per-shard workspace allocated at startup and sized for zstd's
+  worst-case parameters, so zstd neither grows it for a large batch nor shrinks
+  it after a run of small ones (`ZSTD_WORKSPACETOOLARGE_*`) -- a reused
+  heap-owned context still did both, at a low but steady rate. This matches
+  what the same class already did for decompression and what
+  `async_stream_zstd` does for both. Rebuilding
   uncompressed instead was considered and rejected: it would inflate those
   batches on disk and on the wire, and let them past the `batch_max_bytes`
   check, which the produce handler applies to the compressed request before

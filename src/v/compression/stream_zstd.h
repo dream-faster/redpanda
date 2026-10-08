@@ -11,31 +11,29 @@
 
 #pragma once
 #include "bytes/iobuf.h"
-#include "utils/static_deleter_fn.h"
 
-#include <memory>
 #include <zstd.h>
 
 namespace compression {
 class stream_zstd {
 public:
-    using zstd_compress_ctx = std::unique_ptr<
-      ZSTD_CCtx,
-      // wrap ZSTD C API
-      static_sized_deleter_fn<ZSTD_CCtx, &ZSTD_freeCCtx>>;
-
     iobuf compress(const iobuf& b) { return do_compress(b); }
     iobuf uncompress(const iobuf& b) { return do_uncompress(b); }
     iobuf compress(iobuf&& b) { return do_compress(b); }
     iobuf uncompress(iobuf&& b) { return do_uncompress(b); }
 
-    static void init_workspace(size_t);
-
-    /// Number of compression contexts created on this shard.
+    /// Allocate this shard's zstd workspaces.
     ///
-    /// A context owns a workspace sized from the data it is given, so one is
-    /// created on first use and reused afterwards; this counter stops at one.
-    /// Exposed so tests can assert the reuse instead of inferring it.
+    /// \param decompression_size sizes the decompression workspace only. The
+    /// compression workspace is sized from the compression level, which bounds
+    /// it independently of how much data any one call compresses.
+    static void init_workspace(size_t decompression_size);
+
+    /// Number of compression workspaces allocated on this shard.
+    ///
+    /// The workspace is allocated once, at startup, and is never resized, so
+    /// this stops at one for the life of the process. Exposed so tests can
+    /// assert that rather than infer it.
     static size_t compressor_allocations();
 
 private:
