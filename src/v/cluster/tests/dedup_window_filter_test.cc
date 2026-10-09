@@ -684,6 +684,55 @@ TEST(DedupWindowFilter, CapacityEvictionFailsOpenWhenNoSliceCanBeFreed) {
     EXPECT_EQ(f.unindexed_records(), 1u);
 }
 
+// A sweep that cannot free anything leaves the index untouched and derives its
+// cutoffs from _max_ts, so repeating it per record just re-proves the same
+// refusal -- at a cost of a full erase_if scan plus a full histogram pass each
+// time, which is O(index) per admitted record. The refusal has to be
+// remembered until the expiry cutoff could actually reach something.
+TEST(DedupWindowFilter, SaturatedIndexDoesNotResweepForEveryRecord) {
+    constexpr size_t cap = 64;
+    cluster::dedup_window_filter f(1h, cap);
+    // Fill the index with one timestamp, so the oldest histogram bucket holds
+    // everything and no bounded slice can be cut.
+    for (size_t i = 0; i < cap; ++i) {
+        ASSERT_TRUE(f.filter(make_batch(fmt::format("id-{}", i), "v", ts(1000)))
+                      .has_value());
+    }
+    ASSERT_EQ(f.map_size(), cap);
+    const auto sweeps_before = f.capacity_sweeps();
+
+    // New identities, each with a distinct and advancing timestamp so that a
+    // gate keyed on _max_ts alone would not hold. None can be indexed: the
+    // window is an hour, so nothing has expired.
+    constexpr size_t admitted = 500;
+    for (size_t i = 0; i < admitted; ++i) {
+        const auto stamp = ts(1000 + static_cast<int64_t>(i));
+        ASSERT_TRUE(f.filter(make_batch(fmt::format("new-{}", i), "v", stamp))
+                      .has_value());
+    }
+    EXPECT_EQ(f.unindexed_records(), admitted);
+    EXPECT_EQ(f.map_size(), cap);
+    // The refusal is re-derived at most a couple of times, not once per
+    // record. One sweep establishes it; maybe_evict()'s own cadence may clear
+    // the way for another.
+    EXPECT_LE(f.capacity_sweeps() - sweeps_before, 2u)
+      << "re-swept the whole index per record";
+
+    // Coverage is unchanged: the entries that were indexed still match, and
+    // the ones that were not still do not.
+    EXPECT_FALSE(f.filter(make_batch("id-0", "dup", ts(1500))).has_value());
+    EXPECT_TRUE(f.filter(make_batch("new-0", "again", ts(1500))).has_value());
+
+    // Once a record arrives far enough ahead for the expiry cutoff to reach
+    // the indexed entries, the sweep runs again and the index recovers -- the
+    // refusal is remembered, not permanent.
+    const auto sweeps_while_saturated = f.capacity_sweeps();
+    ASSERT_TRUE(
+      f.filter(make_batch("later", "v", shift(ts(1000), 2h))).has_value());
+    EXPECT_GT(f.capacity_sweeps(), sweeps_while_saturated);
+    EXPECT_LT(f.map_size(), cap);
+}
+
 // A record timestamped in the future must not evict entries that a later,
 // correctly-ordered duplicate should still match against. Redpanda accepts
 // records up to log_message_timestamp_after_max_ms (one hour by default) ahead
