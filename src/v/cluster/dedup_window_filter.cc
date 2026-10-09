@@ -20,6 +20,7 @@
 #include <array>
 #include <chrono>
 #include <cstddef>
+#include <limits>
 #include <ranges>
 
 namespace cluster {
@@ -144,6 +145,9 @@ bool dedup_window_filter::is_duplicate(
         ++_unindexed_records;
         return false;
     }
+    // A new entry can be older than anything a previous refusal saw, so that
+    // refusal no longer bounds what a sweep could free.
+    _failed_sweep_oldest.reset();
     _map.emplace(identity, ts);
     if (undo) {
         undo->entries.push_back(
@@ -332,6 +336,9 @@ void dedup_window_filter::populate(const iobuf& key, model::timestamp ts) {
     if (_map.size() < _max_entries) {
         auto [it, inserted] = _map.try_emplace(identity, ts);
         if (inserted) {
+            // A new entry can be older than anything a previous refusal saw,
+            // so that refusal no longer bounds what a sweep could free.
+            _failed_sweep_oldest.reset();
             // May erase arbitrary entries, invalidating it; nothing below
             // touches it.
             maybe_evict();
@@ -355,6 +362,9 @@ void dedup_window_filter::populate(const iobuf& key, model::timestamp ts) {
         ++_unindexed_records;
         return;
     }
+    // A new entry can be older than anything a previous refusal saw, so that
+    // refusal no longer bounds what a sweep could free.
+    _failed_sweep_oldest.reset();
     _map.emplace(identity, ts);
 }
 
@@ -369,11 +379,27 @@ void dedup_window_filter::evict_expired() {
 }
 
 bool dedup_window_filter::make_room_at_capacity() {
+    // A sweep that frees nothing leaves the index exactly as it found it, and
+    // both passes below take their cutoffs from _max_ts, so that refusal holds
+    // until the expiry cutoff passes the oldest entry the sweep saw. Freeing a
+    // single slot is enough, because the callers only sweep with the index
+    // exactly at the ceiling. Re-deriving the same refusal per record is what
+    // this avoids: every record arriving at a saturated index would otherwise
+    // pay a full erase_if scan plus a full histogram pass, which at the
+    // default ceiling is two million entry visits for nothing.
+    if (
+      _failed_sweep_oldest.has_value()
+      && _max_ts.value() - _window.count() <= _failed_sweep_oldest->value()) {
+        return false;
+    }
+    ++_capacity_sweeps;
+
     // Expired entries first: they can never match again, so dropping them
     // costs no coverage at all.
     evict_expired();
     _inserts_since_evict = 0;
     if (_map.size() < _max_entries) {
+        _failed_sweep_oldest.reset();
         return true;
     }
 
@@ -385,6 +411,10 @@ bool dedup_window_filter::make_room_at_capacity() {
     // until traffic subsides.
     const size_t target = _map.size() / capacity_evict_divisor;
     if (target == 0 || _window.count() <= 0) {
+        // Not remembered as a refusal: neither condition depends on the
+        // entries, so there is no timestamp at which a retry becomes
+        // worthwhile. target == 0 needs a ceiling below capacity_evict_divisor
+        // anyway, where "scan the whole index" is a handful of entries.
         return false;
     }
 
@@ -400,7 +430,9 @@ bool dedup_window_filter::make_room_at_capacity() {
     const int64_t span = _window.count();
     const int64_t width = span / (capacity_evict_buckets - 1) + 1;
     std::array<size_t, capacity_evict_buckets> counts{};
+    int64_t oldest = std::numeric_limits<int64_t>::max();
     for (const auto& [_, stamp] : _map) {
+        oldest = std::min(oldest, stamp.value());
         // restore() can clamp _max_ts below an entry's own timestamp, so an
         // offset outside the window is reachable.
         const auto offset = std::clamp<int64_t>(stamp.value() - lo, 0, span);
@@ -422,6 +454,7 @@ bool dedup_window_filter::make_room_at_capacity() {
         // coverage the caller never asked to lose, so fail open for this
         // record instead. Needs timestamps far coarser than the window to
         // happen at all.
+        _failed_sweep_oldest = model::timestamp{oldest};
         return false;
     }
 
@@ -430,6 +463,7 @@ bool dedup_window_filter::make_room_at_capacity() {
     std::erase_if(
       _map, [cutoff](const auto& kv) { return kv.second.value() < cutoff; });
     _capacity_evicted_entries += before - _map.size();
+    _failed_sweep_oldest.reset();
     return _map.size() < _max_entries;
 }
 
@@ -509,6 +543,7 @@ void dedup_window_filter::restore(const dedup_index_snapshot& snapshot) {
     // than needing a dedup_generation bump. Not counted as record skew.
     _max_ts = std::min(snapshot.max_timestamp, broker_now());
     _inserts_since_evict = snapshot.inserts_since_evict;
+    _failed_sweep_oldest.reset();
 }
 
 void dedup_window_filter::clear() {
@@ -521,6 +556,7 @@ void dedup_window_filter::clear() {
     _map = {};
     _max_ts = model::timestamp::min();
     _inserts_since_evict = 0;
+    _failed_sweep_oldest.reset();
 }
 
 } // namespace cluster

@@ -309,6 +309,12 @@ public:
     size_t capacity_evicted_entries() const {
         return _capacity_evicted_entries;
     }
+    /// Capacity sweeps actually performed, as opposed to short-circuited
+    /// because a previous one had already proved nothing could be freed yet.
+    /// A sweep costs two passes over the index, so at a saturated index this
+    /// is what separates O(1) and O(index) per admitted record. Exposed for
+    /// tests rather than as a metric.
+    size_t capacity_sweeps() const { return _capacity_sweeps; }
     /// Produce requests rebuilt because some, but not all, of their records
     /// were dropped. These are the only requests that pay for a batch rebuild
     /// and a recompression, so this is the rate that drives the dedup
@@ -375,6 +381,13 @@ private:
     size_t _truncated_entries{0};
     size_t _capacity_evicted_entries{0};
     size_t _rebuilt_requests{0};
+    size_t _capacity_sweeps{0};
+    // Oldest entry timestamp seen by the last capacity sweep that could not
+    // free anything, or nullopt if the last sweep freed something. Such a
+    // sweep leaves the index exactly as it found it and both of its cutoffs
+    // come from _max_ts, so its refusal holds until the expiry cutoff passes
+    // this timestamp. See make_room_at_capacity().
+    std::optional<model::timestamp> _failed_sweep_oldest;
 };
 
 } // namespace cluster
