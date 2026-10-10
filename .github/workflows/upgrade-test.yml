@@ -21,14 +21,6 @@ on:
         description: 'Stock image to upgrade from (default: newest v26.2.x)'
         required: false
         type: string
-  # Lets the script itself be iterated on without a broker build: with no
-  # slim image it upgrades stock to stock, which exercises the harness only.
-  push:
-    branches:
-      - 'claude/redpanda-slim'
-    paths:
-      - 'tools/slim-checks/upgrade_test.sh'
-      - '.github/workflows/upgrade-test.yml'
 
 concurrency:
   group: upgrade-test-${{ github.ref }}-${{ inputs.slim_image }}
