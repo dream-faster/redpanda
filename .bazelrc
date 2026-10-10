@@ -40,20 +40,6 @@ build --@rules_go//go/config:pure
 build:gofips --//bazel:gofips=True --@rules_go//go/toolchain:sdk_name=go_sdk_with_systemcrypto
 build:gofips --@rules_go//go/config:pure=false
 
-#################
-# Rust settings #
-#################
-
-# Use rules_rust's Rust-side allocator_library that defines the
-# mangled `__rustc::*` allocator shim symbols (rust_alloc,
-# rust_dealloc, etc.). The default cc_allocator_library predates the
-# allocator-symbol mangling in rustc 1.87+ and leaves those symbols
-# undefined when a Rust staticlib is linked into a cc_binary via
-# cc_common.link. See bazelbuild/rules_rust#3459.
-build --@rules_rust//rust/settings:experimental_use_allocator_libraries_with_mangled_symbols=True
-
-# end of rust settings #
-
 # Improve caching and readability of filepaths that the compiler uses by not using
 # absolute paths, and instead use paths that are relative to the redpanda repo.
 # https://github.com/bazel-contrib/toolchains_llvm/pull/445#issuecomment-2605443516
@@ -176,33 +162,10 @@ build:san-all  --//bazel:sanitizer_mode=all
 build:san-all     --copt=-fsanitize=address,undefined,vptr,function,alignment
 build:san-all  --linkopt=-fsanitize=address,undefined,vptr,function,alignment
 
-# LTO mixin: enable LTO for C++ and Rust. Usually mixed in with
+# LTO mixin: enable thin LTO for C++. Usually mixed in with
 # PGO + release, but should work with any.
 build:lto --copt -flto=thin
 build:lto --linkopt -flto=thin
-# Use thin LTO for Rust to match the C++ side. With fat LTO, rustc's
-# LLVM Internalize pass downgrades the auto-injected `__rustc::*`
-# allocator shim symbols from GLOBAL to LOCAL binding when emitting the
-# empty staticlib provided by rules_rust's
-# `experimental_use_allocator_libraries_with_mangled_symbols`. Nothing
-# inside the empty crate references those symbols, so LTO assumes
-# they're internal. The rust stdlib rlibs still emit GLOBAL undefined
-# refs to them, and ELF won't bind a GLOBAL ref to a LOCAL def across
-# object files, so the cc_binary link fails with:
-#   ld.lld: error: undefined symbol: __rustc::__rust_no_alloc_shim_is_unstable_v2
-# Thin LTO doesn't run Internalize across the crate the way fat LTO
-# does, so the symbols stay GLOBAL and the link succeeds. We don't
-# lose any wasm performance: every wasmtime crate is an rlib (rules_rust
-# emits `-Clinker-plugin-lto` regardless of -Clto mode) and the actual
-# cross-language LTO happens at the C++ link step, which is thin too.
-build:lto --@rules_rust//rust/settings:lto=thin
-build:lto --@rules_rust//rust/settings:extra_rustc_flag=-Ccodegen-units=1
-# I've seen others claim these flags help with LTO and the final binary, but these also
-# require a specific version of clang and I don't really want to tie rustc version with
-# clang version.
-# build:lto --@rules_rust//rust/settings:extra_rustc_flag=-Clinker-plugin-lto
-# build:lto --@rules_rust//rust/settings:extra_rustc_flag=-Cembed-bitcode=yes
-# build:lto --@rules_rust//rust/settings:extra_rustc_flag=-Clink-arg=-fuse-ld=lld
 
 ################################################
 # PRIMARY BUILD MODES
