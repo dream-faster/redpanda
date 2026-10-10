@@ -758,6 +758,41 @@ struct incremental_topic_updates
     property_update<std::optional<legacy::enum_wire>> legacy_storage_mode;
     property_update<std::optional<ss::sstring>> legacy_schema_registry_context;
 
+    /// Legacy slots must never carry an operation: a stock peer would apply
+    /// it to the feature that was removed here.
+    void reset_legacy_ops() {
+        legacy_shadow_indexing.op = incremental_update_operation::none;
+        legacy_remote_delete.op = incremental_update_operation::none;
+        legacy_record_key_schema_id_validation.op
+          = incremental_update_operation::none;
+        legacy_record_key_schema_id_validation_compat.op
+          = incremental_update_operation::none;
+        legacy_record_key_subject_name_strategy.op
+          = incremental_update_operation::none;
+        legacy_record_key_subject_name_strategy_compat.op
+          = incremental_update_operation::none;
+        legacy_record_value_schema_id_validation.op
+          = incremental_update_operation::none;
+        legacy_record_value_schema_id_validation_compat.op
+          = incremental_update_operation::none;
+        legacy_record_value_subject_name_strategy.op
+          = incremental_update_operation::none;
+        legacy_record_value_subject_name_strategy_compat.op
+          = incremental_update_operation::none;
+        legacy_iceberg_mode.op = incremental_update_operation::none;
+        legacy_remote_read.op = incremental_update_operation::none;
+        legacy_remote_write.op = incremental_update_operation::none;
+        legacy_iceberg_delete.op = incremental_update_operation::none;
+        legacy_iceberg_partition_spec.op = incremental_update_operation::none;
+        legacy_iceberg_invalid_record_action.op
+          = incremental_update_operation::none;
+        legacy_iceberg_target_lag_ms.op = incremental_update_operation::none;
+        legacy_remote_allow_gaps.op = incremental_update_operation::none;
+        legacy_remote_label.op = incremental_update_operation::none;
+        legacy_storage_mode.op = incremental_update_operation::none;
+        legacy_schema_registry_context.op = incremental_update_operation::none;
+    }
+
     auto serde_fields() {
         return std::tie(
           compression,

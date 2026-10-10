@@ -55,10 +55,11 @@ create_topic_properties_update(
         return [op](auto&&... prop) { ((prop.op = op), ...); };
     };
     std::apply(apply_op(op_t::remove), update.properties.serde_fields());
+    update.properties.reset_legacy_ops();
     std::apply(apply_op(op_t::none), update.custom_properties.serde_fields());
 
     static_assert(
-      std::tuple_size_v<decltype(update.properties.serde_fields())> == 24,
+      std::tuple_size_v<decltype(update.properties.serde_fields())> == 45,
       "If you add a property, decide on its default alter config "
       "policy, and handle the update in the loop below");
     static_assert(
