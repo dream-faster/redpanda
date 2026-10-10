@@ -75,11 +75,11 @@ wait_ready() {
 }
 
 fail() {
-  echo "UPGRADE TEST FAILED: $1"
   for id in "${NODES[@]}"; do
     echo "=== node $id log tail"
-    docker logs --tail 150 "$(name "$id")" 2>&1 || true
+    docker logs --tail 40 "$(name "$id")" 2>&1 || true
   done
+  echo "UPGRADE TEST FAILED: $1"
   exit 1
 }
 
