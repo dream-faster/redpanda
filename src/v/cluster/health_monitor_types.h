@@ -146,13 +146,9 @@ struct partition_status
      */
     kafka::offset high_watermark;
 
-    /*
-     * If the partition is a cloud topics partition, then this field records the
-     * maximum epoch (inclusive) that is eligible for garbage collection. When
-     * reducing (applying `min`) this value across node reports, ignore
-     * std::nullopt. If the reduced value is std::nullopt then the partition
-     * should be treated as if it contains no GC eligible data.
-     */
+    /// Slot of the removed cloud topics GC epoch, kept for the v26.2.x wire
+    /// layout. Always std::nullopt.
+    std::optional<int64_t> legacy_cloud_topic_max_gc_eligible_epoch;
 
     /**
      * Kafka log start offset (first readable offset) for this partition
@@ -173,6 +169,7 @@ struct partition_status
           shard,
           followers_stats,
           high_watermark,
+          legacy_cloud_topic_max_gc_eligible_epoch,
           log_start_offset);
     }
 
@@ -363,6 +360,8 @@ struct cluster_health_report
         for (auto& nr : node_reports) {
             co_await write_async(out, node_health_report_serde{*nr});
         }
+        // bytes_in_cloud_storage, removed
+        write(out, std::optional<size_t>{});
     }
 
     ss::future<> serde_async_read(iobuf_parser& in, const serde::header& h) {
@@ -383,6 +382,10 @@ struct cluster_health_report
                 std::move(r).to_in_memory()));
         }
         if (in.bytes_left() > h._bytes_left_limit) {
+            std::ignore = read_nested<std::optional<size_t>>(
+              in, h._bytes_left_limit); // bytes_in_cloud_storage, removed
+        }
+        if (in.bytes_left() > h._bytes_left_limit) {
             in.skip(in.bytes_left() - h._bytes_left_limit);
         }
     }
@@ -398,6 +401,8 @@ struct cluster_health_report
         for (auto& nr : node_reports) {
             write(out, node_health_report_serde{*nr});
         }
+        // bytes_in_cloud_storage, removed
+        write(out, std::optional<size_t>{});
     }
 
     void serde_read(iobuf_parser& in, const serde::header& h) {
@@ -415,6 +420,10 @@ struct cluster_health_report
             node_reports.emplace_back(
               ss::make_lw_shared<node_health_report>(
                 std::move(r).to_in_memory()));
+        }
+        if (in.bytes_left() > h._bytes_left_limit) {
+            std::ignore = read_nested<std::optional<size_t>>(
+              in, h._bytes_left_limit); // bytes_in_cloud_storage, removed
         }
         if (in.bytes_left() > h._bytes_left_limit) {
             in.skip(in.bytes_left() - h._bytes_left_limit);

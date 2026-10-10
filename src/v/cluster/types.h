@@ -16,6 +16,7 @@
 #include "absl/container/node_hash_set.h"
 #include "base/format_to.h"
 #include "base/outcome.h"
+#include "cluster/legacy_wire.h"
 #include "cluster/data_policy.h"
 #include "cluster/errc.h"
 #include "cluster/feature_update_action.h"
@@ -720,6 +721,42 @@ struct incremental_topic_updates
     // topics that were created without one.
     property_update<std::optional<model::topic_id>> topic_id;
 
+    // Slots of removed features, kept so the serde layout stays identical to
+    // stock v26.2.x (see legacy_wire.h). Nothing reads them.
+    property_update<std::optional<legacy::enum_wire>> legacy_shadow_indexing;
+    property_update<bool> legacy_remote_delete{
+      false, incremental_update_operation::none};
+    property_update<std::optional<bool>> legacy_record_key_schema_id_validation;
+    property_update<std::optional<bool>>
+      legacy_record_key_schema_id_validation_compat;
+    property_update<std::optional<legacy::enum_wire>>
+      legacy_record_key_subject_name_strategy;
+    property_update<std::optional<legacy::enum_wire>>
+      legacy_record_key_subject_name_strategy_compat;
+    property_update<std::optional<bool>>
+      legacy_record_value_schema_id_validation;
+    property_update<std::optional<bool>>
+      legacy_record_value_schema_id_validation_compat;
+    property_update<std::optional<legacy::enum_wire>>
+      legacy_record_value_subject_name_strategy;
+    property_update<std::optional<legacy::enum_wire>>
+      legacy_record_value_subject_name_strategy_compat;
+    property_update<legacy::iceberg_mode_wire> legacy_iceberg_mode;
+    property_update<bool> legacy_remote_read{
+      false, incremental_update_operation::none};
+    property_update<bool> legacy_remote_write{
+      false, incremental_update_operation::none};
+    property_update<std::optional<bool>> legacy_iceberg_delete;
+    property_update<std::optional<ss::sstring>> legacy_iceberg_partition_spec;
+    property_update<std::optional<legacy::enum_wire>>
+      legacy_iceberg_invalid_record_action;
+    property_update<std::optional<std::chrono::milliseconds>>
+      legacy_iceberg_target_lag_ms;
+    property_update<std::optional<bool>> legacy_remote_allow_gaps;
+    property_update<std::optional<legacy::remote_label_wire>> legacy_remote_label;
+    property_update<std::optional<legacy::enum_wire>> legacy_storage_mode;
+    property_update<std::optional<ss::sstring>> legacy_schema_registry_context;
+
     auto serde_fields() {
         return std::tie(
           compression,
@@ -729,23 +766,44 @@ struct incremental_topic_updates
           segment_size,
           retention_bytes,
           retention_duration,
+          legacy_shadow_indexing,
           batch_max_bytes,
           retention_local_target_bytes,
           retention_local_target_ms,
+          legacy_remote_delete,
           segment_ms,
+          legacy_record_key_schema_id_validation,
+          legacy_record_key_schema_id_validation_compat,
+          legacy_record_key_subject_name_strategy,
+          legacy_record_key_subject_name_strategy_compat,
+          legacy_record_value_schema_id_validation,
+          legacy_record_value_schema_id_validation_compat,
+          legacy_record_value_subject_name_strategy,
+          legacy_record_value_subject_name_strategy_compat,
           initial_retention_local_target_bytes,
           initial_retention_local_target_ms,
           write_caching,
           flush_ms,
           flush_bytes,
+          legacy_iceberg_mode,
           leaders_preference,
+          legacy_remote_read,
+          legacy_remote_write,
           delete_retention_ms,
+          legacy_iceberg_delete,
+          legacy_iceberg_partition_spec,
+          legacy_iceberg_invalid_record_action,
+          legacy_iceberg_target_lag_ms,
           min_cleanable_dirty_ratio,
+          legacy_remote_allow_gaps,
           topic_id,
           min_compaction_lag_ms,
           max_compaction_lag_ms,
           message_timestamp_before_max_ms,
-          message_timestamp_after_max_ms);
+          message_timestamp_after_max_ms,
+          legacy_remote_label,
+          legacy_storage_mode,
+          legacy_schema_registry_context);
     }
 
     fmt::iterator format_to(fmt::iterator it) const;
@@ -1621,7 +1679,8 @@ struct bootstrap_cluster_cmd_data
           bootstrap_user_cred,
           node_ids_by_uuid,
           founding_version,
-          initial_nodes);
+          initial_nodes,
+          legacy_recovery_state);
     }
 
     model::cluster_uuid uuid;
@@ -1633,6 +1692,9 @@ struct bootstrap_cluster_cmd_data
     // the node that generated the bootstrap record.
     cluster_version founding_version{invalid_version};
     std::vector<model::broker> initial_nodes;
+
+    // Cluster recovery was removed; the slot keeps the layout of v26.2.x.
+    std::optional<legacy::empty_envelope> legacy_recovery_state;
 };
 
 enum class reconciliation_status : int8_t {
@@ -2504,9 +2566,17 @@ struct partition_state
     model::offset high_water_mark;
     model::offset dirty_offset;
     model::offset latest_configuration_offset;
+    // Slots of removed features, kept for the v26.2.x wire layout.
+    model::offset legacy_start_cloud_offset;
+    model::offset legacy_next_cloud_offset;
     model::revision_id revision_id;
     size_t log_size_bytes;
     size_t non_log_disk_size_bytes;
+    bool legacy_is_read_replica_mode_enabled{false};
+    bool legacy_is_remote_fetch_enabled{false};
+    bool legacy_is_cloud_data_available{false};
+    ss::sstring legacy_read_replica_bucket;
+    ss::sstring legacy_iceberg_mode;
     partition_raft_state raft_state;
     model::offset max_tombstone_removable_offset;
     model::offset max_transaction_removable_offset;
@@ -2521,10 +2591,17 @@ struct partition_state
           high_water_mark,
           dirty_offset,
           latest_configuration_offset,
+          legacy_start_cloud_offset,
+          legacy_next_cloud_offset,
           revision_id,
           log_size_bytes,
           non_log_disk_size_bytes,
+          legacy_is_read_replica_mode_enabled,
+          legacy_is_remote_fetch_enabled,
+          legacy_is_cloud_data_available,
+          legacy_read_replica_bucket,
           raft_state,
+          legacy_iceberg_mode,
           max_tombstone_removable_offset,
           max_transaction_removable_offset,
           max_cleanly_compacted_offset,

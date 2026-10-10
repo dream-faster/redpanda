@@ -193,6 +193,24 @@ redpanda_cc_library(
 )
 
 redpanda_cc_library(
+    name = "legacy_wire",
+    hdrs = [
+        "legacy_wire.h",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//src/v/base",
+        "//src/v/bytes:iobuf_parser",
+        "//src/v/model",
+        "//src/v/serde",
+        "//src/v/serde:named_type",
+        "//src/v/serde:sstring",
+        "//src/v/serde:uuid",
+        "@seastar",
+    ],
+)
+
+redpanda_cc_library(
     name = "topic_configuration",
     srcs = [
         "topic_configuration.cc",
@@ -204,6 +222,7 @@ redpanda_cc_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
+        ":legacy_wire",
         "//src/v/base",
         "//src/v/model",
         "//src/v/reflection:adl",

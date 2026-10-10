@@ -10,6 +10,7 @@
 #pragma once
 
 #include "base/format_to.h"
+#include "cluster/legacy_wire.h"
 #include "model/compression.h"
 #include "model/fundamental.h"
 #include "model/metadata.h"
@@ -120,6 +121,38 @@ struct topic_properties
     std::optional<std::chrono::milliseconds> message_timestamp_before_max_ms{};
     std::optional<std::chrono::milliseconds> message_timestamp_after_max_ms{};
 
+    // Slots of removed features (tiered storage, iceberg, schema id
+    // validation). They only exist to keep the serde layout identical to
+    // stock v26.2.x, see legacy_wire.h. Nothing reads them.
+    std::optional<bool> legacy_recovery;
+    std::optional<legacy::enum_wire> legacy_shadow_indexing;
+    std::optional<bool> legacy_read_replica;
+    std::optional<ss::sstring> legacy_read_replica_bucket;
+    std::optional<legacy::remote_topic_properties_wire>
+      legacy_remote_topic_properties;
+    bool legacy_remote_delete{true};
+    std::optional<bool> legacy_record_key_schema_id_validation;
+    std::optional<bool> legacy_record_key_schema_id_validation_compat;
+    std::optional<legacy::enum_wire> legacy_record_key_subject_name_strategy;
+    std::optional<legacy::enum_wire>
+      legacy_record_key_subject_name_strategy_compat;
+    std::optional<bool> legacy_record_value_schema_id_validation;
+    std::optional<bool> legacy_record_value_schema_id_validation_compat;
+    std::optional<legacy::enum_wire> legacy_record_value_subject_name_strategy;
+    std::optional<legacy::enum_wire>
+      legacy_record_value_subject_name_strategy_compat;
+    std::optional<legacy::remote_label_wire> legacy_remote_label;
+    std::optional<model::topic_namespace> legacy_remote_topic_namespace_override;
+    legacy::iceberg_mode_wire legacy_iceberg_mode;
+    std::optional<bool> legacy_iceberg_delete;
+    std::optional<ss::sstring> legacy_iceberg_partition_spec;
+    std::optional<legacy::enum_wire> legacy_iceberg_invalid_record_action;
+    std::optional<std::chrono::milliseconds> legacy_iceberg_target_lag_ms;
+    std::optional<bool> legacy_remote_topic_allow_gaps;
+    // redpanda_storage_mode::unset
+    legacy::enum_wire legacy_storage_mode{255};
+    std::optional<ss::sstring> legacy_schema_registry_context;
+
     bool is_local_topic() const;
 
     bool is_compacted() const;
@@ -136,24 +169,48 @@ struct topic_properties
           segment_size,
           retention_bytes,
           retention_duration,
+          legacy_recovery,
+          legacy_shadow_indexing,
+          legacy_read_replica,
+          legacy_read_replica_bucket,
+          legacy_remote_topic_properties,
           batch_max_bytes,
           retention_local_target_bytes,
           retention_local_target_ms,
+          legacy_remote_delete,
           segment_ms,
+          legacy_record_key_schema_id_validation,
+          legacy_record_key_schema_id_validation_compat,
+          legacy_record_key_subject_name_strategy,
+          legacy_record_key_subject_name_strategy_compat,
+          legacy_record_value_schema_id_validation,
+          legacy_record_value_schema_id_validation_compat,
+          legacy_record_value_subject_name_strategy,
+          legacy_record_value_subject_name_strategy_compat,
           initial_retention_local_target_bytes,
           initial_retention_local_target_ms,
           mpx_virtual_cluster_id,
           write_caching,
           flush_ms,
           flush_bytes,
+          legacy_remote_label,
+          legacy_remote_topic_namespace_override,
+          legacy_iceberg_mode,
           leaders_preference,
           deprecated_cloud_topic_enabled,
           delete_retention_ms,
+          legacy_iceberg_delete,
+          legacy_iceberg_partition_spec,
+          legacy_iceberg_invalid_record_action,
+          legacy_iceberg_target_lag_ms,
           min_cleanable_dirty_ratio,
+          legacy_remote_topic_allow_gaps,
           min_compaction_lag_ms,
           max_compaction_lag_ms,
           message_timestamp_before_max_ms,
-          message_timestamp_after_max_ms);
+          message_timestamp_after_max_ms,
+          legacy_storage_mode,
+          legacy_schema_registry_context);
     }
 
     friend bool

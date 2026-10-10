@@ -1540,6 +1540,28 @@ redpanda_cc_gtest(
 )
 
 redpanda_cc_gtest(
+    name = "legacy_wire_test",
+    timeout = "short",
+    srcs = [
+        "legacy_wire_test.cc",
+    ],
+    deps = [
+        "//src/v/cluster:legacy_wire",
+        "//src/v/cluster:topic_configuration",
+        "//src/v/cluster:types",
+        "//src/v/model",
+        "//src/v/serde",
+        "//src/v/serde:chrono",
+        "//src/v/serde:optional",
+        "//src/v/serde:sstring",
+        "//src/v/serde:tristate",
+        "//src/v/test_utils:gtest",
+        "@googletest//:gtest",
+        "@seastar",
+    ],
+)
+
+redpanda_cc_gtest(
     name = "client_quota_serde_test",
     timeout = "short",
     srcs = [
