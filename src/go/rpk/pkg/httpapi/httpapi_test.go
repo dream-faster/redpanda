@@ -207,12 +207,12 @@ func TestAll(t *testing.T) {
 			expErr: true,
 		}, {
 			name:   "invalid_query",
-			cl:     NewClient(Host((s.URL))),
+			cl:     NewClient(Host(s.URL)),
 			fn:     func(cl *Client) (any, error) { return nil, cl.Get(context.Background(), "/?;", nil, nil) },
 			expErr: true,
 		}, {
 			name: "canceled_context",
-			cl:   NewClient(Host((s.URL))),
+			cl:   NewClient(Host(s.URL)),
 			fn: func(cl *Client) (any, error) {
 				ctx, cancel := context.WithCancel(context.Background())
 				cancel()

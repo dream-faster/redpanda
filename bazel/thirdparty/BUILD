@@ -1,13 +1,3 @@
-load("@bazel_skylib//rules:native_binary.bzl", "native_binary")
-
-native_binary(
-    name = "minio",
-    src = select({
-        "@platforms//cpu:x86_64": "@minio_x86_64//file",
-        "@platforms//cpu:aarch64": "@minio_aarch64//file",
-    }),
-    visibility = ["//visibility:public"],
-)
 
 alias(
     name = "prometheus",

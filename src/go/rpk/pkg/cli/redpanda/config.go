@@ -222,7 +222,7 @@ you must use the --self flag to specify which ip redpanda should listen on.
 				y.Redpanda.AdvertisedRPCAPI = advertisedRPC
 			}
 			if a := &y.Redpanda.KafkaAPI; len(*a) == 1 {
-				if first := &((*a)[0].Address); *first == config.DefaultListenAddress {
+				if first := &(*a)[0].Address; *first == config.DefaultListenAddress {
 					*first = selfIP
 				}
 			} else if len(*a) == 0 {
@@ -232,14 +232,14 @@ you must use the --self flag to specify which ip redpanda should listen on.
 				}}
 			}
 			if a := &y.Redpanda.AdvertisedKafkaAPI; len(*a) == 1 {
-				if first := &((*a)[0]); first.Address == config.LoopbackIP && first.Port == config.DefaultKafkaPort {
+				if first := &(*a)[0]; first.Address == config.LoopbackIP && first.Port == config.DefaultKafkaPort {
 					*first = advertisedKafka
 				}
 			} else if len(*a) == 0 {
 				*a = []config.NamedSocketAddress{advertisedKafka}
 			}
 			if a := &y.Redpanda.AdminAPI; len(*a) == 1 {
-				if first := &((*a)[0]).Address; *first == config.DefaultListenAddress {
+				if first := &(*a)[0].Address; *first == config.DefaultListenAddress {
 					*first = selfIP
 				}
 			} else if len(*a) == 0 {

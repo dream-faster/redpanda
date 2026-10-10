@@ -74,8 +74,8 @@ struct remote_label_wire
 
     auto serde_fields() { return std::tie(cluster_uuid); }
 
-    friend bool operator==(const remote_label_wire&, const remote_label_wire&)
-      = default;
+    friend bool
+    operator==(const remote_label_wire&, const remote_label_wire&) = default;
 
     fmt::iterator format_to(fmt::iterator it) const {
         return fmt::format_to(it, "{{cluster_uuid: {}}}", cluster_uuid);
@@ -96,8 +96,8 @@ struct remote_topic_properties_wire
     }
 
     friend bool operator==(
-      const remote_topic_properties_wire&, const remote_topic_properties_wire&)
-      = default;
+      const remote_topic_properties_wire&,
+      const remote_topic_properties_wire&) = default;
 
     fmt::iterator format_to(fmt::iterator it) const {
         return fmt::format_to(
@@ -115,8 +115,8 @@ struct empty_envelope
       envelope<empty_envelope, serde::version<0>, serde::compat_version<0>> {
     auto serde_fields() { return std::tie(); }
 
-    friend bool operator==(const empty_envelope&, const empty_envelope&)
-      = default;
+    friend bool
+    operator==(const empty_envelope&, const empty_envelope&) = default;
 
     fmt::iterator format_to(fmt::iterator it) const {
         return fmt::format_to(it, "{{}}");
@@ -126,8 +126,8 @@ struct empty_envelope
 /// model::iceberg_mode. Always written as the "disabled" discriminant; every
 /// enabled shape is consumed on read.
 struct iceberg_mode_wire {
-    friend bool operator==(const iceberg_mode_wire&, const iceberg_mode_wire&)
-      = default;
+    friend bool
+    operator==(const iceberg_mode_wire&, const iceberg_mode_wire&) = default;
 
     fmt::iterator format_to(fmt::iterator it) const {
         return fmt::format_to(it, "disabled");

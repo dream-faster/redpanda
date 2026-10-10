@@ -57,7 +57,7 @@ func (p *SingleStatPanel) MarshalJSON() ([]byte, error) {
 		PanelAlias
 	}{
 		p.Type(),
-		(PanelAlias)(*p),
+		PanelAlias(*p),
 	}
 	return json.Marshal(typedPanel)
 }

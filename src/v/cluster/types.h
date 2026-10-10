@@ -16,11 +16,11 @@
 #include "absl/container/node_hash_set.h"
 #include "base/format_to.h"
 #include "base/outcome.h"
-#include "cluster/legacy_wire.h"
 #include "cluster/data_policy.h"
 #include "cluster/errc.h"
 #include "cluster/feature_update_action.h"
 #include "cluster/fwd.h"
+#include "cluster/legacy_wire.h"
 #include "cluster/nt_revision.h"
 #include "cluster/partition_balancer_types.h"
 #include "cluster/security_types.h"
@@ -753,7 +753,8 @@ struct incremental_topic_updates
     property_update<std::optional<std::chrono::milliseconds>>
       legacy_iceberg_target_lag_ms;
     property_update<std::optional<bool>> legacy_remote_allow_gaps;
-    property_update<std::optional<legacy::remote_label_wire>> legacy_remote_label;
+    property_update<std::optional<legacy::remote_label_wire>>
+      legacy_remote_label;
     property_update<std::optional<legacy::enum_wire>> legacy_storage_mode;
     property_update<std::optional<ss::sstring>> legacy_schema_registry_context;
 

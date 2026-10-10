@@ -142,7 +142,8 @@ struct topic_properties
     std::optional<legacy::enum_wire>
       legacy_record_value_subject_name_strategy_compat;
     std::optional<legacy::remote_label_wire> legacy_remote_label;
-    std::optional<model::topic_namespace> legacy_remote_topic_namespace_override;
+    std::optional<model::topic_namespace>
+      legacy_remote_topic_namespace_override;
     legacy::iceberg_mode_wire legacy_iceberg_mode;
     std::optional<bool> legacy_iceberg_delete;
     std::optional<ss::sstring> legacy_iceberg_partition_spec;

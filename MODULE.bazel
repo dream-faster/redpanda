@@ -316,7 +316,6 @@ use_repo(
     "com_github_rs_xid",
     "com_github_safchain_ethtool",
     "com_github_santhosh_tekuri_jsonschema_v6",
-    "com_github_schollz_progressbar_v3",
     "com_github_segmentio_encoding",
     "com_github_sergi_go_diff",
     "com_github_sirupsen_logrus",
@@ -427,23 +426,7 @@ use_repo(
     "distroless_cc_debian12_linux_arm64_v8",
 )
 
-http_file = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_file")
-
 http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
-
-http_file(
-    name = "minio_x86_64",
-    executable = True,
-    integrity = "sha256-zr1iiuhZtGcN6cBLDL9WAKSYFm2iAxrWNMmHII2JrpQ=",
-    urls = ["https://dl.min.io/server/minio/release/linux-amd64/archive/minio.RELEASE.2025-04-03T14-56-28Z"],
-)
-
-http_file(
-    name = "minio_aarch64",
-    executable = True,
-    integrity = "sha256-Xs94kSmK6+SVko+E5urztZy33dtJnHrdjFAn6wuo8Ok=",
-    urls = ["https://dl.min.io/server/minio/release/linux-arm64/archive/minio.RELEASE.2025-04-03T14-56-28Z"],
-)
 
 http_archive(
     name = "prometheus_x86_64",
