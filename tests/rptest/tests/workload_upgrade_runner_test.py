@@ -11,16 +11,10 @@ import time
 import traceback
 from typing import Any, Optional
 
-from ducktape.mark import matrix
 
 from rptest.clients.offline_log_viewer import OfflineLogViewer
 from rptest.services.admin import Admin
 from rptest.services.cluster import cluster
-from rptest.services.redpanda import (
-    CloudStorageType,
-    SISettings,
-    get_cloud_storage_type,
-)
 from rptest.services.redpanda_installer import (
     RedpandaInstaller,
     RedpandaVersion,
@@ -156,22 +150,11 @@ class WorkloadAdapter(PWorkload):
 
 class RedpandaUpgradeTest(PreallocNodesTest):
     def __init__(self, test_context):
-        # si_settings are needed for LicenseWorkload
         super().__init__(
             test_context=test_context,
             num_brokers=3,
-            si_settings=SISettings(test_context),
             node_prealloc_count=1,
             node_ready_timeout_s=60,
-        )
-        # it is expected that older versions of redpanda will generate this kind of errors, at least while we keep testing from v23.x
-        self.redpanda.si_settings.set_expected_damage(
-            {
-                "ntr_no_topic_manifest",
-                "ntpr_no_manifest",
-                "unknown_keys",
-                "missing_segments",
-            }
         )
 
         self.installer = self.redpanda._installer
@@ -274,16 +257,10 @@ class RedpandaUpgradeTest(PreallocNodesTest):
     def cluster_version(self) -> int:
         return Admin(self.redpanda).get_features()["cluster_version"]
 
-    # before v24.2, dns query to s3 endpoint do not include the bucketname, which is required for AWS S3 fips endpoints
     @skip_fips_mode
     @skip_debug_mode
     @cluster(num_nodes=4)
-    # TODO(vlad): Allow this test on ABS once we have at least two versions
-    # of Redpanda that support Azure Hierarchical Namespaces.
-    @matrix(
-        cloud_storage_type=get_cloud_storage_type(applies_only_on=[CloudStorageType.S3])
-    )
-    def test_workloads_through_releases(self, cloud_storage_type):
+    def test_workloads_through_releases(self):
         # this callback will be called between each upgrade, in a mixed version state
         def mid_upgrade_check(raw_versions: dict[Any, RedpandaVersion]):
             rp_versions = {

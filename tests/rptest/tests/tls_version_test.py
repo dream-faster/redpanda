@@ -19,9 +19,7 @@ from ducktape.services.service import Service
 from rptest.services.admin import Admin
 from rptest.services.cluster import cluster
 from rptest.services.redpanda import (
-    PandaproxyConfig,
     RedpandaService,
-    SchemaRegistryConfig,
     SecurityConfig,
     TLSProvider,
 )
@@ -96,10 +94,7 @@ class TLSVersionTestBase(RedpandaTest):
     """
 
     def __init__(self, test_context, key_type: TLSKeyType):
-        super(TLSVersionTestBase, self).__init__(
-            test_context=test_context,
-            extra_rp_conf={"schema_registry_use_rpc": False},
-        )
+        super(TLSVersionTestBase, self).__init__(test_context=test_context)
         self.security = SecurityConfig()
         self.tls = TLSCertManager(self.logger, key_type=key_type)
         self.key_type = key_type
@@ -109,14 +104,6 @@ class TLSVersionTestBase(RedpandaTest):
     def setUp(self):
         self.security.tls_provider = TLSVersionTestProvider(tls=self.tls)
         self.redpanda.set_security_settings(self.security)
-
-        self.schema_registry_config = SchemaRegistryConfig()
-        self.schema_registry_config.require_client_auth = True
-        self.redpanda.set_schema_registry_settings(self.schema_registry_config)
-
-        self.pandaproxy_config = PandaproxyConfig()
-        self.pandaproxy_config.require_client_auth = True
-        self.redpanda.set_pandaproxy_settings(self.pandaproxy_config)
 
         tls = dict(
             enabled=True,

@@ -246,18 +246,6 @@ class AntithesisTimeoutMixin:
             logger=self.logger,
         )
 
-        # Retry validate_metastore — under AT faults the metastore can
-        # report UNAVAILABLE long after network faults pause (cloud-topics
-        # scheduler/leader recovery is in-process, not network). The
-        # function's own retry budget (5×1s) isn't always enough.
-        self.redpanda.validate_metastore = retry_call(
-            self.redpanda.validate_metastore,
-            attempts=6,
-            sleep_sec=5,
-            label="validate_metastore",
-            logger=self.logger,
-        )
-
         # Pause network faults for the duration of setUp so cluster
         # bootstrap (membership, create_user, topic create) runs without
         # interference. Resumed on exit so faults are active during the

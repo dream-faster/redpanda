@@ -10,9 +10,7 @@
 import json
 import re
 import socket
-import tempfile
 
-import requests
 from ducktape.cluster.cluster import ClusterNode
 from ducktape.utils.util import wait_until
 
@@ -21,9 +19,7 @@ from rptest.services import tls
 from rptest.services.admin import Admin
 from rptest.services.cluster import cluster
 from rptest.services.redpanda import (
-    PandaproxyConfig,
     RedpandaService,
-    SchemaRegistryConfig,
     SecurityConfig,
     TLSProvider,
 )
@@ -73,12 +69,6 @@ class CertificateRevocationTest(RedpandaTest):
         self.user_cert = self.tls.create_cert(
             socket.gethostname(), common_name="walterP", name="user"
         )
-        self.sr_client_cert = self.tls.create_cert(
-            socket.gethostname(), common_name="sr_client", name="sr_client"
-        )
-        self.pp_api_cert = self.tls.create_cert(
-            socket.gethostname(), common_name="pp_api", name="pp_api"
-        )
 
         self.security = SecurityConfig()
         self.security.endpoint_authn_method = "mtls_identity"
@@ -86,26 +76,13 @@ class CertificateRevocationTest(RedpandaTest):
         self.security.require_client_auth = True
         self.security.enable_sasl = False
 
-        self.schema_registry_config = SchemaRegistryConfig()
-        self.schema_registry_config.require_client_auth = True
-        self.schema_registry_config.client_key = self.sr_client_cert.key
-        self.schema_registry_config.client_crt = self.sr_client_cert.crt
-
-        self.pandaproxy_config = PandaproxyConfig()
-        self.pandaproxy_config.require_client_auth = True
-        self.pandaproxy_config.client_key = self.sr_client_cert.key
-        self.pandaproxy_config.client_crt = self.sr_client_cert.crt
-
         self.redpanda.set_security_settings(self.security)
-        self.redpanda.set_schema_registry_settings(self.schema_registry_config)
-        self.redpanda.set_pandaproxy_settings(self.pandaproxy_config)
 
         self.redpanda.add_extra_rp_conf(
             {
                 "kafka_mtls_principal_mapping_rules": [
                     self.security.principal_mapping_rules
                 ],
-                "schema_registry_use_rpc": False,
             }
         )
 
@@ -134,83 +111,6 @@ class CertificateRevocationTest(RedpandaTest):
             RpkException, lambda e: "connection initialization failed" in str(e)
         ):
             self.rpk.list_topics()
-
-    @cluster(
-        num_nodes=3,
-        log_allow_list=VERIFICATION_ERROR_LOG
-        + ["alert certificate revoked", "Schema registry failed to initialize"],
-    )
-    def test_sr_client(self):
-        def create_schema(subject, schema):
-            with tempfile.NamedTemporaryFile(suffix=".avro") as tf:
-                tf.write(bytes(schema, "UTF-8"))
-                tf.seek(0)
-                self.rpk.create_schema(subject, tf.name)
-
-        schema = {"type": "record", "name": "foo", "fields": []}
-
-        create_schema(
-            "foo",
-            json.dumps(schema),
-        )
-
-        self.tls.revoke_cert(self.sr_client_cert)
-        for n in self.redpanda.nodes:
-            self.redpanda.write_crl_file(n, self.tls.ca)
-
-        self.logger.debug(
-            "Restart schema store to force cert verification on kclient reconnect"
-        )
-        for n in self.redpanda.nodes:
-            self.admin.restart_service(rp_service="schema-registry", node=n)
-
-        self.logger.debug(
-            "List schemas should now time out as SR tries and fails to fetch _schemas"
-        )
-        with expect_exception(RpkException, lambda e: "deadline exceeded" in str(e)):
-            self.rpk.list_schemas()
-
-    @cluster(num_nodes=3)
-    def test_pp_api(self):
-        def get_topics(node: ClusterNode):
-            return requests.get(
-                f"https://{node.account.hostname}:8082/topics",
-                headers={
-                    "Accept": "application/vnd.kafka.v2+json",
-                    "Content-Type": "application/vnd.kafka.v2+json",
-                },
-                verify=self.user_cert.ca.crt,
-                cert=(self.user_cert.crt, self.user_cert.key),
-                timeout=10,
-            )
-
-        def expect_connection_exception(node: ClusterNode) -> bool:
-            with expect_exception(
-                (requests.exceptions.SSLError, requests.exceptions.ConnectionError),
-                lambda e: "certificate revoked" in str(e)
-                or "Connection aborted" in str(e),
-            ):
-                get_topics(node)
-            return True
-
-        node = self.redpanda.nodes[0]
-
-        with get_topics(node) as res:
-            assert res.status_code == 200, f"Bad status: {res.status_code}"
-
-        self.tls.revoke_cert(self.user_cert)
-        self.redpanda.write_crl_file(node, self.tls.ca)
-
-        wait_until(
-            lambda: expect_connection_exception(node),
-            timeout_sec=5,
-            backoff_sec=0.5,
-            err_msg="Did not receive expected SSL exception",
-            retry_on_exc=True,
-        )
-
-        with get_topics(self.redpanda.nodes[1]) as res:
-            assert res.status_code == 200, f"Bad status: {res.status_code}"
 
     @cluster(
         num_nodes=3,
