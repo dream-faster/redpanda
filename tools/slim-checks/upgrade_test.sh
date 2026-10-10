@@ -124,7 +124,7 @@ for p in 0 1 2 3 4 5; do
 done
 printf 'a:1\nb:2\na:3\n' | rpk_in 0 topic produce compacted -f '%k:%v\n' -p 0 >/dev/null ||
   fail "produce compacted"
-rpk 0 topic consume plain -p 0 -o start -n 50 -g upgrade-group -f '%v\n' >/dev/null ||
+rpk 0 topic consume plain -o start -n 50 -g upgrade-group -f '%v\n' >/dev/null ||
   fail "group commit"
 rpk 0 security user create upgrader -p secret >/dev/null 2>&1 || true
 sleep 15

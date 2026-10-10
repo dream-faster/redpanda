@@ -97,7 +97,7 @@ printf 'k1:v1\nk2:v2\n' | rpk topic produce compacted -f '%k:%v\n' >/dev/null ||
 
 rpk topic consume plain -p 0 -o start -n 100 -f '%v\n' | wc -l |
   tr -d ' ' | expect_lines 100
-rpk topic consume plain -p 0 -o start -n 100 -g smoke-group -f '%v\n' >/dev/null ||
+rpk topic consume plain -o start -n 100 -g smoke-group -f '%v\n' >/dev/null ||
   fail "consume with group"
 rpk group describe smoke-group >/dev/null || fail "describe group"
 rpk cluster health | grep -q 'Healthy:.*true' || fail "cluster not healthy"
