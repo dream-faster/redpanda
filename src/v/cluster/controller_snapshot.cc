@@ -11,6 +11,7 @@
 
 #include "cluster/controller_snapshot.h"
 
+#include "cluster/legacy_wire.h"
 #include "serde/rw/rw.h"
 
 namespace cluster {

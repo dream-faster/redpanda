@@ -559,6 +559,7 @@ redpanda_cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":data_policy",
+        ":legacy_wire",
         ":errc",
         ":features",
         ":fwd",
@@ -810,6 +811,7 @@ redpanda_cc_library(
         "controller_snapshot.h",
     ],
     implementation_deps = [
+        ":legacy_wire",
         "//src/v/security",
     ],
     visibility = ["//visibility:public"],
