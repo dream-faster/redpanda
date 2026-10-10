@@ -29,8 +29,6 @@ from rptest.services.redpanda import (
     RESTART_LOG_ALLOW_LIST,
     LoggingConfig,
     MetricsEndpoint,
-    PandaproxyConfig,
-    SchemaRegistryConfig,
 )
 from rptest.tests.redpanda_test import RedpandaTest
 from rptest.utils.scale_parameters import ScaleParameters
@@ -108,8 +106,6 @@ class LargeMessagesTest(RedpandaTest):
                     "offset_translator": "warn",
                 },
             ),
-            pandaproxy_config=PandaproxyConfig(),
-            schema_registry_config=SchemaRegistryConfig(),
             **kwargs,
         )
 
