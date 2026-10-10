@@ -355,17 +355,13 @@ TEST(DedupWindowFilter, RevertRequestUnwindsSameKeyMutations) {
     EXPECT_EQ(f.map_size(), 0u);
 }
 
+// Every new identity advances the sweep cursor, so an insertion that moves the
+// watermark past an existing entry's window drops it without any interval
+// having to elapse first.
 TEST(DedupWindowFilter, PopulateTriggersEvictionSweep) {
     cluster::dedup_window_filter f(1000ms);
     f.populate(iobuf::from("stale"), ts(0));
 
-    // Arrange for the next insertion to trigger the opportunistic sweep.
-    auto snapshot = f.snapshot();
-    snapshot.inserts_since_evict = 9'999;
-    f.restore(snapshot);
-
-    // The new key advances the clock far past "stale"'s window and its
-    // insertion crosses the sweep threshold.
     f.populate(iobuf::from("fresh"), ts(5000));
     EXPECT_EQ(f.map_size(), 1u);
 }
@@ -622,28 +618,27 @@ TEST(DedupWindowFilter, EntryLimitFailsOpenWithoutGrowingTheIndex) {
 // new until traffic subsides.
 TEST(DedupWindowFilter, CapacityEvictionDropsTheOldestNotTheNewest) {
     constexpr size_t cap = 8;
+    constexpr size_t identities = 16;
     cluster::dedup_window_filter f(100s, cap);
-    for (size_t i = 0; i < cap; ++i) {
-        const auto stamp = ts(static_cast<int64_t>(i + 1) * 10000);
+    // Twice what the index holds, every one of them still inside the window,
+    // so room can only come from evicting live entries. Trimming starts a
+    // tenth below the ceiling rather than at it, which is why this fills past
+    // the cap instead of asserting a count at it.
+    for (size_t i = 0; i < identities; ++i) {
+        const auto stamp = ts(static_cast<int64_t>(i + 1) * 5000);
         ASSERT_TRUE(f.filter(make_batch(fmt::format("id-{}", i), "v", stamp))
                       .has_value());
+        ASSERT_LE(f.map_size(), f.max_entries());
     }
-    ASSERT_EQ(f.map_size(), cap);
-    ASSERT_EQ(f.capacity_evicted_entries(), 0u);
 
-    // Nothing has expired -- every entry is still inside the window -- so room
-    // for this identity has to come from evicting live ones.
-    ASSERT_TRUE(f.filter(make_batch("id-8", "v", ts(90000))).has_value());
-
-    EXPECT_LE(f.map_size(), f.max_entries());
     EXPECT_GT(f.capacity_evicted_entries(), 0u);
     // Indexed, not admitted unremembered: the point of the change.
     EXPECT_EQ(f.unindexed_records(), 0u);
 
     // The newest entries survive and still deduplicate.
-    EXPECT_FALSE(f.filter(make_batch("id-7", "v", ts(80000))).has_value());
+    EXPECT_FALSE(f.filter(make_batch("id-15", "v", ts(80000))).has_value());
     // The oldest was what got dropped, so it reads as a new identity again.
-    EXPECT_TRUE(f.filter(make_batch("id-0", "v", ts(10000))).has_value());
+    EXPECT_TRUE(f.filter(make_batch("id-0", "v", ts(5000))).has_value());
 }
 
 TEST(DedupWindowFilter, CapacityEvictionKeepsDedupWorkingWhenSaturated) {
@@ -684,53 +679,171 @@ TEST(DedupWindowFilter, CapacityEvictionFailsOpenWhenNoSliceCanBeFreed) {
     EXPECT_EQ(f.unindexed_records(), 1u);
 }
 
-// A sweep that cannot free anything leaves the index untouched and derives its
-// cutoffs from _max_ts, so repeating it per record just re-proves the same
-// refusal -- at a cost of a full erase_if scan plus a full histogram pass each
-// time, which is O(index) per admitted record. The refusal has to be
-// remembered until the expiry cutoff could actually reach something.
-TEST(DedupWindowFilter, SaturatedIndexDoesNotResweepForEveryRecord) {
+// No path into the filter may do work proportional to the index, and a
+// saturated index is the case that used to break that: with nothing freeable,
+// every admitted record re-scanned the whole map and re-ran a whole histogram
+// pass. The cursor's per-call budget is the whole defence, so measure it
+// directly rather than counting sweeps.
+TEST(DedupWindowFilter, SaturatedIndexDoesBoundedWorkPerRecord) {
     constexpr size_t cap = 64;
+    // Budget per new-identity attempt plus the one emergency step taken at the
+    // hard ceiling. Mirrors sweep_budget + capacity_emergency_budget.
+    constexpr size_t visit_bound = 8 + 64;
     cluster::dedup_window_filter f(1h, cap);
-    // Fill the index with one timestamp, so the oldest histogram bucket holds
-    // everything and no bounded slice can be cut.
+    // One timestamp for the whole index, so the oldest histogram bucket holds
+    // everything and no bounded slice can be cut: the sweep has nothing to
+    // free on any call.
     for (size_t i = 0; i < cap; ++i) {
         ASSERT_TRUE(f.filter(make_batch(fmt::format("id-{}", i), "v", ts(1000)))
                       .has_value());
     }
     ASSERT_EQ(f.map_size(), cap);
-    const auto sweeps_before = f.capacity_sweeps();
 
     // New identities, each with a distinct and advancing timestamp so that a
     // gate keyed on _max_ts alone would not hold. None can be indexed: the
     // window is an hour, so nothing has expired.
     constexpr size_t admitted = 500;
     for (size_t i = 0; i < admitted; ++i) {
+        const auto before = f.sweep_visits();
         const auto stamp = ts(1000 + static_cast<int64_t>(i));
         ASSERT_TRUE(f.filter(make_batch(fmt::format("new-{}", i), "v", stamp))
                       .has_value());
+        ASSERT_LE(f.sweep_visits() - before, visit_bound)
+          << "record " << i << " swept more than its budget";
     }
     EXPECT_EQ(f.unindexed_records(), admitted);
     EXPECT_EQ(f.map_size(), cap);
-    // The refusal is re-derived at most a couple of times, not once per
-    // record. One sweep establishes it; maybe_evict()'s own cadence may clear
-    // the way for another.
-    EXPECT_LE(f.capacity_sweeps() - sweeps_before, 2u)
-      << "re-swept the whole index per record";
 
     // Coverage is unchanged: the entries that were indexed still match, and
     // the ones that were not still do not.
     EXPECT_FALSE(f.filter(make_batch("id-0", "dup", ts(1500))).has_value());
     EXPECT_TRUE(f.filter(make_batch("new-0", "again", ts(1500))).has_value());
 
-    // Once a record arrives far enough ahead for the expiry cutoff to reach
-    // the indexed entries, the sweep runs again and the index recovers -- the
-    // refusal is remembered, not permanent.
-    const auto sweeps_while_saturated = f.capacity_sweeps();
+    // Saturation is not permanent: once a record arrives far enough ahead for
+    // the expiry cutoff to reach the indexed entries, the cursor frees them on
+    // its next few steps.
     ASSERT_TRUE(
       f.filter(make_batch("later", "v", shift(ts(1000), 2h))).has_value());
-    EXPECT_GT(f.capacity_sweeps(), sweeps_while_saturated);
     EXPECT_LT(f.map_size(), cap);
+}
+
+// The same bound, stated against index size rather than saturation: the point
+// of the cursor is that per-call cost does not grow with the index. A full
+// pass over 200k entries would stall a reactor; at the production ceiling it
+// stalled every replica at the same log position and left no one free to
+// complete an acks=all quorum.
+TEST(DedupWindowFilter, SweepWorkDoesNotGrowWithIndexSize) {
+    cluster::dedup_window_filter f(1h, 1'000'000);
+
+    // A single timestamp for every entry inside an hour-long window: nothing
+    // is ever expirable, and the index stays far below its soft limit, so the
+    // cursor only ever surveys.
+    constexpr size_t seeded = 200'000;
+    for (size_t i = 0; i < seeded; ++i) {
+        f.populate(iobuf::from(fmt::format("seed-{}", i)), ts(1000));
+    }
+    ASSERT_EQ(f.map_size(), seeded);
+
+    for (size_t i = 0; i < 2000; ++i) {
+        const auto before = f.sweep_visits();
+        f.populate(iobuf::from(fmt::format("extra-{}", i)), ts(1000));
+        ASSERT_LE(f.sweep_visits() - before, 8u)
+          << "insertion " << i << " swept more than one budget";
+    }
+
+    // An already-indexed identity does no sweeping at all: it never reaches
+    // the cursor.
+    const auto before = f.sweep_visits();
+    ASSERT_FALSE(f.filter(make_batch("seed-0", "dup", ts(1000))).has_value());
+    EXPECT_EQ(f.sweep_visits(), before);
+}
+
+// Expiry is spread across insertions rather than done in one pass, so what
+// matters is that it still completes: a backlog of expired entries has to
+// drain under ordinary ingestion, not wait for a sweep that never comes.
+TEST(DedupWindowFilter, ExpiredEntriesDrainIncrementally) {
+    constexpr size_t stale = 500;
+    cluster::dedup_window_filter f(1000ms);
+    for (size_t i = 0; i < stale; ++i) {
+        f.populate(iobuf::from(fmt::format("stale-{}", i)), ts(0));
+    }
+    ASSERT_EQ(f.map_size(), stale);
+
+    // Every one of these is past the window of every entry above, so the whole
+    // seeded set is expired from the first of them onwards.
+    for (size_t i = 0; i < stale; ++i) {
+        f.populate(iobuf::from(fmt::format("fresh-{}", i)), ts(5000));
+    }
+    // Only the fresh identities are left, and no single call did the work.
+    EXPECT_EQ(f.map_size(), stale);
+    for (size_t i = 0; i < stale; ++i) {
+        EXPECT_FALSE(
+          f.filter(make_batch(fmt::format("fresh-{}", i), "v", ts(5000)))
+            .has_value());
+    }
+    EXPECT_TRUE(f.filter(make_batch("stale-0", "v", ts(5000))).has_value());
+}
+
+// The index is a deterministic function of the log, which means the leader's
+// classification path and the follower's apply path must agree entry for
+// entry -- including which live entries capacity trimming drops, since those
+// are dedup decisions for every record that follows. The cursor made this
+// sharper than it was: sweep position is part of the state, so the two paths
+// have to sweep at the same point relative to their insert, not merely sweep
+// the same amount.
+TEST(DedupWindowFilter, LeaderAndFollowerPathsConvergeAcrossTheEntryLimit) {
+    constexpr size_t cap = 8;
+    constexpr size_t identities = 60;
+    cluster::dedup_window_filter leader(100s, cap);
+    cluster::dedup_window_filter follower(100s, cap);
+
+    for (size_t i = 0; i < identities; ++i) {
+        const auto key = fmt::format("id-{}", i);
+        const auto stamp = ts(1000 + static_cast<int64_t>(i) * 1500);
+        ASSERT_TRUE(leader.filter(make_batch(key, "v", stamp)).has_value());
+        follower.populate(iobuf::from(key), stamp);
+    }
+
+    // Enough identities past the cap that trimming ran many times over.
+    ASSERT_GT(leader.capacity_evicted_entries(), 0u);
+    // snapshot() emits in the map's dense array order, so this compares the
+    // layout the cursor walks as well as the contents.
+    EXPECT_EQ(leader.snapshot(), follower.snapshot());
+    EXPECT_EQ(leader.max_timestamp(), follower.max_timestamp());
+    EXPECT_EQ(
+      leader.capacity_evicted_entries(), follower.capacity_evicted_entries());
+    EXPECT_EQ(leader.unindexed_records(), follower.unindexed_records());
+    EXPECT_EQ(leader.sweep_visits(), follower.sweep_visits());
+}
+
+// A cursor position and a half-built histogram describe one particular value
+// array. Both are reset when the array is replaced, rather than carried into a
+// map they no longer refer to.
+TEST(DedupWindowFilter, RestoreAndClearResetTheSweepCursor) {
+    cluster::dedup_window_filter f(1000ms);
+    for (size_t i = 0; i < 300; ++i) {
+        f.populate(iobuf::from(fmt::format("s-{}", i)), ts(0));
+    }
+    ASSERT_EQ(f.map_size(), 300u);
+
+    // Restoring leaves the cursor at the start, so the insertion afterwards
+    // sweeps one full budget from entry zero -- every one of those entries is
+    // now expired, so exactly the budget is freed, and the new identity takes
+    // one slot back. A cursor carried over would instead spend the call
+    // wrapping, and a stale histogram would describe entries that are gone.
+    f.restore(f.snapshot());
+    f.populate(iobuf::from("fresh"), ts(5000));
+    EXPECT_EQ(f.map_size(), 300u - 8u + 1u) << "cursor did not restart at zero";
+
+    f.clear();
+    EXPECT_EQ(f.map_size(), 0u);
+    EXPECT_EQ(f.max_timestamp(), model::timestamp::min());
+    // The cursor is back at zero over an empty array, and the next insertion
+    // behaves like the filter's first.
+    f.populate(iobuf::from("after-clear"), ts(1000));
+    EXPECT_EQ(f.map_size(), 1u);
+    EXPECT_FALSE(
+      f.filter(make_batch("after-clear", "dup", ts(1000))).has_value());
 }
 
 // A record timestamped in the future must not evict entries that a later,
@@ -837,15 +950,13 @@ TEST(DedupWindowFilter, EntryLimitReopensAfterAnEvictionSweep) {
     f.populate(iobuf::from("stale-b"), ts(0));
     ASSERT_EQ(f.map_size(), 2u);
 
-    // Arrange for this attempted insertion to trigger the normal amortized
-    // sweep. Both old entries expire before the capacity check, so the new
-    // identity can be indexed without exceeding the hard limit.
-    auto snapshot = f.snapshot();
-    snapshot.inserts_since_evict = 9'999;
-    f.restore(snapshot);
+    // The index is full, but both entries expire the moment this timestamp
+    // advances the watermark, and the cursor runs before the capacity check --
+    // so the new identity is indexed rather than admitted unremembered.
     f.populate(iobuf::from("fresh"), ts(5000));
 
     ASSERT_EQ(f.map_size(), 1u);
+    EXPECT_EQ(f.unindexed_records(), 0u);
     EXPECT_FALSE(
       f.filter(make_batch("fresh", "duplicate", ts(5000))).has_value());
 }
@@ -1101,44 +1212,31 @@ TEST(DedupIdentityDigest, IsPinnedForSnapshotCompatibility) {
     EXPECT_EQ(d.lo, 0x68a86e30b386534dULL);
 }
 
-// --- Eviction interval ---
+// --- Eviction accounting ---
 
-// evict_expired() scans the whole map, so a fixed sweep interval makes the
-// amortized cost per attempt grow linearly with the index. The interval scales
-// with the map instead: at 160k entries it is 20k attempts, so 15k attempts
-// must not have triggered a sweep. Under a fixed 10k interval
-// one would have fired and reset the counter to 5k.
-TEST(DedupWindowFilter, EvictionIntervalScalesWithMapSize) {
-    cluster::dedup_window_filter f(1000ms);
+// _inserts_since_evict no longer gates anything -- the cursor sweeps on every
+// new-identity attempt -- but it is a wire field of the STM snapshot, so it
+// must keep counting for brokers on either side of a rolling upgrade to read
+// each other's snapshots.
+TEST(DedupWindowFilter, NewIdentityAttemptsAreStillCounted) {
+    cluster::dedup_window_filter f(1h, 2);
 
-    constexpr size_t seeded = 160'000;
-    constexpr size_t added = 15'000;
-    // A single timestamp for every entry: nothing is ever evictable, so the
-    // only thing that can change the counter is a sweep firing.
-    for (size_t i = 0; i < seeded; ++i) {
-        f.populate(iobuf::from(fmt::format("seed-{}", i)), ts(1000));
-    }
-    ASSERT_EQ(f.map_size(), seeded);
+    f.populate(iobuf::from("a"), ts(1000));
+    f.populate(iobuf::from("b"), ts(1000));
+    EXPECT_EQ(f.snapshot().inserts_since_evict, 2u);
 
-    auto reset = f.snapshot();
-    reset.inserts_since_evict = 0;
-    f.restore(reset);
+    // An identity already in the index is not an attempt.
+    f.populate(iobuf::from("a"), ts(1100));
+    EXPECT_EQ(f.snapshot().inserts_since_evict, 2u);
 
-    for (size_t i = 0; i < added; ++i) {
-        f.populate(iobuf::from(fmt::format("extra-{}", i)), ts(1000));
-    }
-    ASSERT_EQ(f.map_size(), seeded + added);
-    EXPECT_EQ(f.snapshot().inserts_since_evict, added);
+    // One the ceiling leaves unindexed is: the cursor advanced for it, so the
+    // count has to reflect that or it would stall while saturated.
+    f.populate(iobuf::from("c"), ts(1000));
+    ASSERT_EQ(f.unindexed_records(), 1u);
+    EXPECT_EQ(f.snapshot().inserts_since_evict, 3u);
 
-    // The other half of the property: the sweep must still fire once the
-    // scaled interval is crossed, or an interval that had effectively become
-    // infinite would pass the check above. The counter can only fall below
-    // where it already stood by being reset, which only evict_expired() does.
-    constexpr size_t past_the_interval = 10'000;
-    for (size_t i = 0; i < past_the_interval; ++i) {
-        f.populate(iobuf::from(fmt::format("more-{}", i)), ts(1000));
-    }
-    EXPECT_LT(f.snapshot().inserts_since_evict, added);
+    f.clear();
+    EXPECT_EQ(f.snapshot().inserts_since_evict, 0u);
 }
 
 // --- Record payload integrity across the sharing rewrite ---

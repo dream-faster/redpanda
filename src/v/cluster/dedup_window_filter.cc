@@ -17,10 +17,8 @@
 #include <seastar/core/lowres_clock.hh>
 
 #include <algorithm>
-#include <array>
 #include <chrono>
 #include <cstddef>
-#include <limits>
 #include <ranges>
 
 namespace cluster {
@@ -71,7 +69,9 @@ dedup_identity_digest dedup_digest_of(const iobuf& identity) {
 dedup_window_filter::dedup_window_filter(
   std::chrono::milliseconds window, size_t max_entries)
   : _window(window)
-  , _max_entries(max_entries) {}
+  , _max_entries(max_entries) {
+    begin_pass();
+}
 
 namespace {
 
@@ -134,20 +134,19 @@ bool dedup_window_filter::is_duplicate(
         return false;
     }
     _max_ts = std::max(_max_ts, ts);
-    // Count the attempted new identity even when the index is full. This keeps
-    // eviction sweeps running at an amortized O(1) rate while saturated, so
-    // advancing timestamps eventually reclaim expired entries and reopen
-    // capacity without scanning the full map for every admitted record.
-    maybe_evict();
-    if (_map.size() >= _max_entries && !make_room_at_capacity()) {
-        // Only reachable when no cutoff could free a bounded slice. The
-        // record is admitted but this identity is not remembered.
+    // Counted even when the ceiling leaves the identity unindexed, so the
+    // cursor keeps advancing while saturated.
+    ++_inserts_since_evict;
+    // Before the insert, not after: a follower's populate() sweeps at the same
+    // point, and capacity trimming is decision-affecting, so the two orders
+    // must match or replicas drift. See populate().
+    sweep_step(sweep_budget);
+    if (_map.size() >= _max_entries && !make_room_for_one()) {
+        // The bounded step found nothing freeable. The record is admitted but
+        // this identity is not remembered.
         ++_unindexed_records;
         return false;
     }
-    // A new entry can be older than anything a previous refusal saw, so that
-    // refusal no longer bounds what a sweep could free.
-    _failed_sweep_oldest.reset();
     _map.emplace(identity, ts);
     if (undo) {
         undo->entries.push_back(
@@ -324,32 +323,15 @@ void dedup_window_filter::populate(const iobuf& key, model::timestamp ts) {
     auto identity = dedup_digest_of(key);
 
     // Followers apply the same capacity rule as the leader does in
-    // is_duplicate(); the two must agree or replicas diverge at the ceiling.
-    // That matters more now than it did under fail-open: capacity eviction
-    // removes entries that could still have matched, so its timing changes
-    // dedup decisions rather than just when memory is released.
+    // is_duplicate(), and they must apply it at the same point. Expiry timing
+    // never changed a dedup decision -- an expired entry cannot match -- but
+    // capacity trimming drops entries that still could, so when the cursor
+    // runs relative to the insert is decision-affecting. Both paths therefore
+    // look the identity up, sweep, and only then insert.
     //
-    // Below the ceiling one try_emplace settles both the new and the existing
-    // identity, so the common case on this -- the busier -- replay path costs
-    // a single probe. The size check comes first so the insert can reach the
-    // limit but never exceed it, which a try_emplace-then-check would.
-    if (_map.size() < _max_entries) {
-        auto [it, inserted] = _map.try_emplace(identity, ts);
-        if (inserted) {
-            // A new entry can be older than anything a previous refusal saw,
-            // so that refusal no longer bounds what a sweep could free.
-            _failed_sweep_oldest.reset();
-            // May erase arbitrary entries, invalidating it; nothing below
-            // touches it.
-            maybe_evict();
-        } else if (ts.value() > it->second.value()) {
-            it->second = ts;
-        }
-        return;
-    }
-
-    // At the ceiling a new identity cannot be indexed until a sweep frees
-    // room, so look up first and only pay for eviction on a miss.
+    // That costs this path the single-probe try_emplace it used to do for a
+    // new identity: a miss is now a find plus an emplace. Determinism between
+    // leader and follower is worth more than the probe.
     auto it = _map.find(identity);
     if (it != _map.end()) {
         if (ts.value() > it->second.value()) {
@@ -357,14 +339,12 @@ void dedup_window_filter::populate(const iobuf& key, model::timestamp ts) {
         }
         return;
     }
-    maybe_evict();
-    if (_map.size() >= _max_entries && !make_room_at_capacity()) {
+    ++_inserts_since_evict;
+    sweep_step(sweep_budget);
+    if (_map.size() >= _max_entries && !make_room_for_one()) {
         ++_unindexed_records;
         return;
     }
-    // A new entry can be older than anything a previous refusal saw, so that
-    // refusal no longer bounds what a sweep could free.
-    _failed_sweep_oldest.reset();
     _map.emplace(identity, ts);
 }
 
@@ -378,121 +358,109 @@ void dedup_window_filter::evict_expired() {
       _map, [cutoff](const auto& kv) { return kv.second.value() < cutoff; });
 }
 
-bool dedup_window_filter::make_room_at_capacity() {
-    // A sweep that frees nothing leaves the index exactly as it found it, and
-    // both passes below take their cutoffs from _max_ts, so that refusal holds
-    // until the expiry cutoff passes the oldest entry the sweep saw. Freeing a
-    // single slot is enough, because the callers only sweep with the index
-    // exactly at the ceiling. Re-deriving the same refusal per record is what
-    // this avoids: every record arriving at a saturated index would otherwise
-    // pay a full erase_if scan plus a full histogram pass, which at the
-    // default ceiling is two million entry visits for nothing.
-    if (
-      _failed_sweep_oldest.has_value()
-      && _max_ts.value() - _window.count() <= _failed_sweep_oldest->value()) {
-        return false;
-    }
-    ++_capacity_sweeps;
+size_t dedup_window_filter::soft_limit() const {
+    // A tenth below the ceiling, and at least one entry below it so a tiny
+    // configured ceiling still leaves the cursor a margin to trim in.
+    return _max_entries
+           - std::max<size_t>(1, _max_entries / capacity_soft_margin_divisor);
+}
 
-    // Expired entries first: they can never match again, so dropping them
-    // costs no coverage at all.
-    evict_expired();
-    _inserts_since_evict = 0;
-    if (_map.size() < _max_entries) {
-        _failed_sweep_oldest.reset();
-        return true;
-    }
+void dedup_window_filter::erase_at(size_t index) {
+    _map.erase(_map.begin() + static_cast<std::ptrdiff_t>(index));
+}
 
-    // Everything left is inside the window, so whatever goes now is coverage
-    // genuinely lost. Losing the oldest slice is far better than the
-    // alternative of admitting every new identity unremembered: dedup keeps
-    // working, with an effective window of roughly max_entries divided by the
-    // new-identity arrival rate, instead of switching off for new identities
-    // until traffic subsides.
-    const size_t target = _map.size() / capacity_evict_divisor;
-    if (target == 0 || _window.count() <= 0) {
-        // Not remembered as a refusal: neither condition depends on the
-        // entries, so there is no timestamp at which a retry becomes
-        // worthwhile. target == 0 needs a ceiling below capacity_evict_divisor
-        // anyway, where "scan the whole index" is a handful of entries.
-        return false;
-    }
+void dedup_window_filter::begin_pass() {
+    _pass_counts.fill(0);
+    _pass_visited = 0;
+    // The frame the pass measures entries against, frozen for its duration:
+    // _max_ts advances while the cursor walks, and buckets shifting underneath
+    // it would describe no single moment. Rounding the width up keeps
+    // offset / width below capacity_evict_buckets for every offset in
+    // [0, span], and dividing rather than scaling avoids the overflow a
+    // multiplying form would risk -- redpanda.dedup.window.ms has no
+    // upper-bound validator.
+    _pass_span = std::max<int64_t>(_window.count(), 0);
+    _pass_lo = _max_ts.value() - _pass_span;
+    _pass_width = _pass_span / static_cast<int64_t>(capacity_evict_buckets - 1)
+                  + 1;
+}
 
-    // evict_expired() just removed everything below _max_ts - _window, so the
-    // surviving timestamps span exactly the window and the histogram needs no
-    // separate pass to find the minimum.
-    //
-    // Bucketing divides rather than scaling: redpanda.dedup.window.ms has no
-    // upper-bound validator, so offset * (buckets - 1) could overflow int64_t
-    // on an absurd window. Rounding the width up keeps offset / width below
-    // capacity_evict_buckets for every offset in [0, span].
-    const int64_t lo = _max_ts.value() - _window.count();
-    const int64_t span = _window.count();
-    const int64_t width = span / (capacity_evict_buckets - 1) + 1;
-    std::array<size_t, capacity_evict_buckets> counts{};
-    int64_t oldest = std::numeric_limits<int64_t>::max();
-    for (const auto& [_, stamp] : _map) {
-        oldest = std::min(oldest, stamp.value());
-        // restore() can clamp _max_ts below an entry's own timestamp, so an
-        // offset outside the window is reachable.
-        const auto offset = std::clamp<int64_t>(stamp.value() - lo, 0, span);
-        ++counts[static_cast<size_t>(offset / width)];
-    }
-
-    // Take whole buckets while they fit under the target, so the cutoff never
-    // removes more than the intended slice.
+void dedup_window_filter::finish_pass() {
+    // Take whole buckets while they stay under the target, so the cutoff never
+    // designates more than the intended quarter. This is the rule the old
+    // whole-map histogram applied, over a pass's worth of entries instead.
+    const size_t target = _pass_visited / capacity_evict_divisor;
     size_t accumulated = 0;
     size_t bucket = 0;
-    while (bucket < counts.size() && accumulated + counts[bucket] <= target) {
-        accumulated += counts[bucket];
+    while (bucket < _pass_counts.size()
+           && accumulated + _pass_counts[bucket] <= target) {
+        accumulated += _pass_counts[bucket];
         ++bucket;
     }
     if (accumulated == 0) {
-        // The oldest bucket alone exceeds the target, which means more than
-        // this slice of the index shares one narrow timestamp range. No
-        // cutoff can drop a smaller piece, and over-evicting would throw away
-        // coverage the caller never asked to lose, so fail open for this
-        // record instead. Needs timestamps far coarser than the window to
-        // happen at all.
-        _failed_sweep_oldest = model::timestamp{oldest};
-        return false;
+        _capacity_cutoff = model::timestamp::min();
+    } else {
+        _capacity_cutoff = model::timestamp{
+          _pass_lo + static_cast<int64_t>(bucket) * _pass_width};
     }
-
-    const int64_t cutoff = lo + static_cast<int64_t>(bucket) * width;
-    const auto before = _map.size();
-    std::erase_if(
-      _map, [cutoff](const auto& kv) { return kv.second.value() < cutoff; });
-    _capacity_evicted_entries += before - _map.size();
-    _failed_sweep_oldest.reset();
-    return _map.size() < _max_entries;
+    begin_pass();
 }
 
-void dedup_window_filter::maybe_evict() {
-    // evict_expired() scans the whole map, so a fixed interval makes the
-    // amortized per-attempt cost grow linearly with the index (at a million
-    // entries and a 10k interval, every attempt pays for ~100 scanned
-    // entries). Scaling the interval with the map keeps that cost flat: a
-    // sweep of N entries happens at most once per N/evict_size_divisor
-    // attempts, i.e. evict_size_divisor scanned entries per attempt.
-    //
-    // The cost is slack, and it is bounded in attempts rather than in
-    // time: a sweep waits for map_size/evict_size_divisor new identities, so
-    // under a sustained arrival rate the map carries about that fraction above
-    // its steady-state working set. A partition that goes idle, or whose
-    // traffic turns into mostly-duplicates, stops attempting new identities
-    // and so stops sweeping -- it holds its expired entries until traffic
-    // resumes.
-    // That was already true of the flat 10k interval; scaling makes the wait
-    // proportionally longer at large indexes. Expired entries can never
-    // change a dedup decision, only occupy space, and both snapshot paths
-    // sweep unconditionally, so a snapshot never carries the slack.
-    const auto interval = std::max(
-      min_evict_interval, _map.size() / evict_size_divisor);
-    if (++_inserts_since_evict < interval) {
-        return;
+void dedup_window_filter::sweep_step(size_t budget) {
+    const int64_t expiry_cutoff = _max_ts.value() - _window.count();
+    const auto soft = soft_limit();
+
+    for (size_t step = 0; step < budget; ++step) {
+        if (_map.empty()) {
+            _sweep_pos = 0;
+            return;
+        }
+        if (_sweep_pos >= _map.size()) {
+            // The cursor reached the end, so the histogram it accumulated now
+            // covers the index: turn it into the next cutoff, and wrap. An
+            // erase elsewhere can also leave the cursor past the end, which
+            // just ends the pass early on a partial histogram -- a soft target
+            // can afford that, and it stays a function of the call sequence.
+            _sweep_pos = 0;
+            finish_pass();
+        }
+        ++_sweep_visits;
+        const auto stamp = _map.values()[_sweep_pos].second;
+        if (stamp.value() < expiry_cutoff) {
+            // Expired: it can never match again, so dropping it costs no
+            // coverage. The cursor does not advance -- the erase moved the
+            // array's last, still unvisited, entry into this slot.
+            erase_at(_sweep_pos);
+            continue;
+        }
+        if (_map.size() >= soft && stamp.value() < _capacity_cutoff.value()) {
+            // Inside the window, so this is coverage genuinely lost. Doing it
+            // here, a few entries at a time from the soft limit upwards, is
+            // what replaced dropping a quarter of the index in one step once
+            // it hit the ceiling.
+            erase_at(_sweep_pos);
+            ++_capacity_evicted_entries;
+            continue;
+        }
+        // restore() can clamp _max_ts below an entry's own timestamp, and the
+        // frame is a pass old, so an offset outside the window is reachable.
+        const auto offset = std::clamp<int64_t>(
+          stamp.value() - _pass_lo, 0, _pass_span);
+        ++_pass_counts[static_cast<size_t>(offset / _pass_width)];
+        ++_pass_visited;
+        ++_sweep_pos;
     }
-    _inserts_since_evict = 0;
-    evict_expired();
+}
+
+bool dedup_window_filter::make_room_for_one() {
+    // One bounded extra step, never a scan. Freeing nothing leaves the caller
+    // to admit the record unindexed, which is the trade the refused whole-map
+    // sweep already made -- but at a cost that no longer depends on how large
+    // the index is. The cursor advances either way, so successive attempts
+    // walk the index and eventually complete a pass, recomputing the cutoff.
+    ++_capacity_sweeps;
+    sweep_step(capacity_emergency_budget);
+    return _map.size() < _max_entries;
 }
 
 dedup_index_snapshot dedup_window_filter::snapshot() const {
@@ -543,7 +511,15 @@ void dedup_window_filter::restore(const dedup_index_snapshot& snapshot) {
     // than needing a dedup_generation bump. Not counted as record skew.
     _max_ts = std::min(snapshot.max_timestamp, broker_now());
     _inserts_since_evict = snapshot.inserts_since_evict;
-    _failed_sweep_oldest.reset();
+    // The cursor indexes the value array it was walking, and the histogram
+    // describes that array's contents; neither survives a different map. Both
+    // are reset rather than persisted: a pass is bounded work that the next
+    // few hundred records redo, and persisting them would put a wire field in
+    // the snapshot that every replica would have to agree on. begin_pass()
+    // runs last because the frame it freezes is read from _max_ts.
+    _sweep_pos = 0;
+    _capacity_cutoff = model::timestamp::min();
+    begin_pass();
 }
 
 void dedup_window_filter::clear() {
@@ -556,7 +532,9 @@ void dedup_window_filter::clear() {
     _map = {};
     _max_ts = model::timestamp::min();
     _inserts_since_evict = 0;
-    _failed_sweep_oldest.reset();
+    _sweep_pos = 0;
+    _capacity_cutoff = model::timestamp::min();
+    begin_pass();
 }
 
 } // namespace cluster
