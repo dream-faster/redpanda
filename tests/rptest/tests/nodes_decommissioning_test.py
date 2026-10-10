@@ -30,7 +30,6 @@ from rptest.services.redpanda import (
     CHAOS_LOG_ALLOW_LIST,
     RESTART_LOG_ALLOW_LIST,
     RedpandaService,
-    SISettings,
 )
 from rptest.services.redpanda_installer import RedpandaInstaller
 from rptest.tests.prealloc_nodes import PreallocNodesTest
@@ -48,14 +47,6 @@ class NodesDecommissioningTest(PreallocNodesTest):
     def __init__(self, test_context):
         self._topic = None
 
-        si_settings = SISettings(
-            test_context=test_context,
-            cloud_storage_max_connections=10,
-            cloud_storage_enable_remote_read=False,
-            cloud_storage_enable_remote_write=False,
-            fast_uploads=True,
-        )
-
         extra_rp_conf = dict(
             enable_cluster_metadata_upload_loop=False,
             retention_local_trim_interval=5_000,
@@ -65,7 +56,6 @@ class NodesDecommissioningTest(PreallocNodesTest):
             test_context=test_context,
             num_brokers=5,
             node_prealloc_count=1,
-            si_settings=si_settings,
             extra_rp_conf=extra_rp_conf,
         )
 
@@ -78,9 +68,7 @@ class NodesDecommissioningTest(PreallocNodesTest):
         # retry on timeout and service unavailable
         return Admin(self.redpanda, retry_codes=[503, 504])
 
-    def _create_topics(
-        self, replication_factors: list[int] = [1, 3], cloud_topic: bool = False
-    ):
+    def _create_topics(self, replication_factors: list[int] = [1, 3]):
         """
         :return: total number of partitions in all topics
         """
@@ -91,9 +79,6 @@ class NodesDecommissioningTest(PreallocNodesTest):
             spec = TopicSpec(
                 partition_count=partitions,
                 replication_factor=random.choice(replication_factors),
-                redpanda_storage_mode=TopicSpec.STORAGE_MODE_CLOUD
-                if cloud_topic
-                else None,
             )
             topics.append(spec)
             total_partitions += partitions
@@ -101,15 +86,7 @@ class NodesDecommissioningTest(PreallocNodesTest):
         for spec in topics:
             config = {
                 "cleanup.policy": "delete",
-                "redpanda.remote.read": "false",
-                "redpanda.remote.write": "false",
             }
-            if spec.redpanda_storage_mode == "cloud":
-                config.update(
-                    {
-                        TopicSpec.PROPERTY_STORAGE_MODE: TopicSpec.STORAGE_MODE_CLOUD,
-                    }
-                )
             rpk = RpkTool(self.redpanda)
             rpk.create_topic(
                 topic=spec.name,
@@ -401,11 +378,8 @@ class NodesDecommissioningTest(PreallocNodesTest):
     @matrix(
         delete_topic=[True, False],
         tick_interval=[5000, 3600000],
-        cloud_topic=[True, False],
     )
-    def test_decommissioning_working_node(
-        self, delete_topic: bool, tick_interval: int, cloud_topic: bool
-    ):
+    def test_decommissioning_working_node(self, delete_topic: bool, tick_interval: int):
         self.start_redpanda()
         self.redpanda.set_cluster_config(
             {
@@ -414,7 +388,7 @@ class NodesDecommissioningTest(PreallocNodesTest):
                 "partition_autobalancing_concurrent_moves": 2,
             }
         )
-        self._create_topics(cloud_topic=cloud_topic)
+        self._create_topics()
 
         self.start_producer()
         self.start_consumer()
@@ -525,10 +499,9 @@ class NodesDecommissioningTest(PreallocNodesTest):
         self.verify()
 
     @cluster(num_nodes=6, log_allow_list=CHAOS_LOG_ALLOW_LIST)
-    @matrix(cloud_topic=[True, False])
-    def test_decommissioning_crashed_node(self, cloud_topic: bool):
+    def test_decommissioning_crashed_node(self):
         self.start_redpanda()
-        self._create_topics(replication_factors=[3], cloud_topic=cloud_topic)
+        self._create_topics(replication_factors=[3])
 
         self.start_producer()
         self.start_consumer()
@@ -551,10 +524,9 @@ class NodesDecommissioningTest(PreallocNodesTest):
         # connections with it
         log_allow_list=RESTART_LOG_ALLOW_LIST,
     )
-    @matrix(cloud_topic=[True, False])
-    def test_decommissioning_cancel_ongoing_movements(self, cloud_topic: bool):
+    def test_decommissioning_cancel_ongoing_movements(self):
         self.start_redpanda()
-        self._create_topics(cloud_topic=cloud_topic)
+        self._create_topics()
 
         self.start_producer()
         self.start_consumer()
@@ -673,10 +645,9 @@ class NodesDecommissioningTest(PreallocNodesTest):
         self.verify()
 
     @cluster(num_nodes=6, log_allow_list=RESTART_LOG_ALLOW_LIST)
-    @matrix(cloud_topic=[True, False])
-    def test_recommissioning_node(self, cloud_topic: bool):
+    def test_recommissioning_node(self):
         self.start_redpanda()
-        self._create_topics(cloud_topic=cloud_topic)
+        self._create_topics()
 
         self.start_producer()
         self.start_consumer()
@@ -705,10 +676,9 @@ class NodesDecommissioningTest(PreallocNodesTest):
         self.verify()
 
     @cluster(num_nodes=6, log_allow_list=RESTART_LOG_ALLOW_LIST)
-    @matrix(cloud_topic=[True, False])
-    def test_recommissioning_node_finishes(self, cloud_topic: bool):
+    def test_recommissioning_node_finishes(self):
         self.start_redpanda()
-        self._create_topics(cloud_topic=cloud_topic)
+        self._create_topics()
 
         self.start_producer()
         self.start_consumer()
@@ -743,10 +713,9 @@ class NodesDecommissioningTest(PreallocNodesTest):
         self.verify()
 
     @cluster(num_nodes=6, log_allow_list=RESTART_LOG_ALLOW_LIST)
-    @matrix(cloud_topic=[True, False])
-    def test_recommissioning_do_not_stop_all_moves_node(self, cloud_topic: bool):
+    def test_recommissioning_do_not_stop_all_moves_node(self):
         self.start_redpanda()
-        self._create_topics(cloud_topic=cloud_topic)
+        self._create_topics()
 
         self.start_producer()
         self.start_consumer()
@@ -796,10 +765,9 @@ class NodesDecommissioningTest(PreallocNodesTest):
         self.verify()
 
     @cluster(num_nodes=6, log_allow_list=RESTART_LOG_ALLOW_LIST)
-    @matrix(cloud_topic=[True, False])
-    def test_recommissioning_one_of_decommissioned_nodes(self, cloud_topic: bool):
+    def test_recommissioning_one_of_decommissioned_nodes(self):
         self.start_redpanda()
-        self._create_topics(cloud_topic=cloud_topic)
+        self._create_topics()
 
         self.start_producer()
         self.start_consumer()
@@ -904,12 +872,12 @@ class NodesDecommissioningTest(PreallocNodesTest):
         self.verify()
 
     @cluster(num_nodes=6, log_allow_list=RESTART_LOG_ALLOW_LIST)
-    @matrix(delete_topic=[True, False], cloud_topic=[True, False])
+    @matrix(delete_topic=[True, False])
     def test_decommissioning_finishes_after_manual_cancellation(
-        self, delete_topic: bool, cloud_topic: bool
+        self, delete_topic: bool
     ):
         self.start_redpanda()
-        self._create_topics(replication_factors=[3], cloud_topic=cloud_topic)
+        self._create_topics(replication_factors=[3])
 
         self.start_producer()
         self.start_consumer()
@@ -945,12 +913,10 @@ class NodesDecommissioningTest(PreallocNodesTest):
             self.verify()
 
     @cluster(num_nodes=6, log_allow_list=RESTART_LOG_ALLOW_LIST)
-    @matrix(node_is_alive=[True, False], cloud_topic=[True, False])
-    def test_flipping_decommission_recommission(
-        self, node_is_alive: bool, cloud_topic: bool
-    ):
+    @matrix(node_is_alive=[True, False])
+    def test_flipping_decommission_recommission(self, node_is_alive: bool):
         self.start_redpanda()
-        self._create_topics(replication_factors=[3], cloud_topic=cloud_topic)
+        self._create_topics(replication_factors=[3])
 
         self.start_producer()
         self.start_consumer()
@@ -1013,11 +979,10 @@ class NodesDecommissioningTest(PreallocNodesTest):
 
     @skip_debug_mode
     @cluster(num_nodes=6, log_allow_list=RESTART_LOG_ALLOW_LIST)
-    @matrix(cloud_topic=[True, False])
-    def test_multiple_decommissions(self, cloud_topic: bool):
+    def test_multiple_decommissions(self):
         self._extra_node_conf = {"empty_seed_starts_cluster": False}
         self.start_redpanda()
-        total_partitions = self._create_topics(cloud_topic=cloud_topic)
+        total_partitions = self._create_topics()
 
         self.start_producer()
         self.start_consumer()
@@ -1066,12 +1031,10 @@ class NodesDecommissioningTest(PreallocNodesTest):
         self.verify()
 
     @cluster(num_nodes=5, log_allow_list=RESTART_LOG_ALLOW_LIST)
-    @matrix(new_bootstrap=[True, False], cloud_topic=[True, False])
-    def test_node_is_not_allowed_to_join_after_restart(
-        self, new_bootstrap: bool, cloud_topic: bool
-    ):
+    @matrix(new_bootstrap=[True, False])
+    def test_node_is_not_allowed_to_join_after_restart(self, new_bootstrap: bool):
         self.start_redpanda(new_bootstrap=new_bootstrap)
-        self._create_topics(cloud_topic=cloud_topic)
+        self._create_topics()
 
         to_decommission = self.redpanda.nodes[-1]
         to_decommission_id = self.redpanda.node_id(to_decommission)
@@ -1386,8 +1349,6 @@ class NodeDecommissionFailureReportingTest(RedpandaTest):
 
 
 class NodeDecommissionSpaceManagementTest(RedpandaTest):
-    segment_upload_interval_sec = 5
-    manifest_upload_interval_sec = 3
     retention_local_trim_interval_ms = 5_000
 
     def __init__(self, test_context, *args, **kwargs):
@@ -1442,8 +1403,7 @@ class NodeDecommissionSpaceManagementTest(RedpandaTest):
 
         # configure and start redpanda
         extra_rp_conf = {
-            "cloud_storage_segment_max_upload_interval_sec": self.segment_upload_interval_sec,
-            "cloud_storage_manifest_max_upload_interval_sec": self.manifest_upload_interval_sec,
+            "log_segment_size": log_segment_size,
             "retention_local_trim_interval": self.retention_local_trim_interval_ms,
             "retention_local_trim_overage_coeff": 1.0,
             "retention_local_target_capacity_bytes": target_size,
@@ -1456,13 +1416,7 @@ class NodeDecommissionSpaceManagementTest(RedpandaTest):
             "segment_fallocation_step": 4096,
         }
 
-        si_settings = SISettings(
-            test_context=self.test_context,
-            log_segment_size=log_segment_size,
-            retention_local_strict=False,
-        )
         self.redpanda.set_extra_rp_conf(extra_rp_conf)
-        self.redpanda.set_si_settings(si_settings)
         self.redpanda.start()
 
         # Sanity check test parameters against the nodes we are running on

@@ -19,7 +19,6 @@ from rptest.services.kgo_verifier_services import (
     KgoVerifierConsumerGroupConsumer,
     KgoVerifierProducer,
 )
-from rptest.services.redpanda import SISettings
 from rptest.tests.prealloc_nodes import PreallocNodesTest
 from rptest.tests.redpanda_test import RedpandaTest
 from rptest.utils.node_operations import FailureInjectorBackgroundThread
@@ -66,16 +65,15 @@ class IdempotencyTest(RedpandaTest):
 
 class IdempotencySnapshotDelivery(PreallocNodesTest):
     def __init__(self, test_context):
-        extra_rp_conf = {"enable_leader_balancer": False}
+        extra_rp_conf = {
+            "enable_leader_balancer": False,
+            "log_segment_size": 1024 * 1024,
+        }
 
-        si_settings = SISettings(
-            test_context, log_segment_size=1024 * 1024, fast_uploads=True
-        )
         super(IdempotencySnapshotDelivery, self).__init__(
             test_context=test_context,
             extra_rp_conf=extra_rp_conf,
             node_prealloc_count=1,
-            si_settings=si_settings,
         )
 
     @cluster(num_nodes=4)
