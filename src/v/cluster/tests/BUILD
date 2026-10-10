@@ -1546,6 +1546,9 @@ redpanda_cc_gtest(
         "legacy_wire_test.cc",
     ],
     deps = [
+        "//src/v/bytes",
+        "//src/v/bytes:iobuf",
+        "@fmt",
         "//src/v/cluster:legacy_wire",
         "//src/v/cluster:topic_configuration",
         "//src/v/cluster:types",

@@ -7,6 +7,8 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0
 
+#include "bytes/bytes.h"
+#include "bytes/iobuf.h"
 #include "cluster/legacy_wire.h"
 #include "cluster/topic_properties.h"
 #include "cluster/types.h"
@@ -18,6 +20,7 @@
 #include "serde/rw/sstring.h"
 #include "serde/rw/tristate_rw.h"
 
+#include <fmt/format.h>
 #include <gtest/gtest.h>
 
 namespace cluster {
@@ -99,6 +102,36 @@ struct stock_topic_properties
     int32_t storage_mode{255};
     std::optional<ss::sstring> schema_registry_context;
 
+    template<typename T>
+    void take_shared_fields_from(const T& live) {
+        compression = live.compression;
+        cleanup_policy_bitflags = live.cleanup_policy_bitflags;
+        compaction_strategy = live.compaction_strategy;
+        timestamp_type = live.timestamp_type;
+        segment_size = live.segment_size;
+        retention_bytes = live.retention_bytes;
+        retention_duration = live.retention_duration;
+        batch_max_bytes = live.batch_max_bytes;
+        retention_local_target_bytes = live.retention_local_target_bytes;
+        retention_local_target_ms = live.retention_local_target_ms;
+        segment_ms = live.segment_ms;
+        initial_retention_local_target_bytes
+          = live.initial_retention_local_target_bytes;
+        initial_retention_local_target_ms
+          = live.initial_retention_local_target_ms;
+        mpx_virtual_cluster_id = live.mpx_virtual_cluster_id;
+        write_caching = live.write_caching;
+        flush_ms = live.flush_ms;
+        flush_bytes = live.flush_bytes;
+        leaders_preference = live.leaders_preference;
+        delete_retention_ms = live.delete_retention_ms;
+        min_cleanable_dirty_ratio = live.min_cleanable_dirty_ratio;
+        min_compaction_lag_ms = live.min_compaction_lag_ms;
+        max_compaction_lag_ms = live.max_compaction_lag_ms;
+        message_timestamp_before_max_ms = live.message_timestamp_before_max_ms;
+        message_timestamp_after_max_ms = live.message_timestamp_after_max_ms;
+    }
+
     auto serde_fields() {
         return std::tie(
           compression,
@@ -153,6 +186,14 @@ struct stock_topic_properties
     }
 };
 
+std::string hex(iobuf b) {
+    std::string out;
+    for (auto c : iobuf_to_bytes(b)) {
+        out += fmt::format("{:02x}", static_cast<uint8_t>(c));
+    }
+    return out;
+}
+
 } // namespace
 
 TEST(legacy_wire, topic_properties_layout_matches_stock) {
@@ -162,11 +203,9 @@ TEST(legacy_wire, topic_properties_layout_matches_stock) {
     live.min_compaction_lag_ms = std::chrono::milliseconds{77};
 
     stock_topic_properties<> stock;
-    stock.retention_bytes = live.retention_bytes;
-    stock.write_caching = live.write_caching;
-    stock.min_compaction_lag_ms = live.min_compaction_lag_ms;
+    stock.take_shared_fields_from(live);
 
-    EXPECT_EQ(serde::to_iobuf(live), serde::to_iobuf(stock));
+    EXPECT_EQ(hex(serde::to_iobuf(live)), hex(serde::to_iobuf(stock)));
 }
 
 TEST(legacy_wire, topic_properties_reads_stock_tiered_and_iceberg_topic) {
