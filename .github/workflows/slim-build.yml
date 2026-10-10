@@ -180,6 +180,32 @@ jobs:
           free -h
           ls -la bazel-bin/src/v/redpanda/redpanda
 
+      # A clean compile says nothing about whether the broker works. Boot it,
+      # round-trip data through the Kafka API, restart on the same data
+      # directory and check the log survived.
+      - name: Build rpk
+        if: ${{ inputs.analysis_only != true }}
+        run: |
+          bazel \
+            --output_base=/mnt/bazel-output \
+            build \
+            --config=release \
+            --repository_cache=/mnt/bazel-repo-cache \
+            --disk_cache=/mnt/bazel-disk-cache \
+            --spawn_strategy=sandboxed,local \
+            --verbose_failures \
+            --lockfile_mode=update \
+            '--local_resources=memory=HOST_RAM*.8' \
+            //src/go/rpk/cmd/rpk
+
+      - name: Smoke test
+        if: ${{ inputs.analysis_only != true }}
+        run: |
+          RPK=$(bazel --output_base=/mnt/bazel-output cquery --config=release \
+                  --lockfile_mode=update --output=files //src/go/rpk/cmd/rpk | head -n1)
+          tools/slim-checks/smoke.sh \
+            bazel-bin/src/v/redpanda/redpanda "$RPK" "$RUNNER_TEMP/smoke"
+
       - name: Trim the disk cache
         if: always()
         run: |
