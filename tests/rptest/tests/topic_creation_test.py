@@ -28,7 +28,6 @@ from rptest.services.cluster import cluster
 from rptest.services.producer_swarm import ProducerSwarm
 from rptest.services.redpanda import (
     ResourceSettings,
-    SISettings,
 )
 from rptest.services.rpk_producer import RpkProducer
 from rptest.tests.cluster_config_test import wait_for_version_sync
@@ -48,16 +47,9 @@ class RapidTopicRecreateTest(RedpandaTest):
         super(RapidTopicRecreateTest, self).__init__(
             test_context=test_context,
             num_brokers=3,
-            si_settings=SISettings(
-                test_context=test_context, skip_end_of_test_scrubbing=True
-            ),
-            extra_rp_conf={
-                "iceberg_enabled": True,  # to create relevant STMs
-            },
         )
         self.rpk = RpkTool(self.redpanda)
         self.topic_name = topic_name()
-        self.cloud_topic_name = topic_name()
 
     def create(self):
         self._current_partitions = random.randint(1, 4)
@@ -71,17 +63,10 @@ class RapidTopicRecreateTest(RedpandaTest):
             partitions=self._current_partitions,
             replicas=replication_factor,
         )
-        self.rpk.create_topic(
-            topic=self.cloud_topic_name,
-            partitions=self._current_partitions,
-            replicas=replication_factor,
-            config={TopicSpec.PROPERTY_STORAGE_MODE: TopicSpec.STORAGE_MODE_CLOUD},
-        )
 
     def delete(self):
         self.logger.info("Deleting topic")
         self.client().delete_topic(self.topic_name)
-        self.client().delete_topic(self.cloud_topic_name)
 
     def add_partitions(self):
         partitions_to_add = random.randint(1, 4)
@@ -90,7 +75,6 @@ class RapidTopicRecreateTest(RedpandaTest):
             f"to {self._current_partitions} existing"
         )
         self.rpk.add_partitions(self.topic_name, partitions_to_add)
-        self.rpk.add_partitions(self.cloud_topic_name, partitions_to_add)
         self._current_partitions += partitions_to_add
 
     @cluster(num_nodes=3)
@@ -120,9 +104,6 @@ class TopicRecreateTest(RedpandaTest):
             test_context=test_context,
             num_brokers=5,
             resource_settings=ResourceSettings(num_cpus=1),
-            si_settings=SISettings(
-                test_context=test_context, skip_end_of_test_scrubbing=True
-            ),
             extra_rp_conf={
                 "auto_create_topics_enabled": False,
                 "max_compacted_log_segment_size": 5 * (2 << 20),
@@ -231,75 +212,6 @@ class TopicRecreateTest(RedpandaTest):
         swarm.stop()
         swarm.wait()
 
-    @cluster(num_nodes=6)
-    def test_cloud_topic_recreation_while_producing(self):
-        """
-        Test that we are able to recreate topic multiple times
-        """
-        self._client = DefaultClient(self.redpanda)
-        rpk = RpkTool(self.redpanda)
-
-        # scaling parameters
-        partition_count = 30
-        producer_count = 10
-
-        topic = topic_name()
-
-        rpk.create_topic(
-            topic=topic,
-            partitions=partition_count,
-            config={TopicSpec.PROPERTY_STORAGE_MODE: TopicSpec.STORAGE_MODE_CLOUD},
-        )
-
-        producer_properties = {
-            "acks": -1,
-            "enable.idempotence": True,
-        }
-
-        swarm = ProducerSwarm(
-            self.test_context,
-            self.redpanda,
-            topic,
-            producer_count,
-            10000000000,
-            log_level="ERROR",
-            properties=producer_properties,
-        )
-        swarm.start()
-
-        def topic_is_healthy():
-            if not swarm.is_alive():
-                swarm.stop()
-                swarm.start()
-            partitions = rpk.describe_topic(topic)
-            hw_offsets = [p.high_watermark for p in partitions]
-            offsets_present = [hw > 0 for hw in hw_offsets]
-            self.logger.debug(f"High watermark offsets: {hw_offsets}")
-            return len(offsets_present) == partition_count and all(offsets_present)
-
-        # Long-lived librdkafka 2.12.1 producers stall after a topic
-        # delete+recreate, so recreate the swarm (fresh client) and wait
-        # for the new topic to be ready each iteration.
-        # See https://github.com/confluentinc/librdkafka/issues/4898
-        for i in range(1, 20):
-            rf = 3 if i % 2 == 0 else 1
-            self.client().delete_topic(topic)
-            rpk.create_topic(
-                topic=topic,
-                partitions=partition_count,
-                replicas=rf,
-                config={TopicSpec.PROPERTY_STORAGE_MODE: TopicSpec.STORAGE_MODE_CLOUD},
-            )
-            self._wait_for_topic_ready(topic, partition_count, rf)
-            swarm.stop()
-            swarm.wait()
-            swarm.start()
-            wait_until(topic_is_healthy, 30, 2, err_msg=f"Topic {topic} health")
-            sleep(5)
-
-        swarm.stop()
-        swarm.wait()
-
 
 class TopicAutocreateTest(RedpandaTest):
     """
@@ -312,7 +224,6 @@ class TopicAutocreateTest(RedpandaTest):
             test_context=test_context,
             num_brokers=1,
             extra_rp_conf={"auto_create_topics_enabled": False},
-            si_settings=SISettings(test_context),
         )
 
         self.kafka_tools = KafkaCliTools(self.redpanda)
@@ -364,24 +275,6 @@ class TopicAutocreateTest(RedpandaTest):
             self.rpk.describe_topic_configs(manual_topic).items()
         )
 
-        # retrieve the cloud storage mode and append it as an extra config, to check it. see issue/13492
-        auto_topic_rpk_cfg.add(
-            (
-                "cloud_storage_mode",
-                self.admin.get_partition_cloud_storage_status(auto_topic, 0)[
-                    "cloud_storage_mode"
-                ],
-            )
-        )
-        manual_topic_rpk_cfg.add(
-            (
-                "cloud_storage_mode",
-                self.admin.get_partition_cloud_storage_status(manual_topic, 0)[
-                    "cloud_storage_mode"
-                ],
-            )
-        )
-
         self.logger.debug(f"{auto_topic=} config={auto_topic_rpk_cfg}")
         self.logger.debug(f"{manual_topic=}, config={manual_topic_rpk_cfg}")
 
@@ -413,20 +306,14 @@ class CreateTopicsTest(RedpandaTest):
         "retention.bytes": lambda: random.randint(1024 * 1024, 1024 * 1024 * 1024),
         "retention.ms": lambda: random.randint(-1, 10000000),
         "max.message.bytes": lambda: random.randint(1024 * 1024, 10 * 1024 * 1024),
-        "redpanda.remote.delete": lambda: "true" if random.randint(0, 1) else "false",
         "segment.ms": lambda: random.choice([-1, random.randint(10000, 10000000)]),
     }
 
     def __init__(self, test_context):
-        si_settings = SISettings(
-            test_context,
-            cloud_storage_max_connections=5,
-            cloud_storage_segment_max_upload_interval_sec=10,
-            log_segment_size=100 * 1024 * 1024,
-        )
-
         super(CreateTopicsTest, self).__init__(
-            test_context=test_context, num_brokers=3, si_settings=si_settings
+            test_context=test_context,
+            num_brokers=3,
+            extra_rp_conf={"log_segment_size": 100 * 1024 * 1024},
         )
 
     @cluster(num_nodes=3)
