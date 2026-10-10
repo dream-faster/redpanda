@@ -85,10 +85,7 @@ void application::configure_admin_server(model::node_id node_id) {
               controller.get()));
           s.add_service(
             std::make_unique<admin::security_service_impl>(
-              create_client(),
-              controller.get(),
-              _kafka_server.ref(),
-              std::ref(metadata_cache)));
+              create_client(), controller.get(), std::ref(metadata_cache)));
       })
       .get();
 }

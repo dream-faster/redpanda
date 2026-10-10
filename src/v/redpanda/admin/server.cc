@@ -1824,12 +1824,6 @@ void config_multi_property_validation(
     if (pbp_err.has_value()) {
         errors[ss::sstring{"partition_balancer_planner"}] = *pbp_err;
     }
-
-    auto oidc_proxy_err = config::validate_oidc_http_proxy_url(updated_config);
-    if (oidc_proxy_err.has_value()) {
-        errors[ss::sstring{updated_config.oidc_http_proxy_url.name()}]
-          = oidc_proxy_err.value();
-    }
 }
 } // namespace
 

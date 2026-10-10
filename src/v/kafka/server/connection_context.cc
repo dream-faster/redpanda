@@ -33,8 +33,6 @@
 #include "model/fundamental.h"
 #include "net/exceptions.h"
 #include "security/authorizer.h"
-#include "security/gssapi_authenticator.h"
-#include "security/oidc_authenticator.h"
 #include "security/plain_authenticator.h"
 #include "security/scram_authenticator.h"
 
@@ -921,12 +919,6 @@ proto::admin::kafka_connection connection_context::to_proto() const {
               .match(
                 security::scram_sha512_authenticator::name,
                 proto::admin::authentication_mechanism::sasl_scram)
-              .match(
-                security::gssapi_authenticator::name,
-                proto::admin::authentication_mechanism::sasl_gssapi)
-              .match(
-                security::oidc::sasl_authenticator::name,
-                proto::admin::authentication_mechanism::sasl_oauthbearer)
               .match(
                 security::plain_authenticator::name,
                 proto::admin::authentication_mechanism::sasl_plain)

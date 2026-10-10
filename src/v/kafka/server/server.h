@@ -34,8 +34,6 @@
 #include "net/server.h"
 #include "security/audit/audit_log_manager.h"
 #include "security/fwd.h"
-#include "security/gssapi_principal_mapper.h"
-#include "security/krb5_configurator.h"
 #include "security/mtls.h"
 #include "utils/ema.h"
 
@@ -77,7 +75,6 @@ public:
       ss::sharded<security::authorizer>&,
       ss::sharded<security::role_store>&,
       ss::sharded<security::audit::audit_log_manager>&,
-      ss::sharded<security::oidc::service>&,
       ss::sharded<cluster::security_frontend>&,
       ss::sharded<cluster::controller_api>&,
       ss::sharded<cluster::tx_gateway_frontend>&,
@@ -158,10 +155,6 @@ public:
         return _audit_mgr.local();
     }
 
-    ss::sharded<security::oidc::service>& oidc_service() {
-        return _oidc_service;
-    }
-
     cluster::security_frontend& security_frontend() {
         return _security_frontend.local();
     }
@@ -186,10 +179,6 @@ public:
 
     kafka::fetch_metadata_cache& get_fetch_metadata_cache() {
         return _fetch_metadata_cache;
-    }
-
-    security::gssapi_principal_mapper& gssapi_principal_mapper() {
-        return _gssapi_principal_mapper;
     }
 
     kafka_probe& kafka_probe() { return *_probe; }
@@ -275,15 +264,12 @@ private:
     ss::sharded<security::authorizer>& _authorizer;
     ss::sharded<security::role_store>& _role_store;
     ss::sharded<security::audit::audit_log_manager>& _audit_mgr;
-    ss::sharded<security::oidc::service>& _oidc_service;
     ss::sharded<cluster::security_frontend>& _security_frontend;
     ss::sharded<cluster::controller_api>& _controller_api;
     ss::sharded<cluster::tx_gateway_frontend>& _tx_gateway_frontend;
     std::optional<qdc_monitor> _qdc_mon;
     kafka::fetch_metadata_cache _fetch_metadata_cache;
     security::tls::principal_mapper _mtls_principal_mapper;
-    security::gssapi_principal_mapper _gssapi_principal_mapper;
-    security::krb5::configurator _krb_configurator;
     ssx::semaphore _memory_fetch_sem;
     fetch_memory_units_manager _fetch_units_manager;
     fetch_read_coalescer _fetch_read_coalescer;

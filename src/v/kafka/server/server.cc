@@ -66,9 +66,7 @@
 #include "security/acl.h"
 #include "security/audit/schemas/iam.h"
 #include "security/errc.h"
-#include "security/gssapi_authenticator.h"
 #include "security/mtls.h"
-#include "security/oidc_authenticator.h"
 #include "security/plain_authenticator.h"
 #include "security/scram_algorithm.h"
 #include "security/scram_authenticator.h"
@@ -147,7 +145,6 @@ server::server(
   ss::sharded<security::authorizer>& authorizer,
   ss::sharded<security::role_store>& role_store,
   ss::sharded<security::audit::audit_log_manager>& audit_mgr,
-  ss::sharded<security::oidc::service>& oidc_service,
   ss::sharded<cluster::security_frontend>& sec_fe,
   ss::sharded<cluster::controller_api>& controller_api,
   ss::sharded<cluster::tx_gateway_frontend>& tx_gateway_frontend,
@@ -183,15 +180,11 @@ server::server(
   , _authorizer(authorizer)
   , _role_store(role_store)
   , _audit_mgr(audit_mgr)
-  , _oidc_service(oidc_service)
   , _security_frontend(sec_fe)
   , _controller_api(controller_api)
   , _tx_gateway_frontend(tx_gateway_frontend)
   , _mtls_principal_mapper(
       config::shard_local_cfg().kafka_mtls_principal_mapping_rules.bind())
-  , _gssapi_principal_mapper(
-      config::shard_local_cfg().sasl_kerberos_principal_mapping.bind())
-  , _krb_configurator(config::shard_local_cfg().sasl_kerberos_config.bind())
   , _memory_fetch_sem(
       static_cast<size_t>(
         cfg->local().max_service_memory_per_core
@@ -768,32 +761,6 @@ ss::future<response_ptr> sasl_handshake_handler::handle(
             ctx.sasl()->set_mechanism(
               std::make_unique<security::plain_authenticator>(
                 ctx.credentials()));
-        }
-    }
-
-    if (config::has_sasl_mechanism(listener, config::gssapi)) {
-        supported_sasl_mechanisms.emplace_back(
-          security::gssapi_authenticator::name);
-
-        if (request.data.mechanism == security::gssapi_authenticator::name) {
-            ctx.sasl()->set_mechanism(
-              std::make_unique<security::gssapi_authenticator>(
-                ctx.connection()->server().thread_worker(),
-                ctx.connection()->server().gssapi_principal_mapper().rules(),
-                config::shard_local_cfg().sasl_kerberos_principal(),
-                config::shard_local_cfg().sasl_kerberos_keytab()));
-        }
-    }
-
-    if (config::has_sasl_mechanism(listener, config::oauthbearer)) {
-        supported_sasl_mechanisms.emplace_back(
-          security::oidc::sasl_authenticator::name);
-
-        if (
-          request.data.mechanism == security::oidc::sasl_authenticator::name) {
-            ctx.sasl()->set_mechanism(
-              std::make_unique<security::oidc::sasl_authenticator>(
-                ctx.connection()->server().oidc_service().local()));
         }
     }
 

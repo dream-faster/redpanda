@@ -37,9 +37,6 @@ std::optional<ss::sstring> validate_sasl_mechanisms_overrides(
 std::optional<ss::sstring>
 validate_http_authn_mechanisms(const std::vector<ss::sstring>& mechanisms);
 
-bool oidc_is_enabled_http();
-bool oidc_is_enabled_kafka();
-
 std::optional<ss::sstring> validate_0_to_1_ratio(const double d);
 
 std::optional<ss::sstring>
@@ -65,8 +62,5 @@ validate_consumer_group_metrics(const std::vector<ss::sstring>& metrics);
 
 std::optional<ss::sstring>
 validate_sane_partition_balancer_timeouts(const configuration& config);
-
-std::optional<ss::sstring>
-validate_oidc_http_proxy_url(const configuration& config);
 
 }; // namespace config

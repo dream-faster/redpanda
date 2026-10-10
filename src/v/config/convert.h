@@ -555,24 +555,4 @@ struct convert<model::kafka_batch_validation_mode> {
     }
 };
 
-template<>
-struct convert<security::oidc::nested_group_behavior> {
-    static Node encode(const security::oidc::nested_group_behavior& rhs) {
-        return Node(fmt::format("{}", rhs));
-    }
-
-    static bool
-    decode(const Node& node, security::oidc::nested_group_behavior& rhs) {
-        static constexpr auto acceptable_values
-          = security::oidc::acceptable_nested_group_behavior_values();
-        auto value = node.as<std::string>();
-        if (!std::ranges::contains(acceptable_values, value)) {
-            return false;
-        }
-        std::istringstream iss(value);
-        iss >> rhs;
-        return true;
-    }
-};
-
 } // namespace YAML

@@ -96,10 +96,6 @@ public:
 
     ss::sharded<security::role_store>& get_role_store() { return _roles; }
 
-    ss::sharded<security::oidc::service>& get_oidc_service() {
-        return _oidc_service;
-    }
-
     ss::sharded<controller_api>& get_api() { return _api; }
 
     ss::sharded<members_frontend>& get_members_frontend() {
@@ -297,7 +293,6 @@ private:
     ss::sharded<security_frontend> _security_frontend;
     ss::sharded<ephemeral_credential_frontend> _ephemeral_credential_frontend;
     ss::sharded<security::authorizer> _authorizer;
-    ss::sharded<security::oidc::service> _oidc_service;
     ss::sharded<raft::group_manager>& _raft_manager;
     ss::sharded<health_monitor_frontend> _hm_frontend; // instance per core
     ss::sharded<health_monitor_backend> _hm_backend;   // single instance

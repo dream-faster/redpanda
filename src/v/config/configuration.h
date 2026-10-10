@@ -311,13 +311,9 @@ struct configuration final : public config_store {
     property<int16_t> id_allocator_log_capacity;
     property<int16_t> id_allocator_batch_size;
     property<bool> enable_sasl;
-    enterprise<property<std::vector<ss::sstring>>> sasl_mechanisms;
-    enterprise<property<std::vector<config::sasl_mechanisms_override>>>
+    property<std::vector<ss::sstring>> sasl_mechanisms;
+    property<std::vector<config::sasl_mechanisms_override>>
       sasl_mechanisms_overrides;
-    property<ss::sstring> sasl_kerberos_config;
-    property<ss::sstring> sasl_kerberos_keytab;
-    property<ss::sstring> sasl_kerberos_principal;
-    property<std::vector<ss::sstring>> sasl_kerberos_principal_mapping;
     bounded_property<std::optional<std::chrono::milliseconds>>
       kafka_sasl_max_reauth_ms;
     property<std::optional<bool>> kafka_enable_authorization;
@@ -526,21 +522,8 @@ struct configuration final : public config_store {
     property<std::optional<std::chrono::seconds>>
       debug_bundle_auto_removal_seconds;
 
-    // oidc authentication
-    property<ss::sstring> oidc_discovery_url;
-    property<std::optional<ss::sstring>> oidc_http_proxy_url;
-    property<std::optional<ss::sstring>> oidc_http_proxy_username;
-    property<std::optional<ss::sstring>> oidc_http_proxy_password;
-    property<ss::sstring> oidc_token_audience;
-    property<std::chrono::seconds> oidc_clock_skew_tolerance;
-    property<ss::sstring> oidc_principal_mapping;
-    property<std::chrono::seconds> oidc_keys_refresh_interval;
-    property<ss::sstring> oidc_group_claim_path;
-
-    enum_property<security::oidc::nested_group_behavior> nested_group_behavior;
-
     // HTTP Authentication
-    enterprise<property<std::vector<ss::sstring>>> http_authentication;
+    property<std::vector<ss::sstring>> http_authentication;
 
     // MPX
     property<bool> enable_mpx_extensions;

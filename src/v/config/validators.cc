@@ -18,7 +18,6 @@
 #include "config/types.h"
 #include "model/namespace.h"
 #include "model/validation.h"
-#include "security/oidc_url_parser.h"
 #include "serde/rw/chrono.h"
 #include "ssx/sformat.h"
 #include "utils/inet_address_wrapper.h"
@@ -118,8 +117,7 @@ std::optional<ss::sstring> validate_sasl_mechanisms_overrides(
 
 std::optional<ss::sstring>
 validate_http_authn_mechanisms(const std::vector<ss::sstring>& mechanisms) {
-    constexpr auto supported = std::to_array<std::string_view>(
-      {"BASIC", "OIDC"});
+    constexpr auto supported = std::to_array<std::string_view>({"BASIC"});
 
     // Validate results
     for (const auto& m : mechanisms) {
@@ -132,14 +130,6 @@ validate_http_authn_mechanisms(const std::vector<ss::sstring>& mechanisms) {
     }
     return std::nullopt;
 }
-
-bool oidc_is_enabled_http() {
-    return std::ranges::any_of(
-      config::shard_local_cfg().http_authentication(),
-      [](const auto& m) { return m == "OIDC"; });
-}
-
-bool oidc_is_enabled_kafka() { return has_sasl_mechanism(oauthbearer); }
 
 std::optional<ss::sstring> validate_0_to_1_ratio(const double d) {
     if (d < 0 || d > 1) {
@@ -333,28 +323,6 @@ validate_sane_partition_balancer_timeouts(const configuration& config) {
           "({})",
           node_availability,
           *maybe_auto_decom_timeout);
-    }
-    return std::nullopt;
-}
-
-std::optional<ss::sstring>
-validate_oidc_http_proxy_url(const config::configuration& config) {
-    // Only https oidc discovery URLs are supported when an HTTP proxy is
-    // configured
-    if (!config.oidc_http_proxy_url().has_value()) {
-        return std::nullopt;
-    }
-    auto discovery = security::oidc::parse_url(config.oidc_discovery_url());
-    if (discovery.has_error()) {
-        // The per-property oidc_discovery_url validator will flag
-        // unparseable URLs; avoid double-reporting.
-        return std::nullopt;
-    }
-    if (discovery.assume_value().scheme != "https") {
-        return fmt::format(
-          "oidc_http_proxy_url requires oidc_discovery_url to use https:// "
-          "(got {})",
-          discovery.assume_value().scheme);
     }
     return std::nullopt;
 }

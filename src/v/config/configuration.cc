@@ -21,7 +21,6 @@
 #include "model/namespace.h"
 #include "net/tls.h"
 #include "security/config.h"
-#include "security/oidc_url_parser.h"
 #include "serde/rw/chrono.h"
 #include "ssx/sformat.h"
 #include "storage/config.h"
@@ -1559,11 +1558,10 @@ configuration::configuration()
       false)
   , sasl_mechanisms(
       *this,
-      is_enterprise_sasl_mechanism,
       "sasl_mechanisms",
       "A list of supported SASL mechanisms, if no override is defined in "
       "`sasl_mechanisms_overrides` for each Kafka listener. Accepted values: "
-      "`SCRAM`, `GSSAPI`, `OAUTHBEARER`, `PLAIN`.  Note that in order to "
+      "`SCRAM`, `PLAIN`.  Note that in order to "
       "enable PLAIN, you must also enable SCRAM.",
       meta{
         .needs_restart = needs_restart::no,
@@ -1573,7 +1571,6 @@ configuration::configuration()
       validate_sasl_mechanisms)
   , sasl_mechanisms_overrides(
       *this,
-      is_enterprise_sasl_mechanisms_override,
       "sasl_mechanisms_overrides",
       "A list of overrides for SASL mechanisms, defined by listener. SASL "
       "mechanisms defined here will replace the ones set in `sasl_mechanisms`. "
@@ -1586,32 +1583,6 @@ configuration::configuration()
       },
       std::vector<sasl_mechanisms_override>{},
       validate_sasl_mechanisms_overrides)
-  , sasl_kerberos_config(
-      *this,
-      "sasl_kerberos_config",
-      "The location of the Kerberos `krb5.conf` file for Redpanda.",
-      {.needs_restart = needs_restart::no, .visibility = visibility::user},
-      "/etc/krb5.conf")
-  , sasl_kerberos_keytab(
-      *this,
-      "sasl_kerberos_keytab",
-      "The location of the Kerberos keytab file for Redpanda.",
-      {.needs_restart = needs_restart::no, .visibility = visibility::user},
-      "/var/lib/redpanda/redpanda.keytab")
-  , sasl_kerberos_principal(
-      *this,
-      "sasl_kerberos_principal",
-      "The primary of the Kerberos Service Principal Name (SPN) for Redpanda.",
-      {.needs_restart = needs_restart::no, .visibility = visibility::user},
-      "redpanda",
-      &validate_non_empty_string_opt)
-  , sasl_kerberos_principal_mapping(
-      *this,
-      "sasl_kerberos_principal_mapping",
-      "Rules for mapping Kerberos principal names to Redpanda user principals.",
-      {.needs_restart = needs_restart::no, .visibility = visibility::user},
-      {"DEFAULT"},
-      security::validate_kerberos_mapping_rules)
   , kafka_sasl_max_reauth_ms(
       *this,
       "kafka_sasl_max_reauth_ms",
@@ -2796,130 +2767,11 @@ configuration::configuration()
       "indefinitely.",
       {.needs_restart = needs_restart::no, .visibility = visibility::user},
       std::nullopt)
-  , oidc_discovery_url(
-      *this,
-      "oidc_discovery_url",
-      "The URL pointing to the well-known discovery endpoint for the OIDC "
-      "provider.",
-      {.needs_restart = needs_restart::no, .visibility = visibility::user},
-      "https://auth.prd.cloud.redpanda.com/.well-known/openid-configuration",
-      [](const auto& v) -> std::optional<ss::sstring> {
-          auto res = security::oidc::parse_url(v);
-          if (res.has_error()) {
-              return res.error().message();
-          }
-          return std::nullopt;
-      })
-  , oidc_http_proxy_url(
-      *this,
-      "oidc_http_proxy_url",
-      "URL of the HTTP forward proxy used for OIDC discovery and JWKS "
-      "fetches. Accepts http://host:port or https://host:port. When "
-      "set, oidc_discovery_url must use https:// — plaintext OIDC "
-      "origins cannot be routed through a forward proxy.",
-      {.needs_restart = needs_restart::no, .visibility = visibility::user},
-      std::nullopt,
-      [](const auto& v) -> std::optional<ss::sstring> {
-          if (!v.has_value()) {
-              return std::nullopt;
-          }
-          auto res = security::oidc::parse_url(*v);
-          if (res.has_error()) {
-              return res.error().message();
-          }
-          return std::nullopt;
-      })
-  , oidc_http_proxy_username(
-      *this,
-      "oidc_http_proxy_username",
-      "Username for HTTP Basic authentication to the OIDC forward proxy "
-      "(oidc_http_proxy_url). Leave unset for an unauthenticated proxy. "
-      "Both username and password must be set for credentials to be sent.",
-      {.needs_restart = needs_restart::no, .visibility = visibility::user},
-      std::nullopt,
-      [](const auto& v) -> std::optional<ss::sstring> {
-          if (!v.has_value()) {
-              return std::nullopt;
-          }
-          if (v->find(':') != ss::sstring::npos) {
-              return "must not contain ':' (RFC 7617)";
-          }
-          if (std::ranges::any_of(*v, absl::ascii_iscntrl)) {
-              return "must not contain control characters";
-          }
-          return std::nullopt;
-      })
-  , oidc_http_proxy_password(
-      *this,
-      "oidc_http_proxy_password",
-      "Password for HTTP Basic authentication to the OIDC forward proxy "
-      "(oidc_http_proxy_url). Leave unset for an unauthenticated proxy. "
-      "Both username and password must be set for credentials to be sent.",
-      {.needs_restart = needs_restart::no,
-       .visibility = visibility::user,
-       .secret = is_secret::yes},
-      std::nullopt,
-      [](const auto& v) -> std::optional<ss::sstring> {
-          if (!v.has_value()) {
-              return std::nullopt;
-          }
-          if (std::ranges::any_of(*v, absl::ascii_iscntrl)) {
-              return "must not contain control characters";
-          }
-          return std::nullopt;
-      })
-  , oidc_token_audience(
-      *this,
-      "oidc_token_audience",
-      "A string representing the intended recipient of the token.",
-      {.needs_restart = needs_restart::no, .visibility = visibility::user},
-      "redpanda")
-  , oidc_clock_skew_tolerance(
-      *this,
-      "oidc_clock_skew_tolerance",
-      "The amount of time (in seconds) to allow for when validating the expiry "
-      "claim in the token.",
-      {.needs_restart = needs_restart::no, .visibility = visibility::user},
-      std::chrono::seconds{} * 30)
-  , oidc_principal_mapping(
-      *this,
-      "oidc_principal_mapping",
-      "Rule for mapping JWT payload claim to a Redpanda user principal.",
-      {.needs_restart = needs_restart::no, .visibility = visibility::user},
-      "$.sub",
-      security::oidc::validate_principal_mapping_rule)
-  , oidc_keys_refresh_interval(
-      *this,
-      "oidc_keys_refresh_interval",
-      "The frequency of refreshing the JSON Web Keys (JWKS) used to validate "
-      "access tokens.",
-      {.needs_restart = needs_restart::no, .visibility = visibility::user},
-      1h)
-  , oidc_group_claim_path(
-      *this,
-      "oidc_group_claim_path",
-      "JSON path to extract groups from the JWT payload.",
-      {.needs_restart = needs_restart::no, .visibility = visibility::user},
-      "$.groups",
-      security::oidc::validate_group_claim_path)
-  , nested_group_behavior(
-      *this,
-      "nested_group_behavior",
-      "Behavior for handling nested groups when extracting groups from "
-      "authentication tokens.  Two options are available - none and suffix.  "
-      "With none, the group is left alone (e.g. '/group/child/grandchild').  "
-      "Suffix will extract the final component from the nested group (e.g. "
-      "'/group' -> 'group' and '/group/child/grandchild' -> 'grandchild').",
-      {.needs_restart = needs_restart::no, .visibility = visibility::user},
-      security::oidc::nested_group_behavior::none,
-      {security::oidc::nested_group_behavior::none,
-       security::oidc::nested_group_behavior::suffix})
   , http_authentication(
       *this,
-      "OIDC",
       "http_authentication",
       "A list of supported HTTP authentication mechanisms. Accepted Values: "
-      "`BASIC`, `OIDC`",
+      "`BASIC`",
       meta{
         .needs_restart = needs_restart::no,
         .visibility = visibility::user,

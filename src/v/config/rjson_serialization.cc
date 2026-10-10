@@ -275,10 +275,4 @@ void rjson_serialize(
     stringize(w, m);
 }
 
-void rjson_serialize(
-  json::Writer<json::StringBuffer>& w,
-  security::oidc::nested_group_behavior ngb) {
-    stringize(w, ngb);
-}
-
 } // namespace json

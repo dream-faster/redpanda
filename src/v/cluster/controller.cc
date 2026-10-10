@@ -66,7 +66,6 @@
 #include "security/authorizer.h"
 #include "security/credential_store.h"
 #include "security/ephemeral_credential_store.h"
-#include "security/oidc_service.h"
 #include "security/role_store.h"
 #include "ssx/future-util.h"
 
@@ -141,52 +140,6 @@ ss::future<> controller::wire_up() {
             ss::sharded_parameter(
               []() { return config::shard_local_cfg().superusers.bind(); }),
             ss::sharded_parameter([this] { return &_roles.local(); }));
-      })
-      .then([this] {
-          return _oidc_service.start(
-            ss::sharded_parameter(
-              [] { return config::shard_local_cfg().sasl_mechanisms.bind(); }),
-            ss::sharded_parameter([] {
-                return config::shard_local_cfg()
-                  .sasl_mechanisms_overrides.bind();
-            }),
-            ss::sharded_parameter([] {
-                return config::shard_local_cfg().http_authentication.bind();
-            }),
-            ss::sharded_parameter([] {
-                return config::shard_local_cfg().oidc_discovery_url.bind();
-            }),
-            ss::sharded_parameter([] {
-                return config::shard_local_cfg().oidc_http_proxy_url.bind();
-            }),
-            ss::sharded_parameter([] {
-                return config::shard_local_cfg()
-                  .oidc_http_proxy_username.bind();
-            }),
-            ss::sharded_parameter([] {
-                return config::shard_local_cfg()
-                  .oidc_http_proxy_password.bind();
-            }),
-            ss::sharded_parameter([] {
-                return config::shard_local_cfg().oidc_token_audience.bind();
-            }),
-            ss::sharded_parameter([] {
-                return config::shard_local_cfg()
-                  .oidc_clock_skew_tolerance.bind();
-            }),
-            ss::sharded_parameter([] {
-                return config::shard_local_cfg().oidc_principal_mapping.bind();
-            }),
-            ss::sharded_parameter([] {
-                return config::shard_local_cfg()
-                  .oidc_keys_refresh_interval.bind();
-            }),
-            ss::sharded_parameter([] {
-                return config::shard_local_cfg().oidc_group_claim_path.bind();
-            }),
-            ss::sharded_parameter([] {
-                return config::shard_local_cfg().nested_group_behavior.bind();
-            }));
       })
       .then(
         [this] { return _tp_state.start(config::node().node_id().value()); })
@@ -606,8 +559,6 @@ ss::future<> controller::start(
         []() { return config::shard_local_cfg().alive_timeout_ms.bind(); }));
     co_await _hm_frontend.invoke_on_all(&health_monitor_frontend::start);
 
-    co_await _oidc_service.invoke_on_all(&security::oidc::service::start);
-
     co_await _feature_manager.invoke_on(
       feature_manager::backend_shard,
       &feature_manager::start,
@@ -754,7 +705,6 @@ ss::future<> controller::stop() {
     co_await _config_frontend.stop();
     co_await _feature_backend.stop();
     co_await _bootstrap_backend.stop();
-    co_await _oidc_service.stop();
     co_await _authorizer.stop();
     co_await _ephemeral_credentials.stop();
     co_await _roles.stop();

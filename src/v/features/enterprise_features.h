@@ -24,8 +24,6 @@ enum class license_required_feature {
     audit_logging,
     partition_auto_balancing_continuous,
     core_balancing_continuous,
-    gssapi,
-    oidc,
     rbac,
     fips,
     leadership_pinning,
@@ -40,10 +38,6 @@ inline fmt::iterator format_to(license_required_feature f, fmt::iterator out) {
         return fmt::format_to(out, "partition_auto_balancing_continuous");
     case license_required_feature::core_balancing_continuous:
         return fmt::format_to(out, "core_balancing_continuous");
-    case license_required_feature::gssapi:
-        return fmt::format_to(out, "gssapi");
-    case license_required_feature::oidc:
-        return fmt::format_to(out, "oidc");
     case license_required_feature::rbac:
         return fmt::format_to(out, "rbac");
     case license_required_feature::fips:
@@ -78,10 +72,6 @@ public:
     // | Cluster     | `cloud_storage_enabled`         | `true`        |
     // | Cluster     | `partition_auto_balancing_mode` | `continuous`  |
     // | Cluster     | `core_balancing_continous`      | `true`        |
-    // | Cluster     | `sasl_mechanisms`               | `GSSAPI`      |
-    // | Cluster     | `sasl_mechanisms`               | `OAUTHBEARER` |
-    // | Cluster     | `http_authentication`           | `OIDC`        |
-
     // | Cluster     | `delete_topic_enable`           | `false`       |
     // | Node        | `fips_mode`                     | `enabled`     |
     // | Node        | `fips_mode`                     | `permissive`  |

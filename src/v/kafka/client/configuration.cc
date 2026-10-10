@@ -12,7 +12,6 @@
 #include "base/units.h"
 #include "config/configuration.h"
 #include "kafka/client/logger.h"
-#include "security/oidc_authenticator.h"
 #include "security/scram_authenticator.h"
 
 namespace kafka::client {
@@ -216,13 +215,12 @@ void validate_sasl_properties(
   std::string_view password) {
     if (
       mechanism != security::scram_sha256_authenticator::name
-      && mechanism != security::scram_sha512_authenticator::name
-      && mechanism != security::oidc::sasl_authenticator::name) [[unlikely]] {
+      && mechanism != security::scram_sha512_authenticator::name) [[unlikely]] {
         throw std::invalid_argument(
           ss::format(
             "Unknown SASL mechanism: {}, currently Redpanda client only "
             "supports "
-            "SCRAM-256, SCRAM-512 and OAUTHBEARER",
+            "SCRAM-256 and SCRAM-512",
             mechanism));
     }
 

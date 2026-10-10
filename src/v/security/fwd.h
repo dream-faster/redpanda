@@ -24,17 +24,6 @@ class role_member_view;
 class role_store;
 class scram_credential;
 
-namespace oidc {
-
-class group_claim_policy;
-class jws;
-class jwt;
-class service;
-class principal_mapping_rule;
-class verifier;
-
-} // namespace oidc
-
 namespace audit {
 
 class audit_log_manager;

@@ -16,7 +16,6 @@
 #include "config/configuration.h"
 #include "seastar/http/exception.hh"
 #include "security/credential_store.h"
-#include "security/oidc_authenticator.h"
 #include "security/scram_authenticator.h"
 #include "security/types.h"
 
@@ -158,32 +157,6 @@ request_auth_result request_authenticator::do_authenticate(
                   {});
             }
         }
-    } else if (supports("OIDC") && auth_hdr.starts_with(authz_bearer_prefix)) {
-        // Minimal length: Bearer, a space, 1 or more bytes
-        auto token = auth_hdr.substr(authz_bearer_prefix.length());
-        if (token.empty()) {
-            throw ss::httpd::bad_request_exception(
-              "Malformed Authorization header");
-        }
-        auto auth = security::oidc::authenticator{
-          _controller->get_oidc_service().local()};
-        auto res = auth.authenticate(token);
-        if (res.has_error()) {
-            throw ss::httpd::base_exception(
-              "Unauthorized", ss::http::reply::status_type::unauthorized);
-        }
-        auto principal = res.assume_value().principal.name();
-        const auto& superusers = _superusers();
-        auto found = std::find(superusers.begin(), superusers.end(), principal);
-        bool superuser = (found != superusers.end()) || (!require_auth);
-        vlog(logger.trace, "Authenticated principal {}", principal);
-        vlog(logger.trace, "OIDC groups: {}", res.assume_value().groups);
-        return request_auth_result{
-          security::credential_user{principal},
-          security::credential_password{auth_hdr},
-          security::oidc::sasl_authenticator::name,
-          request_auth_result::superuser{superuser},
-          std::move(res.assume_value()).groups};
     } else if (!auth_hdr.empty()) {
         throw ss::httpd::bad_request_exception(
           "Unsupported Authorization method");

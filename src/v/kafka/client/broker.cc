@@ -14,7 +14,6 @@
 #include "kafka/protocol/sasl_handshake.h"
 #include "net/connection.h"
 #include "random/generators.h"
-#include "security/oidc_authenticator.h"
 #include "security/plain_authenticator.h"
 #include "security/scram_authenticator.h"
 #include "thirdparty/c-ares/ares.h"
@@ -336,7 +335,6 @@ ss::future<> remote_broker::do_authenticate() {
     if (
       mechanism != security::scram_sha256_authenticator::name
       && mechanism != security::scram_sha512_authenticator::name
-      && mechanism != security::oidc::sasl_authenticator::name
       && mechanism != security::plain_authenticator::name) {
         throw broker_error{
           _node_id,
@@ -367,8 +365,6 @@ ss::future<> remote_broker::do_authenticate() {
         co_await do_authenticate_scram256(username, password);
     } else if (mechanism == security::scram_sha512_authenticator::name) {
         co_await do_authenticate_scram512(username, password);
-    } else if (mechanism == security::oidc::sasl_authenticator::name) {
-        co_await do_authenticate_oauthbearer(password);
     } else if (mechanism == security::plain_authenticator::name) {
         co_await do_authenticate_plain(username, password);
     } else {
@@ -526,20 +522,6 @@ ss::future<> remote_broker::do_authenticate_scram512(
   ss::sstring username, ss::sstring password) {
     return do_authenticate_scram<security::scram_sha512>(
       std::move(username), std::move(password));
-}
-
-ss::future<> remote_broker::do_authenticate_oauthbearer(ss::sstring token) {
-    sasl_authenticate_request req;
-    req.data.auth_bytes = bytes::from_string(
-      fmt::format("n,,\1auth={}\1\1", token));
-    auto res = co_await do_dispatch(
-      std::move(req), get_sasl_authenticate_request_version());
-    if (res.data.errored()) {
-        throw broker_error{
-          _node_id,
-          res.data.error_code,
-          res.data.error_message.value_or("<no error message>")};
-    }
 }
 
 ss::future<> remote_broker::do_authenticate_plain(

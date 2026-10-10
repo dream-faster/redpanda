@@ -275,7 +275,6 @@ build:odr-finder --linkopt -Wl,--detect-odr-violations
 build:odr-finder --linkopt -lc++
 build:odr-finder --linkopt -lc++abi
 build:odr-finder --strip never
-build:odr-finder --@krb5//:linker=gold
 
 # =================================
 # clang-tidy

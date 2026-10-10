@@ -40,9 +40,6 @@ class role_store;
 namespace audit {
 class audit_log_manager;
 }
-namespace oidc {
-class service;
-}
 } // namespace security
 
 namespace ssx {
@@ -97,7 +94,6 @@ public:
       seastar::sharded<security::authorizer>&,
       seastar::sharded<security::role_store>&,
       seastar::sharded<security::audit::audit_log_manager>&,
-      seastar::sharded<security::oidc::service>&,
       seastar::sharded<cluster::security_frontend>&,
       seastar::sharded<cluster::controller_api>&,
       seastar::sharded<cluster::tx_gateway_frontend>&,

@@ -112,8 +112,6 @@ public:
         cluster_version original_logical_version{invalid_version};
 
         std::vector<node_metrics> nodes;
-        bool has_kafka_gssapi{false};
-        bool has_oidc{false};
         uint32_t rbac_role_count{0};
         uint32_t unique_group_count{0};
 

@@ -18,8 +18,6 @@ enum class errc {
     success = 0,
     invalid_credentials,
     invalid_scram_state,
-    invalid_gssapi_state,
-    invalid_oidc_state,
 };
 
 struct errc_category final : public std::error_category {
@@ -33,10 +31,6 @@ struct errc_category final : public std::error_category {
             return "security: Invalid credentials";
         case errc::invalid_scram_state:
             return "security: Invalid SCRAM state";
-        case errc::invalid_gssapi_state:
-            return "security: Invalid GSSAPI state";
-        case errc::invalid_oidc_state:
-            return "security: Invalid OAUTHBEARER state";
         }
         return "security: Unknown error";
     }

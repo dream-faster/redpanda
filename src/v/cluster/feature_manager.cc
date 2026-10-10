@@ -239,10 +239,6 @@ features::enterprise_feature_report
 feature_manager::report_enterprise_features() const {
     const auto& cfg = config::shard_local_cfg();
     const auto& node_cfg = config::node();
-    auto has_oidc = []() {
-        return config::oidc_is_enabled_kafka()
-               || config::oidc_is_enabled_http();
-    };
     auto fips_enabled = [&node_cfg]() {
         auto fips_mode = node_cfg.fips_mode();
         return fips_mode == config::fips_mode_flag::permissive
@@ -279,10 +275,6 @@ feature_manager::report_enterprise_features() const {
     report.set(
       features::license_required_feature::core_balancing_continuous,
       cfg.core_balancing_continuous());
-    report.set(
-      features::license_required_feature::gssapi,
-      config::has_sasl_mechanism(config::gssapi));
-    report.set(features::license_required_feature::oidc, has_oidc());
     report.set(features::license_required_feature::rbac, has_non_default_roles);
     report.set(features::license_required_feature::fips, fips_enabled());
     report.set(

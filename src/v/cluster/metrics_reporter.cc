@@ -350,12 +350,6 @@ metrics_reporter::build_metrics_snapshot() {
           return fm.report_enterprise_features();
       });
 
-    snapshot.has_kafka_gssapi = feature_report.test(
-      features::license_required_feature::gssapi);
-
-    snapshot.has_oidc = feature_report.test(
-      features::license_required_feature::oidc);
-
     snapshot.rbac_role_count = _role_store.local().size();
 
     // Count unique groups from both role members and ACL principals
@@ -685,12 +679,6 @@ void rjson_serialize(
         rjson_serialize(w, m);
     }
     w.EndArray();
-    w.Key("has_kafka_gssapi");
-    w.Bool(snapshot.has_kafka_gssapi);
-
-    w.Key("has_oidc");
-    w.Bool(snapshot.has_oidc);
-
     w.Key("rbac_role_count");
     w.Int64(snapshot.rbac_role_count);
 
