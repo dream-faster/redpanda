@@ -84,7 +84,7 @@ struct stock_topic_properties
     std::optional<model::topic_namespace> remote_topic_namespace_override;
     IcebergMode iceberg_mode{};
     MEMBER(leaders_preference);
-    MEMBER(deprecated_cloud_topic_enabled);
+    bool deprecated_cloud_topic_enabled{false};
     MEMBER(delete_retention_ms);
     std::optional<bool> iceberg_delete;
     std::optional<ss::sstring> iceberg_partition_spec;
@@ -160,7 +160,7 @@ iobuf copy(const iobuf& b) { return b.copy(); }
 TEST(legacy_wire, topic_properties_layout_matches_stock) {
     topic_properties live;
     live.retention_bytes = tristate<size_t>{1234};
-    live.write_caching = model::write_caching_mode::on;
+    live.write_caching = model::write_caching_mode::default_false;
     live.min_compaction_lag_ms = std::chrono::milliseconds{77};
 
     stock_topic_properties<> stock;
