@@ -6,10 +6,19 @@ Head at time of writing: `c10e7333fc`.
 Goal: a Redpanda that is only a distributed Kafka broker on local storage,
 with everything else removed.
 
-**Status: it builds.** CI run `32661684896` on `695abfa` completed all 5935
-build actions and linked `//src/v/redpanda:redpanda` — a 1.09 GB binary, 27
-minutes wall clock. It has **not been run**: no broker started, no test
-executed. See *Where it stands* below.
+**Status: it builds, boots and serves.** CI on `1aed61e873` is fully green (27
+checks). That includes a smoke test (`tools/slim-checks/smoke.sh`) that starts
+the broker, creates plain/compacted/retention topics, produces, consumes with a
+consumer group, restarts on the same data directory and checks the log, topic
+configs and group survived. A wire-layout test
+(`//src/v/cluster/tests:legacy_wire_test`) pins `topic_properties` to the stock
+v26.2.x byte layout.
+
+**Not yet proven:** an in-place or rolling upgrade from a real v26.2.x node.
+`tools/slim-checks/upgrade_test.sh` does that (three stock nodes replaced one by
+one with the slim image on the same volumes); it is wired as the `upgrade` job
+of `.github/workflows/docker-build.yml`. Both workflows are manual
+(`workflow_dispatch`); run docker-build once before rolling out.
 
 ---
 
@@ -45,12 +54,19 @@ sharded<feature_table>&)`.
 
 ### Deliberate behaviour changes
 
-- **Wire formats break.** `topic_properties` and `topic_configuration` drop
-  tiered fields from their serde and adl encodings; `incremental_topic_updates`
-  went from 45 to 24 serde fields; `cluster_health_report` drops
-  `bytes_in_cloud_storage`; the controller snapshot drops its
-  `cluster_recovery` and `data_migrations` parts. There is no upgrade path from
-  stock v26.2.x.
+- **Wire and disk formats stay compatible with stock v26.2.x** for anything that
+  does not use a removed feature. serde envelopes are positional, so removed
+  mid-struct fields keep their slot as unused `legacy_*` members
+  (`src/v/cluster/legacy_wire.h`): `topic_properties`,
+  `incremental_topic_updates`, `bootstrap_cluster_cmd_data`, `partition_state`,
+  `partition_status` and the `cluster_health_report` tail. Removed controller
+  snapshot parts (plugins, cluster recovery, data migrations, cluster links, the
+  iceberg/cloud-topic tombstone maps) are written empty and skipped on read.
+  Trailing-only removals (`usage`, `start_test_request`) need nothing.
+  Anything a stock peer wrote for a removed feature is parsed and dropped, so a
+  tiered or Iceberg topic would silently become a plain local one: do not roll
+  this onto a cluster that uses them. Legacy ADL encodings (pre-v23 controller
+  logs) were not restored.
 - `retention.local.target.*` are accepted but inert.
   `maybe_apply_local_storage_overrides` returns early: those knobs bounded the
   on-disk slice of a *tiered* partition, and with no cloud tier the whole log is
@@ -93,23 +109,19 @@ Two things made this take longer than it should have:
 
 ## What is left
 
-1. **Run it.** The binary has never been started. Bring up a broker, create a
-   topic, produce, consume, restart, confirm the log survives. Nothing below
-   matters until this is done, and it is where the real risk now sits — a clean
-   compile says nothing about whether the partition and controller paths still
-   behave after this much was cut out of them.
-2. **Tests do not build.** Analysis covers them, but only
-   `//src/v/redpanda:redpanda` was ever compiled. `bazel build //src/v/...`
-   will surface a fresh crop of errors in test files, which have had far less
-   attention than production code.
-3. **Vestigial config remains.** `cloud_storage_*` cluster properties are gone,
-   but `space_management_enable`, `retention_local_trim_*` and
-   `disk_reservation_percent` survive with nothing reading them — the space
-   manager (`resource_mgmt/storage.cc`) was deleted. Either restore a local
-   space manager or remove the knobs.
-4. **`ducktape` tests under `tests/` were not touched at all** and reference
-   removed features throughout.
-5. `rpk` (`src/go/rpk`) still has commands for the removed subsystems.
+1. **Run the upgrade test** (dispatch `docker-build`). It is the only thing
+   standing between this and a safe rollout.
+2. **Ducktape tests under `tests/rptest` were not touched** (about 160 of 267
+   modules reference removed features) and CI does not run them.
+3. **Vestigial config remains.** `space_management_enable`,
+   `retention_local_trim_*` and `disk_reservation_percent` survive with nothing
+   reading them (the space manager was deleted). Kept so stock cluster config
+   still loads; remove if you prefer.
+4. `rpk`: the registry, shadow, transform, `cluster storage` and
+   `topic describe-storage` commands are gone. `topic produce/consume` still
+   carry schema-registry flags.
+5. MinIO and the `dev_cluster`/PGO tooling that needed it were removed (the
+   pinned MinIO archive 410s upstream).
 
 ---
 
