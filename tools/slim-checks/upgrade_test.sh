@@ -20,9 +20,13 @@ name() { echo "rp-$1"; }
 
 start_node() {
   local id="$1" image="$2" role="$3" extra=()
-  # The slim image runs as 65532, stock as 101: let the new image take over the
-  # volume's owner so the data directory stays writable.
-  extra+=(--user "$(stat -c %u "$WORK/data$id")")
+  # Each image runs as its own user (stock 101, slim 65532), so a rollout has
+  # to hand the data directory to the new image's user first.
+  if [[ "$role" == "slim" ]]; then
+    local uid="${SLIM_UID:-65532}"
+    docker run --rm --user 0 -v "$WORK/data$id:/d" busybox chown -R "$uid:$uid" /d
+    extra+=(--user "$uid")
+  fi
   docker run -d --name "$(name "$id")" --hostname "$(name "$id")" --network "$NET" \
     --label "slim-role=$role" \
     -v "$WORK/data$id:/var/lib/redpanda/data" "${extra[@]}" "$image" \
