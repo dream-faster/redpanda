@@ -92,6 +92,17 @@ wait_healthy() {
   return 1
 }
 
+# expect_config <node> <topic> <config> <value>
+expect_config() {
+  local out
+  out=$(rpk "$1" topic describe "$2" -c 2>&1) || true
+  if ! grep -Eq "^$3[[:space:]]+$4([[:space:]]|\$)" <<<"$out"; then
+    echo "--- topic describe -c $2 as seen from node $1 (wanted $3 = $4)"
+    echo "$out"
+    return 1
+  fi
+}
+
 fail() {
   for id in "${NODES[@]}"; do
     echo "=== node $id log tail"
@@ -176,9 +187,8 @@ for p in 0 1 2 3 4 5; do
 done
 got=$(count 1 after-snapshot 0)
 [[ $got == 50 ]] || fail "after-snapshot has $got/50"
-rpk 0 topic describe plain -c | grep -q 'min.cleanable.dirty.ratio *0.3' ||
-  fail "topic config lost"
-rpk 0 topic describe retained -c | grep -q 'retention.ms *86400000' || fail "retention lost"
+expect_config 0 plain min.cleanable.dirty.ratio 0.3 || fail "topic config lost"
+expect_config 0 retained retention.ms 86400000 || fail "retention lost"
 rpk 2 group describe upgrade-group | grep -q 'upgrade-group' || fail "group lost"
 rpk 1 topic list | grep -q compacted || fail "compacted topic lost"
 rpk 0 cluster config get controller_snapshot_max_age_sec | grep -q '^5$' ||
