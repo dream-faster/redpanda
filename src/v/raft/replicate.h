@@ -90,6 +90,12 @@ struct replicate_result {
     /// This value is used to communicate the term in which the batch was
     /// replicated. It's not used by the Kafka API.
     model::term_id last_term;
+    /// Number of records actually appended by this replicate. A value of -1
+    /// means "unspecified" and callers should fall back to the original
+    /// request's record count. Paths that may drop records before replication
+    /// (e.g. write-path dedup) set this so the produce response can compute
+    /// base_offset from the post-filter count rather than the request count.
+    int32_t replicated_record_count{-1};
 };
 
 struct replicate_stages {

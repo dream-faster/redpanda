@@ -314,6 +314,16 @@ struct iceberg_partition_spec_validator {
     }
 };
 
+struct dedup_key_header_validator {
+    std::optional<ss::sstring>
+    operator()(const ss::sstring& /*raw*/, const ss::sstring& value) {
+        if (value.empty()) {
+            return ss::sstring{"dedup key header name must not be empty"};
+        }
+        return std::nullopt;
+    }
+};
+
 struct schema_registry_context_validator {
     std::optional<ss::sstring> operator()(
       model::topic_namespace_view /*tns*/,

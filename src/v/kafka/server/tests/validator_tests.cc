@@ -79,3 +79,36 @@ BOOST_DATA_TEST_CASE(
       subject_name_strategy_validator::is_valid(no_options, nullptr),
       data.is_valid);
 }
+
+static const auto dedup_key_header_data = std::to_array(
+  {// Property not present: expect success (dedup key header is optional)
+   test_validator_data{{}, true},
+   // Present with a non-empty value: expect success
+   test_validator_data{
+     {{.name = ss::sstring{topic_property_dedup_key_header},
+       .value = ss::sstring{"my-dedup-key"}}},
+     true},
+   // Present but null value: expect success
+   test_validator_data{
+     {{.name = ss::sstring{topic_property_dedup_key_header},
+       .value = std::nullopt}},
+     true},
+   // Present with an empty string: expect failure
+   test_validator_data{
+     {{.name = ss::sstring{topic_property_dedup_key_header},
+       .value = ss::sstring{""}}},
+     false}});
+
+BOOST_DATA_TEST_CASE(
+  test_dedup_key_header_create_validator,
+  bdata::make(dedup_key_header_data),
+  data) {
+    creatable_topic no_options = {
+      .name = model::topic_view{"test_tp"},
+      .num_partitions = 1,
+      .replication_factor = 1,
+      .configs = data.configs};
+    BOOST_REQUIRE_EQUAL(
+      dedup_key_header_create_validator::is_valid(no_options, nullptr),
+      data.is_valid);
+}

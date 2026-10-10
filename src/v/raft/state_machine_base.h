@@ -125,6 +125,21 @@ public:
      */
     virtual stm_initial_recovery_policy get_initial_recovery_policy() const = 0;
 
+    /**
+     * Optional refinement of get_initial_recovery_policy(): a state machine
+     * that needs recovery bounded to a specific starting offset -- rather
+     * than the read_everything (offset 0) / skip_to_end (current tail)
+     * binary choice -- can override this to compute that offset
+     * asynchronously (e.g. via a timestamp-based log lookup). Returning
+     * std::nullopt (the default) defers entirely to
+     * get_initial_recovery_policy().
+     */
+    virtual ss::future<std::optional<model::offset>>
+    get_initial_recovery_start_offset() {
+        return ss::make_ready_future<std::optional<model::offset>>(
+          std::nullopt);
+    }
+
 protected:
     /**
      * Must always be called under apply mutex scope and apply_units argument

@@ -19,6 +19,7 @@
 #include <fmt/format.h>
 
 #include <array>
+#include <memory>
 #include <zstd.h>
 #include <zstd_errors.h>
 
@@ -42,9 +43,14 @@ static thread_local size_t dctx_workspace_size = 0;
 static thread_local std::unique_ptr<char[], ss::free_deleter> dctx_workspace;
 static thread_local ss::temporary_buffer<char> d_buffer;
 
-void stream_zstd::init_workspace(size_t size) {
+// compression workspace
+static thread_local size_t cctx_workspace_size = 0;
+static thread_local std::unique_ptr<char[], ss::free_deleter> cctx_workspace;
+static thread_local size_t cctx_workspace_allocations = 0;
+
+void stream_zstd::init_workspace(size_t decompression_size) {
     if (!dctx_workspace) {
-        dctx_workspace_size = ZSTD_estimateDStreamSize(size);
+        dctx_workspace_size = ZSTD_estimateDStreamSize(decompression_size);
         dctx_workspace = ss::allocate_aligned_buffer<char>(
           dctx_workspace_size, 8); // zstd requires alignment
         vassert(
@@ -53,19 +59,70 @@ void stream_zstd::init_workspace(size_t size) {
           dctx_workspace_size);
         d_buffer = ss::temporary_buffer<char>(64_KiB);
     }
+    if (!cctx_workspace) {
+        // Budgeted for an unknown source size, which is zstd's worst case: the
+        // parameters it derives from a pledged size are never larger than the
+        // ones it picks when the size is unknown, so no call can need more
+        // room than this. That is what makes the workspace a one-off
+        // allocation rather than something zstd resizes underneath us -- see
+        // compressor() below.
+        cctx_workspace_size = ZSTD_estimateCStreamSize(ZSTD_defaultCLevel());
+        cctx_workspace = ss::allocate_aligned_buffer<char>(
+          cctx_workspace_size, 8); // zstd requires alignment
+        vassert(
+          cctx_workspace,
+          "Failed to allocate zstd compression workspace with {} bytes",
+          cctx_workspace_size);
+        ++cctx_workspace_allocations;
+    }
 }
 
-void stream_zstd::reset_compressor() {
-    _compress.reset(ZSTD_createCCtx());
-    if (!_compress) {
-        throw std::bad_alloc{};
-    }
+size_t stream_zstd::compressor_allocations() {
+    return cctx_workspace_allocations;
 }
-stream_zstd::zstd_compress_ctx& stream_zstd::compressor() {
-    if (!_compress) {
-        reset_compressor();
+
+ZSTD_CCtx* stream_zstd::compressor() {
+    if (unlikely(!cctx_workspace)) {
+        /*
+         * As with decompressor() below: startup normally pre-allocates this,
+         * before fragmentation is a problem. Handled here too for things like
+         * tests that don't exercise that startup code path.
+         */
+        init_workspace(2_MiB);
     }
-    return _compress;
+    /*
+     * A context zstd owns the memory for is sized from the data it is given
+     * and resized as that changes: it grows for a larger payload, and after
+     * 128 consecutive compressions that leave it more than three times larger
+     * than needed it is reallocated smaller (ZSTD_WORKSPACETOOLARGE_FACTOR /
+     * _MAXDURATION), only to grow again on the next large payload. Each of
+     * those is a multi-hundred-KiB contiguous request from the shard's heap,
+     * which fails on a fragmented heap while the shard still reports most of
+     * its memory free -- and a failed allocation here aborts the reactor.
+     *
+     * A static context cannot do any of that. zstd never reallocates a
+     * workspace it does not own: it skips the shrink heuristic entirely for a
+     * static context, and returns an error rather than growing one. Since the
+     * workspace is budgeted for zstd's worst-case parameters (see
+     * init_workspace() above) it is never too small either, so re-initialising
+     * it per call costs nothing but a header reset and allocates nothing.
+     *
+     * This mirrors the decompression side, and async_stream_zstd, which have
+     * always used static workspaces.
+     */
+    auto* ctx = ZSTD_initStaticCCtx(cctx_workspace.get(), cctx_workspace_size);
+    vassert(
+      ctx,
+      "Could not initialize static compression context in {} bytes",
+      cctx_workspace_size);
+    // ZSTD_initStaticCCtx() zeroes the context rather than running the
+    // parameter initialiser ZSTD_createCCtx() uses, so unlike a heap-allocated
+    // context it starts with the content-size flag *off* and would emit frames
+    // with no decompressed size in the header. Setting it back restores the
+    // frame bytes a heap-allocated context produces, which do_compress()
+    // relies on below -- see the pledged-size call there.
+    throw_if_error(ZSTD_CCtx_setParameter(ctx, ZSTD_c_contentSizeFlag, 1));
+    return ctx;
 }
 
 ZSTD_DCtx* stream_zstd::decompressor() {
@@ -84,8 +141,7 @@ ZSTD_DCtx* stream_zstd::decompressor() {
 }
 
 iobuf stream_zstd::do_compress(const iobuf& x) {
-    reset_compressor();
-    ZSTD_CCtx* ctx = compressor().get();
+    ZSTD_CCtx* ctx = compressor();
     // NOTE: always enable content size. **decompression** depends on this
     throw_if_error(ZSTD_CCtx_setPledgedSrcSize(ctx, x.size_bytes()));
 

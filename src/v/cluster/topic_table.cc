@@ -1235,6 +1235,10 @@ topic_properties topic_table::update_topic_properties(
     incremental_update(
       updated_properties.schema_registry_context,
       overrides.schema_registry_context);
+    incremental_update(
+      updated_properties.dedup_window_ms, overrides.dedup_window_ms);
+    incremental_update(
+      updated_properties.dedup_key_header, overrides.dedup_key_header);
     return updated_properties;
 }
 
@@ -1269,8 +1273,25 @@ topic_table::apply(update_topic_properties_cmd cmd, model::offset o) {
         });
     }
 
+    const auto& old_properties = tp->second.get_configuration().properties;
     auto updated_properties = update_topic_properties(
-      tp->second.get_configuration().properties, std::move(cmd));
+      old_properties, std::move(cmd));
+    const bool was_enabled
+      = old_properties.dedup_window_ms.has_optional_value();
+    const bool is_enabled
+      = updated_properties.dedup_window_ms.has_optional_value();
+    // A generation bump invalidates persisted dedup state: it is needed not
+    // only when dedup goes from enabled to disabled, but also when the
+    // identity source changes while enabled (key vs. a header, or one header
+    // name vs. another) -- the existing index entries are keyed by the wrong
+    // identity and must not be compared against post-change records.
+    const bool identity_source_changed
+      = is_enabled
+        && old_properties.dedup_key_header
+             != updated_properties.dedup_key_header;
+    if ((was_enabled && !is_enabled) || identity_source_changed) {
+        updated_properties.dedup_generation = o();
+    }
 
     auto& properties = tp->second.get_configuration_properties();
     // no configuration change, no need to generate delta

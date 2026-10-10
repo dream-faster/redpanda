@@ -180,6 +180,7 @@ struct configuration final : public config_store {
     bounded_property<std::chrono::seconds> usage_disk_persistance_interval_sec;
     bounded_property<int16_t> default_num_windows;
     bounded_property<std::chrono::milliseconds> default_window_sec;
+    bounded_property<size_t> dedup_max_entries_per_partition;
     property<std::chrono::milliseconds> quota_manager_gc_sec;
     property<std::optional<ss::sstring>> cluster_id;
     property<bool> disable_metrics;

@@ -164,13 +164,24 @@ partition_produce_stages partition_append(
             try {
                 auto r = f.get();
                 if (r.has_value()) {
+                    // Write-path dedup may drop records before replication, so
+                    // prefer the post-filter count when the replicate result
+                    // reports one (-1 means "unspecified": use the request
+                    // count).
+                    auto appended = r.value().replicated_record_count >= 0
+                                      ? r.value().replicated_record_count
+                                      : num_records;
                     // have to subtract num_of_records - 1 as base_offset
-                    // is inclusive
-                    p.base_offset = model::offset(
-                      r.value().last_offset - (num_records - 1));
+                    // is inclusive. When everything was deduplicated
+                    // (appended == 0) report the current end offset.
+                    p.base_offset = appended > 0
+                                      ? model::offset(
+                                          r.value().last_offset
+                                          - (appended - 1))
+                                      : model::offset(r.value().last_offset);
                     p.log_append_time_ms = log_append_time_ms;
                     p.error_code = error_code::none;
-                    partition.probe().add_records_produced(num_records);
+                    partition.probe().add_records_produced(appended);
                     partition.probe().add_bytes_produced(num_bytes);
                     partition.probe().add_batches_produced(1);
                 } else {

@@ -165,6 +165,11 @@ struct reset_id_allocator_reply
 struct kafka_result {
     kafka::offset last_offset;
     model::term_id last_term;
+    /// Number of records actually appended (see
+    /// raft::replicate_result::replicated_record_count). -1 means
+    /// "unspecified"; set by the write-path dedup filter when records are
+    /// dropped so the produce response reports the correct base_offset.
+    int32_t replicated_record_count{-1};
 };
 struct kafka_stages {
     kafka_stages(ss::future<>, ss::future<result<kafka_result>>);
@@ -664,7 +669,7 @@ struct property_update<tristate<T>>
 struct incremental_topic_updates
   : serde::envelope<
       incremental_topic_updates,
-      serde::version<11>,
+      serde::version<13>,
       serde::compat_version<0>> {
     static constexpr int8_t version_with_data_policy = -1;
     static constexpr int8_t version_with_shadow_indexing = -3;
@@ -759,6 +764,9 @@ struct incremental_topic_updates
     property_update<std::optional<pandaproxy::schema_registry::context>>
       schema_registry_context;
 
+    property_update<tristate<std::chrono::milliseconds>> dedup_window_ms;
+    property_update<std::optional<ss::sstring>> dedup_key_header;
+
     // Not a regular topic property. Used to assign topic UUIDs to pre-25-2
     // topics that were created without one.
     property_update<std::optional<model::topic_id>> topic_id;
@@ -822,7 +830,9 @@ struct incremental_topic_updates
           message_timestamp_after_max_ms,
           remote_label,
           storage_mode,
-          schema_registry_context);
+          schema_registry_context,
+          dedup_window_ms,
+          dedup_key_header);
     }
 
     fmt::iterator format_to(fmt::iterator it) const;

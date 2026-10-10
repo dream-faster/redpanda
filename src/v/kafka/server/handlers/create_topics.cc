@@ -87,7 +87,9 @@ bool is_supported(std::string_view name) {
        topic_property_message_timestamp_before_max_ms,
        topic_property_message_timestamp_after_max_ms,
        topic_property_redpanda_storage_mode,
-       topic_property_redpanda_storage_mode_impl});
+       topic_property_redpanda_storage_mode_impl,
+       topic_property_dedup_window_ms,
+       topic_property_dedup_key_header});
 
     if (
       std::any_of(
@@ -123,7 +125,8 @@ using validators = make_validator_types<
   iceberg_target_lag_ms_validator,
   schema_registry_context_create_validator,
   min_max_compaction_lag_ms_validator,
-  storage_mode_config_validator>;
+  storage_mode_config_validator,
+  dedup_key_header_create_validator>;
 
 static void
 append_topic_configs(request_context& ctx, create_topics_response& response) {

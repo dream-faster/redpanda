@@ -35,7 +35,7 @@ namespace cluster {
  */
 struct topic_properties
   : serde::
-      envelope<topic_properties, serde::version<14>, serde::compat_version<0>> {
+      envelope<topic_properties, serde::version<17>, serde::compat_version<0>> {
     topic_properties() noexcept = default;
     topic_properties(
       std::optional<model::compression> compression,
@@ -247,6 +247,22 @@ struct topic_properties
     model::redpanda_storage_mode storage_mode{
       storage::ntp_config::default_storage_mode};
 
+    // Windowed first-wins deduplication by record key. Applied at produce time
+    // before Raft replication: a record is dropped if its key was already seen
+    // within the window. Idempotent and transactional produce bypass the
+    // filter. Both the empty and disabled tristate states are treated as
+    // "dedup off" by the ntp_config accessor (dedup is not engaged in either
+    // case).
+    tristate<std::chrono::milliseconds> dedup_window_ms{std::nullopt};
+    // Internal generation used to invalidate persisted dedup state after the
+    // property is disabled or the dedup identity source changes. It is not
+    // exposed as a Kafka topic property.
+    int64_t dedup_generation{0};
+    // When set, the dedup identity for a record is the value of its first
+    // header with this name instead of the Kafka record key. Unset preserves
+    // the original key-based behavior.
+    std::optional<ss::sstring> dedup_key_header;
+
     bool is_local_topic() const;
 
     bool is_cloud_topic() const {
@@ -329,7 +345,10 @@ struct topic_properties
           message_timestamp_before_max_ms,
           message_timestamp_after_max_ms,
           storage_mode,
-          schema_registry_context);
+          schema_registry_context,
+          dedup_window_ms,
+          dedup_generation,
+          dedup_key_header);
     }
 
     friend bool

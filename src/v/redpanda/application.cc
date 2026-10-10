@@ -448,9 +448,11 @@ void application::initialize(
     absl::SetMinLogLevel(absl::LogSeverityAtLeast::kInfinity);
 
     /*
-     * allocate per-core zstd decompression workspace and per-core
-     * async_stream_zstd workspaces. it can be several megabytes in size, so
-     * do it before memory becomes fragmented.
+     * allocate the per-core zstd compression and decompression workspaces and
+     * the per-core async_stream_zstd workspaces. each can be several megabytes
+     * in size, so do it before memory becomes fragmented. these workspaces are
+     * never resized, so this is the only time zstd asks for a contiguous block
+     * this large.
      */
     ss::smp::invoke_on_all([] {
         // TODO: remove this when stream_zstd is replaced with

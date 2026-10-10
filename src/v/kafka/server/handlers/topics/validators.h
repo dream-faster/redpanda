@@ -351,6 +351,26 @@ struct iceberg_create_config_validator {
     }
 };
 
+struct dedup_key_header_create_validator {
+    static constexpr const char* error_message
+      = "dedup key header name must not be empty.";
+
+    static constexpr error_code ec = error_code::invalid_config;
+
+    static bool is_valid(const creatable_topic& c, features::feature_table*) {
+        auto it = std::find_if(
+          c.configs.begin(),
+          c.configs.end(),
+          [](const createable_topic_config& cfg) {
+              return cfg.name == topic_property_dedup_key_header;
+          });
+        if (it == c.configs.end() || !it->value.has_value()) {
+            return true;
+        }
+        return !it->value.value().empty();
+    }
+};
+
 struct iceberg_invalid_record_action_validator {
     static constexpr const char* error_message = "Invalid property value.";
 

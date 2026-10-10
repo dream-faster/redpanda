@@ -300,6 +300,27 @@ ss::future<> state_machine_manager::apply_initial_recovery_policy() {
             continue;
         }
         // Stm needs initial recovery
+        if (
+          auto bounded
+          = co_await entry->stm->get_initial_recovery_start_offset();
+          bounded) {
+            vlog(
+              _log.info,
+              "Applying bounded initial recovery offset {} for '{}' state "
+              "machine",
+              *bounded,
+              name);
+            // stm->start() (already run above) restores any surviving local
+            // snapshot, so next() can already be > *bounded here -- e.g. the
+            // initial-recovery snapshot is missing/unreadable while this
+            // STM's own local snapshot survived. set_next() asserts against
+            // moving backward, so clamp exactly like the read_everything/
+            // skip_to_end branches below do.
+            entry->stm->set_next(std::max(*bounded, entry->stm->next()));
+            snapshot->initial_recovery_next_offsets.emplace(
+              name, entry->stm->next());
+            continue;
+        }
         const auto policy = entry->stm->get_initial_recovery_policy();
         vlog(
           _log.info,
