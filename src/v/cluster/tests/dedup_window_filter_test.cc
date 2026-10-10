@@ -573,16 +573,18 @@ TEST(DedupWindowFilter, RebuiltBatchPreservesTimestamp) {
 TEST(DedupWindowFilter, EvictExpiredDropsStaleEntries) {
     cluster::dedup_window_filter f(1000ms);
 
-    // Key "a" seen at t=1000.
-    f.filter(make_batch("a", "v", ts(1000)));
+    // The later timestamp goes in first on purpose. Inserting "a" second
+    // leaves it in the index for evict_expired() to find: the sweep cursor
+    // runs before the insert, so it cannot see an entry that does not exist
+    // yet, whereas inserting "a" first and then advancing the watermark past
+    // its window would have the cursor drop it and leave nothing to test.
+    f.filter(make_batch("b", "v", ts(5000)));
     EXPECT_EQ(f.map_size(), 1u);
 
-    // Key "b" seen at t=5000 advances the reference clock far past "a"'s
-    // window.
-    f.filter(make_batch("b", "v", ts(5000)));
+    f.filter(make_batch("a", "v", ts(1000)));
     EXPECT_EQ(f.map_size(), 2u);
 
-    // "a" (t=1000) is now 4000ms behind t=5000 (> 1000ms window): evicted.
+    // "a" (t=1000) is 4000ms behind t=5000 (> 1000ms window): evicted.
     // "b" (t=5000) is current: retained.
     f.evict_expired();
     EXPECT_EQ(f.map_size(), 1u);
@@ -1825,8 +1827,10 @@ TEST(DedupWindowFilter, SnapshotRoundTripWithManyEntries) {
 
 TEST(DedupWindowFilter, EvictExpiredKeepsInWindowEntries) {
     cluster::dedup_window_filter f(1000ms);
-    f.populate(iobuf::from("old"), ts(1000));
+    // "recent" first so that "old" survives its own insertion and is still
+    // there for evict_expired() to drop; see EvictExpiredDropsStaleEntries.
     f.populate(iobuf::from("recent"), ts(5000));
+    f.populate(iobuf::from("old"), ts(1000));
     ASSERT_EQ(f.map_size(), 2u);
 
     // Cutoff is max_ts - window == 4000, so "old" goes and "recent" stays.
