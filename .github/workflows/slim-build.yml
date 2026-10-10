@@ -185,6 +185,22 @@ jobs:
       # A clean compile says nothing about whether the broker works. Boot it,
       # round-trip data through the Kafka API, restart on the same data
       # directory and check the log survived.
+      - name: Wire-layout tests
+        if: ${{ inputs.analysis_only != true }}
+        run: |
+          bazel \
+            --output_base=/mnt/bazel-output \
+            test \
+            --config=release \
+            --repository_cache=/mnt/bazel-repo-cache \
+            --disk_cache=/mnt/bazel-disk-cache \
+            --spawn_strategy=sandboxed,local \
+            --verbose_failures \
+            --lockfile_mode=update \
+            --test_output=errors \
+            '--local_resources=memory=HOST_RAM*.8' \
+            //src/v/cluster/tests:legacy_wire_test
+
       - name: Build rpk
         if: ${{ inputs.analysis_only != true }}
         run: |
