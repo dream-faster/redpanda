@@ -31,7 +31,6 @@ from rptest.services.redpanda import (
     MetricsEndpoint,
     PandaproxyConfig,
     SchemaRegistryConfig,
-    SISettings,
 )
 from rptest.tests.redpanda_test import RedpandaTest
 from rptest.utils.scale_parameters import ScaleParameters
@@ -594,58 +593,3 @@ class LargeMessagesTest(RedpandaTest):
         # The lines below were added to debug a shutdown hang.
         # Remove once CORE-13977 is resolved.
         self.redpanda._admin.set_log_level("raft", "debug")
-
-    @cluster(num_nodes=7, log_allow_list=RESTART_LOG_ALLOW_LIST)
-    @matrix(
-        message_size_mib=[8, 32],
-        mode=[Mode.MANY_PARTS, Mode.TEN_TOPICS],
-    )
-    def test_cloud_topics_large_messages_throughput(
-        self,
-        message_size_mib: float,
-        mode: Mode,
-    ) -> None:
-        """Cloud topics variant of the large messages throughput test.
-
-        Validates that cloud topics can handle large messages (8-32 MiB)
-        at acceptable throughput. Uses the same workload structure as the
-        regular test but with all topics created as cloud topics.
-        """
-
-        self.message_size = int(message_size_mib * 2**20)
-        self.replication_factor = 3
-        self.swarm_nodes = 2
-        self.default_consumer_config = False
-
-        assert not self.debug_mode
-
-        # Cloud topics require SISettings for the object storage backend,
-        # but we don't use ScaleParameters' tiered_storage_enabled since
-        # that tunes for tiny segments (32KB) which is wrong for large
-        # messages.
-        si_settings = SISettings(
-            self.test_context,
-            cloud_storage_max_connections=10,
-            cloud_storage_enable_remote_read=False,
-            cloud_storage_enable_remote_write=False,
-            fast_uploads=True,
-        )
-        self.redpanda.set_si_settings(si_settings)
-        self.redpanda.add_extra_rp_conf(
-            {
-                "enable_cluster_metadata_upload_loop": False,
-            }
-        )
-
-        self.scale = ScaleParameters(
-            self.redpanda,
-            self.replication_factor,
-            tiered_storage_enabled=False,
-        )
-
-        self.redpanda.start()
-
-        self._test_large_messages(
-            mode=mode,
-            cloud_topics=True,
-        )

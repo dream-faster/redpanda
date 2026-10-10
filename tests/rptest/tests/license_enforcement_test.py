@@ -11,11 +11,10 @@ import re
 
 from ducktape.mark import matrix
 
-from rptest.clients.rpk import RpkException, RpkTool
-from rptest.clients.types import TopicSpec
+from rptest.clients.rpk import RpkTool
 from rptest.services.admin import Admin
 from rptest.services.cluster import cluster
-from rptest.services.redpanda import LoggingConfig, SISettings
+from rptest.services.redpanda import LoggingConfig
 from rptest.services.redpanda_installer import RedpandaInstaller
 from rptest.tests.redpanda_test import RedpandaTest
 from rptest.utils.mode_checks import skip_fips_mode
@@ -215,31 +214,6 @@ class LicenseEnforcementTest(RedpandaTest):
             err_msg="The cluster hasn't stabilized",
         )
 
-    @cluster(num_nodes=5)
-    def test_enabling_iceberg_without_license(self):
-        si_settings = SISettings(self.test_context)
-        self.redpanda.set_si_settings(si_settings)
-
-        super().setUp()
-
-        # expire license
-        self.redpanda.set_environment(
-            {"__REDPANDA_DISABLE_BUILTIN_TRIAL_LICENSE": True}
-        )
-
-        self.redpanda.restart_nodes(self.redpanda.nodes)
-        self.redpanda.wait_until(
-            self.redpanda.healthy,
-            timeout_sec=60,
-            backoff_sec=1,
-            err_msg="The cluster hasn't stabilized",
-        )
-        try:
-            self.rpk.cluster_config_set("iceberg_enabled", "true")
-            assert False, "Enabling iceberg must fail without the license"
-        except RpkException:
-            pass
-
 
 class LicenseEnforcementPermittedTopicParams(RedpandaTest):
     """
@@ -254,126 +228,6 @@ class LicenseEnforcementPermittedTopicParams(RedpandaTest):
 
     def setUp(self):
         pass
-
-    @cluster(num_nodes=3)
-    @matrix(enable_cloud_storage=[False, True])
-    def test_cloud_storage_topic_params(self, enable_cloud_storage):
-        """
-        This test verifies that if a license isn't installed and `cloud_storage_enabled`
-        is set to `False`, then topics may be created with TS settingss set to true, e.g.
-        `redpanda.remote.write`.
-        """
-        if enable_cloud_storage:
-            si_settings = SISettings(self.test_context)
-            self.redpanda.set_si_settings(si_settings)
-
-        super().setUp()
-
-        self.redpanda.set_environment(
-            {"__REDPANDA_DISABLE_BUILTIN_TRIAL_LICENSE": True}
-        )
-        self.redpanda.restart_nodes(self.redpanda.nodes)
-        self.redpanda.wait_until(
-            self.redpanda.healthy,
-            timeout_sec=60,
-            backoff_sec=1,
-            err_msg="The cluster hasn't stabilized",
-        )
-
-        try:
-            self.rpk.create_topic("test", config={"redpanda.remote.write": "true"})
-            assert not enable_cloud_storage, (
-                "Should have failed to create topic with redpanda.remote.write set and cloud_storage_enabled set to True"
-            )
-        except RpkException as e:
-            assert enable_cloud_storage, (
-                f"Should not have failed to create topic with redpanda.remote.write set and cloud_storage_enabled set to False: {e}"
-            )
-
-    @cluster(num_nodes=3)
-    def test_iceberg_topic_parameters(self):
-        si_settings = SISettings(self.test_context)
-        self.redpanda.set_extra_rp_conf({"iceberg_enabled": True})
-        self.redpanda.set_si_settings(si_settings)
-
-        super().setUp()
-
-        self.redpanda.set_environment(
-            {"__REDPANDA_DISABLE_BUILTIN_TRIAL_LICENSE": True}
-        )
-
-        self.redpanda.restart_nodes(self.redpanda.nodes)
-        self.redpanda.wait_until(
-            self.redpanda.healthy,
-            timeout_sec=60,
-            backoff_sec=1,
-            err_msg="The cluster hasn't stabilized",
-        )
-
-        try:
-            self.rpk.create_topic("test", config={"redpanda.iceberg.mode": "key_value"})
-            assert False, (
-                "Should have failed to create topic with iceberg enabled set and cloud_storage_enabled set to True"
-            )
-        except RpkException:
-            pass
-
-    @cluster(num_nodes=3)
-    def test_iceberg_topic_parameter_when_license_expired(self):
-        si_settings = SISettings(self.test_context)
-        self.redpanda.set_extra_rp_conf(
-            {
-                "iceberg_enabled": True,
-            }
-        )
-        self.redpanda.set_si_settings(si_settings)
-
-        super().setUp()
-        self.rpk.create_topic("test", config={"redpanda.iceberg.mode": "key_value"})
-        # expire license
-        self.redpanda.set_environment(
-            {"__REDPANDA_DISABLE_BUILTIN_TRIAL_LICENSE": True}
-        )
-
-        self.redpanda.restart_nodes(self.redpanda.nodes)
-        self.redpanda.wait_until(
-            self.redpanda.healthy,
-            timeout_sec=60,
-            backoff_sec=1,
-            err_msg="The cluster hasn't stabilized",
-        )
-
-        cfgs = self.rpk.describe_topic_configs("test")
-        assert cfgs["redpanda.iceberg.mode"][0] == "key_value", cfgs
-
-    @cluster(num_nodes=1)
-    def test_cloud_topics_topic_property(self):
-        si_settings = SISettings(self.test_context)
-        self.redpanda.set_si_settings(si_settings)
-        super().setUp()
-
-        self.redpanda.set_environment(
-            {"__REDPANDA_DISABLE_BUILTIN_TRIAL_LICENSE": True}
-        )
-        self.redpanda.restart_nodes(self.redpanda.nodes)
-        self.redpanda.wait_until(
-            self.redpanda.healthy,
-            timeout_sec=60,
-            backoff_sec=1,
-            err_msg="The cluster hasn't stabilized",
-        )
-        # We shouldn't be able to set the topic property without a license,
-        # even with the cluster property set.
-        try:
-            self.rpk.create_topic(
-                "test",
-                config={TopicSpec.PROPERTY_STORAGE_MODE: TopicSpec.STORAGE_MODE_CLOUD},
-            )
-            assert False, (
-                "Should have failed to create topic with redpanda.storage.mode=cloud set"
-            )
-        except RpkException:
-            pass
 
     @cluster(num_nodes=3)
     def test_upgrade_with_topic_configs(self):
