@@ -78,6 +78,20 @@ wait_ready() {
   return 1
 }
 
+# Health settles a few seconds after topics are created or nodes rejoin.
+wait_healthy() {
+  local id="$1"
+  for _ in $(seq 1 60); do
+    if rpk "$id" cluster health 2>/dev/null | grep -q 'Healthy:.*true'; then
+      return 0
+    fi
+    sleep 2
+  done
+  echo "--- cluster health as seen from node $id"
+  rpk "$id" cluster health || true
+  return 1
+}
+
 fail() {
   for id in "${NODES[@]}"; do
     echo "=== node $id log tail"
@@ -152,7 +166,7 @@ for id in 2 1 0; do
     fail "produce via node $id"
   got=$(count "$other" "$topic" 0)
   [[ $got == 30 ]] || fail "node $other read $got/30 from $topic"
-  rpk "$id" cluster health | grep -q 'Healthy:.*true' || fail "unhealthy after node $id"
+  wait_healthy "$id" || fail "unhealthy after node $id"
 done
 
 echo "== verifying pre-upgrade data on slim"
