@@ -25,7 +25,6 @@ from rptest.services.redpanda import (
     RESTART_LOG_ALLOW_LIST,
     ClusterNode,
     LoggingConfig,
-    SISettings,
 )
 from rptest.services.redpanda_installer import (
     InstallOptions,
@@ -196,8 +195,9 @@ class QuotaManagementUtils:
     def alter(self, *args: Any, with_retries: bool = False, **kwargs: Any):
         if with_retries:
             wait_until(
-                lambda: self.rpk.alter_cluster_quotas(*args, **kwargs)["status"]
-                == "OK",
+                lambda: (
+                    self.rpk.alter_cluster_quotas(*args, **kwargs)["status"] == "OK"
+                ),
                 timeout_sec=30,
                 backoff_sec=1,
                 err_msg="failed to run rpk.alter_cluster_quotas",
@@ -814,7 +814,6 @@ class QuotaManagementUpgradeTest(EndToEndTest, QuotaManagementUtils):
         install_opts = InstallOptions(version=RedpandaVersionTriple(from_version))
         self.start_redpanda(
             num_nodes=2,
-            si_settings=SISettings(test_context=self.test_context),
             install_opts=install_opts,
         )
 
@@ -888,7 +887,6 @@ class QuotaManagementUpgradeTest(EndToEndTest, QuotaManagementUtils):
         install_opts = InstallOptions(version=RedpandaVersionTriple(from_version))
         self.start_redpanda(
             num_nodes=2,
-            si_settings=SISettings(test_context=self.test_context),
             install_opts=install_opts,
         )
 

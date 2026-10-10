@@ -15,7 +15,7 @@ from rptest.services.admin import Admin
 from rptest.services.cluster import cluster
 from rptest.services.openmessaging_benchmark import OpenMessagingBenchmark
 from rptest.services.openmessaging_benchmark_configs import OMBSampleConfigurations
-from rptest.services.redpanda import LoggingConfig, SISettings
+from rptest.services.redpanda import LoggingConfig
 from rptest.tests.prealloc_nodes import RedpandaTest
 from rptest.utils.mode_checks import skip_debug_mode
 
@@ -31,12 +31,10 @@ ACTUAL_TO_EXPECTED_TPUT_THRESHOLD = 0.9
 
 class ShardPlacementScaleTest(RedpandaTest):
     def __init__(self, ctx, *args, **kwargs):
-        si_settings = SISettings(test_context=ctx)
         super().__init__(
             *args,
             test_context=ctx,
             num_brokers=5,
-            si_settings=si_settings,
             # trace logging kills preformance, so we run with info level.
             log_config=LoggingConfig("info"),
             **kwargs,

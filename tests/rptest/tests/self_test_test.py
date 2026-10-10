@@ -13,7 +13,7 @@ from math import comb
 
 
 from rptest.services.cluster import cluster
-from rptest.services.redpanda import RESTART_LOG_ALLOW_LIST, SISettings
+from rptest.services.redpanda import RESTART_LOG_ALLOW_LIST
 from rptest.tests.end_to_end import EndToEndTest
 from rptest.util import wait_until_result
 from rptest.utils.functional import flat_map
@@ -47,9 +47,7 @@ class SelfTestTest(EndToEndTest):
     def test_self_test(self):
         """Assert the self test starts/completes with success."""
         num_nodes = 3
-        self.start_redpanda(
-            num_nodes=num_nodes, si_settings=SISettings(test_context=self.test_context)
-        )
+        self.start_redpanda(num_nodes=num_nodes)
         self.rpk_client().self_test_start(2000, 2000, 5000, 100)
 
         # Wait for completion
@@ -197,9 +195,7 @@ class SelfTestTest(EndToEndTest):
         with mixed versions of Redpanda."""
         num_nodes = 3
 
-        self.start_redpanda(
-            num_nodes=num_nodes, si_settings=SISettings(test_context=self.test_context)
-        )
+        self.start_redpanda(num_nodes=num_nodes)
 
         # Attempt to run with an unknown test type "pandatest"
         # The rest of the tests should proceed as normal.
