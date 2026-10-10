@@ -103,12 +103,14 @@ Guarantees:
   (unchanged).
 - **G7** — Each partition indexes at most
   `dedup_max_entries_per_partition` distinct identities (one million by
-  default). Once the index reaches that ceiling, previously indexed identities
-  continue to deduplicate, while new identities are admitted without being
-  indexed until an opportunistic eviction sweep frees capacity. This fail-open
-  behavior keeps produce available and bounds both steady-state index memory
-  and future snapshot size even when producer timestamps do not advance or the
-  configured window and identity cardinality are unexpectedly large. Changing
+  default). A sweep cursor advancing a few entries per new identity keeps the
+  index under that ceiling, trimming the oldest entries a completed pass found
+  from a soft limit a tenth below it. Should the index still reach the hard
+  ceiling, one bounded extra step is taken, and if it frees nothing the new
+  identity is admitted without being indexed. This fail-open behavior keeps
+  produce available and bounds both steady-state index memory and future
+  snapshot size even when producer timestamps do not advance or the configured
+  window and identity cardinality are unexpectedly large. Changing
   the cluster property requires a broker restart, and that restart is not
   atomic across the cluster -- mid-rollout, replicas of the same partition
   enforce different ceilings, which the property's own description now spells
@@ -270,13 +272,14 @@ Best-effort boundaries (all bounded by one dedup window, all documented):
 - **B8** — Capacity eviction (G7) makes eviction timing decision-affecting.
   The expired sweep only ever removed entries that could never match again, so
   replicas sweeping at different points were indistinguishable. Dropping the
-  oldest *live* slice is different: a replica that evicts earlier forgets
+  oldest *live* entries is different: a replica that evicts earlier forgets
   identities another replica still remembers, so the two can answer the same
   duplicate differently, including after a failover to an index built purely
-  by `populate()` replay. Both paths apply the identical rule and sweep
-  expired entries before measuring, which keeps their inputs close, and the
-  divergence stays bounded by one slice. It also removes the larger part of
-  the `_inserts_since_evict` divergence it would otherwise have amplified:
+  by `populate()` replay. Both paths run the identical cursor at the identical
+  point relative to their insert, so a replica that saw the same identity
+  sequence reaches the same contents (see B10 for the one exception). It also
+  removes the larger part of the `_inserts_since_evict` divergence it would
+  otherwise have amplified:
   that double count occurred when the leader's `is_duplicate()` bumped the
   counter for a record it then failed open on, and at capacity the leader now
   makes room and indexes the identity instead, so the follower's `populate()`
@@ -302,6 +305,29 @@ Best-effort boundaries (all bounded by one dedup window, all documented):
   check, which the produce handler applies to the compressed request before
   dedup ever sees it.
 
+- **B10** — Bounding the sweep makes the index's dense-array *layout*, and
+  not only its contents, part of what replicas have to agree on. The cursor is a
+  position in that array; the array is laid out by the order identities were
+  inserted and erased, and the map erases by moving its last entry into the
+  freed slot. Replicas applying the same identity sequence lay it out
+  identically, so they sweep identically -- that is the test. The exception is
+  `revert_request()`: it erases entries a follower never inserted, which
+  permutes the leader's array, and the two then sweep set-equal maps in
+  different orders. The consequence is a different choice of *which* live entry
+  capacity trimming drops, which needs the index above its soft limit and is
+  already best-effort under B8, but it is a divergence the whole-index passes
+  this replaced did not have. It is inherent to the bound rather than a
+  shortcoming of this particular cursor: any scheme doing O(1) work per record
+  carries a position in some layout.
+
+  The bound is what the correlated-stall failure mode demands. Sweeps fire at
+  the same log position on every replica, so a full pass over a multi-million
+  entry index stalled the leader's reactor and then every follower's roughly
+  half a second later, leaving nobody free to complete an `acks=all` quorum.
+  Local snapshotting still copies and scans the whole index, but each replica
+  snapshots on its own schedule, so that cost is not correlated across the
+  quorum.
+
 # Design
 
 ## Follower/apply path
@@ -317,13 +343,12 @@ Best-effort boundaries (all bounded by one dedup window, all documented):
 3. `set_window(config window)`.
 4. Decompress if compressed; for each record with a key:
    `populate(key, first_timestamp + timestamp_delta)`. `populate()` never lets
-   the index exceed its hard per-partition entry limit; when full, new
-   identities remain unindexed until a periodic eviction sweep makes room.
+   the index exceed its hard per-partition entry limit; when a bounded step
+   cannot free a slot, the identity remains unindexed.
 
-`populate()` participates in eviction accounting (increments the new-identity
-attempt counter and triggers the opportunistic `evict_expired()` sweep) so
-follower maps stay bounded without a separate mechanism. Attempts continue to
-advance the sweep counter while the entry ceiling is saturated.
+`populate()` advances the same sweep cursor the leader's classification path
+does, at the same point relative to its insert, so follower maps stay bounded
+by the same mechanism and reach the same contents (see B10).
 
 The STM manager already reads every committed batch once and dispatches it to
 all registered STMs (`rm_stm` consumes `raft_data` batches this way), so this
@@ -444,7 +469,14 @@ Unit (`dedup_window_filter_test.cc`):
   mixed batches.
 - `revert_request` restores previous timestamps, erases new keys, and leaves
   keys overwritten by a later request untouched (compare-and-revert).
-- `populate` triggers eviction sweeps across the insert threshold.
+- `populate` advances the sweep cursor on every new-identity attempt, and the
+  per-call sweep cost is bounded regardless of index size -- including when the
+  index is saturated with nothing freeable, which is the case that previously
+  rescanned the whole index per record.
+- Leader (`is_duplicate`) and follower (`populate`) given the same identity
+  sequence end with identical index contents, dense-array layout, and
+  counters, including across the entry ceiling.
+- The sweep cursor and its histogram reset on `restore()` and `clear()`.
 
 STM (`dedup_stm_test.cc`, single-node raft fixture as today):
 

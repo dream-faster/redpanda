@@ -16,7 +16,9 @@
 #include "model/record.h"
 #include "model/timestamp.h"
 
+#include <array>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 
@@ -169,22 +171,29 @@ struct dedup_index_snapshot {
 ///
 /// Memory is bounded three ways. Each entry costs the same regardless of
 /// identity size, because the index stores a dedup_identity_digest rather
-/// than the identity bytes. And entries older than the window (relative to
-/// the most recent timestamp seen) can never cause a drop again and are
-/// swept opportunistically as new identities are inserted; the sweep
-/// interval scales with the index so that scanning it stays amortized O(1)
-/// per insertion. Finally, a hard per-partition entry limit prevents a large
-/// window, high-cardinality traffic, or non-advancing producer timestamps from
-/// exhausting shard memory. Once that limit is reached, the oldest slice of
-/// the index is dropped to make room, so the effective window narrows to
-/// roughly the limit divided by the new-identity arrival rate rather than
-/// dedup switching off for new identities. The "most
-/// recent timestamp seen" is a client-supplied CreateTime with no ordering
-/// guarantee, so every record timestamp is clamped to the broker's clock
-/// before it reaches the index; without that, one future-dated record would
-/// advance the eviction cutoff past the whole index and silently disable
-/// dedup for the partition -- see the log-derived dedup RFC, boundary B5.
-/// Reordering within the window is still unbounded by the clamp, so
+/// than the identity bytes. Entries older than the window (relative to the
+/// most recent timestamp seen) can never cause a drop again, and a cursor
+/// that advances a few entries per new identity drops them as it goes.
+/// Finally, a hard per-partition entry limit prevents a large window,
+/// high-cardinality traffic, or non-advancing producer timestamps from
+/// exhausting shard memory. The same cursor keeps the index under that limit:
+/// from a soft limit a tenth below it, the cursor also drops the entries a
+/// completed pass found to be in the oldest quarter, so the effective window
+/// narrows to roughly the limit divided by the new-identity arrival rate
+/// rather than dedup switching off for new identities.
+///
+/// No path into the filter does work proportional to the index. That is a
+/// hard requirement, not an optimization: sweeps happen at the same log
+/// position on every replica, so a full pass stalls the leader and then the
+/// followers together, and at a multi-million entry ceiling that was long
+/// enough to leave nobody free to complete an acks=all quorum.
+///
+/// The "most recent timestamp seen" is a client-supplied CreateTime with no
+/// ordering guarantee, so every record timestamp is clamped to the broker's
+/// clock before it reaches the index; without that, one future-dated record
+/// would advance the eviction cutoff past the whole index and silently
+/// disable dedup for the partition -- see the log-derived dedup RFC, boundary
+/// B5. Reordering within the window is still unbounded by the clamp, so
 /// window-edge eviction remains approximate.
 ///
 /// Both ways the filter can silently stop deduplicating -- timestamp skew and
@@ -309,12 +318,15 @@ public:
     size_t capacity_evicted_entries() const {
         return _capacity_evicted_entries;
     }
-    /// Capacity sweeps actually performed, as opposed to short-circuited
-    /// because a previous one had already proved nothing could be freed yet.
-    /// A sweep costs two passes over the index, so at a saturated index this
-    /// is what separates O(1) and O(index) per admitted record. Exposed for
-    /// tests rather than as a metric.
+    /// Bounded emergency sweep steps taken because a new identity arrived
+    /// with the index exactly at the hard ceiling. Non-zero means the soft
+    /// limit is not keeping ahead of the arrival rate.
     size_t capacity_sweeps() const { return _capacity_sweeps; }
+    /// Entries the sweep cursor has visited, over the filter's lifetime.
+    /// Every path into the filter visits a bounded number, so the per-call
+    /// delta is what proves there is no O(index) work on the produce or apply
+    /// path. Exposed for tests rather than as a metric.
+    size_t sweep_visits() const { return _sweep_visits; }
     /// Produce requests rebuilt because some, but not all, of their records
     /// were dropped. These are the only requests that pay for a batch rebuild
     /// and a recompression, so this is the rate that drives the dedup
@@ -327,33 +339,66 @@ private:
     /// broker time, so log replay is unaffected.
     model::timestamp clamp_to_broker_time(model::timestamp);
 
-    /// Free space for one new identity at the entry limit. Sweeps expired
-    /// entries first, then drops the oldest slice of what remains. Returns
-    /// false when no space could be freed, leaving the caller to fail open.
-    bool make_room_at_capacity();
-
     bool is_duplicate(
       dedup_identity_digest identity,
       model::timestamp ts,
       dedup_request_undo* undo);
-    void maybe_evict();
 
-    // Floor on the number of new-identity attempts between opportunistic
-    // eviction sweeps. Attempts are counted even at the hard entry limit so a
-    // saturated index still rechecks for expired entries periodically. The
-    // actual interval scales with the map (see maybe_evict()) so that a sweep,
-    // which is O(map size), stays amortized O(1) per attempt instead of
-    // degrading linearly as the index grows.
-    static constexpr size_t min_evict_interval = 10000;
-    // Fraction of the map worth of new-identity attempts before sweeping:
-    // interval = max(min_evict_interval, map_size / evict_size_divisor).
-    static constexpr size_t evict_size_divisor = 8;
+    /// \brief Advance the sweep cursor over at most \p budget entries.
+    ///
+    /// Drops the expired ones, and -- once the index is within
+    /// capacity_soft_margin_divisor of the ceiling -- the ones below the
+    /// capacity cutoff. The cursor persists across calls and wraps at the end
+    /// of the value array, so successive calls walk the whole index in
+    /// bounded slices instead of one pass. This is the only eviction the
+    /// produce and apply paths perform.
+    void sweep_step(size_t budget);
 
-    // Fraction of the index dropped when it is full of still-live entries:
-    // size/capacity_evict_divisor, so a quarter. Dropping a slice rather than
-    // one entry amortises the two O(n) passes over the next quarter-capacity
-    // of insertions; the cost is that the effective window sawtooths between
-    // three quarters and all of capacity/arrival-rate.
+    /// One bounded sweep step taken because a new identity arrived with the
+    /// index at the hard ceiling. Returns whether it freed a slot; if not, the
+    /// caller admits the record unindexed.
+    bool make_room_for_one();
+
+    /// Freeze the bucket frame a pass measures entries against, and clear its
+    /// histogram.
+    void begin_pass();
+    /// Turn a completed pass's histogram into the next capacity cutoff and
+    /// start the following pass.
+    void finish_pass();
+
+    /// Erase the entry the cursor is on. The map moves its last entry into
+    /// the freed slot, so the caller must re-examine the same index rather
+    /// than advance.
+    void erase_at(size_t index);
+
+    /// Index size at and above which the cursor also drops entries below the
+    /// capacity cutoff, leaving the hard ceiling as a backstop.
+    size_t soft_limit() const;
+
+    // Entries the cursor visits per new-identity attempt. This matches the
+    // throughput of the periodic full passes it replaced -- those swept the
+    // whole index once per map_size/8 attempts, so eight entries per attempt
+    // amortized -- but spread evenly instead of arriving as one burst. The
+    // burst was the problem: at a 6M ceiling a full pass stalled the shard's
+    // reactor for ~230ms, and because sweeps fire at the same log position on
+    // every replica, the followers stalled together ~0.5s later and left no
+    // one free to complete an acks=all quorum.
+    static constexpr size_t sweep_budget = 8;
+    // Extra entries the cursor may visit when a new identity arrives with the
+    // index exactly at the hard ceiling: enough to find something freeable
+    // while the soft limit keeps the tail trimmed, small enough to pay on
+    // every record. The cursor advances either way, so repeated attempts walk
+    // the index and refresh the cutoff rather than redoing the same work.
+    static constexpr size_t capacity_emergency_budget = 64;
+    // Margin below the hard ceiling, as a divisor of max_entries, at which
+    // the cursor starts dropping entries below the capacity cutoff: a tenth,
+    // so trimming begins at 90% and the index converges on its target instead
+    // of dropping a quarter of itself in one step at the ceiling.
+    static constexpr size_t capacity_soft_margin_divisor = 10;
+
+    // Fraction of the index the capacity cutoff designates as droppable:
+    // size/capacity_evict_divisor, so a quarter, measured over a completed
+    // cursor pass.
     static constexpr size_t capacity_evict_divisor = 4;
     // Buckets in the histogram that locates the cutoff timestamp. Fixed and
     // stack-allocated, so this adds no per-entry memory -- the entry ceiling
@@ -371,10 +416,40 @@ private:
       _map;
     // Highest record timestamp seen; used as the reference "now" for eviction.
     model::timestamp _max_ts{model::timestamp::min()};
-    // Kept under its original name because it is persisted in snapshots; at
-    // the entry limit it also counts new-identity attempts that were not
-    // indexed.
+    // New-identity attempts, including ones the ceiling left unindexed. No
+    // longer gates anything -- the cursor sweeps on every attempt -- but it is
+    // a wire field of the STM snapshot, so it is kept and kept counting.
     size_t _inserts_since_evict{0};
+    // Cursor into _map.values(), the dense array the hash map keeps entries
+    // in. Erasing moves the array's last entry into the freed slot, so an
+    // erase at the cursor leaves an unvisited entry there.
+    //
+    // Replicas agree on this because they insert the same identities in the
+    // same order and so lay the array out identically. revert_request() is
+    // the exception: it erases entries a follower never inserted, which
+    // permutes the leader's array. The two then sweep set-equal maps in
+    // different orders and can drop different still-live entries for
+    // capacity. That is bounded -- it needs the index above 90% of its
+    // ceiling, and which live entry goes is already best-effort -- but it is
+    // a divergence the whole-map passes this replaced did not have, and it is
+    // inherent to doing bounded work: a cursor is a position in a layout.
+    size_t _sweep_pos{0};
+    // Histogram of the entries the pass in progress has visited, measured
+    // against the frame frozen at the start of that pass. _max_ts moves while
+    // the cursor walks, and buckets shifting underneath it would describe no
+    // single moment, so the frame is fixed for the pass.
+    std::array<size_t, capacity_evict_buckets> _pass_counts{};
+    size_t _pass_visited{0};
+    int64_t _pass_lo{0};
+    int64_t _pass_span{0};
+    int64_t _pass_width{1};
+    // Timestamp below which the oldest quarter of the index lay when the last
+    // pass completed. timestamp::min() means that pass found no bucket prefix
+    // small enough to cut, so nothing is dropped for capacity -- more than a
+    // quarter shares one narrow range, and dropping it would throw away
+    // coverage nobody asked to lose.
+    model::timestamp _capacity_cutoff{model::timestamp::min()};
+    size_t _sweep_visits{0};
     size_t _dropped_records{0};
     size_t _skew_clamped_records{0};
     size_t _unindexed_records{0};
@@ -382,12 +457,6 @@ private:
     size_t _capacity_evicted_entries{0};
     size_t _rebuilt_requests{0};
     size_t _capacity_sweeps{0};
-    // Oldest entry timestamp seen by the last capacity sweep that could not
-    // free anything, or nullopt if the last sweep freed something. Such a
-    // sweep leaves the index exactly as it found it and both of its cutoffs
-    // come from _max_ts, so its refusal holds until the expiry cutoff passes
-    // this timestamp. See make_room_at_capacity().
-    std::optional<model::timestamp> _failed_sweep_oldest;
 };
 
 } // namespace cluster
