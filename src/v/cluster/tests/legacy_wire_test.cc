@@ -153,8 +153,6 @@ struct stock_topic_properties
     }
 };
 
-iobuf copy(const iobuf& b) { return b.copy(); }
-
 } // namespace
 
 TEST(legacy_wire, topic_properties_layout_matches_stock) {
