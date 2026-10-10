@@ -7,7 +7,6 @@
 # the Business Source License, use of this software will be governed
 # by the Apache License, Version 2.0
 import concurrent.futures
-from connectrpc.errors import ConnectError, ConnectErrorCode
 from contextlib import contextmanager
 import copy
 import dataclasses
@@ -67,10 +66,6 @@ from urllib3.exceptions import MaxRetryError
 
 from rptest.archival.abs_client import ABSClient
 from rptest.archival.s3_client import S3AddressingStyle, S3Client
-from rptest.clients.admin.proto.redpanda.core.admin.internal.cloud_topics.v1 import (
-    metastore_pb2 as metastore_pb,
-)
-from rptest.clients.admin.v2 import Admin as AdminV2
 from rptest.clients.installpack import InstallPackClient
 from rptest.clients.kafka_cat import KafkaCat
 from rptest.clients.kubectl import KubectlTool, is_redpanda_pod
@@ -6180,124 +6175,6 @@ class RedpandaService(Service, RedpandaServiceABC):
             )
         else:
             self.logger.info("No anomalies in internal object storage scrub")
-
-    def validate_metastore(
-        self,
-        check_object_metadata: bool = True,
-        check_object_storage: bool = True,
-        max_extents_per_call: int = 1000,
-        max_concurrent_partitions: int = 16,
-    ):
-        """
-        Validate metastore state for all cloud topic partitions.
-
-        Discovers cloud topics and calls ValidatePartition for each cloud topic
-        partition, paginating to bound the work per call. Partitions are
-        validated concurrently (bounded by `max_concurrent_partitions`) so the
-        wall-clock cost scales with the slowest partition rather than the sum
-        across partitions; at fleet scale (thousands of partitions) the
-        sequential variant overran ducktape timeouts.
-        """
-        if not self.started_nodes():
-            return
-
-        admin = AdminV2(self, auth=(self._superuser.username, self._superuser.password))
-        all_anomalies: list[str] = []
-        anomalies_lock = threading.Lock()
-        max_retries = 5
-
-        def validate_partition(topic: metastore_pb.CloudTopicInfo, pid: int) -> None:
-            resume: int | None = None
-            total_extents = 0
-            retries = 0
-            while True:
-                req = metastore_pb.ValidatePartitionRequest(
-                    topic_id=topic.topic_id,
-                    partition_id=pid,
-                    check_object_metadata=check_object_metadata,
-                    check_object_storage=check_object_storage,
-                    max_extents=max_extents_per_call,
-                )
-                if resume is not None:
-                    req.resume_at_offset = resume
-                try:
-                    resp = admin.metastore().validate_partition(req=req)
-                    retries = 0
-                except ConnectError as e:
-                    if e.code == ConnectErrorCode.UNAVAILABLE and retries < max_retries:
-                        retries += 1
-                        self.logger.warning(
-                            f"validate_partition unavailable for "
-                            f"{topic.topic_name}/{pid}, "
-                            f"retry {retries}/{max_retries}..."
-                        )
-                        time.sleep(1)
-                        continue
-                    raise
-                total_extents += resp.extents_validated
-                if resp.anomalies:
-                    formatted = [
-                        f"{topic.topic_name}/{pid}: "
-                        f"[{metastore_pb.AnomalyType.Name(a.anomaly_type)}]"
-                        f" {a.description}"
-                        for a in resp.anomalies
-                    ]
-                    with anomalies_lock:
-                        all_anomalies.extend(formatted)
-                if not resp.HasField("resume_at_offset"):
-                    break
-                resume = resp.resume_at_offset
-
-            self.logger.debug(
-                f"Validated {total_extents} extents for {topic.topic_name}/{pid}"
-            )
-
-        def validate_topic(topic: metastore_pb.CloudTopicInfo):
-            with concurrent.futures.ThreadPoolExecutor(
-                max_workers=max_concurrent_partitions
-            ) as executor:
-                futures = [
-                    executor.submit(validate_partition, topic, pid)
-                    for pid in range(topic.partition_count)
-                ]
-                # Surface the first exception (if any) once all have settled.
-                for f in concurrent.futures.as_completed(futures):
-                    f.result()
-
-        after_name = ""
-        while True:
-            try:
-                list_resp = admin.metastore().list_cloud_topics(
-                    req=metastore_pb.ListCloudTopicsRequest(
-                        after_topic_name=after_name,
-                        max_topics=100,
-                    )
-                )
-            except ConnectError as e:
-                if e.code == ConnectErrorCode.UNIMPLEMENTED:
-                    self.logger.info(
-                        "ListCloudTopics not supported, skipping metastore validation"
-                    )
-                    return
-                raise
-            for topic in list_resp.topics:
-                validate_topic(topic)
-            if not list_resp.has_more:
-                break
-            if not list_resp.topics:
-                self.logger.warning(
-                    "ListCloudTopics returned has_more=true with empty topics page"
-                )
-                break
-            after_name = list_resp.topics[-1].topic_name
-
-        if all_anomalies:
-            summary = "\n".join(f"  {a}" for a in all_anomalies)
-            raise RuntimeError(
-                f"Metastore validation failed with {len(all_anomalies)} "
-                f"anomalies:\n{summary}"
-            )
-        self.logger.info("Metastore validation passed")
 
     def wait_for_manifest_uploads(self) -> set[CloudStoragePartition]:
         cloud_storage_partitions: set[CloudStoragePartition] = set()

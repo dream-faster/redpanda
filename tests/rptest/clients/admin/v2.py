@@ -16,28 +16,12 @@ from rptest.clients.admin.proto.redpanda.core.admin.v2 import (
     kafka_connections_pb2,
     security_pb2,
     security_pb2_connect,
-    shadow_link_pb2,
-    shadow_link_pb2_connect,
-)
-from rptest.clients.admin.proto.redpanda.core.admin.internal.datalake.v1 import (
-    datalake_pb2,
-    datalake_pb2_connect,
 )
 from rptest.clients.admin.proto.redpanda.core.admin.internal.v1 import (
     debug_pb2,
     debug_pb2_connect,
     breakglass_pb2,
     breakglass_pb2_connect,
-)
-from rptest.clients.admin.proto.redpanda.core.admin.internal.shadow_link_internal.v1 import (
-    shadow_link_internal_pb2,
-    shadow_link_internal_pb2_connect,
-)
-from rptest.clients.admin.proto.redpanda.core.admin.internal.cloud_topics.v1 import (
-    metastore_pb2,
-    metastore_pb2_connect,
-    level_zero_pb2,
-    level_zero_pb2_connect,
 )
 from rptest.clients.admin.proto.redpanda.core.common.v1 import ntp_pb2
 
@@ -52,16 +36,11 @@ class RedpandaServiceProto(Protocol):
 # Re-export some protobufs for convenience
 broker_pb = broker_pb2
 cluster_pb = cluster_pb2
-datalake_pb = datalake_pb2
 features_pb = features_pb2
 security_pb2 = security_pb2
-shadow_link_pb = shadow_link_pb2
-shadow_link_internal_pb = shadow_link_internal_pb2
 debug_pb = debug_pb2
 kafka_connections_pb = kafka_connections_pb2
 breakglass_pb = breakglass_pb2
-metastore_pb = metastore_pb2
-l0_pb = level_zero_pb2
 ntp_pb = ntp_pb2
 
 
@@ -139,42 +118,15 @@ class Admin:
     def features(self, **kwargs: Any) -> features_pb2_connect.FeaturesServiceClient:
         return self._make_service(features_pb2_connect.FeaturesServiceClient, **kwargs)
 
-    def datalake(self, **kwargs: Any) -> datalake_pb2_connect.DatalakeServiceClient:
-        return self._make_service(datalake_pb2_connect.DatalakeServiceClient, **kwargs)
-
     def debug(self, **kwargs: Any) -> debug_pb2_connect.DebugServiceClient:
         return self._make_service(debug_pb2_connect.DebugServiceClient, **kwargs)
 
     def security(self, **kwargs: Any) -> security_pb2_connect.SecurityServiceClient:
         return self._make_service(security_pb2_connect.SecurityServiceClient, **kwargs)
 
-    def shadow_link(
-        self, **kwargs: Any
-    ) -> shadow_link_pb2_connect.ShadowLinkServiceClient:
-        return self._make_service(
-            shadow_link_pb2_connect.ShadowLinkServiceClient, **kwargs
-        )
-
     def breakglass(
         self, **kwargs: Any
     ) -> breakglass_pb2_connect.BreakglassServiceClient:
         return self._make_service(
             breakglass_pb2_connect.BreakglassServiceClient, **kwargs
-        )
-
-    def metastore(self, **kwargs: Any) -> metastore_pb2_connect.MetastoreServiceClient:
-        return self._make_service(
-            metastore_pb2_connect.MetastoreServiceClient, **kwargs
-        )
-
-    def l0(self, **kwargs: Any) -> level_zero_pb2_connect.LevelZeroServiceClient:
-        return self._make_service(
-            level_zero_pb2_connect.LevelZeroServiceClient, **kwargs
-        )
-
-    def internal_shadow_link(
-        self, **kwargs: Any
-    ) -> shadow_link_internal_pb2_connect.ShadowLinkInternalServiceClient:
-        return self._make_service(
-            shadow_link_internal_pb2_connect.ShadowLinkInternalServiceClient, **kwargs
         )

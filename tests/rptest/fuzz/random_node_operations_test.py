@@ -1,6 +1,6 @@
 from typing import Any
 from rptest.services.cluster import cluster
-from rptest.services.redpanda import LoggingConfig, get_cloud_storage_type
+from rptest.services.redpanda import LoggingConfig
 from rptest.tests.random_node_operations_smoke_test import (
     RNOT_ALLOW_LIST,
     CompactionMode,
@@ -14,9 +14,7 @@ from ducktape.mark import matrix
 # It runs the test with a variety of parameters, including:
 # - with and without simulated failures
 # - mixed versions (rolling upgrade/downgrade)
-# - with and without iceberg
 # - different compaction modes
-# - different cloud storage types
 #
 # It is a fuzz test since it runs randomized inputs and failures.
 #
@@ -44,31 +42,23 @@ class RandomNodeOperationsTest(RandomNodeOperationsBase):
                     "raft": "trace",
                     "offset_translator": "trace",
                     "cluster": "debug",
-                    "datalake": "trace",
-                    "cloud_storage": "debug",
-                    "cloud_io": "debug",
                     "kafka": "debug",
                     "reconciler": "debug",
-                    "cloud_topics": "debug",
-                    "cloud_topics_compaction": "debug",
                 },
             ),
         )
 
-    # before v24.2, dns query to s3 endpoint do not include the bucketname, which is required for AWS S3 fips endpoints
     @skip_fips_mode
     @skip_debug_mode
     @cluster(num_nodes=9, log_allow_list=RNOT_ALLOW_LIST)
     @matrix(
         enable_failures=[True, False],
         mixed_versions=[True, False],
-        with_iceberg=[True, False],
         compaction_mode=[
             CompactionMode.SLIDING_WINDOW,
             CompactionMode.CHUNKED_SLIDING_WINDOW,
             CompactionMode.ADJACENT_MERGE,
         ],
-        cloud_storage_type=get_cloud_storage_type(),
     )
     def test_node_operations(self, **kwargs: Any):
         self._do_test_node_operations(**kwargs)

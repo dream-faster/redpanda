@@ -22,13 +22,10 @@ from rptest.services.cluster import cluster
 from rptest.services.redpanda import (
     MetricSamples,
     MetricsEndpoint,
-    PandaproxyConfig,
     RedpandaService,
-    SchemaRegistryConfig,
     SecurityConfig,
     TLSProvider,
 )
-from rptest.tests.pandaproxy_test import User
 from rptest.tests.redpanda_test import RedpandaTest
 from rptest.util import wait_until_result
 
@@ -95,24 +92,14 @@ class TLSMetricsTestBase(RedpandaTest):
     ]
 
     def __init__(self, *args, broker_faketime="-0d", client_faketime="-0d", **kwargs):
-        super().__init__(
-            *args, extra_rp_conf={"schema_registry_use_rpc": False}, **kwargs
-        )
+        super().__init__(*args, **kwargs)
 
         self.broker_faketime = broker_faketime
         self.client_faketime = client_faketime
 
         self.security = SecurityConfig()
-        su_username, su_password, su_algorithm = self.redpanda.SUPERUSER_CREDENTIALS
-        self.admin_user = User(0)
-        self.admin_user.username = su_username
-        self.admin_user.password = su_password
-        self.admin_user.algorithm = su_algorithm
-
-        self.schema_registry_config = SchemaRegistryConfig()
-        self.schema_registry_config.require_client_auth = True
-        self.pandaproxy_config = PandaproxyConfig()
-        self.pandaproxy_config.require_client_auth = True
+        su_username, _, _ = self.redpanda.SUPERUSER_CREDENTIALS
+        self.admin_username = su_username
 
         self.tls = None
 
@@ -122,28 +109,14 @@ class TLSMetricsTestBase(RedpandaTest):
         self.security.require_client_auth = True
         self.security.kafka_enable_authorization = True
         self.security.enable_sasl = True
-        self.schema_registry_config.authn_method = "http_basic"
-        self.pandaproxy_config.authn_method = "http_basic"
-
-        client_cert = self.tls.create_cert(
-            socket.gethostname(),
-            common_name=self.admin_user.username,
-            name="test_client_tls",
-        )
 
         self.security.tls_provider = FaketimeTLSProvider(
             self.tls,
             broker_faketime=self.broker_faketime,
             client_faketime=self.client_faketime,
         )
-        self.schema_registry_config.client_key = client_cert.key
-        self.schema_registry_config.client_crt = client_cert.crt
-        self.pandaproxy_config.client_key = client_cert.key
-        self.pandaproxy_config.client_crt = client_cert.crt
 
         self.redpanda.set_security_settings(self.security)
-        self.redpanda.set_schema_registry_settings(self.schema_registry_config)
-        self.redpanda.set_pandaproxy_settings(self.pandaproxy_config)
 
         super().setUp()
 
@@ -266,9 +239,7 @@ class TLSMetricsTest(TLSMetricsTestBase):
         self.logger.debug(f"Areas w/ TLS enabled: {areas}")
 
         assert "kafka" in areas
-        assert "schema_registry" in areas
         assert "rpc" in areas
-        assert "rest_proxy" in areas
         assert "admin" in areas
 
     @cluster(num_nodes=3)
