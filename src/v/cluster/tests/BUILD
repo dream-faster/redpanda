@@ -1548,7 +1548,6 @@ redpanda_cc_gtest(
     deps = [
         "//src/v/bytes",
         "//src/v/bytes:iobuf",
-        "@fmt",
         "//src/v/cluster:legacy_wire",
         "//src/v/cluster:topic_configuration",
         "//src/v/cluster:types",
@@ -1559,6 +1558,7 @@ redpanda_cc_gtest(
         "//src/v/serde:sstring",
         "//src/v/serde:tristate",
         "//src/v/test_utils:gtest",
+        "@fmt",
         "@googletest//:gtest",
         "@seastar",
     ],
