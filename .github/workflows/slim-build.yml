@@ -174,7 +174,9 @@ jobs:
             --verbose_failures \
             --lockfile_mode=update \
             '--local_resources=memory=HOST_RAM*.8' \
-            //src/v/redpanda:redpanda
+            --keep_going \
+            //src/v/redpanda:redpanda 2>&1 | tee "$RUNNER_TEMP/bazel-build.log"
+          test "${PIPESTATUS[0]}" -eq 0
           echo "=== post-build ==="
           df -h
           free -h
@@ -205,6 +207,13 @@ jobs:
                   --lockfile_mode=update --output=files //src/go/rpk/cmd/rpk | head -n1)
           tools/slim-checks/smoke.sh \
             bazel-bin/src/v/redpanda/redpanda "$RPK" "$RUNNER_TEMP/smoke"
+
+      # Every compiler error in one place: the progress lines bury them.
+      - name: Compiler errors
+        if: failure()
+        run: |
+          grep -E '(error|fatal error):|^ERROR:' "$RUNNER_TEMP/bazel-build.log" \
+            | sed 's/\x1b\[[0-9;]*m//g' | sort -u | head -200 || true
 
       - name: Trim the disk cache
         if: always()
