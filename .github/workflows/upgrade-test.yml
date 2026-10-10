@@ -11,6 +11,11 @@ on:
         description: 'Stock image to upgrade from (default: newest v26.2.x)'
         required: false
         type: string
+      slim_uid:
+        description: 'User id to run the slim image as'
+        required: false
+        type: string
+        default: '65532'
   workflow_dispatch:
     inputs:
       slim_image:
@@ -21,6 +26,11 @@ on:
         description: 'Stock image to upgrade from (default: newest v26.2.x)'
         required: false
         type: string
+      slim_uid:
+        description: 'User id to run the slim image as'
+        required: false
+        type: string
+        default: '65532'
 
 concurrency:
   group: upgrade-test-${{ github.ref }}-${{ inputs.slim_image }}
@@ -83,6 +93,7 @@ jobs:
       - name: Rolling upgrade
         env:
           SELFTEST: ${{ steps.images.outputs.selftest }}
+          SLIM_UID: ${{ inputs.slim_uid }}
         run: |
           if [[ "$SELFTEST" == "true" ]]; then
             export SLIM_RPK=rpk
