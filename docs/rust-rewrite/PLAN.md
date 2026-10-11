@@ -6,32 +6,36 @@ plan is sized from.
 ## Summary
 
 - **What is being rewritten.** The slim broker in this tree: a distributed
-  Kafka broker on local storage, based on v26.2.x. That is 240k lines of
+  Kafka broker on local storage, based on v26.2.x. That is 239k lines of
   production C++ (plus 125k lines of C++ tests) across 60 features, plus the
-  Seastar runtime underneath it. Authentication (SASL, mTLS, ACLs, RBAC,
-  audit) and TLS are out of scope by decision; that removes 18.6k lines.
-  Another 13.7k lines are already dead in this tree.
-- **What "full parity and guarantees" means.** Byte-compatible Kafka
-  protocol, internal RPC, and on-disk formats, plus the same config, Admin API
-  and metrics surfaces. Proof is that a Rust node can join a running C++
-  cluster, take over its data directory, and hand it back. The full contract
-  is below.
-- **Strategy.** Replace one node at a time, not the whole thing at once. The
-  Rust broker is built to interoperate with the C++ broker at the RPC and disk
-  level, so every phase can be tested against the real thing, and the final
-  rollout is the same rolling replacement `tools/slim-checks/upgrade_test.sh`
-  already does for the slim build.
+  Seastar runtime underneath it.
+- **Out of scope.** Authentication (SASL, mTLS, ACLs, RBAC, audit), TLS and
+  enterprise license checks are dropped (18.6k lines). Nothing carries over
+  from existing C++ machines: Rust clusters start on empty disks, so the
+  backward-compatibility code (ADL, legacy wire slots, migrators, old-version
+  decode paths) goes too. Another 13.7k lines are already dead in this tree.
+- **What "full parity and guarantees" means.** Externally visible behaviour.
+  That is the Kafka protocol and its semantics (durability, idempotence,
+  transactions, compaction, consumer groups), cluster behaviour, and the
+  operator surfaces: config, Admin API, metrics, CLI flags. Internal RPC,
+  on-disk formats and controller encodings are free for the Rust design to
+  choose. The contracts are in §2.
+- **Strategy.** Build a new Rust broker and use the C++ broker as a
+  reference: both are driven with the same workloads through the same
+  external APIs and must behave the same. Correctness comes from
+  deterministic simulation, model checking and the existing black-box test
+  suites.
 - **Untouched.** `rpk` (Go) is a client of the Kafka and Admin APIs. The
-  ducktape suite, the Java/Go verifiers, and the Kafka and RPC schema JSON
-  files are reused as-is. They are the parity oracle.
-- **Rough size.** On the order of 25–35 engineer-years: 6–10 strong
-  Rust/distributed-systems engineers for 2.5–4 years, with the first
-  mixed-cluster milestone around month 12–18. This is a rough estimate (see
-  "Effort").
+  ducktape suite, the Java/Go verifiers, and the Kafka schema JSON files are
+  reused as-is.
+- **Rough size.** On the order of 20–28 engineer-years: 6–10 strong
+  Rust/distributed-systems engineers for 2–3.5 years. The first milestone
+  (a 3-node all-Rust cluster serving produce and consume) lands around month
+  10–15. This is a rough estimate (see §9).
 
 ## 1. Scope
 
-### In scope (keep, 240,499 lines)
+### In scope (keep, 239,068 lines)
 
 Every `keep` row in `INVENTORY.md`: the Kafka API (38 APIs), Raft, the
 storage engine, the controller and everything in `cluster/`, transactions
@@ -47,23 +51,25 @@ syschecks, and the runtime foundations.
 | ACLs, RBAC, user/role management | No principals left to authorize | 7,417 |
 | Audit logging | Records principals; nothing to record | 4,304 |
 | TLS on every listener, OpenSSL, `crypto/` | TLS dropped | 2,565 |
-| Enterprise license checks | Gated the features above; no licence keys in this fork (recommended, see §11) | 779 |
+| Enterprise license checks | Dropped | 779 |
+| Compatibility with older C++ versions | No state carried over from C++ nodes | 1,431 in whole files, plus code inside kept files |
 | Internal Kafka client | Only production caller was audit | 9,197 |
 | Parquet/Thrift/Avro | Iceberg leftovers, no callers | 4,539 |
 | `rpk`, ducktape, verifiers | Clients and tests, reused unchanged | n/a |
 
-Dropping authentication and TLS has knock-on effects. `INVENTORY.md`
-lists them under "What dropping authentication and TLS removes". The ones the
-plan has to act on:
+Consequences the plan has to act on:
 
-1. The Rust controller must **parse and discard** `user_management_cmd`,
-   `acl_management_cmd` and `role_management_cmd` batches, plus the security
-   parts of controller snapshots, so it can replay a log a stock cluster wrote.
-2. `ApiVersions` does not advertise the dropped APIs.
-3. A live migration needs the source cluster to run with SASL and TLS off on
-   all listeners, internal RPC included, before the first Rust node joins.
-4. With no access control at all, network isolation is the only protection.
-   That goes in the operator docs, not just this plan.
+1. `ApiVersions` does not advertise the dropped Kafka APIs (SASL, ACL,
+   SCRAM, roles), so tools report them as unsupported.
+2. The features that were behind a licence (continuous partition and core
+   balancing, leadership pinning, topic-deletion protection) are kept and
+   controlled by config alone.
+3. Anyone who can reach a port has full control. Network isolation is the
+   only protection; that goes in the operator docs, not just this plan.
+4. Moving to the Rust broker means standing up new clusters. If data has to
+   move, it moves at the Kafka level (MirrorMaker 2, Redpanda Connect), which
+   copies records but not offsets. Consumer groups re-establish positions on
+   the new cluster.
 
 ## 2. What parity means: the contracts
 
@@ -72,48 +78,62 @@ Parity is defined as a list of contracts, each with a test that proves it.
 
 | # | Contract | Proven by |
 |---|---|---|
-| C1 | **Kafka wire protocol.** The 38 APIs at the same version ranges, same error codes, same tagged fields | Codec generated from the same `schemata/*.json`; differential request replay against C++ (§7.2); client compatibility matrix |
-| C2 | **Internal RPC.** Same framing, header, checksum, compression flag, method IDs (service ID XOR crc32 of method name and input/output type names, honouring `legacy_id`, per `rpc/rpc_compiler.py`), and serde payloads | Golden fixtures in both directions; mixed C++/Rust clusters |
-| C3 | **serde and ADL encodings.** All 284 envelopes, including `legacy_*` placeholder slots and skipped snapshot parts | Golden fixtures generated from C++ (§7.1) |
-| C4 | **On-disk formats.** Segments, 61-byte batch header with CRCs, `.base_index`, compaction indexes, staging files, kvstore, raft and stm snapshots, directory layout `{ns}/{topic}/{partition}_{revision}` | Cross-read and cross-write: C++ writes and Rust reads, and the reverse, under randomized workloads with compaction and truncation |
-| C5 | **Replication and safety guarantees.** Raft safety (no committed-entry loss, single leader per term), `acks=all` durability with fsync semantics, idempotent producer dedup, exactly-once transactions (read_committed, LSO, aborted-tx index), compaction correctness, consumer group offset durability | Deterministic simulation, linearizability checking, the existing Java/Go verifiers, ducktape |
-| C6 | **Cluster behaviour.** Topic lifecycle, partition placement, leader balancing, partition auto-balancing, maintenance mode, node add and decommission, forced reconfiguration, feature activation and upgrade gating, cluster config propagation | Ducktape suites; mixed clusters |
-| C7 | **Operator surfaces.** Node config YAML, 319 cluster and 30 node properties (names, aliases, defaults, bounds, validation), Admin API v1 routes and JSON shapes, Admin API v2 protos, Prometheus metric names and labels, process CLI flags | `rpk` end-to-end; Helm chart post-upgrade job; metric and config schema diffs (zero differences allowed); Admin API contract tests from Swagger |
-| C8 | **Runtime contract with `rpk`.** `rpk redpanda start` passes Seastar flags (`--smp`, `--memory`, `--reserve-memory`, `--lock-memory`, `--cpuset`, `--overprovisioned`, `--io-properties-file`, `--unsafe-bypass-fsync`, `--default-log-level`, `--thread-affinity`), and `rpk iotune` writes `io-properties.yaml` | Rust binary accepts the same flags with the same meaning; `rpk` start tests |
-| C9 | **Feature table identity.** A Rust node reports the same logical version and feature set as v26.2.x slim, so features activate (and don't) exactly as in a C++ cluster | Mixed-cluster feature activation tests |
-| C10 | **Performance.** No regression beyond agreed tolerances (§8) | Benchmark gates in CI |
+| C1 | **Kafka wire protocol.** The 38 APIs at the same version ranges, same error codes, same tagged fields, record batch format v2 | Codec generated from the same `schemata/*.json`; differential replay against the C++ broker (§7.2); client compatibility matrix |
+| C2 | **Data guarantees.** Raft safety (no committed-entry loss, at most one leader per term); `acks=all` durability with the same fsync semantics; idempotent producer dedup; exactly-once transactions (read_committed, LSO, aborted transactions); compaction keeps the latest value per key and honours tombstone retention; retention by size and time; consumer group offset durability | Deterministic simulation, linearizability checking, model checking, the Java/Go verifiers, ducktape |
+| C3 | **Cluster behaviour.** Topic lifecycle, partition placement, leader balancing, partition auto-balancing, maintenance mode, node add and decommission, forced reconfiguration, cluster config propagation | Ducktape suites; differential runs against C++ |
+| C4 | **Operator surfaces.** Node config YAML; 319 cluster and 30 node properties (names, types, defaults, bounds, validation); topic config names and meaning; Admin API v1 routes and JSON shapes; Admin API v2 protos; Prometheus metric names and labels | `rpk` end-to-end; Helm chart post-upgrade job; config schema and metrics diffs against C++ (zero differences allowed); Admin API contract tests from Swagger |
+| C5 | **Runtime contract with `rpk`.** `rpk redpanda start` passes Seastar flags (`--smp`, `--memory`, `--reserve-memory`, `--lock-memory`, `--cpuset`, `--overprovisioned`, `--io-properties-file`, `--unsafe-bypass-fsync`, `--default-log-level`, `--thread-affinity`), and `rpk iotune` writes `io-properties.yaml` | Rust binary accepts the same flags with the same meaning; `rpk` start tests |
+| C6 | **Performance.** No regression beyond agreed tolerances (§8) | Benchmark gates in CI |
 
-Things that are deliberately **not** contracts: log message text, internal
-metric names under `/metrics` that no dashboard or alert uses (to be decided
-per metric, default is keep), crash-report file formats, and exact timing of
-background work (housekeeping, balancer ticks), as long as configured
-intervals are honoured.
+**Not contracts** (free for the Rust design): internal RPC framing and
+encodings, on-disk segment, index, kvstore and snapshot formats, controller
+command encodings, feature-flag identities, log message text, crash-report
+formats, and exact timing of background work as long as configured intervals
+are honoured.
 
-## 3. Strategy: replace one node at a time
+**A requirement that is not parity: Rust-to-Rust upgrades.** Nothing comes
+from C++, but Rust release N+1 must be able to take over release N's disks
+and join a cluster of release N nodes. Otherwise every release means a new
+cluster. So from the first release:
 
-Three ways to do it, and why only the last gives the guarantees:
+- every on-disk structure and RPC message carries a version, and decoders
+  accept the previous version;
+- a feature-flag mechanism (the C++ `feature_table` idea, starting empty)
+  gates behaviour changes until the whole cluster is upgraded;
+- an N-1 → N rolling upgrade test runs in CI from the first tagged release.
 
-1. **Big bang.** Write the Rust broker, cut over when it passes tests. Fails
-   on rollback: there is nothing to go back to once Rust has written data.
-2. **In-process strangler (FFI).** Replace modules inside the C++ binary one
-   at a time. Doesn't work here: everything runs on Seastar's reactor, and a
-   Rust async module can't share that reactor without its own runtime. The FFI
-   surface at module boundaries (futures, `iobuf`, `sharded<>`) would be
-   bigger than some of the modules.
-3. **Node-level strangler (recommended).** The unit of replacement is a node.
-   The Rust broker speaks the C++ broker's internal RPC, reads and writes its
-   disk formats, and reports the same feature table, so the two can share a
-   cluster. This is how the work gets tested at every phase:
-   - Storage is done when Rust and C++ read each other's data directories.
-   - Raft is done when Rust and C++ replicas share a raft group under fault
-     injection.
-   - The controller is done when a Rust node joins a C++ cluster, follows the
-     controller log, and can become controller leader.
-   - Rollout is a rolling replacement on the same volumes. Rollback is the
-     same operation in the other direction.
+## 3. Strategy: a new broker, with the C++ broker as the reference
 
-   The cost is that compatibility work (C2–C4, C9) is up front rather than
-   optional. It would be needed for an in-place migration anyway.
+Nothing has to interoperate with C++, so there is no need to build the Rust
+broker one node at a time inside a C++ cluster. Instead:
+
+- **Build a standalone Rust broker.** Components are tested on their own
+  (storage against a reference model, raft in simulation) and assembled into
+  all-Rust clusters.
+- **Use the C++ broker as a reference implementation.** Run the same
+  workload against a C++ cluster and a Rust cluster and compare what clients
+  and operators see: Kafka responses, fetched data, offsets, group state,
+  Admin API output, config schema, metric names. This is where most
+  semantic bugs show up, and it needs no internal compatibility.
+- **Keep the architecture, simplify the encodings.** The design of v26.2.x
+  is proven: one raft group per partition, controller as raft0, Kafka
+  batches stored on disk as-is, offset translation for non-data batches,
+  per-core partition ownership. Port its algorithms faithfully. Change the
+  encodings where that removes code: one versioned binary format instead of
+  serde plus ADL, no legacy slots, no old-version decode branches.
+  Redesigning the algorithms themselves is out of scope for parity. It is
+  where semantic drift comes from; propose it as post-parity work.
+
+What this gives up compared with an interop strategy: there is no
+mixed-cluster test where C++ catches Rust bugs on the internal protocol, and
+no in-place rollback. In exchange, the compatibility tooling (golden
+fixtures, cross-reading data directories, mixed raft groups, controller-log
+replay) is gone, along with 15–20% of the effort.
+
+**Rollout.** New Rust clusters run alongside the existing C++ clusters,
+optionally fed by Kafka-level mirroring, until they've proven themselves
+under real load. Rollback means pointing clients back at the C++ cluster,
+so keep it running for an agreed bake period.
 
 ## 4. Runtime
 
@@ -126,7 +146,7 @@ no Rust runtime provides as one package:
 | `sharded<T>` (1,436 uses), `smp::submit_to` | Per-core service instances, cross-core calls | `Sharded<T>` built on per-core SPSC queues; cross-core calls return futures |
 | `smp_service_group` (140 uses) | Limits concurrent cross-core work | Semaphore per (source, dest, group) |
 | Scheduling groups with CPU shares (142 uses) | Kafka vs raft vs compaction vs admin prioritization | Multiple task queues per executor, picked by share-weighted vruntime |
-| I/O scheduler with priority classes, `io-properties.yaml` | Fair disk bandwidth between appends, compaction, recovery | Per-core I/O queue with token-bucket model fed by the same `io-properties.yaml` (C8) |
+| I/O scheduler with priority classes, `io-properties.yaml` | Fair disk bandwidth between appends, compaction, recovery | Per-core I/O queue with token-bucket model fed by the same `io-properties.yaml` (C5) |
 | DMA file I/O (`open_file_dma`, O_DIRECT, aligned buffers) | Segment append and read, chunk cache | io_uring with O_DIRECT; aligned buffer pool |
 | Per-shard allocator, memory limits, reclaimer | `batch_cache` shrinks under pressure; `--memory` budget | Explicit per-shard memory accounting with semaphores (already exists for fetch, recovery and storage); `batch_cache` driven by a budget plus pressure callback instead of allocator hooks |
 | lowres clock, timers | Heartbeats, timeouts | Per-core timer wheel |
@@ -143,8 +163,10 @@ runtime per core. Check each one's maintenance status at decision time.
 Owning the abstraction matters for two reasons. The executor can be swapped
 if the first choice is wrong. More importantly, the same API can run on a
 **simulated** backend (virtual time, simulated network and disk, seeded
-scheduling) for deterministic simulation testing (§7.3). That is where this
-rewrite can *exceed* today's guarantees rather than only match them.
+scheduling) for deterministic simulation testing (§7.3). Without interop
+testing against C++, simulation becomes the main source of confidence in
+the distributed parts. It is also where this rewrite can *exceed* today's
+guarantees rather than only match them.
 
 Phase 0 spike criteria (must be measured against Seastar on the same box):
 `acks=all` produce p50/p99 at fixed throughput, fetch throughput,
@@ -157,28 +179,29 @@ under CPU contention between share groups.
 |---|---|---:|
 | `rp-runtime` | Seastar + `ssx/` + `resource_mgmt/` | 6,386 + Seastar |
 | `rp-bytes` | `bytes/` (iobuf: rope of refcounted chunks, zero-copy share/split) | 2,719 |
-| `rp-util` | `utils/`, `container/`, `base/`, `hashing/`, `random/`, `strings/`, `json/` | 16,910 |
-| `rp-serde` (+ derive) | `serde/` envelope, `model/adl_serde*` (plus `reflection/`, counted under `rp-util`) | ~2,400 |
-| `rp-model` | `model/` | 5,870 |
+| `rp-util` | `utils/`, `container/`, `base/`, `hashing/`, `random/`, `strings/`, `json/`, `reflection/` (minus ADL) | 16,511 |
+| `rp-codec` (+ derive) | `serde/` envelopes; one versioned binary format for RPC and disk, no ADL | 1,845 |
+| `rp-model` | `model/` | 5,333 |
 | `rp-compression` | `compression/` (zstd streaming, lz4 frame, snappy Java framing, gzip) | 1,949 |
 | `rp-config` (+ derive) | `config/` | 8,038 |
 | `rp-net` | `net/` minus TLS (conn quotas, connection rate limits) | 3,387 |
-| `rp-rpc` (+ build.rs codegen from service JSON) | `rpc/` | 3,364 |
+| `rp-rpc` | `rpc/` (framing, method dispatch, connection cache) | 3,364 |
 | `rp-storage` | `storage/`, `compaction/` | 29,161 |
-| `rp-raft` | `raft/` | 21,452 |
-| `rp-cluster` | `cluster/`, `features/`, `migrations/` | 68,830 |
+| `rp-raft` | `raft/` | 21,399 |
+| `rp-cluster` | `cluster/`, `features/` | 68,388 |
 | `rp-kafka-protocol` (build.rs codegen from `schemata/*.json`) | `kafka/protocol/` + `generator.py` | 6,009 |
 | `rp-kafka` | `kafka/server/`, `kafka/data/`, `kafka/utils/` | 38,403 |
 | `rp-admin` | `redpanda/admin/`, `serde/json`, `serde/protobuf` (use prost) | 14,125 |
 | `rp-ops` | `metrics/`, `debug_bundle/`, `crash_tracker/`, `syschecks/`, `cluster/self_test`, `http/` | ~10,800 |
 | `redpanda` (bin) | `redpanda/` application wiring, CLI | 3,236 |
 | `rp-sim` | (new) deterministic cluster simulator | n/a |
-| `rp-compat` | (new) golden fixtures, cross-read and cross-write harness, differential replay | n/a |
+| `rp-oracle` | (new) differential harness: drives C++ and Rust clusters with the same workload and compares external behaviour | n/a |
 
-Expected Rust size is roughly 150–200k production lines. The foundations
+Expected Rust size is roughly 140–190k production lines. The foundations
 layer shrinks the most (crates replace hand-rolled utilities). Codegen
-replaces most protocol boilerplate. `cluster/` and `raft/` will be close to
-1:1 because the logic is irreducible.
+replaces most protocol boilerplate. Dropping backward compatibility removes
+scattered branches everywhere. `cluster/` and `raft/` will be close to 1:1
+because the logic is irreducible.
 
 Ground rules:
 
@@ -186,56 +209,64 @@ Ground rules:
   storage, the transaction coordinator, `rm_stm`, group state machine, the
   allocator and balancers are ported decision for decision from the C++,
   with references to the original file in doc comments, so reviewers can
-  diff behaviour. Service wiring, error handling, and buffers are written
-  as idiomatic Rust.
+  diff behaviour. Service wiring, error handling, buffers and encodings are
+  written as idiomatic Rust.
+- **Version everything persisted or sent between nodes** from the first
+  commit (see the Rust-to-Rust upgrade requirement in §2). Format specs live
+  next to the code as docs.
 - **`unsafe` lives only in `rp-runtime` and `rp-bytes`.** Those crates run
   under Miri and sanitizers in CI. Everything else has `#![forbid(unsafe_code)]`.
-- **No panics on input.** Every decoder (Kafka, RPC, serde, segment parser,
+- **No panics on input.** Every decoder (Kafka, RPC, codec, segment parser,
   config) returns errors, and is fuzzed (§7.6). `vassert`-style invariants
   become explicit `assert!`s that crash the process, as today.
-- **Reuse the schema files.** `kafka/protocol/schemata/*.json`, the RPC
-  service JSON and `proto/` are inputs to Rust codegen. Don't fork them into
-  hand-written Rust.
+- **Reuse the schema files.** `kafka/protocol/schemata/*.json` and `proto/`
+  are inputs to Rust codegen. Don't fork them into hand-written Rust.
+- **Design the crate graph for build speed.** Rust compiles a crate at a
+  time, so a wide, shallow graph builds in parallel and a deep chain doesn't.
+  Keep generic-heavy code from being instantiated in every downstream crate;
+  run proc macros and codegen once, in leaf crates; keep LTO and
+  `codegen-units=1` for release builds only. Measure the C++ clean and
+  incremental build times in Phase 0 and track the Rust ones in CI against
+  them. Rust is not automatically faster to compile; it only wins with this
+  discipline.
 
 ## 6. Phases
 
 Each phase has an exit gate. Nothing moves to the next phase on "mostly
-works". Phases 1–2 and 5a can overlap with others once Phase 0 is done.
+works". After Phase 0, phases overlap as shown.
 
 ### Phase 0: Foundations and decisions (months 0–4)
 
 - Runtime spike and decision (§4). Build `rp-runtime` v0 with the real and
   simulated backends behind one API.
 - `rp-bytes`, `rp-util` essentials.
-- **Compatibility tooling in C++ first.** A fixture generator binary in this
-  tree that emits, for every serde/ADL type, randomized instances and their
-  encoded bytes. It extends the pattern in
-  `//src/v/cluster/tests:legacy_wire_test`. Also a data-directory generator
-  that runs randomized workloads and snapshots the resulting directory.
-- CI: cargo workspace in this repo (`src/rust/`), wired into Bazel via
-  `rules_rust`, so the C++ fixture generators and Rust consumers build in
-  one graph.
-- Prune the ducktape suite to what applies to slim. Per `HANDOFF.md`, about
-  160 of 267 modules reference removed features, and authn/TLS tests now
-  join them. Get the remaining suite green **against the C++ broker**. It is
-  the oracle for everything after.
+- Cargo workspace in this repo (`src/rust/`), built in CI. Bazel integration
+  via `rules_rust` only if the C++ tree is still built alongside.
+- Write the format specs: internal RPC framing, segment and index files,
+  kvstore, snapshots, controller commands. Each one versioned.
+- `rp-oracle` v0: start a C++ cluster and (later) a Rust cluster from the
+  same config, run a workload, capture externally visible results.
+- Prune the ducktape suite to what applies to slim with no authentication or
+  TLS. Per `HANDOFF.md`, about 160 of 267 modules reference removed
+  features, and authn/TLS tests now join them. Get the remaining suite green
+  **against the C++ broker**. It is the reference for everything after.
 
-Exit: runtime chosen with spike numbers recorded; fixtures generated in CI;
+Exit: runtime chosen with spike numbers recorded; format specs reviewed;
 pruned ducktape suite green on C++.
 
-### Phase 1: Codecs and model (months 2–6, ~27k C++ lines)
+### Phase 1: Codecs and model (months 2–5, ~27k C++ lines)
 
-`rp-serde` (derive macro for positional envelopes with version and
-compat_version; ADL codec), `rp-model` (record batches, CRCs, ntp, offsets,
-timestamps), `rp-compression`, `rp-kafka-protocol` codegen, `rp-rpc`
-framing and codegen, `rp-config` property framework with all 349
-properties.
+`rp-codec` (derive macro for versioned envelopes), `rp-model` (record
+batches, CRCs, ntp, offsets, timestamps), `rp-compression`,
+`rp-kafka-protocol` codegen, `rp-rpc` framing, `rp-config` property
+framework with all 349 properties.
 
-Exit (C3, part of C1, C2, C7): every golden fixture decodes and re-encodes
-byte-identically. Config schema diff against the C++ Admin API
-`cluster_config/schema` output is empty. Fuzzers run nightly.
+Exit (part of C1, C4): Kafka requests and responses captured from ducktape
+runs against C++ decode and re-encode byte-identically. Config schema diff
+against the C++ Admin API `cluster_config/schema` output is empty. Fuzzers
+run nightly.
 
-### Phase 2: Storage engine (months 4–11, ~29k)
+### Phase 2: Storage engine (months 3–9, ~29k)
 
 Segments, appender (O_DIRECT, fallocate, chunked flush), index, readers and
 readers cache, batch cache, log manager and housekeeping, retention (size,
@@ -243,45 +274,46 @@ time), truncation and prefix truncation, offset translator, kvstore,
 snapshots, sliding-window and adjacent-segment compaction, compaction
 indexes and key maps, the fault-injection file wrappers.
 
-Exit (C4): cross-read and cross-write both ways under randomized workloads
-including compaction, truncation and crash at random points (power-loss
-simulation: drop unsynced writes). C++ storage unit tests ported (the 20k
-lines in `storage/tests` encode most edge cases). Append and read
-microbenchmarks within tolerance.
+Exit (C2 storage part): model-based tests against an in-memory reference
+log (random appends, truncations, compactions, retention, restarts) with
+no divergence. Crash consistency under simulated power loss (unsynced
+writes dropped, torn writes) at random points. C++ storage unit tests
+ported (the 20k lines in `storage/tests` encode most edge cases). Append and
+read microbenchmarks within tolerance.
 
-### Phase 3: Raft (months 8–16, ~21k)
+### Phase 3: Raft (months 6–13, ~21k)
 
 Consensus, elections and pre-vote, replicate batcher and append-entries
 buffering, heartbeat manager (node-pair batching), recovery and
 `coordinated_recovery_throttle`, joint-consensus reconfiguration, learners,
 leadership transfer, voter priority, `persisted_stm` and the state machine
-manager, snapshots, raftgen RPC.
+manager, snapshots, raft RPC service.
 
-Exit (C5 raft part, C2): (a) deterministic simulation of thousands of seeds
+Exit (C2 raft part): (a) deterministic simulation of thousands of seeds
 per CI run with partitions, crashes, disk faults, clock skew and
 reconfiguration, checking election safety, log matching, leader
-completeness and state machine safety; (b) **mixed raft groups**: C++ and
-Rust replicas in one group under fault injection, with a
-linearizability checker on a register workload; (c) ported raft unit tests
+completeness and state machine safety; (b) simulation traces checked
+against a TLA+ (or Stateright) model of reconfiguration (§7.4); (c) a
+linearizability checker on a register workload over a real 3-node
+deployment with network and process faults; (d) ported raft unit tests
 pass.
 
-### Phase 4: Controller and cluster core (months 12–22, ~41k)
+### Phase 4: Controller and cluster core (months 10–18, ~41k)
 
-Controller stm, backend and snapshot; commands (including parse-and-drop
-for removed and security commands); topic table, topics frontend and
-dispatcher; members manager, backend and discovery; cluster bootstrap;
-config manager; feature manager and table (C9); health monitor; node status;
-metadata dissemination; partition manager and partition runtime; leaders
-table; id allocator; distributed kv stm; log eviction and partition
-properties stms; drain; forced reconfiguration.
+Controller stm, backend and snapshot; commands; topic table, topics
+frontend and dispatcher; members manager, backend and discovery; cluster
+bootstrap; config manager; feature manager and table (starting empty);
+health monitor; node status; metadata dissemination; partition manager and
+partition runtime; leaders table; id allocator; distributed kv stm; log
+eviction and partition properties stms; drain; forced reconfiguration.
 
-Exit (C6 partial, C9): **milestone: a Rust node joins a C++ cluster.** It
-replays the controller log, serves as controller follower and leader, and
-hosts raft replicas for user partitions. Ducktape cluster-management suites
-pass on 3-node mixed clusters (1 Rust, 2 C++, then 2+1) and all-Rust
-clusters.
+Exit (C3 partial): **milestone: a 3-node all-Rust cluster** bootstraps,
+creates and deletes topics, adds and decommissions nodes, survives
+controller leader loss, and passes the cluster-management ducktape suites.
+`rp-oracle` shows the same topic, partition and config state as C++ after
+the same sequence of admin operations.
 
-### Phase 5: Kafka data path (5a: months 6–14 against a single-node stub; 5b: 14–20 on real raft, ~27k)
+### Phase 5: Kafka data path (5a: months 5–12 against a single-node stub; 5b: 12–17 on real raft, ~27k)
 
 Server core (connection handling, request dispatch, flexible versions,
 memory and connection quotas), produce (validation, `acks` semantics),
@@ -296,10 +328,10 @@ protocol layer is shaken out early.
 
 Exit (C1): client compatibility matrix (franz-go, librdkafka, Java client,
 sarama, kafka-python, plus Kafka CLI tools) for every supported API version.
-Differential replay shows no unexplained differences. `kgo-verifier`
-produce and consume, including on mixed clusters.
+Differential replay against C++ shows no unexplained differences.
+`kgo-verifier` produce and consume on 3-node clusters with faults.
 
-### Phase 6: Consumer groups, idempotence and transactions (months 16–26, ~25k)
+### Phase 6: Consumer groups, idempotence and transactions (months 14–22, ~25k)
 
 Group coordinator (group state machine, rebalance protocol, static
 membership, offset commit and expiry, group recovery from
@@ -308,82 +340,84 @@ membership, offset commit and expiry, group recovery from
 coordinator (`tm_stm`, `tx_gateway_frontend`, tx hash ranges and
 `__transaction_state` partitions), group transactions
 (`group_tx_tracker_stm`, group fencing), describe/list transactions,
-describe producers, tx manager migrator.
+describe producers, tx manager migrator (recovery-mode repartitioning of
+the transaction coordinator topic).
 
 This is the highest-risk phase for subtle semantic bugs: `rm_stm` and
 `tx_gateway_frontend` alone are 5.8k lines with a lot of state.
 
-Exit (C5 transactions part): Java EOS verifiers
-(`tests/java/e2e-verifiers`) and transaction ducktape suites on all-Rust and
-mixed clusters; simulation tests for coordinator failover mid-commit and
-mid-abort; aborted-tx index and LSO checked against C++ on the same
-workload.
+Exit (C2 transactions part): Java EOS verifiers
+(`tests/java/e2e-verifiers`) and transaction ducktape suites pass;
+simulation tests for coordinator failover mid-commit and mid-abort;
+`rp-oracle` shows the same LSO, aborted-transaction lists and
+read_committed results as C++ on the same transactional workloads.
 
-### Phase 7: Placement and balancing (months 20–28, ~11k)
+### Phase 7: Placement and balancing (months 17–24, ~11k)
 
 Partition allocator and constraints, leader balancer (greedy and random
 strategies), partition auto-balancer planner and backend, shard placement
 table and core balancer, maintenance mode interaction, node decommission
 and recommission.
 
-Exit (C6): balancer decisions match C++ on recorded cluster states (feed the
-same `health_report` and `topic_table` snapshots to both planners and
-compare plans). Ducktape balancer, decommission and maintenance suites pass.
+Exit (C3): planners produce the same plans as C++ for the same cluster
+state (export health report and topic table snapshots from C++ clusters as
+JSON test inputs; these are test fixtures, not a compatibility format).
+Ducktape balancer, decommission and maintenance suites pass.
 
-### Phase 8: Admin API, metrics and operations (months 18–30, ~23k)
+### Phase 8: Admin API, metrics and operations (months 15–25, ~23k)
 
 Admin API v1 (all non-security routes), v2 ConnectRPC services, metrics on
 `/metrics` and `/public_metrics`, debug bundle, crash tracker, syschecks,
-self-test, process CLI flags (C8), metrics reporter (if kept, §11).
+self-test, process CLI flags (C5), metrics reporter (if kept, §11).
 
-Exit (C7, C8): Swagger-derived contract tests pass; metrics name and label
+Exit (C4, C5): Swagger-derived contract tests pass; metrics name and label
 diff against C++ is empty; `rpk` end-to-end suite passes; the Helm chart
 post-upgrade job works.
 
-### Phase 9: Hardening and rollout (months 26–36+)
+### Phase 9: Hardening and rollout (months 22–30+)
 
 - Performance gates (§8) on production-like hardware.
-- Long soak runs (weeks) with chaos, on all-Rust and mixed clusters.
-- Antithesis runs (`tools/antithesis` packaging exists for the C++ binary).
-- **Rollout drill:** `upgrade_test.sh` adapted to replace C++ nodes with
-  Rust one by one on the same volumes, then the reverse. Both directions
-  must pass before any production rollout.
-- Staged production rollout: one Rust node in a non-critical cluster, then
-  majority, then all-Rust. Keep the C++ binary as a rollback target until an
-  agreed bake period has passed.
+- Long soak runs (weeks) with chaos.
+- Antithesis runs (adapt the `tools/antithesis` packaging to the Rust
+  binary).
+- **Rust-to-Rust upgrade drill:** rolling upgrade from the previous Rust
+  build to the current one on the same volumes, and back, under load.
+- Rollout: new Rust clusters next to the C++ ones, optionally mirrored,
+  first for non-critical workloads. Retire a C++ cluster only after its
+  Rust replacement has run through an agreed bake period.
 
 ## 7. How the guarantees are proven
 
-1. **Golden fixtures (C2, C3).** The C++ fixture generator emits bytes for
-   every serde and ADL type with randomized contents. Rust must decode them,
-   re-encode them byte-identically, and produce bytes C++ decodes. This runs
-   in CI on every change to either side.
-2. **Differential replay (C1).** Record Kafka request streams (from
-   ducktape runs and synthetic generators), replay them against a C++ and
-   a Rust single-node broker started from the same state, and diff
-   responses after normalizing non-deterministic fields (timestamps,
-   producer IDs, node IDs).
-3. **Deterministic simulation (C5, C6).** Whole clusters (raft, controller,
+1. **Model-based testing (storage, state machines).** Each stateful
+   component is checked against a simple in-memory reference under random
+   operation sequences, including crashes and restarts.
+2. **Differential testing against C++ (C1, C3, C4).** `rp-oracle` runs the
+   same workload against a C++ and a Rust cluster and compares
+   externally visible results after normalizing non-deterministic fields
+   (timestamps, producer IDs, node IDs, leader placement). It covers Kafka
+   responses and fetched data, consumer group state, transaction outcomes,
+   Admin API output, config schema and metric names.
+3. **Deterministic simulation (C2, C3).** Whole clusters (raft, controller,
    transactions, groups) run in one thread on `rp-runtime`'s simulated
    backend with seeded scheduling, network faults, disk faults (torn
    writes, lost unsynced data, EIO) and clock skew. Any failure is
    reproducible from its seed. This is the main way the rewrite gets
    *stronger* guarantees than the C++, which can't be run this way.
-4. **Model checking for the riskiest protocols.** TLA+ (or a Rust model
-   checker like Stateright) specs for raft joint-consensus reconfiguration,
-   the transaction coordinator commit and abort paths, and the controller's
-   topic and partition lifecycle. Trace-check simulation runs against the
-   specs.
+4. **Model checking for the riskiest protocols.** TLA+ (or Stateright)
+   specs for raft joint-consensus reconfiguration, the transaction
+   coordinator commit and abort paths, and the controller's topic and
+   partition lifecycle. Simulation traces are checked against the specs.
 5. **Black-box suites.** Pruned ducktape suite, Java and Go verifiers, and
-   Antithesis, all run against C++, Rust and mixed clusters with the same
-   expectations.
+   Antithesis, run against C++ and Rust with the same expectations.
 6. **Fuzzing.** cargo-fuzz on every decoder: Kafka requests, RPC frames,
-   serde envelopes, segment and index parsing, config YAML and JSON.
+   codec envelopes, segment and index parsing, config YAML and JSON.
 7. **Ported unit tests.** The 125k lines of C++ tests in scope encode years
    of edge cases. Port the storage, raft, transactions, groups and
    balancer tests first. Lower-value fixture-heavy tests can be replaced by
    simulation and property tests.
-8. **Memory safety.** Miri and sanitizers on `rp-runtime` and `rp-bytes`;
+8. **Upgrade tests.** From the first tagged Rust release, CI runs N-1 → N
+   rolling upgrades and N → N-1 downgrades on real disks.
+9. **Memory safety.** Miri and sanitizers on `rp-runtime` and `rp-bytes`;
    `forbid(unsafe_code)` everywhere else.
 
 ## 8. Performance gates
@@ -408,15 +442,17 @@ OpenMessaging Benchmark and `kgo-verifier` provide the workloads.
 
 This is a rough, order-of-magnitude estimate and the uncertainty is real.
 
-- 240k lines of in-scope C++ plus Seastar, ported with byte-level
-  compatibility and a verification stack that doesn't exist today.
+- 239k lines of in-scope C++ plus Seastar, ported with behavioural parity
+  and a verification stack (simulation, differential harness, model
+  checking) that doesn't exist today.
 - Assuming 15–20k lines of tested production Rust per engineer-year for
-  this class of code, the port alone is 8–13 engineer-years. Compatibility
-  tooling, simulation, test porting, performance work and rollout typically
-  double or triple that. Hence **25–35 engineer-years**.
+  this class of code, the port alone is 7–12 engineer-years. Simulation,
+  the differential harness, test porting, performance work and rollout
+  roughly double that. Hence **20–28 engineer-years**. Dropping C++
+  compatibility saved about 15–20% compared with the interop strategy.
 - With 6–10 engineers who are strong in Rust *and* distributed storage:
-  first mixed-cluster milestone (end of Phase 4) at 12–18 months, full
-  parity at 2.5–4 years.
+  first 3-node cluster milestone (end of Phase 4) at 10–15 months, full
+  parity at 2–3.5 years.
 
 The biggest swing factors are the runtime (a weak choice costs a rewrite of
 the rewrite) and transactions (Phase 6).
@@ -425,12 +461,14 @@ the rewrite) and transactions (Phase 6).
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| Runtime can't match Seastar's scheduling, I/O fairness or tail latency | Fails C10; possibly redo `rp-runtime` | Phase 0 spike with hard numbers before committing; own the abstraction |
-| Subtle semantic drift in transactions, groups or raft | Data loss or duplicates that tests miss | Faithful port with references to the C++; simulation; model checking; mixed-cluster tests where C++ is the oracle |
-| Compatibility gaps found late (an envelope or kvstore key missed) | Mixed cluster or rollback breaks in production | Fixture generator enumerates types from the C++ build, not a hand list; cross-read and cross-write in CI from Phase 2 |
+| Runtime can't match Seastar's scheduling, I/O fairness or tail latency | Fails C6; possibly redo `rp-runtime` | Phase 0 spike with hard numbers before committing; own the abstraction |
+| Subtle semantic drift in transactions, groups or raft | Data loss or duplicates that tests miss | Faithful port with references to the C++; simulation; model checking; differential testing against C++ |
+| No interop means internal-protocol bugs are only caught by Rust-side testing | Bugs that a mixed cluster would have exposed reach later phases | Simulation from Phase 0; model checking of raft and transactions; port raft and storage unit tests early |
+| Redesign temptation (free formats invite free algorithms) | Drift from proven behaviour; schedule slip | Rule in §3: encodings may change, algorithms are ported; redesigns are post-parity |
+| Forgetting Rust-to-Rust upgradability | Every release forces a new cluster | Versioned formats and feature flags from the first commit; N-1 → N tests from the first release |
 | Memory behaviour differs (no allocator reclaimer) | OOM or cache thrash under load | Explicit budgets everywhere; memory-pressure tests in simulation and soak |
 | Upstream keeps moving (this tree tracks v26.2.x) | Parity target drifts | Freeze the target at v26.2.x slim; batch upstream fixes into a tracked list; re-baseline at agreed points only |
-| Ducktape suite is half about removed features | Weak oracle | Phase 0 pruning is a gate, not a nice-to-have |
+| Ducktape suite is half about removed features | Weak reference | Phase 0 pruning is a gate, not a nice-to-have |
 | Team availability (Rust plus distributed storage is a scarce combination) | Schedule | Phase plan lets 2–3 sub-teams work in parallel after Phase 0 |
 | Licensing: Redpanda core is under the Business Source License 1.1 (`licenses/bsl.md`) | A close port is very likely a derivative work bound by the same licence and its use grant | Get legal advice before starting; it changes nothing technically, but could change whether to do this at all |
 | No authentication or TLS | Anyone on the network can read, write or delete | Document loudly; network isolation in every deployment; leave room in `rp-net` so TLS could be added back without redesign |
@@ -438,33 +476,32 @@ the rewrite) and transactions (Phase 6).
 ## 11. Open decisions
 
 1. **Runtime.** Decided at the end of Phase 0 from spike numbers.
-2. **Enterprise license checks.** Recommendation: drop. They only gated
-   features this fork either dropped or should just allow.
-3. **Phone-home metrics reporter** (`cluster/metrics_reporter`, sends
-   cluster telemetry to Redpanda). Recommendation: drop or default off in a
-   fork. Parity says keep.
-4. **Mixed-cluster interop.** Recommended above, and it carries roughly
-   15–20% of the effort. The alternative is offline migration only (stop the
-   cluster, start Rust on the same data dirs). That still needs C4, but
-   loses incremental validation and live rollback.
-5. **Kafka API versions.** Freeze at today's ranges for parity, or plan
+2. **Phone-home metrics reporter** (`cluster/metrics_reporter`, sends
+   cluster telemetry to Redpanda). Recommendation: drop, or default off in
+   a fork. Parity says keep.
+3. **Kafka API versions.** Freeze at today's ranges for parity, or plan
    newer ones (for example the KIP-848 consumer group protocol) as
    post-parity work. Recommendation: freeze.
-6. **Vestigial config** (`retention.local.target.*`, `space_management_*`,
-   `disk_reservation_percent`). Keep accepting them for config
-   compatibility (C7), as the C++ slim build does.
+4. **Vestigial config** (`retention.local.target.*`, `space_management_*`,
+   `disk_reservation_percent`). They only exist so stock configs load and
+   do nothing in slim. Recommendation: drop them, since Rust clusters start
+   from new configs; or accept and ignore them if operators will reuse
+   existing config files.
+5. **Rust-to-Rust upgradability from the first release.** Recommended above
+   (§2). The alternative, allowing format breaks until a declared 1.0, is
+   cheaper early on but must end before any production data lands on Rust.
 
 ## 12. First 90 days
 
-1. Stand up `src/rust/` as a cargo workspace built by Bazel via `rules_rust`;
-   CI job for it.
+1. Stand up `src/rust/` as a cargo workspace with CI.
 2. Runtime spike: two candidate executors behind a prototype `rp-runtime`
-   API; benchmark against Seastar.
-3. C++ fixture generator for serde and ADL types; data-directory generator.
-4. Prune ducktape to the slim and no-auth/no-TLS feature set; get it green
-   on the C++ broker.
-5. `rp-bytes` and `rp-serde` derive macro, decoding the first fixtures.
-6. Kafka protocol codegen from `schemata/*.json`, round-tripping requests
-   captured from a ducktape run.
+   API, with the simulated backend; benchmark against Seastar.
+3. Prune ducktape to the slim, no-auth, no-TLS feature set; get it green on
+   the C++ broker.
+4. Format specs for RPC, segments, kvstore and snapshots, with versioning.
+5. `rp-oracle` v0 running workloads against a C++ cluster and recording
+   externally visible results.
+6. `rp-bytes`, `rp-codec` derive macro, and Kafka protocol codegen from
+   `schemata/*.json`, round-tripping requests captured from a ducktape run.
 7. Write the TLA+ (or Stateright) spec for raft reconfiguration while the
    raft port is still months away.

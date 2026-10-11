@@ -15,25 +15,36 @@ exact. Re-run with:
 
 ```bash
 python3 tools/rust-rewrite/loc_inventory.py            # plain
-python3 tools/rust-rewrite/loc_inventory.py --markdown # this table
+python3 tools/rust-rewrite/loc_inventory.py --markdown # full table
 ```
 
 **Scope column.**
 
 - `keep`: must be rewritten with parity.
-- `drop`: out of scope by decision. Authentication and TLS are removed, along
-  with everything that only exists because of them (see "What dropping
-  authentication and TLS removes" below).
+- `drop`: out of scope by decision: authentication, everything that only
+  exists because of it, TLS, and enterprise license checks.
+- `compat`: only exists so a node can read state written by an older C++
+  version. Rust clusters start from empty disks and carry nothing over from
+  C++ nodes, so these go.
 - `dead`: has no production caller in this tree, so nothing to port.
 
 ## Totals
 
 | | Prod C++ | Test C++ |
 |---|---:|---:|
-| **keep** (to rewrite) | **240,499** | 125,065 |
+| **keep** (to rewrite) | **239,068** | 124,692 |
 | drop (authn, authz, audit, license, TLS) | 18,628 | 9,476 |
+| compat (state from older C++ versions) | 1,431 | 373 |
 | dead (no production caller) | 13,736 | 9,706 |
 | **all of `src/v`** | 272,863 | 144,247 |
+
+The `compat` row only counts whole files. Most backward-compatibility code
+is spread through files that stay. Examples: `legacy_*` placeholder fields,
+decode branches for old serde versions, code gated on 48 feature flags that
+would all be active from day one in Rust, and parse-and-skip logic for
+controller commands of removed features. None of that needs porting. It is
+inside `keep` rows and can't be separated by file, so the real saving is
+larger than 1,431 lines.
 
 Not counted above:
 
@@ -42,7 +53,7 @@ Not counted above:
 | Seastar (external, pinned fork, fetched by Bazel) | not counted | The runtime everything above is built on: reactor per core, `sharded<T>`, scheduling groups, DMA file I/O, the per-shard allocator, the HTTP server, metrics. The rewrite has to replace it; see PLAN.md "Runtime" |
 | Kafka API JSON schemas (`kafka/protocol/schemata`) | 4,153 lines, 46 APIs | Reused as-is: the Rust codec generator reads the same files |
 | Kafka schema code generator (`generator.py`) | 2,043 lines Python | Replaced by a Rust generator (build script or proc-macro) |
-| Internal RPC service definitions (`*.json` in `cluster/`, `raft/`, `kafka/data/`) | 11 services, 68 methods after the cut | Reused as-is: same JSON drives Rust RPC stubs |
+| Internal RPC service definitions (`*.json` in `cluster/`, `raft/`, `kafka/data/`) | 11 services, 68 methods after the cut | Reference for which internal calls exist. The Rust wire encoding is free to differ |
 | Admin API v1 Swagger docs (`redpanda/admin/api-doc`) | 6,144 lines JSON | Contract for the REST surface |
 | Admin API v2 protobufs (`proto/`) | 1,456 lines | Reused as-is (prost/tonic or connect-rust) |
 | `rpk` CLI (Go, `src/go/rpk`) | 55,738 + 26,182 test | **Not rewritten.** It is a client of the Kafka and Admin APIs; parity of those APIs keeps it working |
@@ -86,13 +97,13 @@ DescribeAcls (29), CreateAcls (30), DeleteAcls (31),
 DescribeUserScramCredentials (50), AlterUserScramCredentials (51),
 DescribeRedpandaRoles (15000).
 
-### Raft (21,452)
+### Raft (21,399)
 
 | Feature | Scope | Prod LOC | Test LOC |
 |---|---|---:|---:|
 | Raft: consensus core (election, replication, heartbeats) | keep | 11,550 | 891 |
 | Raft: recovery + throttling | keep | 1,816 | 385 |
-| Raft: membership / joint-consensus configuration | keep | 2,879 | 1,238 |
+| Raft: membership / joint-consensus configuration | keep | 2,826 | 1,238 |
 | Raft: state machine framework (persisted_stm, snapshots) | keep | 3,624 | 1,511 |
 | Raft: group manager, RPC service, probes | keep | 1,583 | 6,632 |
 
@@ -118,19 +129,19 @@ scheduling. Segment data is written with O_DIRECT through
 `segment_appender` and read through `chunk_cache`. `batch_cache` registers
 with Seastar's memory reclaimer, so it shrinks under allocator pressure.
 
-### Cluster and controller (68,830)
+### Cluster and controller (68,388)
 
 | Feature | Scope | Prod LOC | Test LOC |
 |---|---|---:|---:|
 | Transactions: coordinator (tm_stm, tx gateway) + rm_stm | keep | 13,162 | 2,742 |
+| Cluster shared types, errors, RPC service | keep | 6,456 | 6,348 |
 | Controller core (controller stm, backend, snapshot, commands) | keep | 6,286 | 915 |
 | Topic metadata (topic_table, frontend, dispatcher) | keep | 6,193 | 1,312 |
-| Cluster shared types, errors, legacy wire shims, RPC service | keep | 6,594 | 6,582 |
 | Partition placement: allocator + leader balancer | keep | 5,268 | 575 |
 | Membership, discovery, cluster bootstrap | keep | 4,612 | 0 |
 | Health monitor + node status | keep | 4,349 | 703 |
-| Feature flags + upgrade gating | keep | 3,883 | 700 |
 | Partition auto-balancer (planner/backend) | keep | 3,712 | 2,756 |
+| Feature flags + upgrade gating | keep | 3,579 | 700 |
 | Partition runtime (partition, manager, eviction/properties stms) | keep | 3,042 | 1,703 |
 | Metadata dissemination + leaders table + caches | keep | 2,799 | 812 |
 | Shard placement + core balancing | keep | 2,439 | 1,137 |
@@ -144,6 +155,11 @@ The biggest files: `types` (3,791), `tx_gateway_frontend` (3,066), `rm_stm`
 (2,758), `topic_table` (2,412), `partition_balancer_planner` (2,302),
 `topics_frontend` (2,046), `controller_backend` (2,041), `members_manager`
 (1,917). The controller RPC service has 31 methods and `tx_gateway` has 13.
+
+The feature-flag mechanism stays because Rust releases will need rolling
+upgrades between themselves. Its contents don't carry over: the 48 C++
+feature flags are history, and a Rust cluster starts with all of their
+behaviour switched on.
 
 ### Admin API (14,125)
 
@@ -160,12 +176,12 @@ keeps `BrokerService` (GetBroker, ListBrokers), `ClusterService`
 and the internal debug and forced-reconfiguration services; the 15
 `SecurityService` RPCs go. `server.cc` is 4,186 lines on its own.
 
-### Platform: config, RPC, networking, model, codecs (26,562)
+### Platform: config, RPC, networking, model, codecs (26,025)
 
 | Feature | Scope | Prod LOC | Test LOC |
 |---|---|---:|---:|
 | Configuration framework + ~350 properties | keep | 8,038 | 2,084 |
-| Data model (record batches, ntp, offsets, ADL) | keep | 5,870 | 1,958 |
+| Data model (record batches, ntp, offsets) | keep | 5,333 | 1,958 |
 | Networking: server, connection limits/rates, transports | keep | 3,387 | 1,014 |
 | Internal RPC framework (serde over TCP) | keep | 3,364 | 1,968 |
 | HTTP client | keep | 2,109 | 2,207 |
@@ -174,10 +190,10 @@ and the internal debug and forced-reconfiguration services; the 15
 
 Configuration is 319 cluster properties (`config/configuration.h`) and 30
 node properties (`config/node_config.h`), each with validation, defaults,
-bounds, YAML and JSON (de)serialisation, live-update bindings, and the
-aliases and deprecations that keep old config files loading. 51 headers
-declare `serde::envelope` types (284 envelope declarations in total), which
-are the internal RPC and on-disk payloads.
+bounds, YAML and JSON (de)serialisation, and live-update bindings. 51
+headers declare `serde::envelope` types (284 envelope declarations in
+total), which are the internal RPC and on-disk payloads. In Rust these
+become derive-generated types in a format of the rewrite's choosing.
 
 ### Operations and observability (11,432)
 
@@ -190,11 +206,11 @@ are the internal RPC and on-disk payloads.
 | Crash tracker (signal-safe crash records) | keep | 1,311 | 419 |
 | Startup system checks | keep | 505 | 0 |
 
-### Foundations (24,525)
+### Foundations (24,126)
 
 | Feature | Scope | Prod LOC | Test LOC |
 |---|---|---:|---:|
-| Utilities (hist, retry chain, caches, encodings, misc) | keep | 15,095 | 9,898 |
+| Utilities (hist, retry chain, caches, encodings, misc) | keep | 14,696 | 9,759 |
 | Async primitives on Seastar (ssx) | keep | 4,896 | 3,846 |
 | iobuf / zero-copy byte buffers | keep | 2,719 | 2,974 |
 | Containers (chunked vectors, radix tree, interval maps) | keep | 1,815 | 2,697 |
@@ -215,6 +231,17 @@ layer to shrink the most.
 | TLS (OpenSSL contexts, cert reload, crypto wrappers) | drop | 2,565 | 1,079 |
 | Enterprise license checks | drop | 779 | 300 |
 
+### Compatibility with older C++ versions (1,431, plus scattered code)
+
+| Feature | Scope | Prod LOC | Test LOC |
+|---|---|---:|---:|
+| Compatibility with older C++ versions (ADL, legacy wire slots, upgrade migrators) | compat | 1,431 | 373 |
+
+Covers the ADL encoding (`reflection/adl*`, `model/adl_serde*`), the
+`legacy_*` placeholder fields in `cluster/legacy_wire.h`, the feature
+migrators in `migrations/`, and `raft/broker_compat.h`. See "Totals" for
+the compatibility code that sits inside kept files.
+
 ### Dead in this tree (13,736)
 
 | Feature | Scope | Prod LOC | Test LOC |
@@ -225,7 +252,7 @@ layer to shrink the most.
 The Kafka client becomes dead once audit logging is dropped. Ducktape and
 the Go/Java verifiers already provide external clients for tests.
 
-## What dropping authentication and TLS removes
+## What the scope cuts remove
 
 Authentication goes, and with it the parts that only exist to serve it.
 
@@ -238,15 +265,18 @@ Authentication goes, and with it the parts that only exist to serve it.
   internal Kafka client.
 - **Ephemeral credentials and the breakglass admin service.** These only
   exist to mint and bypass credentials.
-- **Enterprise license checks.** These gate RBAC, audit, FIPS and a few
-  balancer features. This fork has no use for licence keys, so the remaining
-  gated features (continuous balancing, leadership pinning) become plain
-  config. This one is a recommendation rather than something you asked for;
-  see PLAN.md "Open decisions".
+- **Enterprise license checks.** These gated RBAC, audit, FIPS, continuous
+  partition and core balancing, leadership pinning and topic-deletion
+  protection. The balancing, pinning and deletion-protection features stay
+  and are controlled by config alone.
 
 TLS goes from every listener: Kafka, internal RPC, Admin API, and
 Prometheus. That removes OpenSSL, `crypto/`, certificate reload and the
 TLS-related node config.
+
+No state carries over from C++ nodes. That means no ADL, no legacy wire
+slots, no migrators, no replay of C++ controller logs, and no reading of
+C++ data directories.
 
 This changes behaviour that people can see:
 
@@ -257,32 +287,24 @@ This changes behaviour that people can see:
 - Anyone who can reach a port has full control, including deleting topics
   and changing cluster config. Network isolation becomes the only access
   control. Deploy accordingly.
-- Existing stock clusters keep users, ACLs and roles in the controller log
-  (`user_management_cmd`, `acl_management_cmd`, `role_management_cmd`) and in
-  controller snapshots. The Rust controller must **parse and drop** these,
-  the same way `cluster/legacy_wire.h` already handles removed features.
-  Otherwise it can't replay a stock log.
-- A rolling migration from a stock cluster only works if that cluster
-  already runs with TLS and SASL off on all listeners, internal RPC included.
-  Turning them off is a prerequisite step.
+- Moving to the Rust broker means new clusters on empty disks. Any data
+  that has to move does so at the Kafka level (for example MirrorMaker 2 or
+  Redpanda Connect), which copies records but not offsets.
 
-## Interfaces and formats that must stay byte-compatible
+## Interfaces that define parity
 
-These are what "parity" is measured against (see PLAN.md):
+Only externally visible surfaces are contracts. Internal RPC, on-disk
+formats, and controller command encodings are free for the Rust design to
+choose (see PLAN.md §2).
 
 | Contract | Defined in | Notes |
 |---|---|---|
 | Kafka wire protocol, 38 APIs | `kafka/protocol/schemata/*.json` | Including flexible versions and tagged fields |
-| Internal RPC framing + 11 services, 68 methods | `rpc/`, `*rpc*.json`, `raft/raftgen.json`, `cluster/controller.json` | Needed for mixed C++/Rust clusters |
-| serde envelopes (version, compat_version, size prefix, positional fields) | `serde/rw/*`, 51 headers | Including the `legacy_*` placeholder slots in `cluster/legacy_wire.h` |
-| Legacy ADL encoding | `model/adl_serde*`, `reflection/` | Still used by raft: configuration history in the kvstore, some raft types, snapshot metadata |
-| Record batch on-disk header and CRCs | `model/record*`, `storage/parser*` | Kafka v2 batch format; Redpanda's own 61-byte packed header with header_crc on disk |
-| Segment files, `.base_index`, compaction indexes | `storage/segment*`, `storage/index_state*`, `storage/compacted_index*` | File naming `{base_offset}-{term}-{version}.log`, plus `.base_index`, `.compaction_index` and staging files |
-| KV store (per-shard, local, not replicated) | `storage/kvstore*` | Keys: raft voted_for, offset translator, stm snapshots, shard placement |
-| Raft/STM snapshot files | `raft/`, `storage/snapshot*` | Controller snapshot, per-partition stm snapshots |
-| Controller log command types | `model/record_batch_types.h`, `cluster/commands.h` | 34 batch types in the enum, including ones for removed features that must still be skipped |
-| Config file and cluster config schema | `config/` | YAML node config, cluster config JSON, property names and aliases |
+| Kafka record batch format v2 | Kafka spec, `model/record*` | Mandatory on the wire; also the natural on-disk payload for zero-copy fetch |
+| Kafka-visible semantics | Kafka spec, ducktape, verifiers | Offsets, LSO and HWM, idempotence, transactions, compaction, retention, group rebalancing |
+| Config file and property schema | `config/` | YAML node config, cluster config property names, types, defaults, bounds |
+| Topic configs | `kafka/server/handlers/configs/*` | Names and semantics of the topic properties clients set |
 | Admin API v1 routes and JSON shapes | `redpanda/admin/api-doc` | rpk, Helm chart, operator depend on these |
 | Admin API v2 protos | `proto/redpanda/core/admin` | |
 | Prometheus metric names and labels | probes across the tree | `/metrics` and `/public_metrics`; dashboards in `tools/dashboards` |
-| Directory layout | `storage/`, `config/` | `{data_directory}/{namespace}/{topic}/{partition}_{revision}/`, `redpanda/` namespace, `.redpanda_data` markers |
+| Process CLI flags and `io-properties.yaml` | Seastar options as passed by `rpk redpanda start` and `rpk iotune` | `--smp`, `--memory`, `--overprovisioned`, etc. |

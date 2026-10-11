@@ -16,8 +16,9 @@ import sys
 
 ROOT = os.path.join(os.path.dirname(__file__), "..", "..", "src", "v")
 
-# (feature, disposition, globs). Disposition: keep, drop (authn/TLS scope
-# cut), dead (no production caller in this tree).
+# (feature, disposition, globs). Disposition: keep, drop (authn/TLS/license
+# scope cut), compat (only exists to read state written by older C++
+# versions; Rust clusters start empty), dead (no production caller).
 FEATURES = [
     # --- security: dropped from scope -----------------------------------
     ("Audit logging (OCSF events to a topic)", "drop", ["security/audit/*"]),
@@ -59,6 +60,13 @@ FEATURES = [
      ["serde/parquet/*", "serde/thrift/*", "serde/avro/*"]),
     ("Kafka client library (only caller was audit)", "dead",
      ["kafka/client/*"]),
+    # --- compat: no state is carried over from C++ nodes -------------------
+    ("Compatibility with older C++ versions (ADL, legacy wire slots, "
+     "upgrade migrators)", "compat", [
+         "reflection/adl*", "reflection/async_adl*",
+         "model/adl_serde*", "model/async_adl_serde*",
+         "cluster/legacy_wire*", "migrations/*", "raft/broker_compat*",
+     ]),
     # --- kafka --------------------------------------------------------------
     ("Kafka protocol codecs + schema generator", "keep",
      ["kafka/protocol/*"]),
@@ -182,7 +190,7 @@ FEATURES = [
         "cluster/config_*",
     ]),
     ("Feature flags + upgrade gating", "keep", [
-        "cluster/feature_*", "features/*", "migrations/*",
+        "cluster/feature_*", "features/*",
     ]),
     ("Topic metadata (topic_table, frontend, dispatcher)", "keep", [
         "cluster/topic*", "cluster/topics_frontend*",
@@ -210,7 +218,7 @@ FEATURES = [
     ("Phone-home metrics reporter + crash reporter", "keep", [
         "cluster/metrics_reporter*", "cluster/crash_reporter*",
     ]),
-    ("Cluster shared types, errors, legacy wire shims, RPC service", "keep",
+    ("Cluster shared types, errors, RPC service", "keep",
      ["cluster/*"]),
     # --- admin --------------------------------------------------------------
     ("Admin API v2 (ConnectRPC) + proto/JSON codecs", "keep", [
@@ -225,7 +233,7 @@ FEATURES = [
     ("Internal RPC framework (serde over TCP)", "keep", ["rpc/*"]),
     ("Networking: server, connection limits/rates, transports", "keep",
      ["net/*"]),
-    ("Data model (record batches, ntp, offsets, ADL)", "keep", ["model/*"]),
+    ("Data model (record batches, ntp, offsets)", "keep", ["model/*"]),
     ("serde: positional binary envelope format", "keep", ["serde/*"]),
     ("Compression (gzip, snappy, lz4, zstd)", "keep", ["compression/*"]),
     ("HTTP client", "keep", ["http/*"]),
@@ -300,7 +308,7 @@ def main():
         else:
             print(f"{d:5s} {c['prod']:7d} {c['test']:7d}  {name}")
     print()
-    for d in ("keep", "drop", "dead"):
+    for d in ("keep", "drop", "compat", "dead"):
         print(f"{d}: prod={totals[d + '_prod']:,} test={totals[d + '_test']:,}")
     if unassigned:
         print("\nunassigned:", *unassigned, sep="\n  ")
