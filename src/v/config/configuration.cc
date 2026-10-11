@@ -2947,7 +2947,38 @@ configuration::configuration()
           }
 
           return std::nullopt;
-      }) {}
+      })
+  , cloud_storage_enabled(
+      *this,
+      "cloud_storage_enabled",
+      "Accepted for compatibility with tooling that always sets it; this "
+      "build has no object storage support, so it must be false.",
+      {.needs_restart = needs_restart::no, .visibility = visibility::user},
+      false,
+      [](const bool& enabled) -> std::optional<ss::sstring> {
+          if (enabled) {
+              return "object storage is not supported by this build";
+          }
+          return std::nullopt;
+      })
+  , cloud_storage_enable_remote_read(
+      *this,
+      "cloud_storage_enable_remote_read",
+      "Accepted and ignored: this build has no object storage support.",
+      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
+      false)
+  , cloud_storage_enable_remote_write(
+      *this,
+      "cloud_storage_enable_remote_write",
+      "Accepted and ignored: this build has no object storage support.",
+      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
+      false)
+  , cloud_storage_cache_size(
+      *this,
+      "cloud_storage_cache_size",
+      "Accepted and ignored: this build has no object storage cache.",
+      {.needs_restart = needs_restart::no, .visibility = visibility::user},
+      0) {}
 
 configuration::error_map_t configuration::load(const YAML::Node& root_node) {
     if (!root_node["redpanda"]) {

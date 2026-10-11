@@ -579,6 +579,26 @@ private:
                   .empty();
     }
 
+    /*
+     * Accepted and ignored, for the Helm chart's benefit.
+     *
+     * The chart's post-install/post-upgrade job (the operator's
+     * sync-cluster-config) PUTs its whole tiered-storage block to
+     * /v1/cluster_config without ?force, and these four carry non-null
+     * defaults even when tiered storage is switched off. Rejecting them as
+     * unknown properties fails that job, which fails the Helm release, which
+     * rolls the brokers back -- so this build keeps the names and ignores the
+     * values. Object storage is not part of it; nothing reads these.
+     *
+     * cloud_storage_enabled is the exception: its validator rejects true,
+     * because silently accepting a request to enable object storage on a
+     * build that cannot do it is worse than failing the upgrade loudly.
+     */
+    property<bool> cloud_storage_enabled;
+    property<bool> cloud_storage_enable_remote_read;
+    property<bool> cloud_storage_enable_remote_write;
+    property<uint64_t> cloud_storage_cache_size;
+
     ss::sstring store_name() const override { return "cluster"; }
 };
 
