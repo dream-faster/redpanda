@@ -258,7 +258,27 @@ if [[ $DEDUP == true ]]; then
   [[ $got == 3 ]] || fail "dedup stopped working after the upgrade: $got/3"
 fi
 expect_config 0 retained retention.ms 86400000 || fail "retention lost"
-rpk 2 group describe upgrade-group | grep -q 'upgrade-group' || fail "group lost"
+# The group coordinator has to recover on whichever node now hosts it, so give
+# it the same bounded wait the health checks use rather than asking once. Piping
+# straight into grep also discarded the output, which left a failure here with
+# nothing to diagnose; print it instead.
+wait_group() {
+  local id="$1" group="$2" out
+  for _ in $(seq 1 30); do
+    out=$(rpk "$id" group describe "$group" 2>&1) || true
+    if grep -q "$group" <<<"$out"; then
+      return 0
+    fi
+    sleep 2
+  done
+  echo "--- group describe $group as seen from node $id"
+  echo "$out"
+  echo "--- groups known to node $id"
+  rpk "$id" group list 2>&1 || true
+  return 1
+}
+
+wait_group 2 upgrade-group || fail "group lost"
 rpk 1 topic list | grep -q compacted || fail "compacted topic lost"
 rpk 0 cluster config get controller_snapshot_max_age_sec | grep -q '^5$' ||
   fail "cluster config lost"
