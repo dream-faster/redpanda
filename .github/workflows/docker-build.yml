@@ -191,12 +191,14 @@ jobs:
               apt-get install -y --no-install-recommends \
                 bash ca-certificates coreutils curl grep sed wget && \
               rm -rf /var/lib/apt/lists/*
+          RUN groupadd --gid 65532 nonroot && \
+              useradd --uid 65532 --gid 65532 --no-create-home --shell /usr/sbin/nologin nonroot
           ADD redpanda_nonroot.tar.gz /
           RUN chown -R 65532:65532 /etc/redpanda /var/lib/redpanda /opt/redpanda
           EXPOSE 8081 8082 9092 9644
           VOLUME ["/var/lib/redpanda/data"]
           LABEL org.opencontainers.image.authors="Redpanda Data <hi@redpanda.com>"
-          USER 65532
+          USER 65532:65532
           ENTRYPOINT ["/opt/redpanda/bin/rpk"]
           CMD ["redpanda", "start", "--overprovisioned"]
           EOF

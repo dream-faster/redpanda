@@ -25,7 +25,7 @@ start_node() {
   if [[ $role == "slim" ]]; then
     local uid="${SLIM_UID:-65532}"
     docker run --rm --user 0 -v "$WORK/data$id:/d" busybox chown -R "$uid:$uid" /d
-    extra+=(--user "$uid")
+    extra+=(--user "$uid:$uid")
   fi
   docker run -d --name "$(name "$id")" --hostname "$(name "$id")" --network "$NET" \
     --label "slim-role=$role" \
