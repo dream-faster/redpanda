@@ -99,7 +99,6 @@ using validators = make_validator_types<
   min_max_compaction_lag_ms_validator,
   dedup_key_header_create_validator>;
 
-
 static void
 append_topic_configs(request_context& ctx, create_topics_response& response) {
     for (auto& ct_result : response.data.topics) {

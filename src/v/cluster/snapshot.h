@@ -24,5 +24,4 @@ inline const ss::sstring partition_properties_stm_snapshot
   = "partition_properties.snapshot";
 inline const ss::sstring dedup_stm_snapshot = "dedup.snapshot";
 
-
 } // namespace cluster

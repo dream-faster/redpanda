@@ -278,7 +278,6 @@ struct dedup_key_header_validator {
     }
 };
 
-
 struct min_cleanable_dirty_ratio_validator {
     std::optional<ss::sstring>
     operator()(const ss::sstring&, const tristate<double>& value) {
