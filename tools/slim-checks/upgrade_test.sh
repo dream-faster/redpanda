@@ -13,20 +13,38 @@ STOCK="$1"
 SLIM="$2"
 NET="rp-upgrade-net"
 NODES=(0 1 2)
-STOCK_RPK="rpk"
-SLIM_RPK="${SLIM_RPK:-/opt/redpanda/bin/rpk}"
-
 name() { echo "rp-$1"; }
+
+# The user and rpk path are properties of the image, not of its role in this
+# test: an upstream stock image runs as 101 with rpk on PATH, while anything
+# built from this repo runs as 65532 with rpk only at an absolute path. The
+# baseline can be either -- it is the deployed dedup build by default -- so
+# ask the image instead of assuming.
+image_uid() { # image_uid <image> <fallback>
+  local u
+  u=$(docker image inspect -f '{{.Config.User}}' "$1" 2>/dev/null | cut -d: -f1)
+  if [[ $u =~ ^[0-9]+$ ]]; then echo "$u"; else echo "$2"; fi
+}
+
+image_rpk() { # image_rpk <image>
+  if docker run --rm --entrypoint /opt/redpanda/bin/rpk "$1" version >/dev/null 2>&1; then
+    echo /opt/redpanda/bin/rpk
+  else
+    echo rpk
+  fi
+}
 
 start_node() {
   local id="$1" image="$2" role="$3" extra=()
-  # Each image runs as its own user (stock 101, slim 65532), so a rollout has
-  # to hand the data directory to the new image's user first.
+  # A rollout has to hand the data directory to the incoming image's user.
+  local uid
   if [[ $role == "slim" ]]; then
-    local uid="${SLIM_UID:-65532}"
-    docker run --rm --user 0 -v "$WORK/data$id:/d" busybox chown -R "$uid:$uid" /d
-    extra+=(--user "$uid:$uid")
+    uid="$SLIM_UID"
+  else
+    uid="$STOCK_UID"
   fi
+  docker run --rm --user 0 -v "$WORK/data$id:/d" busybox chown -R "$uid:$uid" /d
+  extra+=(--user "$uid:$uid")
   docker run -d --name "$(name "$id")" --hostname "$(name "$id")" --network "$NET" \
     --label "slim-role=$role" \
     -v "$WORK/data$id:/var/lib/redpanda/data" "${extra[@]}" "$image" \
@@ -117,6 +135,12 @@ count() { # count <node> <topic> <partition> -> messages readable
     wc -l | tr -d ' '
 }
 
+STOCK_UID=$(image_uid "$STOCK" 101)
+SLIM_UID="${SLIM_UID:-$(image_uid "$SLIM" 65532)}"
+STOCK_RPK="${STOCK_RPK:-$(image_rpk "$STOCK")}"
+SLIM_RPK="${SLIM_RPK:-/opt/redpanda/bin/rpk}"
+echo "baseline uid=$STOCK_UID rpk=$STOCK_RPK; slim uid=$SLIM_UID rpk=$SLIM_RPK"
+
 WORK=$(mktemp -d)
 cleanup() {
   for id in "${NODES[@]}"; do docker rm -f "$(name "$id")" >/dev/null 2>&1 || true; done
@@ -129,8 +153,8 @@ trap cleanup EXIT
 docker network create "$NET" >/dev/null
 for id in "${NODES[@]}"; do
   mkdir -p "$WORK/data$id"
-  # stock images run as uid 101
-  chown 101:101 "$WORK/data$id" 2>/dev/null || sudo chown 101:101 "$WORK/data$id"
+  chown "$STOCK_UID:$STOCK_UID" "$WORK/data$id" 2>/dev/null ||
+    sudo chown "$STOCK_UID:$STOCK_UID" "$WORK/data$id"
 done
 
 echo "== starting three stock nodes: $STOCK"
