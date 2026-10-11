@@ -23,6 +23,8 @@
 #include <fmt/format.h>
 #include <gtest/gtest.h>
 
+#include <tuple>
+
 namespace cluster {
 
 namespace {
@@ -46,11 +48,16 @@ using member_t = std::remove_cvref_t<T>;
 
 // The field layout of topic_properties in stock v26.2.x. Fields that still
 // exist are typed after the live struct; removed ones are spelled out.
-template<typename IcebergMode = int32_t>
+//
+// WithDedup models the predecessor this branch actually upgrades from: a stock
+// v26.2.x broker already carrying the three dedup properties this PR appends
+// (version 17). WithDedup=false is plain stock v26.2.x, which an upgrading
+// node must still be able to read.
+template<typename IcebergMode = int32_t, bool WithDedup = false>
 struct stock_topic_properties
   : serde::envelope<
-      stock_topic_properties<IcebergMode>,
-      serde::version<14>,
+      stock_topic_properties<IcebergMode, WithDedup>,
+      serde::version<WithDedup ? 17 : 14>,
       serde::compat_version<0>> {
     MEMBER(compression);
     MEMBER(cleanup_policy_bitflags);
@@ -101,9 +108,15 @@ struct stock_topic_properties
     MEMBER(message_timestamp_after_max_ms);
     int32_t storage_mode{255};
     std::optional<ss::sstring> schema_registry_context;
+    MEMBER(dedup_window_ms);
+    MEMBER(dedup_generation);
+    MEMBER(dedup_key_header);
 
     template<typename T>
     void take_shared_fields_from(const T& live) {
+        dedup_window_ms = live.dedup_window_ms;
+        dedup_generation = live.dedup_generation;
+        dedup_key_header = live.dedup_key_header;
         compression = live.compression;
         cleanup_policy_bitflags = live.cleanup_policy_bitflags;
         compaction_strategy = live.compaction_strategy;
@@ -132,7 +145,7 @@ struct stock_topic_properties
         message_timestamp_after_max_ms = live.message_timestamp_after_max_ms;
     }
 
-    auto serde_fields() {
+    auto stock_fields() {
         return std::tie(
           compression,
           cleanup_policy_bitflags,
@@ -184,6 +197,16 @@ struct stock_topic_properties
           storage_mode,
           schema_registry_context);
     }
+
+    auto serde_fields() {
+        if constexpr (WithDedup) {
+            return std::tuple_cat(
+              stock_fields(),
+              std::tie(dedup_window_ms, dedup_generation, dedup_key_header));
+        } else {
+            return stock_fields();
+        }
+    }
 };
 
 std::string hex(iobuf b) {
@@ -196,16 +219,60 @@ std::string hex(iobuf b) {
 
 } // namespace
 
-TEST(legacy_wire, topic_properties_layout_matches_stock) {
+// The in-place upgrade this branch has to survive: the node being replaced is
+// a stock v26.2.x broker already running dedup, so its topic_properties bytes
+// must be the ones a slim+dedup node writes -- same slots, same order, same
+// envelope version. The dedup fields sit after the legacy slots precisely so
+// this stays byte-for-byte true.
+TEST(legacy_wire, topic_properties_layout_matches_stock_with_dedup) {
     topic_properties live;
     live.retention_bytes = tristate<size_t>{1234};
     live.write_caching = model::write_caching_mode::default_false;
     live.min_compaction_lag_ms = std::chrono::milliseconds{77};
+    live.dedup_window_ms = tristate<std::chrono::milliseconds>{
+      std::chrono::milliseconds{300000}};
+    live.dedup_generation = 4;
+    live.dedup_key_header = "redpanda-dedup-key";
 
-    stock_topic_properties<> stock;
+    stock_topic_properties<int32_t, /*WithDedup=*/true> stock;
     stock.take_shared_fields_from(live);
 
     EXPECT_EQ(hex(serde::to_iobuf(live)), hex(serde::to_iobuf(stock)));
+}
+
+// The other direction, and the other predecessor: a plain stock v26.2.x
+// broker that never had dedup. Its shorter envelope still parses, leaving the
+// dedup properties at their defaults -- serde stops at the envelope's own
+// size, and compat_version 0 means the version gap is not an error.
+TEST(legacy_wire, topic_properties_reads_stock_without_dedup) {
+    stock_topic_properties<> stock;
+    stock.retention_bytes = tristate<size_t>{1234};
+    stock.min_compaction_lag_ms = std::chrono::milliseconds{77};
+
+    auto parsed = serde::from_iobuf<topic_properties>(serde::to_iobuf(stock));
+
+    EXPECT_EQ(parsed.retention_bytes, stock.retention_bytes);
+    EXPECT_EQ(parsed.min_compaction_lag_ms, stock.min_compaction_lag_ms);
+    EXPECT_TRUE(parsed.dedup_window_ms.is_empty());
+    EXPECT_EQ(parsed.dedup_generation, 0);
+    EXPECT_FALSE(parsed.dedup_key_header.has_value());
+}
+
+// And a dedup-carrying predecessor's values survive the parse, which is what
+// makes the upgrade non-disruptive: the restarted node keeps deduplicating
+// the same topics with the same identity source and generation.
+TEST(legacy_wire, topic_properties_reads_stock_dedup_topic) {
+    stock_topic_properties<int32_t, /*WithDedup=*/true> stock;
+    stock.dedup_window_ms = tristate<std::chrono::milliseconds>{
+      std::chrono::milliseconds{300000}};
+    stock.dedup_generation = 7;
+    stock.dedup_key_header = "redpanda-dedup-key";
+
+    auto parsed = serde::from_iobuf<topic_properties>(serde::to_iobuf(stock));
+
+    EXPECT_EQ(parsed.dedup_window_ms, stock.dedup_window_ms);
+    EXPECT_EQ(parsed.dedup_generation, 7);
+    EXPECT_EQ(parsed.dedup_key_header, stock.dedup_key_header);
 }
 
 TEST(legacy_wire, topic_properties_reads_stock_tiered_and_iceberg_topic) {
