@@ -907,36 +907,6 @@ class Admin:
     def get_features(self, node: MaybeNode = None):
         return self._request("GET", "features", node=node).json()
 
-    def get_cloud_storage_lifecycle_markers(self, node: MaybeNode = None):
-        return self._request("GET", "cloud_storage/lifecycle", node=node).json()
-
-    def delete_cloud_storage_lifecycle_marker(
-        self, topic: str, revision: str, node: MaybeNode = None
-    ):
-        return self._request(
-            "DELETE", f"cloud_storage/lifecycle/{topic}/{revision}", node=node
-        )
-
-    def cloud_storage_trim(
-        self,
-        *,
-        byte_limit: Optional[int],
-        object_limit: Optional[int],
-        node: ClusterNode,
-    ):
-        path = "cloud_storage/cache/trim"
-        params: dict[str, str] = {}
-        if byte_limit is not None:
-            params["bytes"] = str(byte_limit)
-        if object_limit is not None:
-            params["objects"] = str(object_limit)
-
-        if params:
-            joined = "&".join([f"{k}={v}" for k, v in params.items()])
-            path = path + f"?{joined}"
-
-        return self._request("POST", path, node=node)
-
     def supports_feature(
         self, feature_name: str, nodes: list[ClusterNode] | None = None
     ):
@@ -963,21 +933,6 @@ class Admin:
             if not node_supports_feature(node):
                 return False
         return True
-
-    def unsafe_reset_cloud_metadata(
-        self, topic: str, partition: str, manifest: dict[str, Any]
-    ):
-        return self._request(
-            "POST", f"debug/unsafe_reset_metadata/{topic}/{partition}", json=manifest
-        )
-
-    def unsafe_reset_metadata_from_cloud(
-        self, namespace: str, topic: str, partition: int
-    ):
-        return self._request(
-            "POST",
-            f"cloud_storage/unsafe_reset_metadata_from_cloud/{namespace}/{topic}/{partition}",
-        )
 
     def put_feature(self, feature_name: str, body: dict[str, Any]) -> Response:
         return self._request("PUT", f"features/{feature_name}", json=body)
@@ -1638,15 +1593,6 @@ class Admin:
         url = "debug/partition_leaders_table"
         return self._request("get", url, node=node).json()
 
-    def si_sync_local_state(
-        self, topic: str, partition: int, node: MaybeNode = None
-    ) -> Response:
-        """
-        Check data in the S3 bucket and fix local index if needed
-        """
-        path = f"cloud_storage/sync_local_state/{topic}/{partition}"
-        return self._request("post", path, node=node)
-
     def get_partition_balancer_status(
         self, node: MaybeNode = None, **kwargs: Any
     ) -> dict[str, Any]:
@@ -1699,47 +1645,6 @@ class Admin:
             return r.json()["uuid"]
         return None
 
-    def initiate_topic_scan_and_recovery(
-        self,
-        payload: Optional[dict[str, Any]] = None,
-        force_acquire_lock: bool = False,
-        node: MaybeNode = None,
-        **kwargs: Any,
-    ) -> Response:
-        request_args: dict[str, Any] = {"node": node, **kwargs}
-
-        if payload:
-            request_args["json"] = payload
-        return self._request("post", "cloud_storage/topic_recovery", **request_args)
-
-    def get_topic_recovery_status(
-        self, node: MaybeNode = None, **kwargs: Any
-    ) -> Response:
-        request_args: dict[str, Any] = {"node": node, **kwargs}
-        return self._request(
-            "get", "cloud_storage/topic_recovery?extended=true", **request_args
-        )
-
-    def initialize_cluster_recovery(
-        self,
-        node: MaybeNode = None,
-        cluster_uuid_override: str | None = None,
-        **kwargs: Any,
-    ) -> Response:
-        if cluster_uuid_override is not None:
-            assert "json" not in kwargs, "cannot pass cluster_uuid_override and json"
-            kwargs["json"] = {"cluster_uuid_override": cluster_uuid_override}
-
-        request_args: dict[str, Any] = {"node": node, **kwargs}
-
-        return self._request("post", "cloud_storage/automated_recovery", **request_args)
-
-    def get_cluster_recovery_status(
-        self, node: MaybeNode = None, **kwargs: Any
-    ) -> Response:
-        request_args: dict[str, Any] = {"node": node, **kwargs}
-        return self._request("get", "cloud_storage/automated_recovery", **request_args)
-
     def self_test_start(self, options: dict[str, Any]) -> Response:
         return self._request("POST", "debug/self_test/start", json=options)
 
@@ -1786,11 +1691,6 @@ class Admin:
     def stress_fiber_stop(self, node: ClusterNode) -> Response:
         return self._request("PUT", "debug/stress_fiber_stop", node=node)
 
-    def cloud_storage_usage(self) -> int:
-        return int(
-            self._request("GET", "debug/cloud_storage_usage?retries_allowed=10").json()
-        )
-
     def get_usage(self, node: ClusterNode, include_open: bool = True) -> dict[str, Any]:
         return self._request(
             "GET", f"usage?include_open_bucket={str(include_open)}", node=node
@@ -1801,21 +1701,6 @@ class Admin:
         Reset info for cluster health on node
         """
         return self._request("post", "debug/refresh_disk_health_info", node=node)
-
-    def get_partition_cloud_storage_status(
-        self, topic: str, partition: int, node: MaybeNode = None
-    ) -> dict[str, Any]:
-        return self._request(
-            "GET", f"cloud_storage/status/{topic}/{partition}", node=node
-        ).json()
-
-    def get_partition_manifest(self, topic: str, partition: int) -> dict[str, Any]:
-        """
-        Get the in-memory partition manifest for the requested ntp
-        """
-        return self._request(
-            "GET", f"cloud_storage/manifest/{topic}/{partition}"
-        ).json()
 
     def get_partition_state(
         self,
@@ -1946,26 +1831,6 @@ class Admin:
         it would not make sense to send it to just any node.
         """
         return self._request("GET", "raft/recovery/status", node=node).json()
-
-    def get_cloud_storage_anomalies(
-        self, namespace: str, topic: str, partition: int
-    ) -> dict[str, Any]:
-        return self._request(
-            "GET", f"cloud_storage/anomalies/{namespace}/{topic}/{partition}"
-        ).json()
-
-    def reset_scrubbing_metadata(
-        self,
-        namespace: str,
-        topic: str,
-        partition: int,
-        node: Optional[ClusterNode] = None,
-    ) -> Response:
-        return self._request(
-            "POST",
-            f"cloud_storage/reset_scrubbing_metadata/{namespace}/{topic}/{partition}",
-            node=node,
-        )
 
     def get_cluster_partitions(
         self,

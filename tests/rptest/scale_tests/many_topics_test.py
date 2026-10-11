@@ -85,11 +85,6 @@ class ManyTopicsTest(RedpandaTest):
             # Increase connections limit to well above what this test reaches
             "kafka_connections_max": 100_000,
             "kafka_connections_max_per_ip": 100_000,
-            # We don't scrub tiered storage in this test because it is slow
-            # (on purpose) and takes unreasonable amount of time for a CI
-            # job. We should figure out how to make it faster for this
-            # use-case.
-            "cloud_storage_enable_scrubbing": False,
             # TODO: these settings can be removed if CORE-1861 is fixed.
             "aggregate_metrics": False,
             "disable_public_metrics": True,
@@ -114,9 +109,6 @@ class ManyTopicsTest(RedpandaTest):
                 "offset_translator": "warn",
             },
         )
-        # Cloud storage is disabled as it currently takes too long to clean-up.
-        # kwargs['si_settings'] = SISettings(test_context=test_context)
-
         super().__init__(test_context, num_brokers=10, *args, **kwargs)
 
         self.admin = Admin(self.redpanda)
@@ -879,16 +871,6 @@ class ManyTopicsTest(RedpandaTest):
         self.logger.info("Ensure workload is progressing")
         self._wait_workload_progress()
 
-    def _isolate_all_nodes(self):
-        if self._target_port is None:
-            raise RuntimeError("Isolation port not selected")
-
-        self.logger.info(f"Isolating all redpanda nodes on port {self._target_port}")
-        self._isolate(self.redpanda.nodes)
-
-        # Clean out isolation port
-        self._target_port = None
-
     def _isolate_random_node(self):
         if self._target_port is None:
             raise RuntimeError("Isolation port not selected")
@@ -1178,11 +1160,6 @@ class ManyTopicsTest(RedpandaTest):
     @cluster(num_nodes=16, log_allow_list=RESTART_LOG_ALLOW_LIST)
     def test_decommission_node_unsafely(self):
         self._lifecycle_test_impl(self._decommission_node_unsafely)
-
-    @cluster(num_nodes=16, log_allow_list=RESTART_LOG_ALLOW_LIST)
-    def test_block_s3_on_all_nodes(self):
-        self._target_port = 9000
-        self._lifecycle_test_impl(self._isolate_all_nodes)
 
     @cluster(num_nodes=16, log_allow_list=RESTART_LOG_ALLOW_LIST)
     def test_isolate_random_node_from_cluster(self):

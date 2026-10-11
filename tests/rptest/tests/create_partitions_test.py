@@ -13,10 +13,10 @@ from ducktape.utils.util import wait_until
 
 from rptest.clients.types import TopicSpec
 from rptest.services.cluster import cluster
-from rptest.tests.redpanda_test import RedpandaMixedTest
+from rptest.tests.redpanda_test import RedpandaTest
 
 
-class CreatePartitionsTest(RedpandaMixedTest):
+class CreatePartitionsTest(RedpandaTest):
     def __init__(self, test_context: TestContext):
         super().__init__(test_context=test_context)
 

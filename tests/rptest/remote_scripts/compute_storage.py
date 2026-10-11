@@ -17,8 +17,6 @@ from pathlib import Path
 from typing import Iterator
 
 
-# NB: SegmentReader is duplicated in si_utils.py for deployment reasons. If
-# making changes please adapt both.
 class SegmentReader:
     HDR_FMT_RP = "<IiqbIhiqqqhii"
     HEADER_SIZE = struct.calcsize(HDR_FMT_RP)
@@ -172,7 +170,7 @@ def compute_size(
     for ns in safe_listdir(data_dir):
         if not safe_isdir(ns):
             continue
-        if ns.name in ["cloud_storage_cache", "crash_reports", "datalake_staging"]:
+        if ns.name == "crash_reports":
             continue
         ns_output = {}
         for topic in safe_listdir(ns):

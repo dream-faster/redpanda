@@ -10,7 +10,6 @@
 from contextlib import contextmanager
 import random
 import signal
-from subprocess import CalledProcessError
 from typing import Any, Callable, Iterator, cast
 import time
 
@@ -21,7 +20,6 @@ from ducktape.mark.resource import cluster as dt_cluster
 from ducktape.tests.test import Test, TestContext
 
 from rptest.clients.admin.v2 import Admin as AdminV2, debug_pb
-from rptest.clients.kubectl import is_redpanda_pod
 from rptest.clients.rpk import RpkTool
 from rptest.clients.types import TopicSpec
 from rptest.services.admin import CrashType
@@ -45,8 +43,6 @@ from rptest.services.redpanda import (
     LogSearchLocal,
     LoggingConfig,
     RedpandaService,
-    RedpandaServiceCloud,
-    make_redpanda_mixed_service,
     make_redpanda_service,
 )
 from rptest.services.utils import BadLogLines, NodeCrash
@@ -472,15 +468,15 @@ class SimpleSelfTest(Test):
 
     def __init__(self, test_context: TestContext) -> None:
         super(SimpleSelfTest, self).__init__(test_context)
-        self.redpanda = make_redpanda_mixed_service(test_context, min_brokers=3)
+        self.redpanda = make_redpanda_service(test_context, 3)
 
     def setUp(self) -> None:
         self.redpanda.start()
 
     @cluster(num_nodes=3, check_allowed_error_logs=False)
-    def test_cloud(self) -> None:
+    def test_node_resources(self) -> None:
         """
-        Execute a few of the methods that will connect to the k8s pod.
+        Execute a few of the methods that inspect the broker nodes.
         """
 
         node_memory = float(self.redpanda.get_node_memory_mb())
@@ -493,97 +489,11 @@ class SimpleSelfTest(Test):
         assert node_disk_free > 0
 
         rpk = RpkTool(self.redpanda)
-        topic_name = "rp_ducktape_test_cloud_topic"
+        topic_name = "rp_ducktape_test_simple_topic"
         self.logger.info(f"creating topic {topic_name}")
         rpk.create_topic(topic_name)
         self.logger.info(f"deleting topic {topic_name}")
         rpk.delete_topic(topic_name)
-
-
-class KubectlSelfTest(Test):
-    """
-    Verify that the kubectl test works. Only does anything when running
-    in the cloud.
-    """
-
-    def __init__(self, test_context: TestContext) -> None:
-        super().__init__(test_context)
-        self.redpanda = make_redpanda_mixed_service(test_context)
-
-    def setUp(self) -> None:
-        self.redpanda.start()
-
-    @cluster(num_nodes=3)
-    def test_kubectl_tool(self) -> None:
-        rp = self.redpanda
-
-        if isinstance(rp, RedpandaServiceCloud):
-            version_out = rp.kubectl.cmd(["version", "--client"])
-            assert "Client Version" in version_out, (
-                f"Did not find expceted output, output was: {version_out}"
-            )
-
-            try:
-                # foobar, of course, is not a valid kubectl command
-                rp.kubectl.cmd(["foobar"])
-                assert False, "expected this command to throw"
-            except CalledProcessError:
-                pass
-
-
-class KubectlLocalOnlyTest(Test):
-    @dt_cluster(num_nodes=0)
-    def test_is_redpanda_pod(self) -> None:
-        test_cases: dict[str, dict[str, Any]] = {
-            "regular_hit": {
-                "pod": {
-                    "metadata": {
-                        "generateName": "redpanda-broker-",
-                        "labels": {
-                            "app.kubernetes.io/component": "redpanda-statefulset"
-                        },
-                    }
-                },
-                "result": True,
-            },
-            "miss_wrong_generate_name": {
-                "pod": {
-                    "metadata": {
-                        "generateName": "redpanda-broker-configuration-",
-                        "labels": {
-                            "app.kubernetes.io/component": "redpanda-statefulset"
-                        },
-                    }
-                },
-                "result": False,
-            },
-            "miss_wrong_component": {
-                "pod": {
-                    "metadata": {
-                        "generateName": "redpanda-broker-configuration-",
-                        "labels": {
-                            "app.kubernetes.io/component": "redpanda-post-install"
-                        },
-                    },
-                },
-                "result": False,
-            },
-            "hit_legacy_pod_name": {
-                "pod": {"metadata": {"name": "rp-CLUSTER_ID-4"}},
-                "result": True,
-            },
-        }
-        for test_name, test_case in test_cases.items():
-            pod_obj: dict[str, Any] = test_case["pod"]
-            expected_result: bool = test_case["result"]
-            try:
-                actual_result = is_redpanda_pod(pod_obj, "CLUSTER_ID")
-            except KeyError as err:
-                self.logger.error(f"KeyError from is_redpanda_pod: {err}")
-                actual_result = False
-            assert expected_result is actual_result, (
-                f"Failed for test case '{test_name}' (expected={expected_result}, actual={actual_result})"
-            )
 
 
 class FailureInjectorSelfTest(Test):

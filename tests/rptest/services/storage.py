@@ -10,7 +10,6 @@
 import itertools
 import os
 import re
-from dataclasses import dataclass
 from typing import Any, Iterable, Optional
 from ducktape.cluster.cluster import ClusterNode
 
@@ -178,26 +177,11 @@ class PartitionNotFoundError(Exception):
     pass
 
 
-@dataclass
-class NodeCacheStorage:
-    # Total size of the directory according to `du`
-    bytes: int
-
-    # Total number of non-directory files in the cache dir.  This count
-    # overlaps with subsequent type-specific object counts
-    objects: int
-
-    # Number of .index files
-    indices: int
-
-
 class NodeStorage:
-    def __init__(self, name: str, data_dir: str, cache_dir: str) -> None:
+    def __init__(self, name: str, data_dir: str) -> None:
         self.data_dir = data_dir
-        self.cache_dir = cache_dir
         self.ns: dict[str, Namespace] = dict()
         self.name = name
-        self.cache: NodeCacheStorage | None = None
 
     def add_namespace(self, ns: str, path: str) -> Namespace:
         n = Namespace(ns, path)
@@ -222,9 +206,6 @@ class NodeStorage:
             )
 
         return partitions[partition_idx].segments.values()
-
-    def set_cache_stats(self, stats: NodeCacheStorage):
-        self.cache = stats
 
 
 class ClusterStorage:

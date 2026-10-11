@@ -11,14 +11,14 @@ from rptest.clients.kafka_cli_tools import KafkaCliTools
 from rptest.clients.rpk import RpkTool
 from rptest.clients.types import TopicSpec
 from rptest.services.cluster import cluster
-from rptest.services.redpanda import MetricsEndpoint, RedpandaService
-from rptest.tests.redpanda_test import RedpandaMixedTest
+from rptest.services.redpanda import MetricsEndpoint
+from rptest.tests.redpanda_test import RedpandaTest
 from rptest.util import expect_exception
 
 
-class DefaultClientTest(RedpandaMixedTest):
+class DefaultClientTest(RedpandaTest):
     def __init__(self, ctx):
-        super().__init__(test_context=ctx, min_brokers=1)
+        super().__init__(test_context=ctx, num_brokers=1)
 
     @cluster(num_nodes=1)
     def test_create_delete_topic(self):
@@ -36,9 +36,9 @@ class DefaultClientTest(RedpandaMixedTest):
         client.delete_topic(name)
 
 
-class KafkaCliToolsTest(RedpandaMixedTest):
+class KafkaCliToolsTest(RedpandaTest):
     def __init__(self, ctx):
-        super().__init__(test_context=ctx, min_brokers=1)
+        super().__init__(test_context=ctx, num_brokers=1)
 
     @cluster(num_nodes=1)
     def test_produce_consume(self):
@@ -56,9 +56,9 @@ class KafkaCliToolsTest(RedpandaMixedTest):
         client.delete_topic(name)
 
 
-class RedpandaMixedTestSelfTest(RedpandaMixedTest):
+class RedpandaTestSelfTest(RedpandaTest):
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, min_brokers=1, **kwargs)
+        super().__init__(*args, num_brokers=1, **kwargs)
 
     @cluster(num_nodes=1)
     def test_rpk(self):
@@ -88,12 +88,7 @@ class RedpandaMixedTestSelfTest(RedpandaMixedTest):
             sample_pattern=uptime
         )
         assert vectorized_application_uptime is not None, "expected some metrics"
-        if isinstance(self.redpanda, RedpandaService):
-            assert len(vectorized_application_uptime.samples) == 1, "should be 1 node"
-        else:
-            assert len(vectorized_application_uptime.samples) >= 1, (
-                "should be >=3s nodes"
-            )
+        assert len(vectorized_application_uptime.samples) == 1, "should be 1 node"
         assert vectorized_application_uptime.samples[0].value > 0, (
             "expected uptime greater than 0"
         )
@@ -103,12 +98,7 @@ class RedpandaMixedTestSelfTest(RedpandaMixedTest):
             sample_pattern="application_up"
         )
         assert vectorized_application_uptime is not None, "expected some metrics"
-        if isinstance(self.redpanda, RedpandaService):
-            assert len(vectorized_application_uptime.samples) == 1, "should be 1 node"
-        else:
-            assert len(vectorized_application_uptime.samples) >= 1, (
-                "should be >=3s nodes"
-            )
+        assert len(vectorized_application_uptime.samples) == 1, "should be 1 node"
         assert vectorized_application_uptime.samples[0].value > 0, (
             "expected uptime greater than 0"
         )
@@ -149,12 +139,7 @@ class RedpandaMixedTestSelfTest(RedpandaMixedTest):
         # exact match single
         vectorized_application_uptime = self.redpanda.metrics_sample(name=uptime)
         assert vectorized_application_uptime is not None, "expected some metrics"
-        if isinstance(self.redpanda, RedpandaService):
-            assert len(vectorized_application_uptime.samples) == 1, "should be 1 node"
-        else:
-            assert len(vectorized_application_uptime.samples) >= 1, (
-                "should be >=3s nodes"
-            )
+        assert len(vectorized_application_uptime.samples) == 1, "should be 1 node"
         assert vectorized_application_uptime.samples[0].value > 0, (
             "expected uptime greater than 0"
         )
@@ -166,10 +151,7 @@ class RedpandaMixedTestSelfTest(RedpandaMixedTest):
         assert len(exact_two) == 2
 
         uptime_value = exact_two[uptime]
-        if isinstance(self.redpanda, RedpandaService):
-            assert len(uptime_value.samples) == 1, "should be 1 node"
-        else:
-            assert len(uptime_value.samples) >= 1, "should be >=3s nodes"
+        assert len(uptime_value.samples) == 1, "should be 1 node"
         assert uptime_value.samples[0].value > 0, "expected uptime greater than 0"
 
         ####################
@@ -215,12 +197,10 @@ class RedpandaMixedTestSelfTest(RedpandaMixedTest):
                 expect_metric=True,
             )
 
-        if isinstance(self.redpanda, RedpandaService):
-            # test that filtering works, only on RS as RSC doesn't support it on
-            # public metrics
-            uptime_only = self.redpanda.metrics(
-                self.redpanda.nodes[0], MetricsEndpoint.METRICS, name=uptime
-            )
+        # test that filtering works
+        uptime_only = self.redpanda.metrics(
+            self.redpanda.nodes[0], MetricsEndpoint.METRICS, name=uptime
+        )
 
-            for m in uptime_only:
-                assert m.name == uptime, f"expected only {uptime}, got {m.name} instead"
+        for m in uptime_only:
+            assert m.name == uptime, f"expected only {uptime}, got {m.name} instead"

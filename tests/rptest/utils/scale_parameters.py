@@ -9,7 +9,7 @@
 
 from math import floor
 from typing import Any, Optional
-from rptest.services.redpanda import RedpandaService, ResourceSettings, SISettings
+from rptest.services.redpanda import RedpandaService, ResourceSettings
 
 
 class ScaleParameters:
@@ -52,12 +52,10 @@ class ScaleParameters:
         replication_factor: int,
         mib_per_partition: float = DEFAULT_MIB_PER_PARTITION,
         topic_replicas_per_shard: int = DEFAULT_PARTITIONS_PER_SHARD,
-        tiered_storage_enabled: bool = False,
         partition_memory_reserve_percentage: int = DEFAULT_PARTITIONS_MEMORY_ALLOCATION_PERCENT,
     ):
         self.partition_limit: int
         self.redpanda = redpanda
-        self.tiered_storage_enabled = tiered_storage_enabled
         self.partition_memory_reserve_percentage = partition_memory_reserve_percentage
 
         self.node_count = node_count = len(self.redpanda.nodes)
@@ -163,60 +161,12 @@ class ScaleParameters:
         # to enforce that.  This enables traffic tests to run as long
         # as they like without risking filling the disk.
         self.retention_bytes = int((node_disk_free / 2) / partition_replicas_per_node)
-        self.local_retention_bytes = None
 
         # Choose an appropriate segment size to enable retention
         # rules to kick in promptly.
         # TODO: redpanda should figure this out automatically by
         #       rolling segments pre-emptively if low on disk space
         self.segment_size = int(self.retention_bytes / 4)
-
-        # Tiered storage will have a warmup period where it will set the
-        # segment size and local retention lower to ensure a large number of
-        # segments.
-        self.segment_size_after_warmup = self.segment_size
-
-        # NOTE: using retention_bytes that is aimed at occupying disk space.
-        self.local_retention_after_warmup = self.retention_bytes
-
-        if tiered_storage_enabled:
-            # When testing with tiered storage, the tuning goals of the test
-            # parameters are different: we want to stress the number of
-            # uploaded segments.
-
-            # Locally retain as many segments as a full day.
-            self.segment_size = 32 * 1024
-
-            # Retain as much data in cloud as one big batch of data.
-            # NOTE: we consider the existing `retention_bytes` (computed above)
-            # so the test doesn't take too much space on disk.
-            self.local_retention_bytes = min(
-                self.retention_bytes, self.segment_size * 24
-            )
-
-            # One of the goals of this test with tiered storage enabled is to
-            # test with a large number of managed cloud segments.
-            # TODO: consider a variant of this test (or another test) that
-            # tests cloud retention.
-            self.retention_bytes = -1
-
-            # Set a max upload interval such that won't swamp S3 -- we should
-            # already be uploading somewhat frequently given the segment size.
-            cloud_storage_segment_max_upload_interval_sec = 300
-            cloud_storage_housekeeping_interval_ms = (
-                cloud_storage_segment_max_upload_interval_sec * 1000
-            )
-
-            self.si_settings = SISettings(
-                redpanda._context,
-                log_segment_size=self.segment_size,
-                cloud_storage_segment_max_upload_interval_sec=cloud_storage_segment_max_upload_interval_sec,
-                cloud_storage_housekeeping_interval_ms=cloud_storage_housekeeping_interval_ms,
-                use_bucket_cleanup_policy=True,
-                skip_end_of_test_scrubbing=True,
-            )
-        else:
-            self.si_settings = None
 
         # The expect_bandwidth is just for calculating sensible
         # timeouts when waiting for traffic: it is not a scientific
@@ -233,18 +183,6 @@ class ScaleParameters:
             # client side.
             self.expect_single_bandwidth = 200e6
 
-            if tiered_storage_enabled:
-                # We read very tiny segments 32KiB over high latency link
-                # (10ms to 100ms) with a concurrency limit of cloud_storage_max_connections=20`.
-                # Using Little's Law we can derive the arrival rate as `20/0.1`
-                # which is to say 200 segments per second. 200 * 32KiB = 6.25MiB
-                # per node. This is if we ignore all other sources of latency,
-                # contention, and S3 rate limiting or instabilities.
-                self.expect_bandwidth = node_count * 6 * 1e6
-                # Minimum of server and client bottlenecks.
-                self.expect_single_bandwidth = min(
-                    self.expect_bandwidth, self.expect_single_bandwidth
-                )
         else:
             # Docker environment: curb your expectations.  Not only is storage
             # liable to be slow, we have many nodes sharing the same drive.
@@ -288,7 +226,7 @@ class ScaleParameters:
         self.redpanda.set_resource_settings(ResourceSettings(**resource_settings_args))
 
         self.logger.info(
-            f"Selected retention.bytes={self.retention_bytes}, retention.local.target.bytes={self.local_retention_bytes}, segment.bytes={self.segment_size}"
+            f"Selected retention.bytes={self.retention_bytes}, segment.bytes={self.segment_size}"
         )
 
         # Should not happen on the expected EC2 instance types where

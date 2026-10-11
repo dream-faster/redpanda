@@ -20,7 +20,6 @@ from ducktape.mark import matrix
 from ducktape.utils.util import wait_until
 
 from rptest.clients.rpk import RpkTool
-from rptest.clients.types import TopicSpec
 from rptest.services.admin import Admin
 from rptest.services.cluster import cluster
 from rptest.services.consumer_swarm import ConsumerSwarm
@@ -72,20 +71,7 @@ class LargeMessagesTest(RedpandaTest):
                 # not expect to hit them.
                 "kafka_connection_rate_limit": 10000,
                 "kafka_connections_max": 50000,
-                # In testing tiered storage, we care about creating as many
-                # cloud segments as possible. To that end, bounding the segment
-                # size isn't productive.
-                "cloud_storage_segment_size_min": 1,
                 "log_segment_size_min": 1024,
-                # Disable segment merging: when we create many small segments
-                # to pad out tiered storage metadata, we don't want them to
-                # get merged together.
-                "cloud_storage_enable_segment_merging": False,
-                # We don't scrub tiered storage in this test because it is slow
-                # (on purpose) and takes unreasonable amount of time for a CI
-                # job. We should figure out how to make it faster for this
-                # use-case.
-                "cloud_storage_enable_scrubbing": False,
                 # Raise the broker-imposed fetch max bytes to allow for fetches
                 # to return more than just the obligatory read.
                 "fetch_max_bytes": self.FETCH_MAX_BYTES_MIB * 2**20,
@@ -112,15 +98,12 @@ class LargeMessagesTest(RedpandaTest):
         self.admin = Admin(self.redpanda)
         self.rpk = RpkTool(self.redpanda)
 
-        # not supported for now
-        self.tiered_storage_enabled = False
-
     def setUp(self) -> None:
         # defer redpanda startup to the test, it might want to tweak
         # ResourceSettings based on its parameters.
         pass
 
-    def _create_topics(self, cloud_topics: bool = False) -> None:
+    def _create_topics(self) -> None:
         self.logger.info("Entering topic creation")
         for tn in self.topic_names:
             self.logger.info(f"Creating topic {tn} with {self.n_partitions} partitions")
@@ -135,14 +118,6 @@ class LargeMessagesTest(RedpandaTest):
             # range of sizes.
             if self.message_size / 2**20 > self.MAX_DEFAULT_MSG_SIZE_MIB:
                 config |= {"max.message.bytes": self.message_size + 1000}
-
-            if not cloud_topics and self.scale.local_retention_bytes:
-                config["retention.local.target.bytes"] = (
-                    self.scale.local_retention_bytes
-                )
-
-            if cloud_topics:
-                config[TopicSpec.PROPERTY_STORAGE_MODE] = TopicSpec.STORAGE_MODE_CLOUD
 
             self.rpk.create_topic(
                 tn,
@@ -313,14 +288,7 @@ class LargeMessagesTest(RedpandaTest):
         assert not self.debug_mode
 
         # Init scale settings in the RP cluster
-        self.scale = ScaleParameters(
-            self.redpanda,
-            self.replication_factor,
-            tiered_storage_enabled=self.tiered_storage_enabled,
-        )
-
-        if self.scale.si_settings:
-            self.redpanda.set_si_settings(self.scale.si_settings)
+        self.scale = ScaleParameters(self.redpanda, self.replication_factor)
 
         # Enable large node-wide throughput limits to verify they work at scale
         # To avoid affecting the result of the test with the limit, set them
@@ -385,7 +353,6 @@ class LargeMessagesTest(RedpandaTest):
     def _test_large_messages(
         self,
         mode: Mode,
-        cloud_topics: bool = False,
         extra_log_fields: str = "",
     ) -> None:
         """Shared workload driver for large message throughput tests.
@@ -418,7 +385,7 @@ class LargeMessagesTest(RedpandaTest):
         )
 
         # Do create topics stage
-        self._create_topics(cloud_topics=cloud_topics)
+        self._create_topics()
 
         # Do the healthcheck on RP
         # to make sure that all topics are settle down and have their leader
@@ -431,7 +398,7 @@ class LargeMessagesTest(RedpandaTest):
 
         self.logger.info(
             f"LargeMessagesTest parameters: "
-            f"mode={mode.value}, cloud_topics={cloud_topics}, "
+            f"mode={mode.value}, "
             f"message_size={self.message_size} bytes ({self.message_size / 2**20:.2f} MiB), "
             f"n_topics={self.n_topics}, n_partitions={self.n_partitions}, replication_factor={self.replication_factor}, "
             f"n_clients={self.n_clients}, swarm_nodes={self.swarm_nodes}, unique={self.unique}, "

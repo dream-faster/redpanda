@@ -6,7 +6,7 @@ from ducktape.cluster.cluster_spec import ClusterSpec
 from ducktape.tests.test import Test, TestContext
 from ducktape.utils.util import wait_until
 
-from rptest.services.redpanda import RedpandaService, RedpandaServiceCloud
+from rptest.services.redpanda import RedpandaService
 
 
 class PreallocNodesMixin:
@@ -78,5 +78,5 @@ class PreallocNodesMixin:
             self._preallocated_nodes = []
 
     @property
-    def __redpanda(self) -> RedpandaService | RedpandaServiceCloud:
+    def __redpanda(self) -> RedpandaService:
         return getattr(self, "redpanda")

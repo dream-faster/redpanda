@@ -6,7 +6,6 @@
 !tests/python
 !tests/go
 !tools/offline_log_viewer
-!tools/rp_storage_tool
 !tools/consumer_offsets_recovery
 !tools/controller_forced_reconfiguration
 !tests/docker/ducktape-deps/
