@@ -1647,6 +1647,25 @@ redpanda_cc_gtest(
     ],
 )
 
+redpanda_cc_gtest(
+    name = "dedup_snapshot_stall_test",
+    timeout = "moderate",
+    srcs = [
+        "dedup_snapshot_stall_test.cc",
+    ],
+    cpu = 1,
+    memory = "4GiB",
+    deps = [
+        "//src/v/bytes:iobuf",
+        "//src/v/cluster",
+        "//src/v/model",
+        "//src/v/serde",
+        "//src/v/test_utils:gtest",
+        "@googletest//:gtest",
+        "@seastar",
+    ],
+)
+
 redpanda_cc_bench(
     name = "dedup_window_filter_rpbench",
     srcs = ["dedup_window_filter_bench.cc"],
