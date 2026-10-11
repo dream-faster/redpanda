@@ -10,6 +10,7 @@
 #include "cluster/topic_configuration.h"
 
 #include "base/format_to.h"
+#include "model/adl_serde.h"
 #include "model/fundamental.h"
 #include "model/metadata.h"
 #include "model/namespace.h"
@@ -41,14 +42,9 @@ storage::ntp_config topic_configuration::make_ntp_config(
             // during bootstrap.
             .cache_enabled = storage::with_cache(
               !is_internal() || tp_ns.tp == model::tx_manager_topic),
-            .recovery_enabled = storage::topic_recovery_enabled(
-              properties.recovery ? *properties.recovery : false),
-            .shadow_indexing_mode = properties.shadow_indexing,
-            .read_replica = properties.read_replica,
             .retention_local_target_bytes
             = properties.retention_local_target_bytes,
             .retention_local_target_ms = properties.retention_local_target_ms,
-            .remote_delete = properties.remote_delete,
             .segment_ms = properties.segment_ms,
             .initial_retention_local_target_bytes
             = properties.initial_retention_local_target_bytes,
@@ -57,13 +53,10 @@ storage::ntp_config topic_configuration::make_ntp_config(
             .write_caching = properties.write_caching,
             .flush_ms = properties.flush_ms,
             .flush_bytes = properties.flush_bytes,
-            .iceberg_mode = properties.iceberg_mode,
             .delete_retention_ms = properties.delete_retention_ms,
             .min_cleanable_dirty_ratio = properties.min_cleanable_dirty_ratio,
             .min_compaction_lag_ms = properties.min_compaction_lag_ms,
             .max_compaction_lag_ms = properties.max_compaction_lag_ms,
-            .remote_allow_gaps = properties.remote_topic_allow_gaps,
-            .storage_mode = properties.storage_mode,
           });
     }
     return {
@@ -103,12 +96,6 @@ void topic_configuration::serde_read(iobuf_parser& in, const serde::header& h) {
     } else {
         tp_id = std::nullopt;
     }
-
-    if (h._version < 1) {
-        // Legacy tiered storage topics do not delete data on
-        // topic deletion.
-        properties.remote_delete = storage::ntp_config::legacy_remote_delete;
-    }
 }
 fmt::iterator topic_configuration::format_to(fmt::iterator it) const {
     return fmt::format_to(
@@ -144,13 +131,10 @@ void adl<cluster::topic_configuration>::to(
       t.properties.timestamp_type,
       t.properties.segment_size,
       t.properties.retention_bytes,
-      t.properties.retention_duration,
-      t.properties.recovery,
-      t.properties.shadow_indexing);
+      t.properties.retention_duration);
 }
 
-// note: adl deserialization doesn't support read replica or migration fields
-// since serde should be used for new versions.
+// note: adl deserialization is legacy; serde should be used for new versions.
 cluster::topic_configuration
 adl<cluster::topic_configuration>::from(iobuf_parser& in) {
     // NOTE: The first field of the topic_configuration is a
@@ -191,15 +175,6 @@ adl<cluster::topic_configuration>::from(iobuf_parser& in) {
     cfg.properties.retention_bytes = adl<tristate<size_t>>{}.from(in);
     cfg.properties.retention_duration
       = adl<tristate<std::chrono::milliseconds>>{}.from(in);
-    if (version < 0) {
-        cfg.properties.recovery = adl<std::optional<bool>>{}.from(in);
-        cfg.properties.shadow_indexing
-          = adl<std::optional<model::shadow_indexing_mode>>{}.from(in);
-    }
-
-    // Legacy topics from pre-22.3 get remote delete disabled.
-    cfg.properties.remote_delete = storage::ntp_config::legacy_remote_delete;
-
     return cfg;
 }
 

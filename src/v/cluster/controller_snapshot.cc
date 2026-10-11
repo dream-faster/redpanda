@@ -11,6 +11,7 @@
 
 #include "cluster/controller_snapshot.h"
 
+#include "cluster/legacy_wire.h"
 #include "serde/rw/rw.h"
 
 namespace cluster {
@@ -133,8 +134,9 @@ ss::future<> topics_t::serde_async_write(iobuf& out) {
     serde::write(out, highest_group_id);
     co_await write_map_async(out, std::move(lifecycle_markers));
     co_await write_map_async(out, partitions_to_force_recover);
-    co_await write_map_async(out, std::move(iceberg_tombstones));
-    co_await write_map_async(out, std::move(cloud_topic_tombstones));
+    // iceberg and cloud topic tombstones: always empty
+    serde::write(out, serde::serde_size_t{0});
+    serde::write(out, serde::serde_size_t{0});
 }
 
 ss::future<>
@@ -154,15 +156,19 @@ topics_t::serde_async_read(iobuf_parser& in, const serde::header h) {
     }
 
     if (h._version >= 2) {
-        iceberg_tombstones
-          = co_await read_map_async_nested<decltype(iceberg_tombstones)>(
-            in, h._bytes_left_limit);
+        std::ignore = co_await read_map_async_nested<chunked_hash_map<
+          model::topic_namespace,
+          legacy::empty_envelope,
+          model::topic_namespace_hash,
+          model::topic_namespace_eq>>(in, h._bytes_left_limit);
     }
 
     if (h._version >= 3) {
-        cloud_topic_tombstones
-          = co_await read_map_async_nested<decltype(cloud_topic_tombstones)>(
-            in, h._bytes_left_limit);
+        std::ignore = co_await read_map_async_nested<chunked_hash_map<
+          nt_revision,
+          legacy::empty_envelope,
+          nt_revision_hash,
+          nt_revision_eq>>(in, h._bytes_left_limit);
     }
 
     if (in.bytes_left() > h._bytes_left_limit) {
@@ -203,11 +209,12 @@ ss::future<> controller_snapshot::serde_async_write(iobuf& out) {
     co_await serde::write_async(out, std::move(topics));
     co_await serde::write_async(out, std::move(security));
     co_await serde::write_async(out, std::move(metrics_reporter));
-    co_await serde::write_async(out, std::move(plugins));
-    co_await serde::write_async(out, std::move(cluster_recovery));
+    // Slots of removed subsystems, kept so stock v26.2.x can read this.
+    serde::write(out, legacy::empty_envelope{}); // plugins
+    serde::write(out, legacy::empty_envelope{}); // cluster_recovery
     co_await serde::write_async(out, std::move(client_quotas));
-    co_await serde::write_async(out, std::move(data_migrations));
-    co_await serde::write_async(out, std::move(cluster_links));
+    serde::write(out, legacy::empty_envelope{}); // data_migrations
+    serde::write(out, legacy::empty_envelope{}); // cluster_links
 }
 
 ss::future<>
@@ -229,30 +236,25 @@ controller_snapshot::serde_async_read(iobuf_parser& in, const serde::header h) {
         in, h._bytes_left_limit);
 
     if (h._version >= 1) {
-        plugins = co_await serde::read_async_nested<decltype(plugins)>(
-          in, h._bytes_left_limit);
+        std::ignore = serde::read_nested<legacy::empty_envelope>(
+          in, h._bytes_left_limit); // plugins
     }
     if (h._version >= 2) {
-        cluster_recovery
-          = co_await serde::read_async_nested<decltype(cluster_recovery)>(
-            in, h._bytes_left_limit);
+        std::ignore = serde::read_nested<legacy::empty_envelope>(
+          in, h._bytes_left_limit); // cluster_recovery
     }
     if (h._version >= 3) {
         client_quotas
           = co_await serde::read_async_nested<decltype(client_quotas)>(
             in, h._bytes_left_limit);
     }
-
     if (h._version >= 4) {
-        data_migrations
-          = co_await serde::read_async_nested<decltype(data_migrations)>(
-            in, h._bytes_left_limit);
+        std::ignore = serde::read_nested<legacy::empty_envelope>(
+          in, h._bytes_left_limit); // data_migrations
     }
-
     if (h._version >= 5) {
-        cluster_links
-          = co_await serde::read_async_nested<decltype(cluster_links)>(
-            in, h._bytes_left_limit);
+        std::ignore = serde::read_nested<legacy::empty_envelope>(
+          in, h._bytes_left_limit); // cluster_links
     }
 
     if (in.bytes_left() > h._bytes_left_limit) {

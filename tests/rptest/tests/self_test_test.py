@@ -9,14 +9,11 @@
 
 import re
 import time
-from collections import defaultdict
 from math import comb
 
-from ducktape.utils.util import wait_until
 
 from rptest.services.cluster import cluster
-from rptest.services.redpanda import RESTART_LOG_ALLOW_LIST, SISettings
-from rptest.services.redpanda_installer import InstallOptions, RedpandaVersionLine
+from rptest.services.redpanda import RESTART_LOG_ALLOW_LIST
 from rptest.tests.end_to_end import EndToEndTest
 from rptest.util import wait_until_result
 from rptest.utils.functional import flat_map
@@ -50,9 +47,7 @@ class SelfTestTest(EndToEndTest):
     def test_self_test(self):
         """Assert the self test starts/completes with success."""
         num_nodes = 3
-        self.start_redpanda(
-            num_nodes=num_nodes, si_settings=SISettings(test_context=self.test_context)
-        )
+        self.start_redpanda(num_nodes=num_nodes)
         self.rpk_client().self_test_start(2000, 2000, 5000, 100)
 
         # Wait for completion
@@ -79,23 +74,8 @@ class SelfTestTest(EndToEndTest):
         # Assert properties of the network results hold true
         network_results = [r for r in reports if r["test_type"] == "network"]
 
-        cloud_results = [r for r in reports if r["test_type"] == "cloud"]
-
-        read_tests = ["List", "Head", "Get"]
-        write_tests = ["Put", "Delete", "Plural Delete", "Multipart Put"]
-
-        num_expected_cloud_storage_read_tests = num_nodes * len(read_tests)
-        num_expected_cloud_storage_write_tests = num_nodes * len(write_tests)
-        assert (
-            len(cloud_results)
-            == num_expected_cloud_storage_write_tests
-            + num_expected_cloud_storage_read_tests
-        )
-
         # Ensure no other result sets exist
-        assert len(disk_results) + len(network_results) + len(cloud_results) == len(
-            reports
-        )
+        assert len(disk_results) + len(network_results) == len(reports)
 
         # Ensure nCr network test reports, clusterwide
         assert len(network_results) == comb(num_nodes, 2), (
@@ -215,19 +195,15 @@ class SelfTestTest(EndToEndTest):
         with mixed versions of Redpanda."""
         num_nodes = 3
 
-        self.start_redpanda(
-            num_nodes=num_nodes, si_settings=SISettings(test_context=self.test_context)
-        )
+        self.start_redpanda(num_nodes=num_nodes)
 
         # Attempt to run with an unknown test type "pandatest"
-        # and possibly unknown "cloud" test.
         # The rest of the tests should proceed as normal.
         request_json = {
             "tests": [
                 {"type": "pandatest"},
                 {"type": "disk"},
                 {"type": "network"},
-                {"type": "cloud"},
             ]
         }
 
@@ -246,12 +222,6 @@ class SelfTestTest(EndToEndTest):
         # Redpanda running.
         assert len(set(redpanda_versions)) == 1
 
-        # Cloudcheck was introduced in 24.2.1.
-        # Expect that it will be unknown to nodes running
-        # earlier versions of redpanda.
-        if redpanda_versions[0] < (24, 2, 1):
-            unknown_report_types.append("cloud")
-
         # Wait for self test completion.
         node_reports = self.wait_for_self_test_completion()
 
@@ -264,100 +234,3 @@ class SelfTestTest(EndToEndTest):
             else:
                 assert "error" not in report
                 assert "warning" not in report
-
-    @cluster(num_nodes=3)
-    def test_self_test_mixed_node_controller_lower_version(self):
-        """Assert the self test still runs when the controller node
-        is of a lower version than the rest of the nodes in the cluster.
-        The upgraded follower nodes should be able to parse the "unknown"
-        checks (currently just the cloudcheck), and then run and return
-        their results to the controller node."""
-        num_nodes = 3
-
-        install_opts = InstallOptions(
-            version=RedpandaVersionLine((24, 1)),
-            upgraded_version=RedpandaVersionLine((24, 3)),
-            num_to_upgrade=2,
-        )
-        self.start_redpanda(
-            num_nodes=num_nodes,
-            si_settings=SISettings(test_context=self.test_context),
-            install_opts=install_opts,
-        )
-
-        # Attempt to run with a possibly unknown "cloud" test.
-        # The controller, which is of a lower version than the other nodes in the cluster,
-        # doesn't recognize "cloud" as a test, but the other nodes should.
-        request_json = {
-            "tests": [{"type": "cloud", "backoff_ms": 100, "timeout_ms": 10000}]
-        }
-
-        redpanda_versions = {
-            i: self.redpanda.get_version_int_tuple(node)
-            for (i, node) in enumerate(self.redpanda.nodes)
-        }
-
-        controller_node_index = min(redpanda_versions, key=redpanda_versions.get)
-        controller_node_id = controller_node_index + 1
-        # Make sure that the lowest version node is the controller.
-        self.redpanda._admin.partition_transfer_leadership(
-            "redpanda", "controller", 0, controller_node_id
-        )
-        wait_until(
-            lambda: self.redpanda._admin.get_partition_leader(
-                namespace="redpanda", topic="controller", partition=0
-            )
-            == controller_node_id,
-            timeout_sec=10,
-            backoff_sec=1,
-            err_msg="Leadership did not stabilize",
-        )
-
-        # Manually invoke self test admin endpoint, using the lowest version node as the target.
-        self.redpanda._admin._request(
-            "POST",
-            "debug/self_test/start",
-            json=request_json,
-            node=self.redpanda.nodes[controller_node_index],
-        )
-
-        # Wait for self test completion.
-        node_reports = self.wait_for_self_test_completion()
-
-        unknown_checks_map = defaultdict(set)
-        for node, version in redpanda_versions.items():
-            node_id = node + 1
-            # Cloudcheck was introduced in 24.2.1.
-            # Expect that it will be unknown to nodes running
-            # earlier versions of redpanda.
-            if version < (24, 2, 1):
-                unknown_checks_map[node_id].add("cloud")
-
-        # Assert reports are passing, with the exception of unknown tests.
-        assert len(node_reports) > 0
-        for report in node_reports:
-            node = report["node_id"]
-            results = report["results"]
-            # Results shouldn't be empty, even for unknown checks.
-            assert len(results) > 0
-            for result in results:
-                if result["test_type"] in unknown_checks_map[node]:
-                    assert "error" in result
-                else:
-                    if "error" in result:
-                        if (
-                            result["error"]
-                            == "Uploaded key/payload could not be found in cloud storage item list."
-                            and result.get("test_type", "") == "cloud"
-                            and result.get("info", "") == "List"
-                        ):
-                            # On Azure we had flakiness for these versions where a later List Blob
-                            # request would not see the upload result of a Put Blob because of a
-                            # bug in the redpanda's self check logic. To avoid this flakiness,
-                            # explicitly ignore these errors in this case.
-                            pass
-                        else:
-                            # Any other error is not allowed
-                            assert False, f"Unexpected error in result: {result}"
-
-                    assert "warning" not in result

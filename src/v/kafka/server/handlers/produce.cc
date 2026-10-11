@@ -10,6 +10,7 @@
 #include "kafka/server/handlers/produce.h"
 
 #include "base/likely.h"
+#include "base/outcome.h"
 #include "cluster/metadata_cache.h"
 #include "cluster/partition_manager.h"
 #include "cluster/shard_table.h"
@@ -23,7 +24,6 @@
 #include "model/namespace.h"
 #include "model/record.h"
 #include "model/timestamp.h"
-#include "pandaproxy/schema_registry/validation.h"
 #include "raft/errc.h"
 #include "ssx/future-util.h"
 
@@ -205,9 +205,6 @@ produce_response::partition finalize_request_with_error_code(
 struct ntp_produce_request {
     model::ntp ntp;
     std::unique_ptr<model::record_batch> batch;
-    std::optional<pandaproxy::schema_registry::schema_id_validator>
-      schema_id_validator;
-
     size_t batch_max_bytes;
     model::timestamp_type timestamp_type;
     std::chrono::milliseconds message_timestamp_before_max_ms;
@@ -249,28 +246,6 @@ ss::future<produce_response::partition> do_produce_topic_partition(
           req.ntp,
           ss::this_shard_id(),
           std::move(msg));
-    }
-
-    if (auto& validator = req.schema_id_validator) {
-        auto ec = co_await (*validator)(*req.batch);
-        if (ec != error_code::none) {
-            // TODO: It's a bit much to post this to the partition probe for
-            // this metric. We should probably move the metric.
-            auto shard = octx.rctx.shards().shard_for(req.ntp);
-            if (shard) {
-                co_await octx.rctx.partition_manager().invoke_on(
-                  *shard,
-                  [](cluster::partition_manager& pm, const model::ntp& ntp) {
-                      if (auto p = pm.get(ntp)) {
-                          p->probe().add_schema_id_validation_failed();
-                      }
-                      return ss::now();
-                  },
-                  req.ntp);
-            }
-            co_return finalize_request_with_error_code(
-              ec, std::move(dispatched), req.ntp, ss::this_shard_id());
-        }
     }
 
     // A single produce request may contain record batches for many
@@ -379,9 +354,6 @@ partition_produce_stages produce_topic_partition(
   const topic_configuration_context& cfg_ctx) {
     auto ntp = model::ntp(
       model::kafka_namespace, topic.name, part.partition_index);
-    auto validator
-      = pandaproxy::schema_registry::maybe_make_schema_id_validator(
-        octx.rctx.schema_registry(), topic.name, *cfg_ctx.properties);
     // steal the batch from the adapter
     auto batch = std::make_unique<model::record_batch>(
       std::move(part.records->adapter.batch.value()));
@@ -392,7 +364,6 @@ partition_produce_stages produce_topic_partition(
       ntp_produce_request{
         .ntp = std::move(ntp),
         .batch = std::move(batch),
-        .schema_id_validator = std::move(validator),
         .batch_max_bytes = cfg_ctx.batch_max_bytes,
         .timestamp_type = cfg_ctx.timestamp_type,
         .message_timestamp_before_max_ms
@@ -439,18 +410,14 @@ produce_topic(produce_ctx& octx, produce_request::topic& topic) {
       = octx.rctx.metadata_cache().get_topic_disabled_set(
         model::topic_namespace_view{model::kafka_namespace, topic.name});
 
-    const bool is_transform_logs_topic = topic.name
-                                         == model::transform_log_internal_topic;
-
     const auto& kafka_noproduce_topics
       = config::shard_local_cfg().kafka_noproduce_topics();
 
-    const bool is_noproduce_topic = is_transform_logs_topic
-                                    || std::find(
-                                         kafka_noproduce_topics.begin(),
-                                         kafka_noproduce_topics.end(),
-                                         topic.name)
-                                         != kafka_noproduce_topics.end();
+    const bool is_noproduce_topic = std::find(
+                                      kafka_noproduce_topics.begin(),
+                                      kafka_noproduce_topics.end(),
+                                      topic.name)
+                                    != kafka_noproduce_topics.end();
 
     const bool audit_produce_restricted
       = !octx.rctx.authorized_auditor()
@@ -544,8 +511,6 @@ produce_topic(produce_ctx& octx, produce_request::topic& topic) {
         partitions_produced.push_back(std::move(pr.produced));
         partitions_dispatched.push_back(std::move(pr.dispatched));
     }
-    auto is_iceberg_enabled = topic_cfg.properties.iceberg_mode
-                              != model::iceberg_mode::disabled;
     // collect partition responses and build the topic response
     return topic_produce_stages{
       .dispatched = ss::when_all_succeed(
@@ -553,15 +518,6 @@ produce_topic(produce_ctx& octx, produce_request::topic& topic) {
       .produced
       = ss::when_all_succeed(
           partitions_produced.begin(), partitions_produced.end())
-          .then([&octx, is_iceberg_enabled](
-                  std::vector<produce_response::partition> parts) {
-              // if topic is iceberg enabled update iceberg throttle manager.
-              if (is_iceberg_enabled) {
-                  octx.rctx.server().local().mark_datalake_producer(
-                    octx.rctx.header().client_id);
-              }
-              return ssx::now(std::move(parts));
-          })
           .then([name = std::move(topic.name)](
                   std::vector<produce_response::partition> parts) mutable {
               return produce_response::topic{
@@ -762,34 +718,6 @@ produce_handler::handle(request_context ctx, ss::smp_service_group ssg) {
       resp,
       error_code::topic_authorization_failed);
     request.data.topics.erase_to_end(unauthorized_it);
-
-    // Make sure to not write into migrated-from topics in their critical stages
-    auto migrated_it = std::partition(
-      request.data.topics.begin(),
-      request.data.topics.end(),
-      [&ctx](const topic_produce_data& t) {
-          return !ctx.metadata_cache().should_reject_writes(
-            model::topic_namespace_view(model::kafka_namespace, t.name));
-      });
-    fill_response_with_errors(
-      migrated_it,
-      request.data.topics.cend(),
-      resp,
-      error_code::invalid_topic_exception);
-    request.data.topics.erase_to_end(migrated_it);
-
-    auto linked_topics_it = std::partition(
-      request.data.topics.begin(),
-      request.data.topics.end(),
-      [&ctx](const topic_produce_data& t) {
-          return ctx.is_topic_mutable(t.name);
-      });
-    fill_response_with_errors(
-      linked_topics_it,
-      request.data.topics.cend(),
-      resp,
-      error_code::policy_violation);
-    request.data.topics.erase_to_end(linked_topics_it);
 
     ss::promise<> dispatched_promise;
     auto dispatched_f = dispatched_promise.get_future();

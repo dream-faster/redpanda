@@ -43,9 +43,6 @@ inline constexpr std::string_view
   topic_property_initial_retention_local_target_ms
   = "initial.retention.local.target.ms";
 
-inline constexpr std::string_view topic_property_remote_allow_gaps
-  = "redpanda.remote.allowgaps";
-
 inline constexpr std::string_view topic_property_replication_factor
   = "replication.factor";
 
@@ -64,26 +61,10 @@ inline constexpr std::string_view topic_property_min_compaction_lag_ms
 inline constexpr std::string_view topic_property_max_compaction_lag_ms
   = "max.compaction.lag.ms";
 
-inline constexpr std::string_view topic_property_read_replica
-  = "redpanda.remote.readreplica";
-
-inline constexpr std::string_view topic_property_recovery
-  = "redpanda.remote.recovery";
-
 inline constexpr std::string_view topic_property_mpx_virtual_cluster_id
   = "redpanda.virtual.cluster.id";
 
 inline constexpr std::string_view topic_property_leaders_preference
   = "redpanda.leaders.preference";
-
-inline constexpr std::string_view topic_property_redpanda_storage_mode
-  = "redpanda.storage.mode";
-
-// Read-only companion of redpanda.storage.mode: the resolved variant
-// (tiered_v1/tiered_v2) of a topic in the tiered storage mode. Accepted on
-// topic creation (only together with redpanda.storage.mode=tiered) to pick a
-// non-default variant; not alterable.
-inline constexpr std::string_view topic_property_redpanda_storage_mode_impl
-  = "redpanda.storage.mode.impl";
 
 } // namespace kafka

@@ -189,7 +189,6 @@ private:
     do_authenticate_scram256(ss::sstring username, ss::sstring password);
     ss::future<>
     do_authenticate_scram512(ss::sstring username, ss::sstring password);
-    ss::future<> do_authenticate_oauthbearer(ss::sstring token);
     ss::future<>
     do_authenticate_plain(ss::sstring username, ss::sstring password);
     ss::future<security::server_first_message>

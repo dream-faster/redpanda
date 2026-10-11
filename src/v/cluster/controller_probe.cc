@@ -11,7 +11,6 @@
 
 #include "cluster/controller_probe.h"
 
-#include "cluster/cloud_metadata/uploader.h"
 #include "cluster/controller.h"
 #include "cluster/members_table.h"
 #include "cluster/partition_leaders_table.h"
@@ -123,42 +122,6 @@ void controller_probe::setup_metrics() {
             "Number of nodes that have a non-homogenous FIPS mode value"))
           .aggregate({sm::shard_label}),
       });
-
-    if (auto maybe_uploader = _controller.metadata_uploader()) {
-        // add the next metric only if the uploader is available. internally
-        // this depends on cloud storage configuration.
-        _public_metrics->add_group(
-          prometheus_sanitize::metrics_name(cluster_metric_prefix),
-          {
-            sm::make_gauge(
-              "latest_cluster_metadata_manifest_age",
-              [this] {
-                  auto maybe_manifest_ref
-                    = _controller.metadata_uploader().value().get().manifest();
-                  if (!maybe_manifest_ref.has_value()) {
-                      return int64_t{0};
-                  }
-
-                  const auto& manifest = maybe_manifest_ref.value().get();
-                  if (manifest.upload_time_since_epoch == 0ms) {
-                      // we never uploaded, so let's return a value that is not
-                      // problematic to the aggregation of this metric
-                      return int64_t{0};
-                  }
-
-                  auto now_ts
-                    = ss::lowres_system_clock::now().time_since_epoch();
-
-                  auto age_s = std::chrono::duration_cast<std::chrono::seconds>(
-                    now_ts - manifest.upload_time_since_epoch);
-                  return int64_t{age_s.count()};
-              },
-              sm::description(
-                "Age in seconds of the latest "
-                "cluster_metadata_manifest uploaded"))
-              .aggregate({sm::shard_label}),
-          });
-    }
 }
 
 } // namespace cluster

@@ -41,7 +41,7 @@ DEV_CLUSTER_PYTHON_DEPS = [
 #
 # To specify cluster configuration:
 #
-#     bazel run //tools:dev_cluster -- --nodes 1 --no-use-minio --config-overrides '{"cloud_storage_enabled": true, "cloud_storage_secret_key": "<secret_key>", "cloud_storage_access_key": "<access_key>", "cloud_storage_region": "us-west-2", "cloud_storage_bucket": "my_bucket", "iceberg_enabled": true, "iceberg_catalog_type": "rest", "iceberg_rest_catalog_endpoint": "https://glue.us-west-2.amazonaws.com/iceberg", "iceberg_rest_catalog_authentication_mode": "aws_sigv4", "iceberg_rest_catalog_base_location": "s3://my_bucket/glue"}'
+#     bazel run //tools:dev_cluster -- --nodes 1 --config-overrides '{"auto_create_topics_enabled": true}'
 py_binary(
     name = "dev_cluster",
     testonly = True,
@@ -51,10 +51,8 @@ py_binary(
     args = [
         "--executable $(rootpath //src/v/redpanda:redpanda)",
         "--rpk $(rootpath //src/go/rpk/cmd/rpk)",
-        "--minio_executable $(rootpath //bazel/thirdparty:minio)",
         "--prometheus $(rootpath //bazel/thirdparty:prometheus)",
         "--grafana $(rootpath //bazel/thirdparty:grafana)",
-        "--iceberg-catalog-jar $(rootpath //tests/java/iceberg-rest-catalog:iceberg_rest_catalog_jar)",
         "--lsan_suppression_file $(rootpath //:lsan_suppressions)",
         "--ubsan_suppression_file $(rootpath //:ubsan_suppressions)",
     ],
@@ -62,73 +60,12 @@ py_binary(
         "//:lsan_suppressions",
         "//:ubsan_suppressions",
         "//bazel/thirdparty:grafana",
-        "//bazel/thirdparty:minio",
         "//bazel/thirdparty:prometheus",
         "//src/go/rpk/cmd/rpk",
         "//src/v/redpanda",
-        "//tests/java/iceberg-rest-catalog:iceberg_rest_catalog_jar",
     ],
     visibility = ["//visibility:public"],
     deps = DEV_CLUSTER_PYTHON_DEPS,
-)
-
-# Package redpanda binary into a tarball alongside with all needed runfiles. We
-# can't make a redpanda a "tool" dependency as otherwise it will run under
-# "host-config"
-pkg_tar(
-    name = "redpanda_package_for_pgo",
-    srcs = ["//src/v/redpanda"],
-    extension = "tar",
-    include_runfiles = True,
-    package_dir = "redpanda",
-    strip_prefix = "/",
-    tags = ["manual"],
-    visibility = ["//visibility:private"],
-)
-
-# pgo training script used as a tool target which also sets up the python deps
-# for dev_cluster.py such that we can run dev_cluster from within train_pgo
-py_binary(
-    name = "train_pgo",
-    testonly = True,
-    srcs = [
-        "pgo_bolt/train_pgo.py",
-    ],
-    data = [
-        "dev_cluster.py",
-    ],
-    visibility = ["//visibility:private"],
-    deps = DEV_CLUSTER_PYTHON_DEPS,
-)
-
-genrule(
-    name = "pgo_profile",
-    testonly = True,
-    srcs = [
-        "//bazel/thirdparty:omb_minimal",
-        "//bazel/thirdparty:minio",
-        "@current_llvm_toolchain//:llvm-profdata",
-        "dev_cluster.py",
-        ":redpanda_package_for_pgo",
-        "//src/go/rpk/cmd/rpk",
-    ],
-    outs = ["pgo_profile.profdata"],
-    cmd = "$(execpath :train_pgo) " +
-          "--dev-cluster-py $(location dev_cluster.py) " +
-          "--llvm-profdata-bin $(execpath @current_llvm_toolchain//:llvm-profdata) " +
-          "--redpanda-tar $(location :redpanda_package_for_pgo) " +
-          "--omb-benchmark $(execpath //bazel/thirdparty:omb_minimal) " +
-          "--minio-binary $(execpath //bazel/thirdparty:minio) " +
-          "--rpk-binary $(execpath //src/go/rpk/cmd/rpk) " +
-          "--combined-profile-file $(RULEDIR)/pgo_profile.profdata",
-    tags = [
-        "manual",
-        "supports-graceful-termination",
-    ],
-    tools = [
-        ":train_pgo",
-    ],
-    visibility = ["//visibility:public"],
 )
 
 sh_binary(

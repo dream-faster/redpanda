@@ -16,9 +16,9 @@
 
 namespace kafka::client {
 
-class cluster_link_test_metadata_adapter : public kafka::metadata_cache_info {
+class test_metadata_adapter : public kafka::metadata_cache_info {
 public:
-    explicit cluster_link_test_metadata_adapter(config::configuration* config)
+    explicit test_metadata_adapter(config::configuration* config)
       : _config(config) {}
 
     ::model::compression get_default_compression() const override {
@@ -47,19 +47,6 @@ public:
     uint32_t get_default_batch_max_bytes() const override {
         return _config->kafka_batch_max_bytes();
     }
-    ::model::shadow_indexing_mode
-    get_default_shadow_indexing_mode() const override {
-        ::model::shadow_indexing_mode m
-          = ::model::shadow_indexing_mode::disabled;
-        if (_config->cloud_storage_enable_remote_write()) {
-            m = ::model::shadow_indexing_mode::archival;
-        }
-        if (_config->cloud_storage_enable_remote_read()) {
-            m = ::model::add_shadow_indexing_flag(
-              m, ::model::shadow_indexing_mode::fetch);
-        }
-        return m;
-    }
     std::optional<size_t>
     get_default_retention_local_target_bytes() const override {
         return _config->retention_local_target_bytes_default();
@@ -76,21 +63,7 @@ public:
     get_default_delete_retention_ms() const override {
         return _config->tombstone_retention_ms();
     }
-    bool get_default_record_key_schema_id_validation() const override {
-        return false;
-    }
 
-    pandaproxy::schema_registry::subject_name_strategy
-    get_default_record_key_subject_name_strategy() const override {
-        return pandaproxy::schema_registry::subject_name_strategy::topic_name;
-    }
-    bool get_default_record_value_schema_id_validation() const override {
-        return false;
-    }
-    pandaproxy::schema_registry::subject_name_strategy
-    get_default_record_value_subject_name_strategy() const override {
-        return pandaproxy::schema_registry::subject_name_strategy::topic_name;
-    }
     std::optional<size_t>
     get_default_initial_retention_local_target_bytes() const override {
         return config::shard_local_cfg()
@@ -100,10 +73,6 @@ public:
     get_default_initial_retention_local_target_ms() const override {
         return config::shard_local_cfg()
           .initial_retention_local_target_ms_default();
-    }
-    std::chrono::milliseconds
-    get_default_iceberg_target_lag_ms() const override {
-        return _config->iceberg_target_lag_ms();
     }
     std::optional<double>
     get_default_min_cleanable_dirty_ratio() const override {
@@ -305,7 +274,7 @@ ss::future<response_t> cluster_mock::handle_describe_configs_request(
         report_topic_config(
           resource,
           result,
-          cluster_link_test_metadata_adapter{_mock_config.get()},
+          test_metadata_adapter{_mock_config.get()},
           topic_it->second.topic_properties,
           dc_req.data.include_synonyms,
           dc_req.data.include_documentation);

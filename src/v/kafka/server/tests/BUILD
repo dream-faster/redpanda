@@ -89,7 +89,6 @@ redpanda_cc_btest(
         "error_mapping_test.cc",
     ],
     deps = [
-        "//src/v/cluster:cluster_link_errc",
         "//src/v/cluster:tx_protocol_types",
         "//src/v/kafka/server",
         "//src/v/test_utils:seastar_boost",
@@ -157,34 +156,11 @@ redpanda_cc_btest(
     ],
     deps = [
         "//src/v/cluster:client_quota_backend",
-        "//src/v/cluster:cluster_link_table",
-        "//src/v/cluster:cluster_link_types",
-        "//src/v/cluster:cluster_recovery_table",
         "//src/v/cluster:controller_log_limiter",
-        "//src/v/cluster:data_migration_table",
         "//src/v/cluster:feature_backend",
-        "//src/v/cluster:plugin_backend",
         "//src/v/kafka/protocol:describe_redpanda_roles",
         "//src/v/kafka/protocol:produce",
         "//src/v/kafka/server",
-        "//src/v/test_utils:seastar_boost",
-        "@boost//:test",
-        "@seastar//:testing",
-    ],
-)
-
-redpanda_cc_btest(
-    name = "validator_tests",
-    timeout = "short",
-    srcs = [
-        "validator_tests.cc",
-    ],
-    deps = [
-        "//src/v/cluster:types",
-        "//src/v/kafka/protocol/schemata:create_topics_request",
-        "//src/v/kafka/server",
-        "//src/v/kafka/server:topic_config_utils",
-        "//src/v/pandaproxy/schema_registry:subject_name_strategy",
         "//src/v/test_utils:seastar_boost",
         "@boost//:test",
         "@seastar//:testing",
@@ -318,9 +294,7 @@ redpanda_cc_btest(
     deps = [
         "//src/v/cluster",
         "//src/v/cluster:client_quota_backend",
-        "//src/v/cluster:cloud_metadata_types",
         "//src/v/cluster:controller_log_limiter",
-        "//src/v/cluster:data_migration_table",
         "//src/v/cluster:feature_backend",
         "//src/v/cluster:leader_balancer_strategy",
         "//src/v/cluster:node_status_backend",
@@ -403,7 +377,6 @@ redpanda_cc_btest(
         "//src/v/cluster:client_quota_backend",
         "//src/v/cluster:commands",
         "//src/v/cluster:controller_log_limiter",
-        "//src/v/cluster:data_migration_table",
         "//src/v/cluster:feature_backend",
         "//src/v/cluster:leader_balancer_strategy",
         "//src/v/cluster:node_status_backend",
@@ -437,7 +410,6 @@ redpanda_cc_btest(
         "//src/v/cluster:client_quota_backend",
         "//src/v/cluster:cluster_utils",
         "//src/v/cluster:controller_log_limiter",
-        "//src/v/cluster:data_migration_table",
         "//src/v/cluster:feature_backend",
         "//src/v/cluster:leader_balancer_strategy",
         "//src/v/cluster:node_status_backend",
@@ -460,10 +432,7 @@ redpanda_cc_btest(
         "api_versions_test.cc",
     ],
     deps = [
-        "//src/v/cluster:cluster_link_table",
-        "//src/v/cluster:cluster_link_types",
         "//src/v/cluster:controller_log_limiter",
-        "//src/v/cluster:data_migration_table",
         "//src/v/cluster:feature_backend",
         "//src/v/cluster:leader_balancer_strategy",
         "//src/v/cluster:node_status_backend",
@@ -506,7 +475,6 @@ redpanda_cc_btest(
     deps = [
         "//src/v/cluster:client_quota_backend",
         "//src/v/cluster:controller_log_limiter",
-        "//src/v/cluster:data_migration_table",
         "//src/v/cluster:feature_backend",
         "//src/v/cluster:leader_balancer_strategy",
         "//src/v/cluster:node_status_backend",
@@ -540,7 +508,6 @@ redpanda_cc_btest(
         "//src/v/cluster:client_quota_backend",
         "//src/v/cluster:cluster_utils",
         "//src/v/cluster:controller_log_limiter",
-        "//src/v/cluster:data_migration_table",
         "//src/v/cluster:feature_backend",
         "//src/v/cluster:leader_balancer_strategy",
         "//src/v/cluster:node_status_backend",
@@ -565,7 +532,6 @@ redpanda_cc_btest(
         "//src/v/cluster:client_quota_backend",
         "//src/v/cluster:cluster_utils",
         "//src/v/cluster:controller_log_limiter",
-        "//src/v/cluster:data_migration_table",
         "//src/v/cluster:feature_backend",
         "//src/v/cluster:leader_balancer_strategy",
         "//src/v/cluster:node_status_backend",
@@ -592,7 +558,6 @@ redpanda_cc_btest(
         "topic_recreate_test.cc",
     ],
     deps = [
-        "//src/v/cluster:inventory_service",
         "//src/v/cluster:leader_balancer_strategy",
         "//src/v/cluster:members_table",
         "//src/v/cluster:node_status_backend",
@@ -650,7 +615,6 @@ redpanda_cc_btest(
     deps = [
         "//src/v/cluster:client_quota_backend",
         "//src/v/cluster:controller_log_limiter",
-        "//src/v/cluster:data_migration_table",
         "//src/v/cluster:feature_backend",
         "//src/v/cluster:leader_balancer_strategy",
         "//src/v/cluster:node_status_backend",
@@ -704,7 +668,6 @@ redpanda_cc_btest(
     deps = [
         "//src/v/cluster:cluster_utils",
         "//src/v/cluster:controller_log_limiter",
-        "//src/v/cluster:data_migration_table",
         "//src/v/cluster:feature_backend",
         "//src/v/cluster:leader_balancer_strategy",
         "//src/v/cluster:node_status_backend",
@@ -739,7 +702,6 @@ redpanda_cc_btest(
     deps = [
         "//src/v/cluster:cluster_utils",
         "//src/v/cluster:controller_log_limiter",
-        "//src/v/cluster:data_migration_table",
         "//src/v/cluster:feature_backend",
         "//src/v/cluster:fwd",
         "//src/v/cluster:leader_balancer_strategy",
@@ -769,7 +731,6 @@ redpanda_cc_btest(
         "//src/v/cluster:client_quota_backend",
         "//src/v/cluster:commands",
         "//src/v/cluster:controller_log_limiter",
-        "//src/v/cluster:data_migration_table",
         "//src/v/cluster:feature_backend",
         "//src/v/cluster:leader_balancer_strategy",
         "//src/v/cluster:node_status_backend",
@@ -843,7 +804,6 @@ redpanda_cc_btest(
     cpu = "1",
     deps = [
         "//src/v/cluster:controller_log_limiter",
-        "//src/v/cluster:data_migration_table",
         "//src/v/cluster:feature_backend",
         "//src/v/cluster:leader_balancer_strategy",
         "//src/v/cluster:node_status_backend",
@@ -883,10 +843,7 @@ redpanda_cc_btest(
     cpu = "1",
     deps = [
         ":kafka_test_utils",
-        "//src/v/cluster:cluster_link_table",
-        "//src/v/cluster:cluster_link_types",
         "//src/v/cluster:controller_log_limiter",
-        "//src/v/cluster:data_migration_table",
         "//src/v/cluster:feature_backend",
         "//src/v/cluster:leader_balancer_strategy",
         "//src/v/cluster:node_status_backend",
@@ -921,7 +878,6 @@ redpanda_cc_gtest(
     deps = [
         "//src/v/base",
         "//src/v/cluster:cluster_utils",
-        "//src/v/cluster:data_migration_table",
         "//src/v/cluster:feature_backend",
         "//src/v/cluster:leader_balancer_strategy",
         "//src/v/cluster:node_status_backend",
@@ -971,7 +927,6 @@ redpanda_cc_btest(
     deps = [
         "//src/v/base",
         "//src/v/cluster:fwd",
-        "//src/v/cluster:inventory_service",
         "//src/v/cluster:leader_balancer_strategy",
         "//src/v/cluster:log_eviction_stm",
         "//src/v/cluster:node_status_backend",
@@ -993,47 +948,6 @@ redpanda_cc_btest(
         "@fmt",
         "@seastar",
         "@seastar//:testing",
-    ],
-)
-
-redpanda_cc_gtest(
-    name = "datalake_throttle_manager_test",
-    timeout = "short",
-    srcs = [
-        "datalake_throttle_manager_test.cc",
-    ],
-    cpu = 3,
-    deps = [
-        "//src/v/config",
-        "//src/v/kafka/server:datalake_throttle_manager",
-        "//src/v/random:generators",
-        "//src/v/ssx:future_util",
-        "//src/v/test_utils:gtest",
-        "@fmt",
-        "@googletest//:gtest",
-        "@seastar",
-        "@seastar//:testing",
-    ],
-)
-
-redpanda_cc_gtest(
-    name = "write_at_offset_stm_test",
-    timeout = "moderate",
-    srcs = [
-        "write_at_offset_stm_test.cc",
-    ],
-    cpu = 1,
-    deps = [
-        "//src/v/config",
-        "//src/v/kafka/data:log_reader_config",
-        "//src/v/kafka/server:write_at_offset_stm",
-        "//src/v/model/tests:random",
-        "//src/v/raft",
-        "//src/v/raft/tests:stm_test_fixture",
-        "//src/v/redpanda/tests:fixture",
-        "//src/v/test_utils:gtest",
-        "//src/v/test_utils:scoped_config",
-        "@googletest//:gtest",
     ],
 )
 
@@ -1146,9 +1060,7 @@ redpanda_cc_btest(
     deps = [
         "//src/v/cluster",
         "//src/v/cluster:client_quota_backend",
-        "//src/v/cluster:cloud_metadata_types",
         "//src/v/cluster:controller_log_limiter",
-        "//src/v/cluster:data_migration_table",
         "//src/v/cluster:feature_backend",
         "//src/v/cluster:leader_balancer_strategy",
         "//src/v/cluster:node_status_backend",
@@ -1178,9 +1090,7 @@ redpanda_cc_btest(
     deps = [
         "//src/v/cluster",
         "//src/v/cluster:client_quota_backend",
-        "//src/v/cluster:cloud_metadata_types",
         "//src/v/cluster:controller_log_limiter",
-        "//src/v/cluster:data_migration_table",
         "//src/v/cluster:feature_backend",
         "//src/v/cluster:leader_balancer_strategy",
         "//src/v/cluster:node_status_backend",
@@ -1212,7 +1122,6 @@ redpanda_cc_btest(
         "//src/v/cluster:client_quota_backend",
         "//src/v/cluster:commands",
         "//src/v/cluster:controller_log_limiter",
-        "//src/v/cluster:data_migration_table",
         "//src/v/cluster:feature_backend",
         "//src/v/cluster:leader_balancer_strategy",
         "//src/v/cluster:node_status_backend",
@@ -1242,7 +1151,6 @@ redpanda_cc_btest(
         "//src/v/cluster:client_quota_backend",
         "//src/v/cluster:commands",
         "//src/v/cluster:controller_log_limiter",
-        "//src/v/cluster:data_migration_table",
         "//src/v/cluster:feature_backend",
         "//src/v/cluster:leader_balancer_strategy",
         "//src/v/cluster:node_status_backend",
@@ -1273,7 +1181,6 @@ redpanda_cc_btest(
         "//src/v/cluster:client_quota_backend",
         "//src/v/cluster:cluster_utils",
         "//src/v/cluster:controller_log_limiter",
-        "//src/v/cluster:data_migration_table",
         "//src/v/cluster:feature_backend",
         "//src/v/cluster:leader_balancer_strategy",
         "//src/v/cluster:node_status_backend",
@@ -1339,7 +1246,6 @@ redpanda_cc_btest(
         "//src/v/cluster",
         "//src/v/cluster:client_quota_backend",
         "//src/v/cluster:controller_log_limiter",
-        "//src/v/cluster:data_migration_table",
         "//src/v/cluster:feature_backend",
         "//src/v/kafka/protocol",
         "//src/v/kafka/protocol:describe_redpanda_roles",

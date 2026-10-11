@@ -274,9 +274,9 @@ TEST_F(gc_fixture, retention_test_after_truncation) {
     EXPECT_EQ(builder.get_disk_log_impl().get_probe().partition_size(), 0);
 }
 
-TEST_F(gc_fixture, retention_by_size_with_remote_write) {
+TEST_F(gc_fixture, retention_by_size_local_target) {
     /*
-     * This test sets the size retention limit on a cloud storage topic
+     * This test sets the size retention limit on a topic
      * via the rention.local.target.bytes topic configuration option.
      *
      * Fixed size segments are added until the limit is breached.
@@ -284,18 +284,12 @@ TEST_F(gc_fixture, retention_by_size_with_remote_write) {
      * if it acted correctly.
      */
 
-    config::shard_local_cfg().get("cloud_storage_enabled").set_value(true);
-    auto reset_cfg = ss::defer(
-      [] { config::shard_local_cfg().get("cloud_storage_enabled").reset(); });
-
     size_t size_limit = 1000;
 
     storage::ntp_config config{
       storage::log_builder_ntp(), builder.get_log_config().base_dir};
 
     storage::ntp_config::default_overrides overrides;
-    overrides.shadow_indexing_mode = model::shadow_indexing_mode::full;
-    overrides.storage_mode = model::redpanda_storage_mode::tiered;
     overrides.retention_local_target_bytes = tristate<size_t>{size_limit};
     config.set_overrides(overrides);
 
@@ -343,31 +337,25 @@ TEST_F(gc_fixture, retention_by_size_with_remote_write) {
     builder.stop().get();
 }
 
-TEST_F(gc_fixture, retention_by_time_with_remote_write) {
+TEST_F(gc_fixture, retention_by_time_local_target) {
     /*
-     * This test sets the time retention limit on a cloud storage topic
-     * via the rention.local.target.ms topic configuration option.
+     * This test sets the time retention limit via the
+     * rention.local.target.ms topic configuration option.
      */
     using namespace std::chrono_literals;
     auto batch_age = std::chrono::duration_cast<std::chrono::milliseconds>(1h);
-
-    config::shard_local_cfg().get("cloud_storage_enabled").set_value(true);
 
     // this test assumes that retention overrides are applied, which they are
     // not, if operating in nonstrict mode.
     config::shard_local_cfg().get("retention_local_strict").set_value(true);
 
-    auto reset_cfg = ss::defer([] {
-        config::shard_local_cfg().get("cloud_storage_enabled").reset();
-        config::shard_local_cfg().get("retention_local_strict").reset();
-    });
+    auto reset_cfg = ss::defer(
+      [] { config::shard_local_cfg().get("retention_local_strict").reset(); });
 
     storage::ntp_config config{
       storage::log_builder_ntp(), builder.get_log_config().base_dir};
 
     storage::ntp_config::default_overrides overrides;
-    overrides.shadow_indexing_mode = model::shadow_indexing_mode::full;
-    overrides.storage_mode = model::redpanda_storage_mode::tiered;
     config.set_overrides(overrides);
 
     auto log_creation_time = model::timestamp{
@@ -400,8 +388,6 @@ TEST_F(gc_fixture, retention_by_time_with_remote_write) {
 
     // Override the local target retention.
     storage::ntp_config::default_overrides time_override;
-    time_override.shadow_indexing_mode = model::shadow_indexing_mode::full;
-    time_override.storage_mode = model::redpanda_storage_mode::tiered;
     time_override.retention_local_target_ms
       = tristate<std::chrono::milliseconds>{0ms};
     builder.update_configuration(time_override).get();
@@ -410,82 +396,6 @@ TEST_F(gc_fixture, retention_by_time_with_remote_write) {
     builder | storage::garbage_collect(model::timestamp{1}, std::nullopt)
       | storage::stop();
     EXPECT_EQ(builder.get_log()->segment_count(), 0);
-}
-
-TEST_F(gc_fixture, log_eviction_exempt_topics) {
-    /*
-     * deletion_exempt() follows the log_eviction_exempt_topics cluster
-     * property, which defaults to the schema registry topic and only
-     * applies to the kafka namespace.
-     */
-    ASSERT_TRUE(storage::deletion_exempt(model::schema_registry_internal_ntp));
-    const model::ntp user_ntp(
-      model::kafka_namespace, model::topic("foo"), model::partition_id(0));
-    ASSERT_FALSE(storage::deletion_exempt(user_ntp));
-    ASSERT_FALSE(
-      storage::deletion_exempt(
-        model::ntp(
-          model::ns("other"),
-          model::schema_registry_internal_tp.topic,
-          model::partition_id(0))));
-
-    config::shard_local_cfg().log_eviction_exempt_topics.set_value(
-      std::vector<ss::sstring>{"foo"});
-    EXPECT_FALSE(storage::deletion_exempt(model::schema_registry_internal_ntp));
-    EXPECT_TRUE(storage::deletion_exempt(user_ntp));
-    config::shard_local_cfg().log_eviction_exempt_topics.reset();
-    EXPECT_TRUE(storage::deletion_exempt(model::schema_registry_internal_ntp));
-}
-
-TEST_F(gc_fixture, schema_registry_deletion_exempt) {
-    /*
-     * The schema registry replays its full topic on startup, so neither
-     * retention nor space management may remove local data, even when the
-     * topic is tiered with an aggressive local retention target.
-     */
-    ASSERT_TRUE(storage::deletion_exempt(model::schema_registry_internal_ntp));
-
-    config::shard_local_cfg().get("cloud_storage_enabled").set_value(true);
-    auto reset_cfg = ss::defer(
-      [] { config::shard_local_cfg().get("cloud_storage_enabled").reset(); });
-
-    storage::ntp_config config{
-      model::schema_registry_internal_ntp, builder.get_log_config().base_dir};
-
-    storage::ntp_config::default_overrides overrides;
-    overrides.shadow_indexing_mode = model::shadow_indexing_mode::full;
-    overrides.storage_mode = model::redpanda_storage_mode::tiered;
-    overrides.retention_local_target_bytes = tristate<size_t>{1};
-    // In production _schemas is compact-only, which alone prevents retention
-    // GC (but not space management). Deliberately use the delete policy here
-    // so the GC half of this test exercises the exemption rather than the
-    // cleanup policy: deletion_exempt must hold even if the policy is ever
-    // (mis)configured to allow deletion.
-    overrides.cleanup_policy_bitflags
-      = model::cleanup_policy_bitflags::deletion;
-    config.set_overrides(overrides);
-
-    builder | storage::start(std::move(config)) | storage::add_segment(0)
-      | storage::add_random_batch(0, 100, storage::maybe_compress_batches::yes)
-      | storage::add_segment(100)
-      | storage::add_random_batch(100, 2, storage::maybe_compress_batches::yes);
-
-    ASSERT_TRUE(builder.get_disk_log_impl().config().is_locally_collectable());
-    builder.gc(model::timestamp::now(), std::make_optional<size_t>(1)).get();
-    EXPECT_EQ(builder.get_log()->segment_count(), 2);
-
-    auto reclaimable = builder.get_log()
-                         ->get_reclaimable_offsets(
-                           storage::gc_config(
-                             model::timestamp::now(),
-                             std::make_optional<size_t>(1)))
-                         .get();
-    EXPECT_TRUE(reclaimable.effective_local_retention.empty());
-    EXPECT_TRUE(reclaimable.low_space_non_hinted.empty());
-    EXPECT_TRUE(reclaimable.low_space_hinted.empty());
-    EXPECT_TRUE(reclaimable.active_segment.empty());
-
-    builder | storage::stop();
 }
 
 TEST_F(gc_fixture, non_collectible_disk_usage_test) {

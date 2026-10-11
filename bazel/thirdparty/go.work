@@ -5,8 +5,6 @@ go 1.26.5
 use (
 	src/go/rpk
 	src/v/test_utils/go
-	src/transform-sdk/go/transform
-	src/transform-sdk/go/transform/internal/testdata
 	tests/go/kgo-verifier
 	bazel/packaging
 )

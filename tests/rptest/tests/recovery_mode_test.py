@@ -16,7 +16,6 @@ from requests.exceptions import HTTPError
 from rptest.clients.rpk import RpkException, RpkTool
 from rptest.services.admin import Admin
 from rptest.services.cluster import cluster
-from rptest.services.redpanda import SISettings
 from rptest.services.rpk_producer import RpkProducer
 from rptest.tests.redpanda_test import RedpandaTest
 from rptest.util import wait_until_result
@@ -48,9 +47,7 @@ def assert_rpk_fails(cmd, error_msg):
 
 class RecoveryModeTest(RedpandaTest):
     def __init__(self, test_ctx, *args, **kwargs):
-        super().__init__(
-            *args, test_ctx, num_brokers=4, si_settings=SISettings(test_ctx), **kwargs
-        )
+        super().__init__(*args, test_ctx, num_brokers=4, **kwargs)
 
     def setUp(self):
         # start the nodes manually
@@ -151,8 +148,10 @@ class RecoveryModeTest(RedpandaTest):
         ## alter arbitrary topic config
         rpk.alter_topic_config("mytopic1", "compression.type", "snappy")
         wait_until(
-            lambda: rpk.describe_topic_configs("mytopic1")["compression.type"][0]
-            == "snappy",
+            lambda: (
+                rpk.describe_topic_configs("mytopic1")["compression.type"][0]
+                == "snappy"
+            ),
             timeout_sec=30,
             backoff_sec=1,
             err_msg="failed to alter topic config",

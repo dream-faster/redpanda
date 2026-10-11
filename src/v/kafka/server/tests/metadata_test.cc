@@ -564,7 +564,6 @@ FIXTURE_TEST(metadata_autocreate_internal_topics, metadata_fixture) {
     auto req = kafka::metadata_request{.data{
       .topics = {{
         {.name{model::kafka_consumer_offsets_topic}},
-        {.name{model::schema_registry_internal_tp.topic}},
         {.name{model::kafka_audit_logging_topic}},
       }},
       .allow_auto_topic_creation = true,
@@ -575,7 +574,7 @@ FIXTURE_TEST(metadata_autocreate_internal_topics, metadata_fixture) {
     // Only check topic-level errors: partitions may transiently report
     // leader_not_available until leadership metadata catches up with the
     // freshly created topics.
-    BOOST_REQUIRE_EQUAL(resp.data.topics.size(), 3);
+    BOOST_REQUIRE_EQUAL(resp.data.topics.size(), 2);
     for (const auto& topic : resp.data.topics) {
         BOOST_REQUIRE_EQUAL(topic.error_code, kafka::error_code::none);
     }
@@ -590,18 +589,6 @@ FIXTURE_TEST(metadata_autocreate_internal_topics, metadata_fixture) {
     BOOST_CHECK(
       co_cfg->properties.cleanup_policy_bitflags
       == model::cleanup_policy_bitflags::compaction);
-
-    auto schemas_cfg = topics_state.get_topic_cfg(
-      {model::kafka_namespace, model::schema_registry_internal_tp.topic});
-    BOOST_REQUIRE(schemas_cfg.has_value());
-    BOOST_CHECK_EQUAL(schemas_cfg->partition_count, 1);
-    BOOST_CHECK(
-      schemas_cfg->properties.cleanup_policy_bitflags
-      == model::cleanup_policy_bitflags::compaction);
-    BOOST_CHECK(
-      schemas_cfg->properties.compression == model::compression::none);
-    BOOST_CHECK(schemas_cfg->properties.retention_duration.is_disabled());
-    BOOST_CHECK(schemas_cfg->properties.retention_bytes.is_disabled());
 
     auto audit_cfg = topics_state.get_topic_cfg(model::kafka_audit_logging_nt);
     BOOST_REQUIRE(audit_cfg.has_value());

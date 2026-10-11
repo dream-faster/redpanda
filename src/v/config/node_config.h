@@ -51,21 +51,11 @@ public:
     one_or_many_property<model::broker_endpoint> admin;
     one_or_many_property<endpoint_tls_config> admin_api_tls;
 
-    // Coproc/wasm
     deprecated_property coproc_supervisor_server;
-
-    // Data transforms
-    property<bool> emergency_disable_data_transforms;
 
     // HTTP server content dirs
     property<ss::sstring> admin_api_doc_dir;
     deprecated_property dashboard_dir;
-
-    // Shadow indexing/S3 cache location
-    property<std::optional<ss::sstring>> cloud_storage_cache_directory;
-
-    // Path to store inventory file hashes for cloud storage scrubber
-    property<std::optional<ss::sstring>> cloud_storage_inventory_hash_store;
 
     deprecated_property enable_central_config;
 
@@ -124,30 +114,6 @@ public:
 
     std::filesystem::path crash_report_dir_path() const {
         return data_directory().path / "crash_reports";
-    }
-
-    /**
-     * Return the configured cache path if set, otherwise a default
-     * path within the data directory.
-     */
-    std::filesystem::path cloud_storage_cache_path() const {
-        if (cloud_storage_cache_directory().has_value()) {
-            return std::string(cloud_storage_cache_directory().value());
-        } else {
-            return data_directory().path / "cloud_storage_cache";
-        }
-    }
-
-    std::filesystem::path cloud_storage_inventory_hash_path() const {
-        if (cloud_storage_inventory_hash_store().has_value()) {
-            return std::filesystem::path{
-              cloud_storage_inventory_hash_store().value()};
-        }
-        return data_directory().path / "cloud_storage_inventory";
-    }
-
-    std::filesystem::path datalake_staging_path() const {
-        return data_directory().path / "datalake_staging";
     }
 
     std::filesystem::path l1_staging_path() const {

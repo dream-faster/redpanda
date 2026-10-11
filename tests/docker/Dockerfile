@@ -84,7 +84,6 @@ FROM maven-base AS java-verifiers
 
 COPY --chown=0:0 tests/java/e2e-verifiers /opt/redpanda-tests/java/e2e-verifiers
 COPY --chown=0:0 tests/java/verifiers /opt/redpanda-tests/java/verifiers
-COPY --chown=0:0 tests/java/kafka-serde /opt/redpanda-tests/java/kafka-serde
 COPY --chown=0:0 --chmod=0755 tests/docker/ducktape-deps/java-verifiers /
 RUN /java-verifiers && \
     rm /java-verifiers
@@ -97,14 +96,6 @@ ENV KAFKA_MIRROR="https://s3-us-west-2.amazonaws.com/kafka-packages"
 COPY --chown=0:0 --chmod=0755 tests/docker/ducktape-deps/kafka-tools /
 RUN --mount=type=cache,id=dl-cache,target=/dl-cache /kafka-tools && \
     rm /kafka-tools
-
-#################################
-
-FROM base AS confluent-schema-registry
-
-COPY --chown=0:0 --chmod=0755 tests/docker/ducktape-deps/confluent-schema-registry /
-RUN --mount=type=cache,id=dl-cache,target=/dl-cache /confluent-schema-registry && \
-    rm /confluent-schema-registry
 
 #################################
 
@@ -141,14 +132,6 @@ ENV PATH="${PATH}:/usr/local/go/bin"
 
 #################################
 
-FROM base AS nodejs
-
-COPY --chown=0:0 --chmod=0755 tests/docker/ducktape-deps/nodejs /
-RUN /nodejs && rm /nodejs
-ENV PATH="${PATH}:/opt/nodejs/bin"
-
-#################################
-
 FROM golang AS kaf
 
 COPY --chown=0:0 --chmod=0755 tests/docker/ducktape-deps/kaf /
@@ -179,15 +162,6 @@ RUN /client-swarm && \
 
 #################################
 
-FROM rust AS rp-storage-tool
-
-COPY --chown=0:0 --chmod=0755 tests/docker/ducktape-deps/rp-storage-tool /
-COPY --chown=0:0 --chmod=0755 tools/rp_storage_tool /rp_storage_tool
-RUN /rp-storage-tool && \
-    rm -rf /rp_storage_tool
-
-#################################
-
 FROM golang AS sarama-examples
 
 COPY --chown=0:0 --chmod=0755 tests/docker/ducktape-deps/sarama-examples /
@@ -202,15 +176,6 @@ COPY --chown=0:0 --chmod=0755 tests/go /opt/redpanda-tests/go
 COPY --chown=0:0 --chmod=0755 tests/docker/ducktape-deps/golang-test-clients /
 RUN --mount=type=cache,target=/root/go/pkg/mod,id=go-mod-cache \
     /golang-test-clients && rm /golang-test-clients
-
-#################################
-
-FROM nodejs AS nodejs-test-clients
-
-COPY --chown=0:0 --chmod=0755 tests/nodejs /opt/redpanda-tests/nodejs
-COPY --chown=0:0 --chmod=0755 tests/docker/ducktape-deps/nodejs-test-clients /
-RUN --mount=type=cache,target=/root/.npm,id=npm-cache \
-    /nodejs-test-clients && rm /nodejs-test-clients
 
 #################################
 
@@ -255,46 +220,10 @@ RUN /k8s && \
 
 #################################
 
-FROM golang AS byoc-mock
-
-COPY --chown=0:0 --chmod=0755 tests/go/byoc-mock /opt/redpanda-tests/go/byoc-mock
-COPY --chown=0:0 --chmod=0755 tests/docker/ducktape-deps/byoc-mock /
-RUN --mount=type=cache,target=/root/go/pkg/mod,id=go-mod-cache \
-    /byoc-mock && rm /byoc-mock
-
-#################################
-
-FROM golang AS plugin-mock
-
-COPY --chown=0:0 --chmod=0755 tests/go/plugin-mock /opt/redpanda-tests/go/plugin-mock
-COPY --chown=0:0 --chmod=0755 tests/docker/ducktape-deps/plugin-mock /
-RUN --mount=type=cache,target=/root/go/pkg/mod,id=go-mod-cache \
-    /plugin-mock && rm /plugin-mock
-
-#################################
-
 FROM base AS keycloak
 
 COPY --chown=0:0 --chmod=0755 tests/docker/ducktape-deps/keycloak /
 RUN --mount=type=cache,id=dl-cache,target=/dl-cache /keycloak && rm /keycloak
-
-#################################
-
-FROM golang AS tinygo
-
-COPY --chown=0:0 --chmod=0755 tests/docker/ducktape-deps/tinygo /
-RUN /tinygo && \
-    rm /tinygo
-ENV PATH="${PATH}:/usr/local/tinygo/bin"
-
-#################################
-
-FROM tinygo AS wasi-transforms
-
-COPY --chown=0:0 --chmod=0755 tests/docker/ducktape-deps/tinygo-wasi-transforms /
-COPY --chown=0:0 --chmod=0755 src/transform-sdk /transform-sdk
-RUN /tinygo-wasi-transforms && \
-    rm -rf /transform-sdk
 
 #################################
 
@@ -305,40 +234,6 @@ RUN --mount=target=/running/ocsf-server,type=tmpfs --mount=type=cache,target=/va
 
 #################################
 
-FROM java-base AS polaris
-COPY --chown=0:0 --chmod=0755 tests/docker/ducktape-deps/polaris /
-RUN --mount=type=cache,target=/root/.gradle/caches/modules-2,id=gradle-polaris \
-    /polaris && rm /polaris
-
-#################################
-
-FROM java-base AS nessie
-COPY --chown=0:0 --chmod=0755 tests/docker/ducktape-deps/nessie /
-RUN --mount=type=cache,target=/root/.gradle/caches/modules-2,id=gradle-nessie \
-    /nessie && rm /nessie
-
-#################################
-
-FROM java-base AS iceberg-rest
-COPY --chown=0:0 tests/java/iceberg-rest-catalog /opt/redpanda-tests/java/iceberg-rest-catalog
-COPY --chown=0:0 --chmod=0755 tests/docker/ducktape-deps/iceberg-rest-catalog /
-RUN --mount=type=cache,target=/root/.gradle/caches/modules-2,id=gradle-iceberg \
-    /iceberg-rest-catalog && rm /iceberg-rest-catalog
-
-#################################
-
-FROM base AS trino
-COPY --chown=0:0 --chmod=0755 tests/docker/ducktape-deps/trino /
-RUN --mount=type=cache,id=dl-cache,target=/dl-cache /trino && rm /trino
-
-#################################
-
-FROM maven-base AS spark
-COPY --chown=0:0 tests/java/spark-iceberg-dependencies /opt/redpanda-tests/java/spark-iceberg-dependencies
-COPY --chown=0:0 --chmod=0755 tests/docker/ducktape-deps/spark /
-RUN --mount=type=cache,id=dl-cache,target=/dl-cache /spark && rm /spark
-
-#################################
 # m2-collector creates the final .m2 cache from all images
 # that execute directly out of the cache, so we avoid duplicating
 # the full cache contents N times in the final image
@@ -353,7 +248,6 @@ COPY --from=omb /root/.m2 /root/.m2
 # in the seed tarball
 FROM m2-collector AS m2-all
 COPY --from=kafka-tools /root/.m2 /root/.m2
-COPY --from=spark /root/.m2 /root/.m2
 
 ###################################
 # Not used by the final image, but useful for debugging the cache mount contents.
@@ -365,9 +259,6 @@ COPY --chmod=0755 tests/docker/ducktape-deps/download-utils tests/docker/ducktap
 RUN --mount=type=cache,id=dl-cache,target=/dl-cache \
     --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    --mount=type=cache,target=/gradle_polaris,id=gradle-polaris \
-    --mount=type=cache,target=/gradle_nessie,id=gradle-nessie \
-    --mount=type=cache,target=/gradle_iceberg,id=gradle-iceberg \
     --mount=type=cache,target=/root/go/pkg/mod,id=go-mod-cache \
     bash -c "source /debug-cache && debug_cache"
 
@@ -450,34 +341,21 @@ COPY --from=kafka-streams-examples /opt/kafka-streams-examples /opt/kafka-stream
 COPY --from=omb /opt/openmessaging-benchmark /opt/openmessaging-benchmark
 COPY --from=java-verifiers /opt/redpanda-tests/java /opt/redpanda-tests/java
 COPY --from=java-verifiers /opt/verifiers /opt/verifiers
-COPY --from=java-verifiers /opt/kafka-serde /opt/kafka-serde
 COPY --from=kafka-tools /opt /opt
-COPY --from=confluent-schema-registry /opt/confluent /opt/confluent
 COPY --from=kcat /usr/local/bin/kcat /usr/local/bin/
 COPY --from=sarama-examples /opt/sarama /opt/sarama
 COPY --from=golang-test-clients /opt/redpanda-tests/go /opt/redpanda-tests/go
 COPY --from=client-swarm /usr/local/bin/client-swarm /usr/local/bin/
-COPY --from=rp-storage-tool /usr/local/bin/rp-storage-tool /usr/local/bin/
 COPY --from=franz-bench /opt/franz-go/examples/bench /opt/franz-go/examples/bench
 COPY --from=k8s /usr/local/bin/kubectl /usr/local/bin/helm /usr/local/bin/
 COPY --from=kaf /usr/local/bin/kaf /usr/local/bin/
 COPY --from=kcl /usr/local/bin/kcl /usr/local/bin/
 COPY --from=kgo-verifier /opt/kgo-verifier /opt/kgo-verifier
-COPY --from=byoc-mock /opt/redpanda-tests/go/byoc-mock/.rpk.managed-byoc /root/.local/bin/.rpk.managed-byoc
-COPY --from=plugin-mock /opt/redpanda-tests/go/plugin-mock/.rpk.ac-pluginmock /root/.local/bin/.rpk.ac-pluginmock
 COPY --from=keycloak /opt/keycloak/ /opt/keycloak/
-COPY --from=wasi-transforms /opt/transforms/ /opt/transforms/
 COPY --from=ocsf /opt/ocsf-schema/ /opt/ocsf-schema/
 COPY --from=ocsf /opt/ocsf-server/ /opt/ocsf-server/
-COPY --from=polaris /opt/polaris/ /opt/polaris/
-COPY --from=nessie /opt/nessie/ /opt/nessie/
 COPY --from=flink /opt/flink/ /opt/flink/
-COPY --from=iceberg-rest /opt/iceberg-rest-catalog /opt/iceberg-rest-catalog
-COPY --from=trino /opt/trino /opt/trino
-COPY --from=spark /opt/spark /opt/spark
 COPY --from=m2-collector /root/.m2 /root/.m2
-COPY --from=nodejs /opt/nodejs/ /opt/nodejs/
-COPY --from=nodejs-test-clients /opt/redpanda-tests/nodejs /opt/redpanda-tests/nodejs
 
 RUN ldconfig
 

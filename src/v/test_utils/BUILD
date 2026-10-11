@@ -218,22 +218,6 @@ redpanda_test_cc_library(
 )
 
 redpanda_test_cc_library(
-    name = "archival",
-    hdrs = [
-        "archival.h",
-    ],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":test_macros",
-        "//src/v/bytes:iostream",
-        "//src/v/cloud_storage",
-        "//src/v/cluster",
-        "//src/v/model/tests:random",
-        "//src/v/storage/tests:disk_log_builder",
-    ],
-)
-
-redpanda_test_cc_library(
     name = "tmpbuf_file",
     hdrs = [
         "tmpbuf_file.h",

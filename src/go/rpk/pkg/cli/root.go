@@ -34,12 +34,9 @@ import (
 	"github.com/redpanda-data/redpanda/src/go/rpk/pkg/cli/k8s"
 	plugincmd "github.com/redpanda-data/redpanda/src/go/rpk/pkg/cli/plugin"
 	"github.com/redpanda-data/redpanda/src/go/rpk/pkg/cli/profile"
-	"github.com/redpanda-data/redpanda/src/go/rpk/pkg/cli/registry"
 	"github.com/redpanda-data/redpanda/src/go/rpk/pkg/cli/security"
-	"github.com/redpanda-data/redpanda/src/go/rpk/pkg/cli/shadow"
 	"github.com/redpanda-data/redpanda/src/go/rpk/pkg/cli/sql"
 	"github.com/redpanda-data/redpanda/src/go/rpk/pkg/cli/topic"
-	"github.com/redpanda-data/redpanda/src/go/rpk/pkg/cli/transform"
 	"github.com/redpanda-data/redpanda/src/go/rpk/pkg/cli/version"
 	"github.com/redpanda-data/redpanda/src/go/rpk/pkg/cli/version/versioncmd"
 	"github.com/redpanda-data/redpanda/src/go/rpk/pkg/cobraext"
@@ -150,12 +147,9 @@ Use --print-tree to emit the full command tree as JSON.`,
 		generate.NewCommand(fs, p),
 		group.NewCommand(fs, p),
 		plugincmd.NewCommand(fs, p),
-		registry.NewCommand(fs, p),
 		security.NewCommand(fs, p),
-		shadow.NewCommand(fs, p),
 		sql.NewCommand(fs, p),
 		topic.NewCommand(fs, p),
-		transform.NewCommand(fs, p, osExec),
 		versioncmd.NewCommand(fs, p),
 		newOxlaCommand(),
 

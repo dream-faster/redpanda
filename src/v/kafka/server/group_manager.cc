@@ -9,7 +9,7 @@
 
 #include "kafka/server/group_manager.h"
 
-#include "cluster/cloud_metadata/error_outcome.h"
+#include "base/outcome.h"
 #include "cluster/health_monitor_frontend.h"
 #include "cluster/logger.h"
 #include "cluster/offsets_snapshot.h"
@@ -833,29 +833,6 @@ ss::future<result<model::offset>> group_manager::set_blocked_for_groups(
         }
     }
     co_return result.value().last_offset;
-}
-
-ss::future<group_manager::group_offsets_snapshot_result>
-group_manager::snapshot_groups_for_upload(
-  const model::ntp& ntp, size_t max_num_groups_per_snap) {
-    auto res = co_await do_snapshot_groups(
-      ntp, max_num_groups_per_snap, std::nullopt);
-    if (res.has_value()) {
-        co_return std::move(res.assume_value());
-    }
-    switch (res.error()) {
-    case cluster::errc::partition_not_exists:
-        co_return cluster::cloud_metadata::error_outcome::ntp_not_found;
-    case cluster::errc::update_in_progress:
-    case cluster::errc::not_leader:
-        co_return cluster::cloud_metadata::error_outcome::not_ready;
-    default:
-        vlog(
-          cg_klog.error,
-          "Unexpected error while snapshotting groups: {}",
-          res.error());
-        co_return cluster::cloud_metadata::error_outcome::not_ready;
-    }
 }
 
 ss::future<cluster::get_group_offsets_reply>

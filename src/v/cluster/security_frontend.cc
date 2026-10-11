@@ -25,6 +25,7 @@
 #include "model/errc.h"
 #include "model/namespace.h"
 #include "raft/errc.h"
+#include "rpc/connection_cache.h"
 #include "rpc/errc.h"
 #include "rpc/types.h"
 #include "security/authorizer.h"

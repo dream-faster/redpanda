@@ -12,7 +12,7 @@ import re
 from ducktape.utils.util import wait_until
 
 from rptest.services.cluster import cluster
-from rptest.services.redpanda import PandaproxyConfig, RedpandaService
+from rptest.services.redpanda import RedpandaService
 from rptest.tests.redpanda_test import RedpandaTest
 
 # Choose ports _below_ the default 33145, because test environment
@@ -156,9 +156,6 @@ class ConfigurationUpdateTest(RedpandaTest):
             advertised_rpc_api=dict(address="0.0.0.0", port=ALTERNATIVE_RPC_PORTS[0]),
         )
 
-        altered_cfg_3 = PandaproxyConfig()
-        altered_cfg_3.advertised_api_host = "0.0.0.0"
-
         self.redpanda.start_node(
             node_1, override_cfg_params=altered_cfg_1, expect_fail=True, timeout=10
         )
@@ -174,15 +171,6 @@ class ConfigurationUpdateTest(RedpandaTest):
 
         n_err_logs = self.redpanda.count_log_node(
             node_2, "'advertised_rpc_api' validation error"
-        )
-        assert n_err_logs == 1
-
-        self.redpanda.set_pandaproxy_settings(altered_cfg_3)
-
-        self.redpanda.start_node(node_3, expect_fail=True, timeout=10)
-
-        n_err_logs = self.redpanda.count_log_node(
-            node_3, "'advertised_pandaproxy_api' validation error"
         )
         assert n_err_logs == 1
 

@@ -438,18 +438,6 @@ public:
       model::topic_namespace_hash,
       model::topic_namespace_eq>;
 
-    using iceberg_tombstones_t = chunked_hash_map<
-      model::topic_namespace,
-      nt_iceberg_tombstone,
-      model::topic_namespace_hash,
-      model::topic_namespace_eq>;
-
-    using cloud_topic_tombstones_t = chunked_hash_map<
-      nt_revision,
-      nt_cloud_topic_tombstone,
-      nt_revision_hash,
-      nt_revision_eq>;
-
     using topic_delta = topic_table_topic_delta;
 
     using topic_delta_cb_t
@@ -497,7 +485,7 @@ public:
         const in_progress_update* update = nullptr;
     };
 
-    explicit topic_table(data_migrations::migrated_resources&, model::node_id);
+    explicit topic_table(model::node_id);
 
     cluster::notification_id_type
     register_topic_delta_notification(topic_delta_cb_t cb) {
@@ -802,15 +790,6 @@ public:
         return is_disabled(model::topic_namespace_view{ntp}, ntp.tp.partition);
     }
 
-    // Get a set of topics with pending iceberg deletion work.
-    const iceberg_tombstones_t& get_iceberg_tombstones() const {
-        return _iceberg_tombstones;
-    }
-
-    const cloud_topic_tombstones_t& get_cloud_topic_tombstones() const {
-        return _cloud_topic_tombstones;
-    }
-
     auto topics_iterator_begin() const {
         return stable_iterator<
           underlying_t::const_iterator,
@@ -908,11 +887,9 @@ private:
     underlying_map _topics;
     lifecycle_markers_t _lifecycle_markers;
     disabled_partitions_t _disabled_partitions;
-    iceberg_tombstones_t _iceberg_tombstones;
 
     // Cloud topic topic_ids that have been removed from the cluster and
     // require removal of objects from the bucket and cloud topics metastore.
-    cloud_topic_tombstones_t _cloud_topic_tombstones;
     size_t _partition_count{0};
 
     updates_t _updates_in_progress;
@@ -943,7 +920,6 @@ private:
     topic_table_probe _probe;
     force_recoverable_partitions_t _partitions_to_force_reconfigure;
     model::revision_id _partitions_to_force_reconfigure_revision{0};
-    data_migrations::migrated_resources& _migrated_resources;
     friend class topic_table_partition_generator;
 };
 

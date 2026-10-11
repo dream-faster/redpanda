@@ -10,11 +10,8 @@
  */
 
 #pragma once
-#include "cluster/cluster_link/fwd.h"
-#include "cluster/cluster_link_rpc_types.h"
 #include "cluster/controller_service.h"
 #include "cluster/fwd.h"
-#include "cluster/plugin_rpc_types.h"
 #include "cluster/types.h"
 #include "features/fwd.h"
 #include "rpc/fwd.h"
@@ -32,7 +29,6 @@ public:
       ss::smp_service_group,
       controller* controller,
       ss::sharded<topics_frontend>&,
-      ss::sharded<plugin_frontend>&,
       ss::sharded<members_manager>&,
       ss::sharded<metadata_cache>&,
       ss::sharded<security_frontend>&,
@@ -46,8 +42,7 @@ public:
       ss::sharded<rpc::connection_cache>&,
       ss::sharded<partition_manager>&,
       ss::sharded<node_status_backend>&,
-      ss::sharded<client_quota::frontend>&,
-      ss::sharded<cluster_link::frontend>&);
+      ss::sharded<client_quota::frontend>&);
 
     virtual ss::future<join_node_reply>
     join_node(join_node_request, rpc::streaming_context&) override;
@@ -125,21 +120,12 @@ public:
     ss::future<producer_id_lookup_reply> highest_producer_id(
       producer_id_lookup_request, rpc::streaming_context&) final;
 
-    ss::future<cloud_storage_usage_reply> cloud_storage_usage(
-      cloud_storage_usage_request r, rpc::streaming_context&) final;
-
     ss::future<partition_state_reply>
     get_partition_state(partition_state_request, rpc::streaming_context&) final;
 
     ss::future<controller_committed_offset_reply>
     get_controller_committed_offset(
       controller_committed_offset_request, rpc::streaming_context&) final;
-
-    ss::future<upsert_plugin_response>
-    upsert_plugin(upsert_plugin_request, rpc::streaming_context&) final;
-
-    ss::future<remove_plugin_response>
-    remove_plugin(remove_plugin_request, rpc::streaming_context&) final;
 
     ss::future<delete_topics_reply>
     delete_topics(delete_topics_request, rpc::streaming_context&) final;
@@ -149,30 +135,6 @@ public:
 
     ss::future<client_quota::alter_quotas_response> alter_client_quotas(
       client_quota::alter_quotas_request, rpc::streaming_context&) final;
-
-    ss::future<upsert_cluster_link_response> upsert_cluster_link(
-      upsert_cluster_link_request, rpc::streaming_context&) final;
-    ss::future<remove_cluster_link_response> remove_cluster_link(
-      remove_cluster_link_request, rpc::streaming_context&) final;
-    ss::future<add_mirror_topic_response>
-    add_mirror_topic(add_mirror_topic_request, rpc::streaming_context&) final;
-    ss::future<update_mirror_topic_status_response> update_mirror_topic_status(
-      update_mirror_topic_status_request, rpc::streaming_context&) final;
-    ss::future<batch_update_mirror_topic_status_response>
-    batch_update_mirror_topic_status(
-      batch_update_mirror_topic_status_request, rpc::streaming_context&) final;
-    ss::future<update_mirror_topic_properties_response>
-    update_mirror_topic_properties(
-      update_mirror_topic_properties_request, rpc::streaming_context&) final;
-    ss::future<delete_mirror_topic_response> delete_mirror_topic(
-      delete_mirror_topic_request, rpc::streaming_context&) final;
-
-    ss::future<update_cluster_link_configuration_response>
-    update_cluster_link_configuration(
-      update_cluster_link_configuration_request, rpc::streaming_context&) final;
-
-    ss::future<get_current_cluster_epoch_response> get_current_cluster_epoch(
-      get_current_cluster_epoch_request, ::rpc::streaming_context&) final;
 
 private:
     static constexpr auto default_move_interruption_timeout = 10s;
@@ -207,9 +169,6 @@ private:
       do_cancel_node_partition_movements(
         cancel_node_partition_movements_request);
 
-    ss::future<cloud_storage_usage_reply>
-      do_cloud_storage_usage(cloud_storage_usage_request);
-
     ss::future<partition_state_reply>
       do_get_partition_state(partition_state_request);
 
@@ -227,9 +186,7 @@ private:
     ss::sharded<health_monitor_frontend>& _hm_frontend;
     ss::sharded<rpc::connection_cache>& _conn_cache;
     ss::sharded<partition_manager>& _partition_manager;
-    ss::sharded<plugin_frontend>& _plugin_frontend;
     ss::sharded<node_status_backend>& _node_status_backend;
     ss::sharded<client_quota::frontend>& _quotas_frontend;
-    ss::sharded<cluster_link::frontend>& _cluster_link_frontend;
 };
 } // namespace cluster

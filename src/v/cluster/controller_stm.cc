@@ -11,10 +11,10 @@
 
 #include "cluster/controller_stm.h"
 
+#include "base/outcome.h"
 #include "base/vlog.h"
 #include "bytes/iostream.h"
 #include "cluster/controller_snapshot.h"
-#include "cluster/data_migration_table.h"
 #include "cluster/logger.h"
 #include "cluster/members_manager.h"
 
@@ -147,15 +147,8 @@ ss::future<> controller_stm::apply_snapshot(
 
         // apply everything else in no particular order.
         co_await ss::when_all(
-          std::get<plugin_backend&>(_state).apply_snapshot(offset, snapshot),
-          std::get<cluster_recovery_manager&>(_state).apply_snapshot(
-            offset, snapshot),
           std::get<security_manager&>(_state).apply_snapshot(offset, snapshot),
           std::get<client_quota::backend&>(_state).apply_snapshot(
-            offset, snapshot),
-          std::get<data_migrations::migrations_table&>(_state).apply_snapshot(
-            offset, snapshot),
-          std::get<cluster_link::table&>(_state).apply_snapshot(
             offset, snapshot));
 
     } catch (const seastar::abort_requested_exception&) {

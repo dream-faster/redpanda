@@ -32,7 +32,6 @@ public:
         virtual void add_batches_produced(uint64_t) = 0;
         virtual void add_bytes_fetched(uint64_t) = 0;
         virtual void add_bytes_fetched_from_follower(uint64_t) = 0;
-        virtual void add_schema_id_validation_failed() = 0;
         virtual void setup_metrics(const model::ntp&) = 0;
         virtual void clear_metrics() = 0;
         virtual ~impl() noexcept = default;
@@ -68,10 +67,6 @@ public:
         return _impl->add_bytes_fetched_from_follower(bytes);
     }
 
-    void add_schema_id_validation_failed() {
-        _impl->add_schema_id_validation_failed();
-    }
-
     void clear_metrics() { _impl->clear_metrics(); }
 
 private:
@@ -91,18 +86,12 @@ public:
     }
     void add_bytes_produced(uint64_t cnt) final { _bytes_produced += cnt; }
     void add_batches_produced(uint64_t cnt) final { _batches_produced += cnt; }
-    void add_schema_id_validation_failed() final {
-        ++_schema_id_validation_records_failed;
-    };
-
     void clear_metrics() final;
 
 private:
     void reconfigure_metrics();
     void setup_public_metrics(const model::ntp&);
     void setup_internal_metrics(const model::ntp&);
-
-    void setup_public_scrubber_metric(const model::ntp&);
 
 private:
     static constexpr int64_t metric_default_initialized_state{-2};
@@ -114,8 +103,6 @@ private:
     uint64_t _batches_produced{0};
     uint64_t _bytes_fetched{0};
     uint64_t _bytes_fetched_from_follower{0};
-    uint64_t _schema_id_validation_records_failed{0};
-    config::binding<bool> _enable_scrubbing_bind;
     metrics::internal_metric_groups _metrics;
     metrics::public_metric_groups _public_metrics;
 };

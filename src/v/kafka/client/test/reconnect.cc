@@ -15,7 +15,6 @@
 #include "kafka/protocol/metadata.h"
 #include "model/fundamental.h"
 #include "model/metadata.h"
-#include "pandaproxy/test/utils.h"
 #include "test_utils/boost_fixture.h"
 
 #include <seastar/util/defer.hh>

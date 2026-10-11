@@ -5,8 +5,6 @@
         "cluster/types.h",
         "cluster/health_monitor_types.h",
         "cluster/client_quota_serde.h",
-        "cluster/plugin_rpc_types.h",
-        "cluster/cluster_link_rpc_types.h",
         "cluster/security_types.h"
     ],
     "methods": [
@@ -141,11 +139,6 @@
             "output_type": "producer_id_lookup_reply"
         },
         {
-            "name": "cloud_storage_usage",
-            "input_type": "cloud_storage_usage_request",
-            "output_type": "cloud_storage_usage_reply"
-        },
-        {
             "name": "get_partition_state",
             "input_type": "partition_state_request",
             "output_type": "partition_state_reply"
@@ -154,16 +147,6 @@
             "name": "get_controller_committed_offset",
             "input_type": "controller_committed_offset_request",
             "output_type": "controller_committed_offset_reply"
-        },
-        {
-            "name": "upsert_plugin",
-            "input_type": "upsert_plugin_request",
-            "output_type": "upsert_plugin_response"
-        },
-        {
-            "name": "remove_plugin",
-            "input_type": "remove_plugin_request",
-            "output_type": "remove_plugin_response"
         },
         {
             "name": "delete_topics",
@@ -179,52 +162,6 @@
             "name": "alter_client_quotas",
             "input_type": "client_quota::alter_quotas_request",
             "output_type": "client_quota::alter_quotas_response"
-        },
-        {
-            "name": "upsert_cluster_link",
-            "input_type": "upsert_cluster_link_request",
-            "output_type": "upsert_cluster_link_response"
-        },
-        {
-            "name": "remove_cluster_link",
-            "input_type": "remove_cluster_link_request",
-            "output_type": "remove_cluster_link_response"
-        },
-        {
-            "name": "add_mirror_topic",
-            "input_type": "add_mirror_topic_request",
-            "output_type": "add_mirror_topic_response"
-        },
-        {
-            "name": "update_mirror_topic_status",
-            "input_type": "update_mirror_topic_status_request",
-            "output_type": "update_mirror_topic_status_response"
-        },
-        {
-            "name": "batch_update_mirror_topic_status",
-            "input_type": "batch_update_mirror_topic_status_request",
-            "output_type": "batch_update_mirror_topic_status_response"
-        },
-        {
-            "name": "update_mirror_topic_properties",
-            "input_type": "update_mirror_topic_properties_request",
-            "output_type": "update_mirror_topic_properties_response"
-        },
-        {
-            "name": "delete_mirror_topic",
-            "input_type": "delete_mirror_topic_request",
-            "output_type": "delete_mirror_topic_response"
-        },
-
-        {
-            "name": "get_current_cluster_epoch",
-            "input_type": "get_current_cluster_epoch_request",
-            "output_type": "get_current_cluster_epoch_response"
-        },
-        {
-            "name": "update_cluster_link_configuration",
-            "input_type": "update_cluster_link_configuration_request",
-            "output_type": "update_cluster_link_configuration_response"
         }
     ]
 }

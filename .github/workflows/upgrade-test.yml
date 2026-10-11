@@ -1,0 +1,102 @@
+---
+name: upgrade-test
+on:
+  workflow_call:
+    inputs:
+      slim_image:
+        description: 'Slim broker image to upgrade to'
+        required: true
+        type: string
+      stock_image:
+        description: 'Stock image to upgrade from (default: newest v26.2.x)'
+        required: false
+        type: string
+      slim_uid:
+        description: 'User id to run the slim image as'
+        required: false
+        type: string
+        default: '65532'
+  workflow_dispatch:
+    inputs:
+      slim_image:
+        description: 'Slim broker image to upgrade to (empty: self-test with stock)'
+        required: false
+        type: string
+      stock_image:
+        description: 'Stock image to upgrade from (default: newest v26.2.x)'
+        required: false
+        type: string
+      slim_uid:
+        description: 'User id to run the slim image as'
+        required: false
+        type: string
+        default: '65532'
+
+concurrency:
+  group: upgrade-test-${{ github.ref }}-${{ inputs.slim_image }}
+  cancel-in-progress: true
+
+jobs:
+  upgrade:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve images
+        id: images
+        env:
+          STOCK_INPUT: ${{ inputs.stock_image }}
+          SLIM_INPUT: ${{ inputs.slim_image }}
+        run: |
+          stock="$STOCK_INPUT"
+          if [[ -z "$stock" ]]; then
+            for n in $(seq 12 -1 0); do
+              cand="docker.redpanda.com/redpandadata/redpanda:v26.2.$n"
+              if docker manifest inspect "$cand" >/dev/null 2>&1; then
+                stock="$cand"
+                break
+              fi
+            done
+          fi
+          if [[ -z "$stock" ]]; then
+            echo "no v26.2.x stock image found" >&2
+            exit 1
+          fi
+          slim="$SLIM_INPUT"
+          selftest=false
+          if [[ -z "$slim" ]]; then
+            slim="$stock"
+            selftest=true
+          fi
+          echo "stock=$stock" >> "$GITHUB_OUTPUT"
+          echo "slim=$slim" >> "$GITHUB_OUTPUT"
+          echo "selftest=$selftest" >> "$GITHUB_OUTPUT"
+          echo "stock image: $stock"
+          echo "slim image:  $slim (selftest=$selftest)"
+
+      - name: Pull images
+        run: |
+          docker pull "${{ steps.images.outputs.stock }}"
+          docker pull "${{ steps.images.outputs.slim }}"
+
+      - name: Rolling upgrade
+        env:
+          SELFTEST: ${{ steps.images.outputs.selftest }}
+          SLIM_UID: ${{ inputs.slim_uid }}
+        run: |
+          if [[ "$SELFTEST" == "true" ]]; then
+            export SLIM_RPK=rpk
+          fi
+          tools/slim-checks/upgrade_test.sh \
+            "${{ steps.images.outputs.stock }}" "${{ steps.images.outputs.slim }}"

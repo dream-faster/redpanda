@@ -13,7 +13,6 @@ from rptest.services.admin import (
 )
 from rptest.services.cluster import cluster
 from rptest.services.redpanda import (
-    SchemaRegistryConfig,
     SecurityConfig,
 )
 from rptest.tests.redpanda_test import RedpandaTest
@@ -99,7 +98,6 @@ class EnterpriseFeaturesTest(EnterpriseFeaturesTestBase):
         super().__init__(
             *args,
             num_brokers=3,
-            schema_registry_config=SchemaRegistryConfig(),
             **kwargs,
         )
 
@@ -291,8 +289,10 @@ class EnterpriseFeaturesTest(EnterpriseFeaturesTestBase):
         else:
             with expect_exception(
                 requests.exceptions.HTTPError,
-                lambda e: e.response.status_code == 403
-                or FEATURE_DEPENDENT_CONFIG[feature] in e.response.json().keys(),
+                lambda e: (
+                    e.response.status_code == 403
+                    or FEATURE_DEPENDENT_CONFIG[feature] in e.response.json().keys()
+                ),
             ):
                 self.try_enable_feature(feature)
 

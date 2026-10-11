@@ -37,9 +37,6 @@ std::optional<ss::sstring> validate_sasl_mechanisms_overrides(
 std::optional<ss::sstring>
 validate_http_authn_mechanisms(const std::vector<ss::sstring>& mechanisms);
 
-bool oidc_is_enabled_http();
-bool oidc_is_enabled_kafka();
-
 std::optional<ss::sstring> validate_0_to_1_ratio(const double d);
 
 std::optional<ss::sstring>
@@ -61,39 +58,9 @@ std::optional<ss::sstring> validate_tombstone_retention_ms(
   const std::optional<std::chrono::milliseconds>& ms);
 
 std::optional<ss::sstring>
-validate_iceberg_partition_spec(const ss::sstring& spec);
-
-std::optional<ss::sstring> validate_iceberg_rest_catalog_endpoint(
-  const std::optional<ss::sstring>& endpoint);
-
-std::optional<ss::sstring> validate_iceberg_topic_name_dot_replacement(
-  const std::optional<ss::sstring>& value);
-
-std::optional<ss::sstring>
-validate_iceberg_default_catalog_namespace(const std::vector<ss::sstring>& ns);
-
-std::optional<ss::sstring>
-validate_iceberg_rest_catalog_auth_mode(const configuration& config);
-
-std::optional<ss::sstring>
-validate_iceberg_rest_catalog_config(const configuration& config);
-
-std::optional<ss::sstring>
 validate_consumer_group_metrics(const std::vector<ss::sstring>& metrics);
 
 std::optional<ss::sstring>
-validate_cloud_storage_cluster_name(const std::optional<ss::sstring>&);
-
-std::optional<ss::sstring>
-validate_cloud_topics_reconciliation_intervals(const configuration& config);
-
-std::optional<ss::sstring>
 validate_sane_partition_balancer_timeouts(const configuration& config);
-
-std::optional<ss::sstring>
-validate_default_redpanda_storage_mode(const configuration& config);
-
-std::optional<ss::sstring>
-validate_oidc_http_proxy_url(const configuration& config);
 
 }; // namespace config

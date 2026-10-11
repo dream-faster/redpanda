@@ -93,7 +93,6 @@ redpanda_cc_gtest(
         "//src/v/config",
         "//src/v/container:chunked_vector",
         "//src/v/kafka/protocol",
-        "//src/v/pandaproxy/schema_registry:types",
         "//src/v/random:generators",
         "//src/v/security",
         "//src/v/test_utils:gtest",
@@ -124,67 +123,6 @@ redpanda_cc_btest(
         "@fmt",
         "@seastar",
         "@seastar//:testing",
-    ],
-)
-
-redpanda_cc_btest(
-    name = "gssapi_principal_mapper_test",
-    timeout = "short",
-    srcs = [
-        "gssapi_principal_mapper_test.cc",
-    ],
-    deps = [
-        "//src/v/config",
-        "//src/v/security",
-        "//src/v/test_utils:seastar_boost",
-        "@boost//:test",
-    ],
-)
-
-redpanda_cc_btest(
-    name = "jwt_test",
-    timeout = "short",
-    srcs = [
-        "jwt_test.cc",
-    ],
-    deps = [
-        "//src/v/security",
-        "//src/v/security:config",
-        "//src/v/test_utils:seastar_boost",
-        "@boost//:test",
-        "@fmt",
-        "@seastar",
-        "@seastar//:testing",
-    ],
-)
-
-redpanda_cc_btest(
-    name = "url_test",
-    timeout = "short",
-    srcs = [
-        "url_test.cc",
-    ],
-    deps = [
-        "//src/v/security:config",
-        "//src/v/test_utils:seastar_boost",
-        "@boost//:test",
-        "@fmt",
-    ],
-)
-
-redpanda_cc_btest(
-    name = "oidc_principal_mapping_test",
-    timeout = "short",
-    srcs = [
-        "oidc_principal_mapping_test.cc",
-    ],
-    deps = [
-        "//src/v/config",
-        "//src/v/json",
-        "//src/v/security",
-        "//src/v/test_utils:seastar_boost",
-        "@boost//:test",
-        "@seastar",
     ],
 )
 
@@ -262,23 +200,6 @@ redpanda_cc_bench(
         "//src/v/random:generators",
         "//src/v/security",
         "@boost//:range",
-        "@seastar",
-        "@seastar//:benchmark",
-    ],
-)
-
-redpanda_cc_bench(
-    name = "oidc_authenticator_bench_rpbench",
-    srcs = [
-        "oidc_authenticator_bench.cc",
-    ],
-    deps = [
-        "//src/v/base",
-        "//src/v/container:chunked_vector",
-        "//src/v/json",
-        "//src/v/security",
-        "//src/v/security:config",
-        "@boost//:algorithm",
         "@seastar",
         "@seastar//:benchmark",
     ],

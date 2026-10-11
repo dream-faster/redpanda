@@ -17,19 +17,15 @@
 #include "cluster/types.h"
 #include "config/configuration.h"
 #include "container/chunked_vector.h"
-#include "datalake/partition_spec_parser.h"
 #include "kafka/protocol/errors.h"
 #include "kafka/protocol/fwd.h"
-#include "kafka/server/handlers/topics/sr_context_validator.h"
 #include "kafka/server/handlers/topics/types.h"
 #include "model/fundamental.h"
 #include "model/metadata.h"
 #include "model/namespace.h"
-#include "pandaproxy/schema_registry/schema_id_validation.h"
-#include "pandaproxy/schema_registry/subject_name_strategy.h"
-#include "pandaproxy/schema_registry/types.h"
 #include "security/acl.h"
 #include "serde/rw/chrono.h"
+#include "utils/tristate.h"
 
 #include <seastar/core/coroutine.hh>
 #include <seastar/core/sstring.hh>
@@ -232,8 +228,6 @@ struct duration_validator {
 
 const auto flush_ms_validator = duration_validator{
   .name = "flush.ms", .min = 1ms};
-const auto iceberg_target_lag_ms_validator = duration_validator{
-  .name = "target.lag.ms", .min = 10s};
 const auto min_compaction_lag_ms_validator = duration_validator{
   .name = "min.compaction.lag.ms"};
 const auto max_compaction_lag_ms_validator = duration_validator{
@@ -257,32 +251,6 @@ struct flush_bytes_validator {
     }
 };
 
-struct iceberg_config_validator {
-    bool extended_mode_config = false;
-    std::optional<ss::sstring> operator()(
-      model::topic_namespace_view tns,
-      const ss::sstring&,
-      const model::iceberg_mode& value) {
-        if (!model::is_user_topic(tns)) {
-            return fmt::format(
-              "Iceberg configuration cannot be altered on non user topics");
-        }
-        if (
-          !config::shard_local_cfg().iceberg_enabled()
-          && value != model::iceberg_mode::disabled) {
-            return fmt::format(
-              "Iceberg disabled in the cluster configuration, enable it by "
-              "setting: {}",
-              config::shard_local_cfg().iceberg_enabled.name());
-        }
-        if (value.needs_extended_cluster_feature() && !extended_mode_config) {
-            return "Invalid iceberg mode: extended key/headers config requires "
-                   "the cluster to be fully upgraded to at least v26.2.1.";
-        }
-        return std::nullopt;
-    }
-};
-
 struct delete_retention_ms_validator {
     std::optional<ss::sstring> operator()(
       const ss::sstring&,
@@ -297,32 +265,6 @@ struct delete_retention_ms_validator {
             }
         }
         return std::nullopt;
-    }
-};
-
-struct iceberg_partition_spec_validator {
-    std::optional<ss::sstring>
-    operator()(const ss::sstring& /*raw*/, const ss::sstring& value) {
-        auto parsed = datalake::parse_partition_spec(value);
-        if (parsed.has_error()) {
-            return fmt::format(
-              "couldn't parse iceberg partition spec `{}': {}",
-              value,
-              parsed.error());
-        }
-        return std::nullopt;
-    }
-};
-
-struct schema_registry_context_validator {
-    std::optional<ss::sstring> operator()(
-      model::topic_namespace_view /*tns*/,
-      const ss::sstring& raw,
-      const std::optional<pandaproxy::schema_registry::context>& value) {
-        if (!value) {
-            return std::nullopt;
-        }
-        return validate_sr_context(raw);
     }
 };
 
@@ -365,92 +307,6 @@ struct batch_max_bytes_limits_validator {
         }
 
         return {};
-    }
-};
-
-// Check if a storage mode transition is permitted.
-// Returns true if the transition is allowed, false otherwise.
-//
-// Permitted transitions:
-//   local -> tiered: Permitted
-//   tiered -> local: Permitted (with caution)
-//   unset -> local: Permitted (with caution)
-//   unset -> tiered: Permitted
-//   cloud -> tiered_cloud: Permitted
-//   tiered_cloud -> cloud: Permitted
-// Not permitted:
-//   local -> unset: Not permitted
-//   local -> cloud: Not permitted
-//   tiered -> unset: Not permitted
-//   tiered -> cloud: Not permitted
-//   cloud -> local: Not permitted
-//   cloud -> tiered: Not permitted
-//   unset <-> cloud: Not permitted (cloud requires explicit choice)
-//   local -> tiered_cloud: Not permitted
-//   tiered -> tiered_cloud: Not permitted
-//   tiered_cloud -> local: Not permitted
-//   tiered_cloud -> tiered: Not permitted
-//   unset <-> tiered_cloud: Not permitted
-inline bool is_storage_mode_transition_permitted(
-  model::redpanda_storage_mode from, model::redpanda_storage_mode to) {
-    using sm = model::redpanda_storage_mode;
-
-    // No-op transitions are fine.
-    if (from == to) {
-        return true;
-    }
-
-    // Permitted transitions:
-    //   local -> tiered: Permitted
-    //   tiered -> local: Permitted (with caution)
-    //   unset -> local: Permitted (with caution)
-    //   unset -> tiered: Permitted
-    if (from == sm::local && to == sm::tiered) {
-        return true;
-    }
-    if (from == sm::tiered && to == sm::local) {
-        return true;
-    }
-    if (from == sm::unset && to == sm::local) {
-        return true;
-    }
-    if (from == sm::unset && to == sm::tiered) {
-        return true;
-    }
-
-    // cloud <-> tiered_cloud: Permitted
-    if (from == sm::cloud && to == sm::tiered_cloud) {
-        return true;
-    }
-    if (from == sm::tiered_cloud && to == sm::cloud) {
-        return true;
-    }
-
-    // All other transitions are not permitted
-    return false;
-}
-
-/// Validator for redpanda.storage.mode property.
-/// Validates that the transition from current storage mode to the new value is
-/// permitted.
-struct storage_mode_validator {
-    std::optional<model::redpanda_storage_mode> current_mode;
-
-    std::optional<ss::sstring>
-    operator()(const ss::sstring&, const model::redpanda_storage_mode& value) {
-        // If we don't have a current mode (new topic), allow any value
-        if (!current_mode) {
-            return std::nullopt;
-        }
-
-        if (!is_storage_mode_transition_permitted(*current_mode, value)) {
-            return fmt::format(
-              "Cannot alter redpanda.storage.mode from {} to {} - this "
-              "transition is not permitted",
-              model::redpanda_storage_mode_impl_name(*current_mode),
-              model::redpanda_storage_mode_impl_name(value));
-        }
-        return std::nullopt;
     }
 };
 
@@ -761,101 +617,5 @@ inline void parse_and_set_topic_replication_factor(
     }
     return;
 }
-
-///\brief Topic property parsing for schema id validation.
-///
-/// Handles parsing properties for create, alter and incremental_alter.
-template<typename Props>
-class schema_id_validation_config_parser {
-public:
-    explicit schema_id_validation_config_parser(Props& props)
-      : props(props) {}
-
-    ///\brief Parse a topic property from the supplied name and value
-    template<typename T, typename S>
-    bool operator()(
-      const T& name, const S& value, kafka::config_resource_operation op) {
-        using property_t = std::variant<
-          decltype(&props.record_key_schema_id_validation),
-          decltype(&props.record_key_subject_name_strategy)>;
-
-        auto matcher = string_switch<std::optional<property_t>>(name);
-        switch (config::shard_local_cfg().enable_schema_id_validation()) {
-        case pandaproxy::schema_registry::schema_id_validation_mode::compat:
-            matcher
-              .match(
-                topic_property_record_key_schema_id_validation_compat,
-                &props.record_key_schema_id_validation_compat)
-              .match(
-                topic_property_record_key_subject_name_strategy_compat,
-                &props.record_key_subject_name_strategy_compat)
-              .match(
-                topic_property_record_value_schema_id_validation_compat,
-                &props.record_value_schema_id_validation_compat)
-              .match(
-                topic_property_record_value_subject_name_strategy_compat,
-                &props.record_value_subject_name_strategy_compat);
-            [[fallthrough]];
-        case pandaproxy::schema_registry::schema_id_validation_mode::redpanda:
-            matcher
-              .match(
-                topic_property_record_key_schema_id_validation,
-                &props.record_key_schema_id_validation)
-              .match(
-                topic_property_record_key_subject_name_strategy,
-                &props.record_key_subject_name_strategy)
-              .match(
-                topic_property_record_value_schema_id_validation,
-                &props.record_value_schema_id_validation)
-              .match(
-                topic_property_record_value_subject_name_strategy,
-                &props.record_value_subject_name_strategy);
-            [[fallthrough]];
-        case pandaproxy::schema_registry::schema_id_validation_mode::none:
-            break;
-        }
-        auto prop = matcher.default_match(std::nullopt);
-        if (prop.has_value()) {
-            ss::visit(
-              prop.value(), [&value, op](auto& p) { apply(*p, value, op); });
-        }
-        return prop.has_value();
-    }
-
-    ///\brief Parse a topic property from the supplied cfg.
-    template<typename C>
-    bool operator()(const C& cfg, kafka::config_resource_operation op) {
-        return (*this)(cfg.name, cfg.value, op);
-    }
-
-private:
-    ///\brief Parse and set a boolean from 'true' or 'false'.
-    static void apply(
-      cluster::property_update<std::optional<bool>>& prop,
-      const std::optional<ss::sstring>& value,
-      kafka::config_resource_operation op) {
-        kafka::parse_and_set_optional_bool_alpha(prop, value, op);
-    }
-    ///\brief Parse and set the Subject Name Strategy
-    static void apply(
-      cluster::property_update<std::optional<
-        pandaproxy::schema_registry::subject_name_strategy>>& prop,
-      const std::optional<ss::sstring>& value,
-      kafka::config_resource_operation op) {
-        kafka::parse_and_set_optional(prop, value, op);
-    }
-    ///\brief Parse and set properties by wrapping them a property_update.
-    template<typename T>
-    static void apply(
-      std::optional<T>& prop,
-      std::optional<ss::sstring> value,
-      kafka::config_resource_operation op) {
-        cluster::property_update<std::optional<T>> up;
-        apply(up, value, op);
-        prop = up.value;
-    }
-
-    Props& props;
-};
 
 } // namespace kafka

@@ -222,11 +222,6 @@ autocreate_topic_configuration(request_context& ctx, model::topic topic) {
           cluster::internal_topic_replication(
             ctx.metadata_cache().node_count()));
     }
-    if (topic == model::schema_registry_internal_tp.topic) {
-        return schema_registry_topic_configuration(
-          cluster::internal_topic_replication(
-            ctx.metadata_cache().node_count()));
-    }
     if (topic == model::kafka_audit_logging_topic) {
         auto replication_factor
           = config::shard_local_cfg().audit_log_replication_factor().value_or(
@@ -246,10 +241,6 @@ autocreate_topic_configuration(request_context& ctx, model::topic topic) {
       std::move(topic),
       config::shard_local_cfg().default_topic_partitions(),
       config::shard_local_cfg().default_topic_replications()};
-    // Need to respect the default_redpanda_storage_mode when autocreating a
-    // topic.
-    cfg.properties.storage_mode
-      = config::shard_local_cfg().default_redpanda_storage_mode();
     return cfg;
 }
 
@@ -405,9 +396,7 @@ static ss::future<chunked_vector<metadata_response::topic>> get_topic_metadata(
       *request.data.topics,
       [](const auto& topic) { return topic.topic_id != model::topic_id{}; });
 
-    auto superuser_required_to_create = ctx.is_cluster_link_active()
-                                          ? superuser_required::yes
-                                          : superuser_required::no;
+    auto superuser_required_to_create = superuser_required::no;
 
     for (auto& topic : *request.data.topics) {
         const auto move_topic_name = [&topic]() {

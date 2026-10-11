@@ -18,7 +18,7 @@ config_setting(
 # to enable specific additional flags (see .bazelrc) to actually
 # enable the sanitizers. This flag is set *in addition* to those
 # flags so that downstream build files can made local decisions
-# based on whether sanitizers are enabled or not (e.g., krb5).
+# based on whether sanitizers are enabled or not.
 string_flag(
     name = "sanitizer_mode",
     build_setting_default = "none",

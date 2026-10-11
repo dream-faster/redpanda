@@ -87,54 +87,6 @@ redpanda_proto_library(
 )
 
 proto_library(
-    name = "shadow_link_proto",
-    srcs = ["shadow_link.proto"],
-    visibility = ["//visibility:public"],
-    deps = [
-        "//proto/redpanda/core/common/v1:acl_proto",
-        "//proto/redpanda/core/common/v1:tls_proto",
-        "//proto/redpanda/core/pbgen:options_proto",
-        "//proto/redpanda/core/pbgen:rpc_proto",
-        "@googleapis//google/api:field_behavior_proto",
-        "@googleapis//google/api:field_info_proto",
-        "@googleapis//google/api:resource_proto",
-        "@protobuf//:duration_proto",
-        "@protobuf//:field_mask_proto",
-        "@protobuf//:timestamp_proto",
-    ],
-)
-
-redpanda_proto_library(
-    name = "shadow_link_redpanda_proto",
-    protos = [":shadow_link_proto"],
-    visibility = ["//visibility:public"],
-    deps = [
-        "//proto/redpanda/core/common/v1:acl_redpanda_proto",
-        "//proto/redpanda/core/common/v1:tls_redpanda_proto",
-        "//src/v/serde/protobuf:field_mask",
-        "@abseil-cpp//absl/time:time",
-    ],
-)
-
-proto_library(
-    name = "iceberg_proto",
-    srcs = ["iceberg.proto"],
-    visibility = ["//visibility:public"],
-    deps = [
-        "//proto/redpanda/core/pbgen:options_proto",
-        "//proto/redpanda/core/pbgen:rpc_proto",
-    ],
-)
-
-redpanda_proto_library(
-    name = "iceberg_redpanda_proto",
-    protos = [
-        ":iceberg_proto",
-    ],
-    visibility = ["//visibility:public"],
-)
-
-proto_library(
     name = "security_proto",
     srcs = ["security.proto"],
     visibility = ["//visibility:public"],

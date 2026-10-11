@@ -91,14 +91,6 @@ storage_resources::storage_resources()
       config::shard_local_cfg().storage_compaction_index_memory.bind()) {}
 
 void storage_resources::update_allowance(uint64_t total, uint64_t free) {
-    // TODO: also take as an input the disk consumption of the SI cache:
-    // it knows this because it calculates it when doing periodic trimming.
-    if (
-      config::shard_local_cfg().cloud_storage_enabled
-      && total > config::shard_local_cfg().cloud_storage_cache_size()) {
-        total -= config::shard_local_cfg().cloud_storage_cache_size();
-    }
-
     _space_allowance_free = std::min(free, total);
 
     _falloc_step = calc_falloc_step();

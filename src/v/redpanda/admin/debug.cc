@@ -8,10 +8,9 @@
  * the Business Source License, use of this software will be governed
  * by the Apache License, Version 2.0
  */
+#include "base/outcome.h"
 #include "base/vassert-register.h"
 #include "base/vassert.h"
-#include "cloud_io/cache_service.h"
-#include "cluster/cloud_storage_size_reducer.h"
 #include "cluster/controller.h"
 #include "cluster/controller_stm.h"
 #include "cluster/metadata_cache.h"
@@ -383,13 +382,6 @@ void admin_server::register_debug_routes() {
           });
       });
 
-    register_route<user>(
-      seastar::httpd::debug_json::get_cloud_storage_usage,
-      [this](std::unique_ptr<ss::http::request> req)
-        -> ss::future<ss::json::json_return_type> {
-          return cloud_storage_usage_handler(std::move(req));
-      });
-
     register_route<superuser>(
       ss::httpd::debug_json::blocked_reactor_notify_ms,
       [this](std::unique_ptr<ss::http::request> req) {
@@ -458,12 +450,6 @@ void admin_server::register_debug_routes() {
       });
 
     register_route<user>(
-      ss::httpd::debug_json::restart_service,
-      [this](std::unique_ptr<ss::http::request> req) {
-          return restart_service_handler(std::move(req));
-      });
-
-    register_route<user>(
       seastar::httpd::debug_json::get_partition_state,
       [this](std::unique_ptr<ss::http::request> req)
         -> ss::future<ss::json::json_return_type> {
@@ -511,15 +497,6 @@ void admin_server::register_debug_routes() {
         -> ss::future<ss::json::json_return_type> {
           return get_local_storage_usage_handler(std::move(req));
       });
-
-    request_handler_fn unsafe_reset_metadata_handler = [this](
-                                                         auto req, auto reply) {
-        return unsafe_reset_metadata(std::move(req), std::move(reply));
-    };
-
-    register_route<superuser>(
-      ss::httpd::debug_json::unsafe_reset_metadata,
-      std::move(unsafe_reset_metadata_handler));
 
     register_route<superuser>(
       ss::httpd::debug_json::get_disk_stat,
@@ -759,58 +736,6 @@ admin_server::get_local_offsets_translated_handler(
 }
 
 ss::future<ss::json::json_return_type>
-admin_server::cloud_storage_usage_handler(
-  std::unique_ptr<ss::http::request> req) {
-    auto batch_size
-      = cluster::topic_table_partition_generator::default_batch_size;
-    if (
-      auto batch_size_param = req->get_query_param("batch_size");
-      !batch_size_param.empty()) {
-        try {
-            batch_size = std::stoi(batch_size_param);
-        } catch (...) {
-            throw ss::httpd::bad_param_exception(
-              fmt::format(
-                "batch_size must be an integer: {}", batch_size_param));
-        }
-    }
-
-    auto retries_allowed
-      = cluster::cloud_storage_size_reducer::default_retries_allowed;
-    if (
-      auto retries_param = req->get_query_param("retries_allowed");
-      !retries_param.empty()) {
-        try {
-            retries_allowed = std::stoi(retries_param);
-        } catch (...) {
-            throw ss::httpd::bad_param_exception(
-              fmt::format(
-                "retries_allowed must be an integer: {}", retries_param));
-        }
-    }
-
-    cluster::cloud_storage_size_reducer reducer(
-      _controller->get_topics_state(),
-      _controller->get_members_table(),
-      _controller->get_partition_leaders(),
-      _connection_cache,
-      batch_size,
-      retries_allowed);
-
-    auto res = co_await reducer.reduce();
-
-    if (res) {
-        co_return ss::json::json_return_type(res.value());
-    } else {
-        throw ss::httpd::base_exception(
-          fmt::format(
-            "Failed to generate total cloud storage usage. "
-            "Please retry."),
-          ss::http::reply::status_type::service_unavailable);
-    }
-}
-
-ss::future<ss::json::json_return_type>
 admin_server::sampled_memory_profile_handler(
   std::unique_ptr<ss::http::request> req) {
     vlog(adminlog.info, "Request to sampled memory profile");
@@ -880,20 +805,8 @@ admin_server::get_local_storage_usage_handler(
     ret.target_min_capacity = disk.target.min_capacity;
     ret.target_min_capacity_wanted = disk.target.min_capacity_wanted;
 
-    if (_cloud_storage_cache.local_is_initialized()) {
-        auto [cache_bytes, cache_objects]
-          = co_await _cloud_storage_cache.invoke_on(
-            ss::shard_id{0},
-            [](cloud_io::cache& cache) -> std::pair<uint64_t, size_t> {
-                return {cache.get_usage_bytes(), cache.get_usage_objects()};
-            });
-
-        ret.cloud_storage_cache_bytes = cache_bytes;
-        ret.cloud_storage_cache_objects = cache_objects;
-    } else {
-        ret.cloud_storage_cache_bytes = 0;
-        ret.cloud_storage_cache_objects = 0;
-    }
+    ret.cloud_storage_cache_bytes = 0;
+    ret.cloud_storage_cache_objects = 0;
 
     co_return ret;
 }
@@ -932,14 +845,6 @@ admin_server::get_partition_state_handler(
         replica.max_cleanly_compacted_offset
           = state.max_cleanly_compacted_offset;
         replica.max_transaction_free_offset = state.max_transaction_free_offset;
-        replica.is_read_replica_mode_enabled
-          = state.is_read_replica_mode_enabled;
-        replica.read_replica_bucket = state.read_replica_bucket;
-        replica.is_remote_fetch_enabled = state.is_remote_fetch_enabled;
-        replica.is_cloud_data_available = state.is_cloud_data_available;
-        replica.start_cloud_offset = state.start_cloud_offset;
-        replica.next_cloud_offset = state.next_cloud_offset;
-        replica.iceberg_mode = state.iceberg_mode;
         fill_raft_state(replica, state);
         response.replicas.push(std::move(replica));
     }
