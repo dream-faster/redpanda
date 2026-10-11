@@ -1639,6 +1639,7 @@ redpanda_cc_gtest(
         "//src/v/model:batch_builder",
         "//src/v/raft",
         "//src/v/raft/tests:raft_fixture",
+        "//src/v/serde",
         "//src/v/storage:record_batch_builder",
         "//src/v/test_utils:gtest",
         "@googletest//:gtest",
