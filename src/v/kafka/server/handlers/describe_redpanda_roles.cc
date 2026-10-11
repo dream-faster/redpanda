@@ -35,15 +35,6 @@ ss::future<response_ptr> describe_redpanda_roles_handler::handle(
 
     describe_redpanda_roles_response resp;
 
-    if (!ctx.feature_table().local().is_active(
-          features::feature::shadow_link_role_sync)) {
-        resp.data.error_code = error_code::unsupported_version;
-        resp.data.error_message
-          = "DescribeRedpandaRoles is not available until the cluster is "
-            "fully upgraded";
-        co_return co_await ctx.respond(std::move(resp));
-    }
-
     auto authz = ctx.authorized(
       security::acl_operation::describe, security::default_cluster_name);
 

@@ -59,7 +59,6 @@ public:
     security_service_impl(
       admin::proxy::client proxy_client,
       cluster::controller* controller,
-      ss::sharded<kafka::server>& kafka_server,
       ss::sharded<cluster::metadata_cache>& md_cache);
 
     seastar::future<proto::admin::create_scram_credential_response>
@@ -129,7 +128,6 @@ public:
 private:
     admin::proxy::client _proxy_client;
     cluster::controller* _controller;
-    ss::sharded<kafka::server>& _kafka_server;
     ss::sharded<cluster::metadata_cache>& _md_cache;
 };
 

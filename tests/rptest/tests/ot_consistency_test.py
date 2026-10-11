@@ -11,9 +11,6 @@
 from rptest.clients.kafka_cli_tools import KafkaCliTools
 from rptest.clients.types import TopicSpec
 from rptest.services.cluster import cluster
-from rptest.services.redpanda import (
-    SISettings,
-)
 from rptest.tests.redpanda_test import RedpandaTest
 from rptest.utils.node_operations import verify_offset_translator_state_consistent
 
@@ -23,9 +20,7 @@ class OffsetTranslatorConsistencyTest(RedpandaTest):
         self._ctx = test_ctx
         super(OffsetTranslatorConsistencyTest, self).__init__(
             test_ctx,
-            si_settings=SISettings(
-                test_ctx, log_segment_size=1024 * 1024, fast_uploads=True
-            ),
+            extra_rp_conf={"log_segment_size": 1024 * 1024},
             *args,
             **kwargs,
         )

@@ -110,7 +110,7 @@ func parseBYOCFlags(fs afero.Fs, p *config.Params, cmd *cobra.Command, args []st
 		return nil, "", nil, err
 	}
 
-	redpandaID := *(cmd.Context().Value(ctxKeyRedpandaID{}).(*string))
+	redpandaID := *cmd.Context().Value(ctxKeyRedpandaID{}).(*string)
 	cfg, err := p.Load(fs)
 	if err != nil {
 		return nil, "", nil, err

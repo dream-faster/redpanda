@@ -76,19 +76,6 @@ def data_dependency():
     )
 
     http_archive(
-        name = "krb5",
-        build_file = "//bazel/thirdparty:krb5.BUILD",
-        sha256 = "289f5bb81d1f2f8d5eecebe56a056aeed95d35fd9bb4a7071c5dd7ad4b3fe888",
-        strip_prefix = "krb5-krb5-1.22.2-final",
-        url = "https://github.com/krb5/krb5/archive/refs/tags/krb5-1.22.2-final.tar.gz",
-        patches = [
-            "//bazel/thirdparty:0002-Fix-two-NegoEx-parsing-vulnerabilities.patch",
-            "//bazel/thirdparty:0003-Fix-build-when-KRB5_DNS_LOOKUP-isnt-defined.patch",
-        ],
-        patch_args = ["-p1"],
-    )
-
-    http_archive(
         name = "libpciaccess",
         build_file = "//bazel/thirdparty:libpciaccess.BUILD",
         sha256 = "d0d0d53c2085d21ab37ae5989e55a3de13d4d80dc2c0a8d5c77154ea70f4783c",
@@ -175,14 +162,6 @@ def data_dependency():
         sha256 = "8393d08b2a41949c70345926515036df55643e80118b608bcec6f4202d4a3026",
         strip_prefix = "unordered_dense-f30ed41b58af8c79788e8581fe57a6faf856258e",
         url = "https://github.com/martinus/unordered_dense/archive/f30ed41b58af8c79788e8581fe57a6faf856258e.tar.gz",
-    )
-
-    http_archive(
-        name = "wasmtime",
-        build_file = "//bazel/thirdparty:wasmtime.BUILD",
-        sha256 = "a7f989b170d109696b928b4b3d1ec1d930064af7df47178e1341bd96e5c34465",
-        strip_prefix = "wasmtime-9e1084ffac08b1bf9c82de40c0efc1baff14b9ad",
-        url = "https://github.com/bytecodealliance/wasmtime/archive/9e1084ffac08b1bf9c82de40c0efc1baff14b9ad.tar.gz",
     )
 
     http_archive(

@@ -8,12 +8,10 @@
 # by the Apache License, Version 2.0
 import json
 import logging
-import pprint
 import random
 import re
 import tempfile
 import time
-from collections import namedtuple
 from typing import Any, NamedTuple, Protocol
 
 import requests
@@ -22,30 +20,23 @@ from ducktape.cluster.cluster import ClusterNode
 from ducktape.mark import matrix, parametrize
 from ducktape.utils.util import wait_until
 
-from rptest.clients.kafka_cli_tools import KafkaCliTools
 from rptest.clients.kcl import KAFKA_ERROR_INVALID_CONFIG
 from rptest.clients.rpk import RpkException, RpkTool
 from rptest.clients.rpk_remote import RpkRemoteTool
-from rptest.clients.types import TopicSpec
 from rptest.services.admin import Admin
 from rptest.services.cluster import cluster
-from rptest.services.metrics_check import MetricCheck
 from rptest.services.redpanda import (
-    IAM_ROLES_API_CALL_ALLOW_LIST,
     OIDC_ALLOW_LIST,
     RESTART_LOG_ALLOW_LIST,
-    CloudStorageType,
     RedpandaService,
     SISettings,
-    get_cloud_storage_type,
 )
 from rptest.services.redpanda_installer import (
     RedpandaInstaller,
     RedpandaVersion,
 )
 from rptest.tests.redpanda_test import RedpandaTest
-from rptest.util import expect_exception, expect_http_error
-from rptest.utils.si_utils import BucketView
+from rptest.util import expect_exception
 
 BOOTSTRAP_CONFIG = {
     # A non-default value for checking bootstrap import works
@@ -91,8 +82,9 @@ def check_restart_clears(admin, redpanda, nodes=None):
 
     redpanda.restart_nodes(other_nodes)
     wait_until(
-        lambda: set([n["restart"] for n in admin.get_cluster_config_status()])
-        == {False},
+        lambda: (
+            set([n["restart"] for n in admin.get_cluster_config_status()]) == {False}
+        ),
         timeout_sec=10,
         backoff_sec=0.5,
         err_msg="Not all nodes cleared restart flag",
@@ -108,13 +100,15 @@ def wait_for_version_sync(admin, redpanda, version):
     result.
     """
     wait_until(
-        lambda: set(
-            [
-                n["config_version"]
-                for n in admin.get_cluster_config_status(node=redpanda.controller())
-            ]
-        )
-        == {version},
+        lambda: (
+            set(
+                [
+                    n["config_version"]
+                    for n in admin.get_cluster_config_status(node=redpanda.controller())
+                ]
+            )
+            == {version}
+        ),
         timeout_sec=10,
         backoff_sec=0.5,
         err_msg=f"Config status versions did not converge on {version}",
@@ -1769,160 +1763,6 @@ class ClusterConfigTest(RedpandaTest, ClusterConfigHelpersMixin):
     # We need to use a string as the value for `update`, to not trigger
     # `OSError: [Errno 36] File name too long`
     # caused by ducktape creating a folder for the run + parameters.
-    @cluster(
-        num_nodes=1,
-        log_allow_list=IAM_ROLES_API_CALL_ALLOW_LIST
-        + [re.compile(".*Self configuration of the cloud storage client failed.*")],
-    )
-    @matrix(
-        update_str=[
-            "ABS_STATIC_CFG",
-            "ABS_VM_INSTANCE_METADATA",
-            "ABS_ASK_OIDC_FEDERATION",
-        ]
-    )
-    def test_abs_cloud_validation(self, update_str: str):
-        """
-        Cloud storage configuration specific for ABS. this test is similar to test_cloud_validation,
-        but config differences between S3 and ABS makes it easier to have a specific test
-        """
-        update: dict[str, Any] = getattr(self, update_str)
-        self.logger.info(f"apply {update_str}: {update}")
-
-        # AKS requires some env variables to function correctly, set it here if the key '__env__' exists, and remove it from 'update'
-        if env := update.pop("__env__", None):
-            self.redpanda.set_environment(env)
-
-        # It is invalid to enable cloud storage without its accompanying properties
-        invalid_update = {"cloud_storage_enabled": True}
-        with expect_http_error(400):
-            self.admin.patch_cluster_config(upsert=invalid_update)
-
-        # The update should not fail validation, so this request should not fail
-        patch_result = self.admin.patch_cluster_config(upsert=update)
-
-        wait_for_version_sync(self.admin, self.redpanda, patch_result["config_version"])
-
-        # Check that redpanda is able to start with this configuration (ignore connection issues due to non-existant cloud storage instance)
-        self.redpanda.restart_nodes(self.redpanda.nodes)
-
-        # Switching off cloud storage is always valid, we can leave the other
-        # properties set
-        patch_result = self.admin.patch_cluster_config(
-            upsert={"cloud_storage_enabled": False}
-        )
-        wait_for_version_sync(self.admin, self.redpanda, patch_result["config_version"])
-        self.redpanda.restart_nodes(self.redpanda.nodes)
-
-    @cluster(num_nodes=3, log_allow_list=IAM_ROLES_API_CALL_ALLOW_LIST)
-    def test_cloud_validation(self):
-        """
-        Cloud storage configuration has special multi-property rules, check
-        they are enforced.
-        """
-
-        # It is invalid to enable cloud storage without its accompanying properties
-        invalid_update = {"cloud_storage_enabled": True}
-        with expect_http_error(400):
-            self.admin.patch_cluster_config(upsert=invalid_update, remove=[])
-
-        # Required for STS to function correctly, the token file is just a placeholder
-        # to make the refresh credentials system boot up.
-        self.redpanda.set_environment(
-            {"AWS_ROLE_ARN": "role", "AWS_WEB_IDENTITY_TOKEN_FILE": "/etc/hosts"}
-        )
-
-        # Exercise a set of valid combinations of access+secret keys and credentials sources
-        valid_updates = [
-            {
-                "cloud_storage_enabled": True,
-                "cloud_storage_credentials_source": "aws_instance_metadata",
-                "cloud_storage_region": "us-east-1",
-                "cloud_storage_bucket": "dearliza",
-                "cloud_storage_url_style": "virtual_host",
-            },
-            {
-                "cloud_storage_enabled": True,
-                "cloud_storage_credentials_source": "gcp_instance_metadata",
-                "cloud_storage_region": "us-east-1",
-                "cloud_storage_bucket": "dearliza",
-                "cloud_storage_url_style": "virtual_host",
-            },
-            {
-                "cloud_storage_enabled": True,
-                "cloud_storage_credentials_source": "sts",
-                "cloud_storage_region": "us-east-1",
-                "cloud_storage_bucket": "dearliza",
-                "cloud_storage_url_style": "virtual_host",
-            },
-            {
-                "cloud_storage_enabled": True,
-                "cloud_storage_secret_key": "open",
-                "cloud_storage_access_key": "sesame",
-                "cloud_storage_credentials_source": "config_file",
-                "cloud_storage_region": "us-east-1",
-                "cloud_storage_bucket": "dearliza",
-                "cloud_storage_url_style": "virtual_host",
-            },
-        ]
-        for payload in valid_updates:
-            # It is valid to remove keys from config when the credentials source is dynamic
-            removed = []
-            if "cloud_storage_access_key" not in payload:
-                removed.append("cloud_storage_access_key")
-            if "cloud_storage_secret_key" not in payload:
-                removed.append("cloud_storage_secret_key")
-            self.logger.debug(
-                f"patching with {pprint.pformat(payload, indent=1)}, removed keys: {removed}"
-            )
-            patch_result = self.admin.patch_cluster_config(
-                upsert=payload, remove=removed
-            )
-            wait_for_version_sync(
-                self.admin, self.redpanda, patch_result["config_version"]
-            )
-
-            # Check we really set it properly, and Redpanda can restart without
-            # hitting a validation issue on startup (this is what would happen
-            # if the API validation wasn't working properly)
-            self.redpanda.restart_nodes(self.redpanda.nodes)
-
-        # Set the config to static for the next set of checks
-        static_config = {
-            "cloud_storage_enabled": True,
-            "cloud_storage_secret_key": "open",
-            "cloud_storage_access_key": "sesame",
-            "cloud_storage_region": "us-east-1",
-            "cloud_storage_bucket": "dearliza",
-            "cloud_storage_url_style": "virtual_host",
-        }
-        patch_result = self.admin.patch_cluster_config(upsert=static_config, remove=[])
-        wait_for_version_sync(self.admin, self.redpanda, patch_result["config_version"])
-        self.redpanda.restart_nodes(self.redpanda.nodes)
-
-        # It is invalid to clear any required cloud storage properties while
-        # cloud storage is enabled and the credentials source is static.
-        forbidden_to_clear = [
-            "cloud_storage_secret_key",
-            "cloud_storage_access_key",
-            "cloud_storage_region",
-            "cloud_storage_bucket",
-        ]
-        for key in forbidden_to_clear:
-            with expect_http_error(400):
-                self.admin.patch_cluster_config(upsert={}, remove=[key])
-
-        # Switching off cloud storage is always valid, we can leave the other
-        # properties set
-        patch_result = self.admin.patch_cluster_config(
-            upsert={"cloud_storage_enabled": False}, remove=[]
-        )
-        wait_for_version_sync(self.admin, self.redpanda, patch_result["config_version"])
-
-        # Clearing related properties is valid now that cloud storage is
-        # disabled
-        for key in forbidden_to_clear:
-            self.admin.patch_cluster_config(upsert={}, remove=[key])
 
     @cluster(num_nodes=3)
     def test_status_read_after_write_consistency(self):
@@ -1985,40 +1825,6 @@ class ClusterConfigTest(RedpandaTest, ClusterConfigHelpersMixin):
             assert valid
 
     # None for pct_value is std::nullopt, which defaults to 0.0 in the cloud cache.
-    @cluster(num_nodes=1)
-    def test_validate_cloud_storage_cache_size_config(self):
-        CloudCacheConf = namedtuple(
-            "CloudCacheConf", ["size_value", "pct_value", "valid"]
-        )
-        test_cases = [
-            CloudCacheConf(size_value=0, pct_value=None, valid=False),
-            CloudCacheConf(size_value=0, pct_value=0.0, valid=False),
-            CloudCacheConf(size_value=0, pct_value=-1.0, valid=False),
-            CloudCacheConf(size_value=0, pct_value=101.0, valid=False),
-            CloudCacheConf(size_value=-1, pct_value=None, valid=False),
-            CloudCacheConf(size_value=1024, pct_value=None, valid=True),
-            CloudCacheConf(size_value=10, pct_value=50.0, valid=True),
-            CloudCacheConf(size_value=0, pct_value=0.1, valid=True),
-        ]
-
-        for size_value, pct_value, valid in test_cases:
-            upsert = {}
-            upsert["cloud_storage_cache_size"] = size_value
-            upsert["cloud_storage_cache_size_percent"] = pct_value
-
-            if valid:
-                patch_result = self.admin.patch_cluster_config(upsert=upsert)
-                new_version = patch_result["config_version"]
-                wait_for_version_status_sync(self.admin, self.redpanda, new_version)
-                updated_config = self.admin.get_cluster_config()
-                assert updated_config["cloud_storage_cache_size"] == size_value
-                assert updated_config["cloud_storage_cache_size_percent"] == pct_value
-            else:
-                with expect_exception(
-                    requests.exceptions.HTTPError,
-                    lambda e: e.response.status_code == 400,
-                ):
-                    self.admin.patch_cluster_config(upsert=upsert)
 
     @cluster(num_nodes=1)
     def test_disable_bounded_property_checks(self):
@@ -2049,144 +1855,6 @@ class ClusterConfigTest(RedpandaTest, ClusterConfigHelpersMixin):
         self.redpanda.set_cluster_config(out_of_bound_properties, expect_restart=True)
         for prop, value in out_of_bound_properties.items():
             self._check_value_everywhere(prop, value)
-
-    @cluster(num_nodes=1)
-    def test_iceberg_authentication_properties(self):
-        """
-        Tests that the Iceberg authentication properties are properly validated when set.
-        """
-        validated_auth_modes = ["bearer", "oauth2", "aws_sigv4"]
-
-        # Check that setting the authentication mode to anything other than "none" alone returns an error.
-        for mode in validated_auth_modes:
-            with expect_exception(
-                requests.exceptions.HTTPError, lambda e: e.response.status_code == 400
-            ):
-                self.redpanda.set_cluster_config(
-                    {"iceberg_rest_catalog_authentication_mode": mode},
-                    expect_restart=True,
-                )
-
-        # Bearer mode needs catalog_token set, oauth2 mode needs both client_id/secret set,
-        # aws_sigv4 needs region, access_key, and secret_key.
-        invalid_auth_mode_props = [
-            {
-                "iceberg_rest_catalog_authentication_mode": "bearer",
-            },
-            {
-                "iceberg_rest_catalog_authentication_mode": "oauth2",
-                "iceberg_rest_catalog_client_id": "panda_id",
-            },
-            {
-                "iceberg_rest_catalog_authentication_mode": "aws_sigv4",
-                "cloud_storage_region": "us-west-2",
-            },
-            {
-                "iceberg_rest_catalog_authentication_mode": "aws_sigv4",
-                "cloud_storage_region": "us-west-2",
-                "cloud_storage_access_key": "AKIAIOSFODNN7EXAMPLE",
-            },
-        ]
-
-        for invalid_props in invalid_auth_mode_props:
-            # These should fail.
-            with expect_exception(
-                requests.exceptions.HTTPError, lambda e: e.response.status_code == 400
-            ):
-                self.redpanda.set_cluster_config(invalid_props, expect_restart=True)
-
-        valid_auth_mode_props = [
-            {
-                "iceberg_rest_catalog_authentication_mode": "bearer",
-                "iceberg_rest_catalog_token": "panda_token",
-            },
-            {
-                "iceberg_rest_catalog_authentication_mode": "oauth2",
-                "iceberg_rest_catalog_client_id": "panda_id",
-                "iceberg_rest_catalog_client_secret": "panda_secret",
-            },
-            {
-                "iceberg_rest_catalog_authentication_mode": "aws_sigv4",
-                "cloud_storage_region": "us-west-2",
-                "cloud_storage_access_key": "AKIAIOSFODNN7EXAMPLE",
-                "cloud_storage_secret_key": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
-            },
-        ]
-
-        for valid_props in valid_auth_mode_props:
-            # These should succeed.
-            self.redpanda.set_cluster_config(valid_props, expect_restart=True)
-
-
-class ClusterConfigIcebergTest(RedpandaTest):
-    """Class to test configuration with Iceberg enabled as a prerequisite.
-    This also requires cloud storage configuration."""
-
-    def __init__(self, test_context):
-        super().__init__(test_context, si_settings=SISettings(test_context))
-
-        self.admin = Admin(self.redpanda)
-
-    @cluster(num_nodes=1)
-    def test_iceberg_rest_catalog_endpoint_validation(self):
-        """
-        Tests that the Iceberg REST catalog endpoint validation works correctly.
-        """
-        # Enabling iceberg alone should work.
-        self.redpanda.set_cluster_config({"iceberg_enabled": True}, expect_restart=True)
-
-        # Setting catalog type to rest without endpoint should be rejected.
-        with expect_exception(
-            requests.exceptions.HTTPError, lambda e: e.response.status_code == 400
-        ):
-            self.redpanda.set_cluster_config(
-                {"iceberg_enabled": True, "iceberg_catalog_type": "rest"},
-                expect_restart=True,
-            )
-
-        # Setting catalog type to rest with endpoint should work.
-        self.redpanda.set_cluster_config(
-            {
-                "iceberg_enabled": True,
-                "iceberg_catalog_type": "rest",
-                "iceberg_rest_catalog_endpoint": "http://localhost:8181",
-            },
-            expect_restart=True,
-        )
-
-    @cluster(num_nodes=1)
-    def test_iceberg_rest_catalog_endpoint_url_validation(self):
-        """
-        Verifies that malformed `iceberg_rest_catalog_endpoint` values are
-        rejected, while well-formed URLs are accepted.
-        """
-        malformed_values = [
-            "not a url",
-            "://missing-scheme",
-            "http://host:not-a-port",
-            "http://host:99999",
-        ]
-        for value in malformed_values:
-            with expect_exception(
-                requests.exceptions.HTTPError,
-                lambda e: e.response.status_code == 400,
-            ):
-                self.redpanda.set_cluster_config(
-                    {"iceberg_rest_catalog_endpoint": value},
-                    expect_restart=True,
-                )
-
-        # Well-formed values should be accepted.
-        valid_values = [
-            "http://localhost:8181",
-            "https://catalog.example.com",
-            "https://catalog.example.com:443/path",
-        ]
-        for value in valid_values:
-            self.redpanda.set_cluster_config(
-                {"iceberg_rest_catalog_endpoint": value},
-                expect_restart=True,
-            )
 
 
 class PropertyAliasData(NamedTuple):
@@ -2469,144 +2137,6 @@ class ClusterConfigNoKafkaTest(RedpandaTest):
             sasl_mechanism="SCRAM-SHA-256",
         )
         rpk.create_topic("testtopic")
-
-
-class ClusterConfigAzureSharedKey(RedpandaTest):
-    segment_size = 1024 * 1024
-    topics = (
-        TopicSpec(
-            partition_count=1,
-            replication_factor=3,
-        ),
-    )
-
-    def __init__(self, test_context):
-        super().__init__(
-            test_context,
-            log_level="trace",
-            si_settings=SISettings(
-                test_context, log_segment_size=self.segment_size, fast_uploads=True
-            ),
-        )
-
-        self.kafka_cli = KafkaCliTools(self.redpanda)
-
-    def get_cloud_log_size(self):
-        s3_snapshot = BucketView(self.redpanda, topics=self.topics)
-        return s3_snapshot.cloud_log_size_for_ntp(self.topic, 0).total(no_archive=True)
-
-    def wait_for_cloud_uploads(self, initial_count: int, delta: int):
-        def segment_uploaded():
-            return self.get_cloud_segment_count() >= initial_count + delta
-
-        wait_until(
-            lambda: segment_uploaded(initial_count, delta),
-            timeout_sec=30,
-            backoff_sec=5,
-            err_msg="Segments were not uploaded",
-        )
-
-    def produce_records(self, records: int, record_size: int):
-        self.kafka_cli.produce(self.topic, records, record_size)
-
-    @cluster(
-        num_nodes=3,
-        log_allow_list=[
-            r"abs - .* Received .* AuthorizationFailure error response",
-            r"abs - .* Received .* AuthenticationFailed error response",
-        ],
-    )
-    @matrix(
-        cloud_storage_type=get_cloud_storage_type(
-            applies_only_on=[CloudStorageType.ABS]
-        )
-    )
-    def test_live_shared_key_change(self, cloud_storage_type):
-        """
-        This test ensures that 'cloud_storage_azure_shared_key' can
-        be safely updated without a full restart of the cluster.
-
-        The test performs the following steps:
-        1. Begin with a key in-place
-        2. Validate uploads work
-        3. Replace the key with a bogus one
-        4. Validate uploads are failing
-        5. Set the key back to the initial value
-        6. Validate uploads work again
-        7. Try to unset the key
-        8. Validate that this is not allowed
-        """
-
-        initial_cloud_log_size = self.get_cloud_log_size()
-        self.produce_records(10, 1024)
-        wait_until(
-            lambda: self.get_cloud_log_size() >= initial_cloud_log_size + 10 * 1024,
-            timeout_sec=30,
-            backoff_sec=5,
-            err_msg="Data was not uploaded to cloud",
-        )
-
-        topic_leader_node = self.redpanda.partitions(self.topic)[0].leader
-        metric_check = MetricCheck(
-            self.logger,
-            self.redpanda,
-            topic_leader_node,
-            [
-                "vectorized_cloud_storage_successful_uploads_total",
-                "vectorized_cloud_storage_failed_uploads_total",
-            ],
-            reduce=sum,
-        )
-
-        def check_uploads_failing():
-            return metric_check.evaluate(
-                [
-                    (
-                        "vectorized_cloud_storage_successful_uploads_total",
-                        lambda a, b: b == a,
-                    ),
-                    (
-                        "vectorized_cloud_storage_failed_uploads_total",
-                        lambda a, b: b > a,
-                    ),
-                ]
-            )
-
-        self.redpanda.set_cluster_config(
-            {
-                "cloud_storage_azure_shared_key": "notakey02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw=="
-            },
-            expect_restart=False,
-        )
-
-        self.produce_records(10, 1024)
-        wait_until(
-            check_uploads_failing,
-            timeout_sec=30,
-            backoff_sec=5,
-            err_msg="Uploads did not fail",
-        )
-
-        self.redpanda.set_cluster_config(
-            {
-                "cloud_storage_azure_shared_key": self.si_settings.cloud_storage_azure_shared_key
-            },
-            expect_restart=False,
-        )
-
-        initial_cloud_log_size = self.get_cloud_log_size()
-        self.produce_records(10, 1024)
-        wait_until(
-            lambda: self.get_cloud_log_size() >= initial_cloud_log_size + 10 * 1024,
-            timeout_sec=30,
-            backoff_sec=5,
-            err_msg="Data was not uploaded to cloud",
-        )
-
-        with expect_http_error(400):
-            self.redpanda.set_cluster_config(
-                {"cloud_storage_azure_shared_key": None}, expect_restart=False
-            )
 
 
 class ClusterConfigNodeAddTest(RedpandaTest):

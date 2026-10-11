@@ -208,29 +208,6 @@ redpanda_cc_btest(
 )
 
 redpanda_cc_gtest(
-    name = "transform_test",
-    timeout = "short",
-    srcs = ["transform_test.cc"],
-    cpu = 1,
-    deps = [
-        ":random",
-        "//src/v/base",
-        "//src/v/model",
-        "//src/v/random:generators",
-        "//src/v/serde:map",
-        "//src/v/serde:sstring",
-        "//src/v/serde:uuid",
-        "//src/v/serde:variant",
-        "//src/v/serde:vector",
-        "//src/v/test_utils:gtest",
-        "//src/v/test_utils:random",
-        "//src/v/test_utils:random_bytes",
-        "@googletest//:gtest",
-        "@seastar",
-    ],
-)
-
-redpanda_cc_gtest(
     name = "batch_builder_test",
     timeout = "short",
     srcs = ["batch_builder_test.cc"],
@@ -240,37 +217,6 @@ redpanda_cc_gtest(
         "//src/v/model:batch_builder",
         "//src/v/test_utils:gtest",
         "//src/v/test_utils:random",
-        "@googletest//:gtest",
-    ],
-)
-
-redpanda_cc_gtest(
-    name = "iceberg_mode_test",
-    timeout = "short",
-    srcs = [
-        "iceberg_mode_test.cc",
-    ],
-    cpu = 1,
-    deps = [
-        "//src/v/bytes:iobuf",
-        "//src/v/bytes:iobuf_parser",
-        "//src/v/model",
-        "//src/v/serde",
-        "//src/v/test_utils:gtest",
-        "@googletest//:gtest",
-    ],
-)
-
-redpanda_cc_gtest(
-    name = "storage_mode_alias_test",
-    timeout = "short",
-    srcs = [
-        "storage_mode_alias_test.cc",
-    ],
-    cpu = 1,
-    deps = [
-        "//src/v/model",
-        "//src/v/test_utils:gtest",
         "@googletest//:gtest",
     ],
 )

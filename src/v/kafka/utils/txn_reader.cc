@@ -186,7 +186,7 @@ read_committed_reader::read_committed_reader(
   , _underlying(std::move(reader).release()) {}
 
 fmt::iterator read_committed_reader::format_to(fmt::iterator it) const {
-    return fmt::format_to(it, "transform::txn_reader{{}}");
+    return fmt::format_to(it, "kafka::txn_reader{{}}");
 }
 
 bool read_committed_reader::is_end_of_stream() const {

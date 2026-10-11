@@ -25,25 +25,21 @@ self_test_backend::self_test_backend(
   model::node_id self,
   ss::sharded<node::local_monitor>& nlm,
   ss::sharded<rpc::connection_cache>& connections,
-  ss::sharded<cloud_storage::remote>& cloud_storage_api,
   ss::scheduling_group sg)
   : _self(self)
   , _st_sg(sg)
   , _disk_test(nlm)
-  , _network_test(self, connections)
-  , _cloud_test(self, cloud_storage_api) {}
+  , _network_test(self, connections) {}
 
 ss::future<> self_test_backend::start() {
     co_await _disk_test.start();
     co_await _network_test.start();
-    co_await _cloud_test.start();
 }
 
 ss::future<> self_test_backend::stop() {
     auto f = _gate.close();
     co_await _disk_test.stop();
     co_await _network_test.stop();
-    co_await _cloud_test.stop();
     co_await _lock.get_units(); /// Ensure outstanding work is completed
     co_await std::move(f);
 }
@@ -57,7 +53,6 @@ self_test_backend::do_start_test(start_test_request r) {
 
     auto dtos = std::move(r.dtos);
     auto ntos = std::move(r.ntos);
-    auto ctos = std::move(r.ctos);
     auto unparsed_checks = std::move(r.unparsed_checks);
 
     _stage = self_test_stage::disk;
@@ -129,36 +124,6 @@ self_test_backend::do_start_test(start_test_request r) {
         }
     }
 
-    _stage = self_test_stage::cloud;
-    for (auto& cto : ctos) {
-        try {
-            cto.sg = _st_sg;
-            if (!_cancelling) {
-                auto ctr = co_await _cloud_test.run(cto);
-                results.insert(
-                  results.end(),
-                  std::make_move_iterator(ctr.begin()),
-                  std::make_move_iterator(ctr.end()));
-            } else {
-                results.push_back(
-                  self_test_result{
-                    .name = cto.name,
-                    .test_type = "cloud",
-                    .warning = "Cloud self test prevented from starting due to "
-                               "cancel signal"});
-            }
-        } catch (const std::exception& ex) {
-            vlog(
-              clusterlog.error,
-              "Cloud self test finished with error: {} - options: {}",
-              ex.what(),
-              cto);
-            results.push_back(
-              self_test_result{
-                .name = cto.name, .test_type = "cloud", .error = ex.what()});
-        }
-    }
-
     for (const auto& unparsed_check : unparsed_checks) {
         results.push_back(
           self_test_result{
@@ -213,7 +178,6 @@ ss::future<get_status_response> self_test_backend::stop_test() {
     _cancelling = true;
     _disk_test.cancel();
     _network_test.cancel();
-    _cloud_test.cancel();
     try {
         /// When lock is released, the 'then' block above will set the _prev_run
         /// var with the finalized test results from the cancelled run.

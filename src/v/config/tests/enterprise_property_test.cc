@@ -47,7 +47,7 @@ struct test_config : public config_store {
           std::vector<ss::sstring>{"foo", "bar", "baz"})
       , enterprise_str_vec(
           *this,
-          std::vector<ss::sstring>{"GSSAPI"},
+          std::vector<ss::sstring>{"ENTERPRISE_VALUE"},
           "enterprise_str_vec",
           "An enterprise-only vector of strings",
           meta{.needs_restart = needs_restart::no})
@@ -97,7 +97,7 @@ TEST(EnterprisePropertyTest, TestRestriction) {
     EXPECT_FALSE(cfg.enterprise_str_vec.check_restricted(
       N(std::vector<ss::sstring>{"foo", "bar", "baz"})));
     EXPECT_TRUE(cfg.enterprise_str_vec.check_restricted(
-      N(std::vector<ss::sstring>{"foo", "bar", "baz", "GSSAPI"})));
+      N(std::vector<ss::sstring>{"foo", "bar", "baz", "ENTERPRISE_VALUE"})));
 
     EXPECT_FALSE(cfg.enterprise_opt_int.check_restricted(N(10)));
     EXPECT_TRUE(cfg.enterprise_opt_int.check_restricted(N(10000)));
@@ -136,7 +136,7 @@ TEST(EnterprisePropertyTest, TestIsRestricted) {
       std::vector<ss::sstring>{"foo", "bar", "baz"});
     EXPECT_FALSE(cfg.enterprise_str_vec.is_restricted());
     cfg.enterprise_str_vec.set_value(
-      std::vector<ss::sstring>{"foo", "bar", "baz", "GSSAPI"});
+      std::vector<ss::sstring>{"foo", "bar", "baz", "ENTERPRISE_VALUE"});
     EXPECT_TRUE(cfg.enterprise_str_vec.is_restricted());
 
     cfg.enterprise_opt_int.set_value(10);

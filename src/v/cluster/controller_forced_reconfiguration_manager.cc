@@ -13,6 +13,7 @@
 
 #include "cluster/controller.h"
 #include "cluster/types.h"
+#include "config/node_config.h"
 
 #include <expected>
 #include <ranges>

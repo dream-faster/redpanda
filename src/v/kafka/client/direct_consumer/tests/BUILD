@@ -76,7 +76,6 @@ redpanda_cc_gtest(
     deps = [
         ":direct_consumer_fixture",
         "//src/v/cluster:fwd",
-        "//src/v/cluster:inventory_service",
         "//src/v/cluster:leader_balancer_strategy",
         "//src/v/cluster:node_status_backend",
         "//src/v/cluster:partition_properties_stm",

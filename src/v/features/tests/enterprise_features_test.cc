@@ -48,7 +48,7 @@ struct test_config : public config_store {
           std::vector<ss::sstring>{"foo", "bar", "baz"})
       , enterprise_str_vec(
           *this,
-          std::vector<ss::sstring>{"GSSAPI"},
+          std::vector<ss::sstring>{"ENTERPRISE_VALUE"},
           "enterprise_str_vec",
           "An enterprise-only vector of strings",
           meta{.needs_restart = needs_restart::no})
@@ -114,7 +114,7 @@ struct EnterpriseFeatureTest : public ::testing::Test {
               &cfg.enterprise_str_vec,
               {.default_value{},
                .allowed_value = {"OTHER"},
-               .restricted_value = {"GSSAPI", "OTHER"}}};
+               .restricted_value = {"ENTERPRISE_VALUE", "OTHER"}}};
         }
         if constexpr (
           std::same_as<Property, config::property<std::optional<int>>>) {

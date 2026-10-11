@@ -60,7 +60,6 @@ bazel_dep(name = "rules_go", version = "0.59.0")
 bazel_dep(name = "rules_pkg", version = "1.0.1")
 bazel_dep(name = "rules_proto", version = "7.1.0")
 bazel_dep(name = "rules_python", version = "1.7.0")
-bazel_dep(name = "rules_rust", version = "0.70.0")
 bazel_dep(name = "snappy", version = "1.2.1")
 bazel_dep(name = "utf8proc", version = "2.11.0")
 bazel_dep(name = "yaml-cpp", version = "0.8.0")
@@ -107,7 +106,6 @@ use_repo(non_module_dependencies, "c-ares")
 use_repo(non_module_dependencies, "hdrhistogram")
 use_repo(non_module_dependencies, "hwloc")
 use_repo(non_module_dependencies, "jsoncons")
-use_repo(non_module_dependencies, "krb5")
 use_repo(non_module_dependencies, "libpciaccess")
 use_repo(non_module_dependencies, "libprotobuf_mutator")
 use_repo(non_module_dependencies, "lksctp")
@@ -120,7 +118,6 @@ use_repo(non_module_dependencies, "rapidjson")
 use_repo(non_module_dependencies, "roaring")
 use_repo(non_module_dependencies, "seastar")
 use_repo(non_module_dependencies, "unordered_dense")
-use_repo(non_module_dependencies, "wasmtime")
 use_repo(non_module_dependencies, "xxhash")
 use_repo(non_module_dependencies, "x86_64_sysroot")
 use_repo(non_module_dependencies, "aarch64_sysroot")
@@ -272,7 +269,6 @@ use_repo(
     "build_buf_gen_go_redpandadata_gatekeeper_connectrpc_go",
     "build_buf_gen_go_redpandadata_gatekeeper_protocolbuffers_go",
     "com_connectrpc_connect",
-    "com_github_actgardner_gogen_avro_v10",
     "com_github_alecaivazis_survey_v2",
     "com_github_avast_retry_go",
     "com_github_aws_aws_sdk_go_v2_config",
@@ -312,11 +308,9 @@ use_repo(
     "com_github_redpanda_data_common_go_rpadmin",
     "com_github_redpanda_data_common_go_rpsr",
     "com_github_redpanda_data_protoc_gen_go_mcp",
-    "com_github_redpanda_data_redpanda_src_transform_sdk_go_transform",
     "com_github_rs_xid",
     "com_github_safchain_ethtool",
     "com_github_santhosh_tekuri_jsonschema_v6",
-    "com_github_schollz_progressbar_v3",
     "com_github_segmentio_encoding",
     "com_github_sergi_go_diff",
     "com_github_sirupsen_logrus",
@@ -354,48 +348,6 @@ use_repo(
 )
 
 # ====================================
-# Rust Toolchain
-# ====================================
-rust = use_extension("@rules_rust//rust:extensions.bzl", "rust", dev_dependency = True)
-rust.toolchain(
-    edition = "2021",
-    extra_target_triples = [
-        "aarch64-unknown-linux-gnu",
-        "x86_64-unknown-linux-gnu",
-    ],
-    versions = ["1.91.0"],
-)
-use_repo(rust, "rust_toolchains")
-
-register_toolchains(
-    "@rust_toolchains//:all",
-    dev_dependency = True,
-)
-
-crate = use_extension(
-    "@rules_rust//crate_universe:extension.bzl",
-    "crate",
-)
-crate.from_cargo(
-    name = "crates",
-    cargo_lockfile = "//bazel/thirdparty:Cargo.lock",
-    manifests = ["//bazel/thirdparty:Cargo.toml"],
-    supported_platform_triples = [
-        # We currently only build this rust code on linux
-        # so don't fetch for other platforms
-        "aarch64-unknown-linux-gnu",
-        "x86_64-unknown-linux-gnu",
-    ],
-)
-crate.annotation(
-    additive_build_file = "//bazel/thirdparty:wasmtime.BUILD",
-    crate = "wasmtime-c-api-impl",
-    extra_aliased_targets = {"wasmtime_c": "wasmtime_c"},
-    gen_build_script = "off",
-)
-use_repo(crate, "crates")
-
-# ====================================
 # OCI Base Images
 # ====================================
 bazel_dep(name = "rules_oci", version = "2.3.0", dev_dependency = True)
@@ -427,23 +379,7 @@ use_repo(
     "distroless_cc_debian12_linux_arm64_v8",
 )
 
-http_file = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_file")
-
 http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
-
-http_file(
-    name = "minio_x86_64",
-    executable = True,
-    integrity = "sha256-zr1iiuhZtGcN6cBLDL9WAKSYFm2iAxrWNMmHII2JrpQ=",
-    urls = ["https://dl.min.io/server/minio/release/linux-amd64/archive/minio.RELEASE.2025-04-03T14-56-28Z"],
-)
-
-http_file(
-    name = "minio_aarch64",
-    executable = True,
-    integrity = "sha256-Xs94kSmK6+SVko+E5urztZy33dtJnHrdjFAn6wuo8Ok=",
-    urls = ["https://dl.min.io/server/minio/release/linux-arm64/archive/minio.RELEASE.2025-04-03T14-56-28Z"],
-)
 
 http_archive(
     name = "prometheus_x86_64",

@@ -27,26 +27,7 @@ ss::json::json_return_type raw_data_to_usage_response(
         resp.back().open = e.is_open();
         resp.back().kafka_bytes_received_count = e.u.bytes_received;
         resp.back().kafka_bytes_sent_count = e.u.bytes_sent;
-        if (e.u.bytes_cloud_storage) {
-            resp.back().cloud_storage_bytes_gauge = *e.u.bytes_cloud_storage;
-        } else {
-            resp.back().cloud_storage_bytes_gauge = -1;
-        }
-        auto& dl_usage = e.u.datalake_usage;
-        ss::httpd::usage_json::datalake_usage dl_usage_response;
-        if (dl_usage.topic_stats) {
-            for (auto& entry : dl_usage.topic_stats.value()) {
-                ss::httpd::usage_json::datalake_topic_usage topic_usage;
-                topic_usage.topic_name = entry.topic;
-                topic_usage.topic_revision = entry.revision();
-                topic_usage.kafka_bytes_processed = entry.kafka_bytes_processed;
-                dl_usage_response.topics.push(std::move(topic_usage));
-            }
-        } else {
-            dl_usage_response.missing_reason = fmt::format(
-              "{}", dl_usage.missing_reason);
-        }
-        resp.back().datalake_usage = dl_usage_response;
+        resp.back().cloud_storage_bytes_gauge = -1;
     }
     if (include_open && !resp.empty()) {
         /// Handle case where client does not want to observe

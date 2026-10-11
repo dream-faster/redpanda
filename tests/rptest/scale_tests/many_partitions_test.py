@@ -832,60 +832,6 @@ class ManyPartitionsTest(PreallocNodesTest):
         )
 
     @cluster(num_nodes=12, log_allow_list=RESTART_LOG_ALLOW_LIST)
-    # FIXME: run with compaction
-    @parametrize(
-        compacted=False,
-        mib_per_partition=DEFAULT_MIB_PER_PARTITION,
-        topic_partitions_per_shard=DEFAULT_PARTITIONS_PER_SHARD,
-    )
-    def test_many_partitions_tiered_storage(
-        self, compacted: bool, mib_per_partition: float, topic_partitions_per_shard: int
-    ):
-        self._test_many_partitions(
-            compacted=compacted,
-            tiered_storage_enabled=True,
-            mib_per_partition=mib_per_partition,
-            topic_partitions_per_shard=topic_partitions_per_shard,
-        )
-
-    @cluster(
-        num_nodes=12,
-        log_allow_list=RESTART_LOG_ALLOW_LIST,
-    )
-    @parametrize(
-        mib_per_partition=DEFAULT_MIB_PER_PARTITION,
-        topic_partitions_per_shard=DEFAULT_PARTITIONS_PER_SHARD,
-    )
-    def test_many_partitions_cloud_topics(
-        self, mib_per_partition: float, topic_partitions_per_shard: int
-    ):
-        self._test_many_partitions(
-            compacted=False,
-            cloud_topics_enabled=True,
-            mib_per_partition=mib_per_partition,
-            topic_partitions_per_shard=topic_partitions_per_shard,
-        )
-
-    @cluster(
-        num_nodes=12,
-        log_allow_list=RESTART_LOG_ALLOW_LIST,
-    )
-    @parametrize(
-        mib_per_partition=DEFAULT_MIB_PER_PARTITION,
-        topic_partitions_per_shard=DEFAULT_PARTITIONS_PER_SHARD,
-    )
-    def test_many_partitions_cloud_topics_tiered_storage(
-        self, mib_per_partition: float, topic_partitions_per_shard: int
-    ):
-        self._test_many_partitions(
-            compacted=False,
-            tiered_storage_enabled=True,
-            cloud_topics_enabled=True,
-            mib_per_partition=mib_per_partition,
-            topic_partitions_per_shard=topic_partitions_per_shard,
-        )
-
-    @cluster(num_nodes=12, log_allow_list=RESTART_LOG_ALLOW_LIST)
     def test_omb(self):
         scale = ScaleParameters(
             self.redpanda,

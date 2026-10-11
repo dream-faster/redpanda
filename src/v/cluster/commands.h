@@ -12,16 +12,12 @@
 #pragma once
 #include "bytes/iobuf_parser.h"
 #include "cluster/client_quota_serde.h"
-#include "cluster/cluster_link_rpc_types.h"
-#include "cluster/data_migration_types.h"
 #include "cluster/security_types.h"
 #include "cluster/simple_batch_builder.h"
 #include "cluster/types.h"
-#include "cluster_link/model/types.h"
 #include "model/metadata.h"
 #include "model/record.h"
 #include "model/record_batch_types.h"
-#include "model/transform.h"
 #include "reflection/adl.h"
 #include "reflection/async_adl.h"
 #include "security/role.h"
@@ -159,34 +155,12 @@ inline constexpr int8_t feature_update_license_update_cmd_type = 1;
 // cluster bootstrap commands
 inline constexpr int8_t bootstrap_cluster_cmd_type = 0;
 
-// plugin command types
-inline constexpr int8_t transform_update_cmd_type = 0;
-inline constexpr int8_t transform_remove_cmd_type = 1;
-
 // cluster recovery commands
 inline constexpr int8_t cluster_recovery_init_cmd_type = 0;
 inline constexpr int8_t cluster_recovery_update_cmd_type = 1;
 
 // client quota commands
 inline constexpr int8_t alter_quotas_delta_cmd_type = 0;
-
-// data migration commands
-inline constexpr int8_t create_data_migration_cmd_type = 0;
-inline constexpr int8_t update_data_migration_state_cmd_type = 1;
-inline constexpr int8_t remove_data_migration_cmd_type = 2;
-
-// cluster link commands
-inline constexpr int8_t cluster_link_upsert_cmd_type = 0;
-inline constexpr int8_t cluster_link_remove_cmd_type = 1;
-inline constexpr int8_t cluster_link_add_mirror_topic_cmd_type = 2;
-inline constexpr int8_t cluster_link_update_mirror_topic_state_cmd_type = 3;
-inline constexpr int8_t cluster_link_update_mirror_topic_properties_cmd_type
-  = 4;
-inline constexpr int8_t cluster_link_update_cluster_link_configuration_cmd_type
-  = 5;
-inline constexpr int8_t cluster_link_delete_mirror_topic_cmd_type = 6;
-inline constexpr int8_t cluster_link_batch_update_mirror_topic_state_cmd_type
-  = 7;
 
 using create_topic_cmd = controller_command<
   model::topic_namespace,
@@ -433,21 +407,6 @@ using feature_update_license_update_cmd = controller_command<
   model::record_batch_type::feature_update,
   serde_opts::serde_only>;
 
-// Plugins
-using transform_update_cmd = controller_command<
-  int8_t, // unused
-  model::transform_metadata,
-  transform_update_cmd_type,
-  model::record_batch_type::plugin_update,
-  serde_opts::serde_only>;
-
-using transform_remove_cmd = controller_command<
-  model::transform_name,
-  int8_t, // unused
-  transform_remove_cmd_type,
-  model::record_batch_type::plugin_update,
-  serde_opts::serde_only>;
-
 // Cluster bootstrap
 using bootstrap_cluster_cmd = controller_command<
   int8_t, // unused, always 0
@@ -455,97 +414,11 @@ using bootstrap_cluster_cmd = controller_command<
   bootstrap_cluster_cmd_type,
   model::record_batch_type::cluster_bootstrap_cmd>;
 
-// Cluster recovery
-using cluster_recovery_init_cmd = controller_command<
-  int8_t, // Unused, always 0
-  cluster_recovery_init_cmd_data,
-  cluster_recovery_init_cmd_type,
-  model::record_batch_type::cluster_recovery_cmd>;
-using cluster_recovery_update_cmd = controller_command<
-  int8_t, // Unused, always 0
-  cluster_recovery_update_cmd_data,
-  cluster_recovery_update_cmd_type,
-  model::record_batch_type::cluster_recovery_cmd>;
-
 using alter_quotas_delta_cmd = controller_command<
   int8_t, // unused
   client_quota::alter_delta_cmd_data,
   alter_quotas_delta_cmd_type,
   model::record_batch_type::client_quota>;
-
-using create_data_migration_cmd = controller_command<
-  int8_t,
-  data_migrations::create_migration_cmd_data,
-  create_data_migration_cmd_type,
-  model::record_batch_type::data_migration_cmd>;
-
-using update_data_migration_state_cmd = controller_command<
-  int8_t,
-  data_migrations::update_migration_state_cmd_data,
-  update_data_migration_state_cmd_type,
-  model::record_batch_type::data_migration_cmd>;
-
-using remove_data_migration_cmd = controller_command<
-  int8_t,
-  data_migrations::remove_migration_cmd_data,
-  remove_data_migration_cmd_type,
-  model::record_batch_type::data_migration_cmd>;
-
-using cluster_link_upsert_cmd = controller_command<
-  int8_t, // unused
-  ::cluster_link::model::metadata,
-  cluster_link_upsert_cmd_type,
-  model::record_batch_type::cluster_link,
-  serde_opts::serde_only>;
-
-using cluster_link_remove_cmd = controller_command<
-  int8_t, // unused,
-  ::cluster_link::model::delete_shadow_link_cmd,
-  cluster_link_remove_cmd_type,
-  model::record_batch_type::cluster_link,
-  serde_opts::serde_only>;
-
-using cluster_link_add_mirror_topic_cmd = controller_command<
-  ::cluster_link::model::id_t,
-  ::cluster_link::model::add_mirror_topic_cmd,
-  cluster_link_add_mirror_topic_cmd_type,
-  model::record_batch_type::cluster_link,
-  serde_opts::serde_only>;
-
-using cluster_link_update_mirror_topic_status_cmd = controller_command<
-  ::cluster_link::model::id_t,
-  ::cluster_link::model::update_mirror_topic_status_cmd,
-  cluster_link_update_mirror_topic_state_cmd_type,
-  model::record_batch_type::cluster_link,
-  serde_opts::serde_only>;
-
-using cluster_link_batch_update_mirror_topic_status_cmd = controller_command<
-  ::cluster_link::model::id_t,
-  ::cluster_link::model::batch_update_mirror_topic_status_cmd,
-  cluster_link_batch_update_mirror_topic_state_cmd_type,
-  model::record_batch_type::cluster_link,
-  serde_opts::serde_only>;
-
-using cluster_link_update_mirror_topic_properties_cmd = controller_command<
-  ::cluster_link::model::id_t,
-  ::cluster_link::model::update_mirror_topic_properties_cmd,
-  cluster_link_update_mirror_topic_properties_cmd_type,
-  model::record_batch_type::cluster_link,
-  serde_opts::serde_only>;
-
-using cluster_link_delete_mirror_topic_cmd = controller_command<
-  ::cluster_link::model::id_t,
-  ::cluster_link::model::delete_mirror_topic_cmd,
-  cluster_link_delete_mirror_topic_cmd_type,
-  model::record_batch_type::cluster_link,
-  serde_opts::serde_only>;
-
-using cluster_link_update_cluster_link_configuration_cmd = controller_command<
-  ::cluster_link::model::id_t,
-  ::cluster_link::model::update_cluster_link_configuration_cmd,
-  cluster_link_update_cluster_link_configuration_cmd_type,
-  model::record_batch_type::cluster_link,
-  serde_opts::serde_only>;
 
 // typelist utils
 template<typename T>

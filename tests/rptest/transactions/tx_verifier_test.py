@@ -10,17 +10,10 @@
 import subprocess
 
 from ducktape.errors import DucktapeError
-from ducktape.mark import matrix
 from ducktape.tests.test import TestContext
 
-from rptest.context.cloud_storage import CloudStorageType
 from rptest.clients.rpk import RpkTool
-from rptest.clients.types import TopicSpec
 from rptest.services.cluster import cluster
-from rptest.services.redpanda import (
-    SISettings,
-    get_cloud_storage_type,
-)
 from rptest.tests.redpanda_test import RedpandaTest
 
 # Expected log errors in tests that test misbehaving
@@ -47,11 +40,6 @@ class TxVerifierTest(RedpandaTest):
         super(TxVerifierTest, self).__init__(
             test_context=test_context,
             extra_rp_conf=extra_rp_conf,
-            si_settings=SISettings(
-                test_context=test_context,
-                cloud_storage_enable_remote_read=False,
-                cloud_storage_enable_remote_write=False,
-            ),
         )
 
     def verify(self, tests: list[str], topic1: str, topic2: str, groupId: str):
@@ -85,8 +73,7 @@ class TxVerifierTest(RedpandaTest):
             raise DucktapeError(errors)
 
     @cluster(num_nodes=3, log_allow_list=TX_ERROR_LOGS)
-    @matrix(cloud_storage_type=get_cloud_storage_type())
-    def test_all_tx_tests(self, cloud_storage_type: CloudStorageType):
+    def test_all_tx_tests(self):
         rpk = RpkTool(self.redpanda)
 
         specs: list[tuple[str, str, str]] = []
@@ -95,19 +82,6 @@ class TxVerifierTest(RedpandaTest):
         specs.append(("topic1-std", "topic2-std", "groupId-std"))
         rpk.create_topic(specs[-1][0])
         rpk.create_topic(specs[-1][1])
-
-        # 2 cloud topics
-        cloud_topic_config = {
-            TopicSpec.PROPERTY_STORAGE_MODE: TopicSpec.STORAGE_MODE_CLOUD,
-        }
-        specs.append(("topic1-ct", "topic2-ct", "groupId-ct"))
-        rpk.create_topic(specs[-1][0], config=cloud_topic_config)
-        rpk.create_topic(specs[-1][1], config=cloud_topic_config)
-
-        # 1 standard topic and 1 cloud topic
-        specs.append(("topic1-std2", "topic2-ct2", "groupId-mixed"))
-        rpk.create_topic(specs[-1][0])
-        rpk.create_topic(specs[-1][1], config=cloud_topic_config)
 
         tests = [
             "init",

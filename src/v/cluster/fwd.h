@@ -15,8 +15,6 @@
 
 namespace cluster {
 
-class cluster_recovery_manager;
-class cluster_recovery_table;
 class controller;
 class controller_backend;
 class controller_stm;
@@ -34,11 +32,7 @@ class partition_probe;
 class shard_table;
 class topics_frontend;
 class topic_table;
-class plugin_frontend;
-class plugin_table;
-class plugin_backend;
 class topic_table_partition_generator;
-class cloud_storage_size_reducer;
 class members_manager;
 class members_table;
 class metadata_cache;
@@ -66,7 +60,6 @@ class node_status_table;
 class ephemeral_credential_frontend;
 class self_test_backend;
 class self_test_frontend;
-class topic_recovery_status_frontend;
 class node_isolation_watcher;
 struct controller_snapshot;
 struct controller_join_snapshot;
@@ -79,16 +72,6 @@ class shard_balancer;
 class id_allocator_stm;
 class tm_stm;
 class rm_stm;
-namespace data_migrations {
-class migrated_resources;
-class migration_frontend;
-class worker;
-class backend;
-class migrations_table;
-class frontend;
-class irpc_frontend;
-} // namespace data_migrations
-
 namespace tx {
 class producer_state_manager;
 class producer_state;
@@ -100,21 +83,6 @@ struct producer_partition_transaction_state;
 namespace node {
 class local_monitor;
 } // namespace node
-
-namespace cloud_metadata {
-class cluster_recovery_backend;
-class offsets_lookup;
-class offsets_lookup_batcher;
-class offsets_recoverer;
-class offsets_recovery_manager;
-class offsets_recovery_requestor;
-class offsets_recovery_router;
-class offsets_upload_requestor;
-class offsets_upload_router;
-class offsets_uploader;
-class producer_id_recovery_manager;
-class uploader;
-} // namespace cloud_metadata
 
 namespace client_quota {
 class frontend;

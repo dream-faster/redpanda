@@ -20,14 +20,9 @@ from typing import Any
 from ducktape.tests.test import TestContext
 from ducktape.mark import matrix
 
-from rptest.services.apache_iceberg_catalog import IcebergRESTCatalog
 from rptest.services.cluster import cluster
 from rptest.services.redpanda import (
     LoggingConfig,
-    PandaproxyConfig,
-    SchemaRegistryConfig,
-    SISettings,
-    get_cloud_storage_type,
 )
 from rptest.tests.prealloc_nodes import PreallocNodesTest
 from rptest.tests.random_node_operations_smoke_test import (
@@ -72,8 +67,6 @@ class AntithesisRandomNodeOpsTest(AntithesisTimeoutMixin, RandomNodeOperationsBa
                 "storage_min_free_bytes": 10000000,
             },
             node_prealloc_count=3,
-            schema_registry_config=SchemaRegistryConfig(),
-            pandaproxy_config=PandaproxyConfig(),
             log_config=LoggingConfig("info"),
         )
 
@@ -83,17 +76,6 @@ class AntithesisRandomNodeOpsTest(AntithesisTimeoutMixin, RandomNodeOperationsBa
         self.nodes_with_prev_version = []
         self.previous_version = None
         self.installer = self.redpanda._installer
-        self._si_settings = SISettings(
-            self.test_context,
-            cloud_storage_enable_remote_read=True,
-            cloud_storage_enable_remote_write=True,
-            fast_uploads=True,
-        )
-        self.catalog_service = IcebergRESTCatalog(
-            test_context,
-            cloud_storage_bucket=self._si_settings.cloud_storage_bucket,
-            filesystem_wrapper_mode=False,
-        )
 
     def setUp(self) -> None:
         super().setUp()
@@ -132,12 +114,10 @@ class AntithesisRandomNodeOpsTest(AntithesisTimeoutMixin, RandomNodeOperationsBa
     @cluster(num_nodes=9, log_allow_list=RNOT_ALLOW_LIST)
     @matrix(
         enable_failures=[True, False],
-        with_iceberg=[False],
         compaction_mode=[
             CompactionMode.SLIDING_WINDOW,
             CompactionMode.ADJACENT_MERGE,
         ],
-        cloud_storage_type=get_cloud_storage_type()[:1],
     )
     def test_random_node_ops(self, **kwargs: Any) -> None:
         self._do_test_node_operations(

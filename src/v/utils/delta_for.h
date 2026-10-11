@@ -1181,10 +1181,6 @@ private:
 template<class value_t, class delta_t, size_t max_frame_size>
 class deltafor_column;
 
-namespace cloud_storage {
-class column_store;
-}
-
 /// Base class for deltafor_column specializations
 ///
 /// We have two specializations of the deltafor_column. One
@@ -1202,9 +1198,6 @@ class deltafor_column_impl
 
     using self_t
       = deltafor_column_impl<value_t, delta_alg, Derived, max_frame_size>;
-
-    // this friendship is used to access frame_t and _frames
-    friend class cloud_storage::column_store;
 
     // constructor that will share all the frames from the source range
     deltafor_column_impl(

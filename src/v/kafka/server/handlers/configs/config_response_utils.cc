@@ -18,7 +18,7 @@
 #include "config/node_config.h"
 #include "kafka/server/handlers/topics/types.h"
 #include "model/metadata.h"
-#include "pandaproxy/schema_registry/types.h"
+#include "utils/tristate.h"
 
 #include <chrono>
 
@@ -55,10 +55,6 @@ metadata_cache_adapter::get_default_timestamp_type() const {
 uint32_t metadata_cache_adapter::get_default_batch_max_bytes() const {
     return _metadata_cache.get_default_batch_max_bytes();
 }
-model::shadow_indexing_mode
-metadata_cache_adapter::get_default_shadow_indexing_mode() const {
-    return _metadata_cache.get_default_shadow_indexing_mode();
-}
 std::optional<size_t>
 metadata_cache_adapter::get_default_retention_local_target_bytes() const {
     return _metadata_cache.get_default_retention_local_target_bytes();
@@ -75,22 +71,6 @@ std::optional<std::chrono::milliseconds>
 metadata_cache_adapter::get_default_delete_retention_ms() const {
     return _metadata_cache.get_default_delete_retention_ms();
 }
-bool metadata_cache_adapter::get_default_record_key_schema_id_validation()
-  const {
-    return _metadata_cache.get_default_record_key_schema_id_validation();
-}
-pandaproxy::schema_registry::subject_name_strategy
-metadata_cache_adapter::get_default_record_key_subject_name_strategy() const {
-    return _metadata_cache.get_default_record_key_subject_name_strategy();
-}
-bool metadata_cache_adapter::get_default_record_value_schema_id_validation()
-  const {
-    return _metadata_cache.get_default_record_value_schema_id_validation();
-}
-pandaproxy::schema_registry::subject_name_strategy
-metadata_cache_adapter::get_default_record_value_subject_name_strategy() const {
-    return _metadata_cache.get_default_record_value_subject_name_strategy();
-}
 std::optional<size_t>
 metadata_cache_adapter::get_default_initial_retention_local_target_bytes()
   const {
@@ -99,10 +79,6 @@ metadata_cache_adapter::get_default_initial_retention_local_target_bytes()
 std::optional<std::chrono::milliseconds>
 metadata_cache_adapter::get_default_initial_retention_local_target_ms() const {
     return _metadata_cache.get_default_initial_retention_local_target_ms();
-}
-std::chrono::milliseconds
-metadata_cache_adapter::get_default_iceberg_target_lag_ms() const {
-    return _metadata_cache.get_default_iceberg_target_lag_ms();
 }
 std::optional<double>
 metadata_cache_adapter::get_default_min_cleanable_dirty_ratio() const {
@@ -169,13 +145,9 @@ consteval describe_configs_type property_config_type() {
         std::is_same_v<T, model::cleanup_policy_bitflags> ||
         std::is_same_v<T, model::timestamp_type> ||
         std::is_same_v<T, config::data_directory_path> ||
-        std::is_same_v<T, pandaproxy::schema_registry::subject_name_strategy> ||
-        std::is_same_v<T, pandaproxy::schema_registry::context> ||
         std::is_same_v<T, model::vcluster_id> ||
         std::is_same_v<T, model::write_caching_mode> ||
-        std::is_same_v<T, config::leaders_preference> || std::is_same_v<T, model::iceberg_mode> ||
-        std::is_same_v<T, model::iceberg_invalid_record_action> ||
-        std::is_same_v<T, model::redpanda_storage_mode>;
+        std::is_same_v<T, config::leaders_preference>;
 
     constexpr auto is_long_type = is_long<T> ||
         // Long type since seconds is atleast a 35-bit signed integral
@@ -376,7 +348,7 @@ static void add_topic_config(
 
 /**
  * For faking DEFAULT_CONFIG status for properties that are actually
- * topic overrides: cloud storage properties.  We do not support cluster
+ * topic overrides.  We do not support cluster
  * defaults for these, the values are always "sticky" to topics, but
  * some Kafka clients insist that after an AlterConfig RPC, anything
  * they didn't set should be DEFAULT_CONFIG.
@@ -721,43 +693,6 @@ config_response_container_t make_topic_configs(
         config::shard_local_cfg().raft_replica_max_flush_delay_ms.desc()),
       &describe_as_string<std::chrono::milliseconds>);
 
-    // Shadow indexing properties
-    add_topic_config_if_requested(
-      config_keys,
-      result,
-      topic_property_remote_read,
-      model::is_fetch_enabled(
-        metadata_cache.get_default_shadow_indexing_mode()),
-      topic_property_remote_read,
-      topic_properties.shadow_indexing.has_value()
-        ? std::make_optional(
-            model::is_fetch_enabled(*topic_properties.shadow_indexing))
-        : std::nullopt,
-      include_synonyms,
-      maybe_make_documentation(
-        include_documentation,
-        config::shard_local_cfg().cloud_storage_enable_remote_read.desc()),
-      &describe_as_string<bool>,
-      true);
-
-    add_topic_config_if_requested(
-      config_keys,
-      result,
-      topic_property_remote_write,
-      model::is_archival_enabled(
-        metadata_cache.get_default_shadow_indexing_mode()),
-      topic_property_remote_write,
-      topic_properties.shadow_indexing.has_value()
-        ? std::make_optional(
-            model::is_archival_enabled(*topic_properties.shadow_indexing))
-        : std::nullopt,
-      include_synonyms,
-      maybe_make_documentation(
-        include_documentation,
-        config::shard_local_cfg().cloud_storage_enable_remote_write.desc()),
-      &describe_as_string<bool>,
-      true);
-
     add_topic_config_if_requested(
       config_keys,
       result,
@@ -782,23 +717,6 @@ config_response_container_t make_topic_configs(
       maybe_make_documentation(
         include_documentation,
         config::shard_local_cfg().retention_local_target_ms_default.desc()));
-
-    if (config_property_requested(config_keys, topic_property_remote_delete)) {
-        add_topic_config<bool>(
-          result,
-          topic_property_remote_delete,
-          storage::ntp_config::default_remote_delete,
-          topic_property_remote_delete,
-          override_if_not_default(
-            std::make_optional<bool>(topic_properties.remote_delete),
-            storage::ntp_config::default_remote_delete),
-          true,
-          maybe_make_documentation(
-            include_documentation,
-            "Controls whether topic deletion should imply deletion in "
-            "S3"),
-          [](const bool& b) { return b ? "true" : "false"; });
-    }
 
     add_topic_config_if_requested(
       config_keys,
@@ -831,24 +749,6 @@ config_response_container_t make_topic_configs(
           });
     }
 
-    if (config_property_requested(config_keys, topic_property_iceberg_mode)) {
-        add_topic_config<model::iceberg_mode>(
-          result,
-          topic_property_iceberg_mode,
-          storage::ntp_config::default_iceberg_mode,
-          topic_property_iceberg_mode,
-          override_if_not_default(
-            std::make_optional<model::iceberg_mode>(
-              topic_properties.iceberg_mode),
-            storage::ntp_config::default_iceberg_mode),
-          true,
-          maybe_make_documentation(
-            include_documentation, "Iceberg enablement mode for the topic."),
-          [](const model::iceberg_mode& mode) {
-              return ssx::sformat("{}", mode);
-          });
-    }
-
     add_topic_config_if_requested(
       config_keys,
       result,
@@ -862,136 +762,6 @@ config_response_container_t make_topic_configs(
       maybe_make_documentation(
         include_documentation,
         config::shard_local_cfg().tombstone_retention_ms.desc()));
-
-    constexpr std::string_view key_validation
-      = "Enable validation of the schema id for keys on a record";
-    constexpr std::string_view val_validation
-      = "Enable validation of the schema id for values on a record";
-    constexpr bool validation_hide_default_override = true;
-
-    switch (config::shard_local_cfg().enable_schema_id_validation()) {
-    case pandaproxy::schema_registry::schema_id_validation_mode::compat: {
-        add_topic_config_if_requested(
-          config_keys,
-          result,
-          topic_property_record_key_schema_id_validation_compat,
-          metadata_cache.get_default_record_key_schema_id_validation(),
-          topic_property_record_key_schema_id_validation_compat,
-          topic_properties.record_key_schema_id_validation_compat,
-          include_synonyms,
-          maybe_make_documentation(include_documentation, key_validation),
-          &describe_as_string<bool>,
-          validation_hide_default_override);
-
-        add_topic_config_if_requested(
-          config_keys,
-          result,
-          topic_property_record_key_subject_name_strategy_compat,
-          metadata_cache.get_default_record_key_subject_name_strategy(),
-          topic_property_record_key_subject_name_strategy_compat,
-          topic_properties.record_key_subject_name_strategy_compat,
-          include_synonyms,
-          maybe_make_documentation(
-            include_documentation,
-            fmt::format(
-              "The subject name strategy for keys if {} is enabled",
-              topic_property_record_key_schema_id_validation_compat)),
-          [](auto sns) { return ss::sstring(to_string_view_compat(sns)); },
-          validation_hide_default_override);
-
-        add_topic_config_if_requested(
-          config_keys,
-          result,
-          topic_property_record_value_schema_id_validation_compat,
-          metadata_cache.get_default_record_value_schema_id_validation(),
-          topic_property_record_value_schema_id_validation_compat,
-          topic_properties.record_value_schema_id_validation_compat,
-          include_synonyms,
-          maybe_make_documentation(include_documentation, val_validation),
-          &describe_as_string<bool>,
-          validation_hide_default_override);
-
-        add_topic_config_if_requested(
-          config_keys,
-          result,
-          topic_property_record_value_subject_name_strategy_compat,
-          metadata_cache.get_default_record_value_subject_name_strategy(),
-          topic_property_record_value_subject_name_strategy_compat,
-          topic_properties.record_value_subject_name_strategy_compat,
-          include_synonyms,
-          maybe_make_documentation(
-            include_documentation,
-            fmt::format(
-              "The subject name strategy for values if {} is enabled",
-              topic_property_record_value_schema_id_validation_compat)),
-          [](auto sns) { return ss::sstring(to_string_view_compat(sns)); },
-          validation_hide_default_override);
-        [[fallthrough]];
-    }
-    case pandaproxy::schema_registry::schema_id_validation_mode::redpanda: {
-        add_topic_config_if_requested(
-          config_keys,
-          result,
-          topic_property_record_key_schema_id_validation,
-          metadata_cache.get_default_record_key_schema_id_validation(),
-          topic_property_record_key_schema_id_validation,
-          topic_properties.record_key_schema_id_validation,
-          include_synonyms,
-          maybe_make_documentation(include_documentation, key_validation),
-          &describe_as_string<bool>,
-          validation_hide_default_override);
-
-        add_topic_config_if_requested(
-          config_keys,
-          result,
-          topic_property_record_key_subject_name_strategy,
-          metadata_cache.get_default_record_key_subject_name_strategy(),
-          topic_property_record_key_subject_name_strategy,
-          topic_properties.record_key_subject_name_strategy,
-          include_synonyms,
-          maybe_make_documentation(
-            include_documentation,
-            fmt::format(
-              "The subject name strategy for keys if {} is enabled",
-              topic_property_record_key_schema_id_validation)),
-          &describe_as_string<
-            pandaproxy::schema_registry::subject_name_strategy>,
-          validation_hide_default_override);
-
-        add_topic_config_if_requested(
-          config_keys,
-          result,
-          topic_property_record_value_schema_id_validation,
-          metadata_cache.get_default_record_value_schema_id_validation(),
-          topic_property_record_value_schema_id_validation,
-          topic_properties.record_value_schema_id_validation,
-          include_synonyms,
-          maybe_make_documentation(include_documentation, val_validation),
-          &describe_as_string<bool>,
-          validation_hide_default_override);
-
-        add_topic_config_if_requested(
-          config_keys,
-          result,
-          topic_property_record_value_subject_name_strategy,
-          metadata_cache.get_default_record_value_subject_name_strategy(),
-          topic_property_record_value_subject_name_strategy,
-          topic_properties.record_value_subject_name_strategy,
-          include_synonyms,
-          maybe_make_documentation(
-            include_documentation,
-            fmt::format(
-              "The subject name strategy for values if {} is enabled",
-              topic_property_record_value_schema_id_validation)),
-          &describe_as_string<
-            pandaproxy::schema_registry::subject_name_strategy>,
-          validation_hide_default_override);
-        [[fallthrough]];
-    }
-    case pandaproxy::schema_registry::schema_id_validation_mode::none: {
-        break;
-    }
-    }
 
     add_topic_config_if_requested(
       config_keys,
@@ -1031,79 +801,6 @@ config_response_container_t make_topic_configs(
         include_documentation,
         "Preferred location (e.g. rack) for partition leaders of this topic."),
       &describe_as_string<config::leaders_preference>);
-
-    if (topic_properties.iceberg_mode != model::iceberg_mode::disabled) {
-        add_topic_config_if_requested(
-          config_keys,
-          result,
-          config::shard_local_cfg().iceberg_delete.name(),
-          config::shard_local_cfg().iceberg_delete(),
-          topic_property_iceberg_delete,
-          topic_properties.iceberg_delete,
-          include_synonyms,
-          maybe_make_documentation(
-            include_documentation,
-            "If true, delete the corresponding Iceberg table when deleting the "
-            "topic."),
-          &describe_as_string<bool>);
-
-        add_topic_config_if_requested(
-          config_keys,
-          result,
-          config::shard_local_cfg().iceberg_default_partition_spec.name(),
-          config::shard_local_cfg().iceberg_default_partition_spec(),
-          topic_property_iceberg_partition_spec,
-          topic_properties.iceberg_partition_spec,
-          include_synonyms,
-          maybe_make_documentation(
-            include_documentation,
-            "Partition spec of the corresponding Iceberg table."),
-          &describe_as_string<ss::sstring>,
-          true);
-
-        add_topic_config_if_requested(
-          config_keys,
-          result,
-          config::shard_local_cfg().iceberg_invalid_record_action.name(),
-          config::shard_local_cfg().iceberg_invalid_record_action(),
-          topic_property_iceberg_invalid_record_action,
-          topic_properties.iceberg_invalid_record_action,
-          include_synonyms,
-          maybe_make_documentation(
-            include_documentation,
-            "Action to take when an invalid record is encountered."),
-          &describe_as_string<model::iceberg_invalid_record_action>);
-
-        add_topic_config_if_requested(
-          config_keys,
-          result,
-          topic_property_iceberg_target_lag_ms,
-          metadata_cache.get_default_iceberg_target_lag_ms(),
-          topic_property_iceberg_target_lag_ms,
-          topic_properties.iceberg_target_lag_ms,
-          include_synonyms,
-          maybe_make_documentation(
-            include_documentation,
-            "Best effort target for Iceberg table lag relative to source "
-            "topic, in milliseconds."),
-          describe_as_string<std::chrono::milliseconds>);
-    }
-
-    add_topic_config_if_requested(
-      config_keys,
-      result,
-      topic_property_schema_registry_context,
-      pandaproxy::schema_registry::default_context,
-      topic_property_schema_registry_context,
-      topic_properties.schema_registry_context,
-      include_synonyms,
-      maybe_make_documentation(
-        include_documentation,
-        "Schema Registry context used to look up schemas referenced by "
-        "records in this topic (e.g. by the in-broker Iceberg translator). "
-        "Defaults to the Schema Registry default context ('.')."),
-      &describe_as_string<pandaproxy::schema_registry::context>,
-      /*hide_default_override=*/true);
 
     add_topic_config_if_requested(
       config_keys,
@@ -1146,20 +843,6 @@ config_response_container_t make_topic_configs(
     add_topic_config_if_requested(
       config_keys,
       result,
-      config::shard_local_cfg().cloud_storage_enable_remote_allow_gaps.name(),
-      config::shard_local_cfg().cloud_storage_enable_remote_allow_gaps(),
-      topic_property_remote_allow_gaps,
-      topic_properties.remote_topic_allow_gaps,
-      include_synonyms,
-      maybe_make_documentation(
-        include_documentation,
-        config::shard_local_cfg()
-          .cloud_storage_enable_remote_allow_gaps.desc()),
-      &describe_as_string<bool>);
-
-    add_topic_config_if_requested(
-      config_keys,
-      result,
       topic_property_message_timestamp_before_max_ms,
       metadata_cache.get_default_message_timestamp_before_max_ms(),
       topic_property_message_timestamp_before_max_ms,
@@ -1182,56 +865,6 @@ config_response_container_t make_topic_configs(
         include_documentation,
         config::shard_local_cfg().log_message_timestamp_after_max_ms.desc()),
       describe_as_string<std::chrono::milliseconds>);
-
-    add_topic_config_if_requested(
-      config_keys,
-      result,
-      config::shard_local_cfg().default_redpanda_storage_mode.name(),
-      config::shard_local_cfg().default_redpanda_storage_mode(),
-      topic_property_redpanda_storage_mode,
-      override_if_not_default(
-        std::make_optional<model::redpanda_storage_mode>(
-          topic_properties.storage_mode),
-        config::shard_local_cfg().default_redpanda_storage_mode()),
-      include_synonyms,
-      maybe_make_documentation(
-        include_documentation,
-        config::shard_local_cfg().default_redpanda_storage_mode.desc()),
-      [](const model::redpanda_storage_mode& mode) {
-          return ss::sstring(model::redpanda_storage_mode_user_name(mode));
-      });
-
-    // Read-only companion of redpanda.storage.mode: the exact
-    // implementation of the topic's storage mode, always present and never
-    // ambiguous (the tiered variants report tiered_v1/tiered_v2 while the
-    // mode itself displays both as 'tiered').
-    if (
-      config_property_requested(
-        config_keys, topic_property_redpanda_storage_mode_impl)) {
-        result.push_back(
-          config_response{
-            .name = ss::sstring(topic_property_redpanda_storage_mode_impl),
-            .value = ss::sstring(
-              model::redpanda_storage_mode_impl_name(
-                topic_properties.storage_mode)),
-            .read_only = true,
-            // The value is derived from the storage mode rather than being
-            // an explicit override: report it as a default so config
-            // backup/replay tooling does not treat it as user-set (and so
-            // upgrade config comparisons tolerate its appearance).
-            .is_default = true,
-            .config_source = describe_configs_source::default_config,
-            .config_type = describe_configs_type::string,
-            .documentation = maybe_make_documentation(
-              include_documentation,
-              "Exact implementation of the topic's storage mode. Tiered "
-              "topics report tiered_v1 (classic tiered-storage "
-              "architecture) or tiered_v2 (new tiered-storage "
-              "architecture); other modes mirror redpanda.storage.mode. "
-              "Read-only after creation: supply it at topic creation to "
-              "select the implementation explicitly."),
-          });
-    }
 
     return result;
 }

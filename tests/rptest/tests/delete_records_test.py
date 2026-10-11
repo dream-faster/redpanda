@@ -279,7 +279,6 @@ class DeleteRecordsTest(RedpandaTest, PartitionMovementMixin):
         )
 
     @cluster(num_nodes=3)
-    @parametrize(cloud_storage_enabled=True)
     @parametrize(cloud_storage_enabled=False)
     def test_delete_records_topic_start_delta(self, cloud_storage_enabled):
         """
@@ -329,7 +328,7 @@ class DeleteRecordsTest(RedpandaTest, PartitionMovementMixin):
     # occurs at the moment a failure is injected.
     @cluster(num_nodes=3, check_for_storage_usage_inconsistencies=False)
     @matrix(
-        cloud_storage_enabled=[True, False],
+        cloud_storage_enabled=[False],
         truncate_point=[
             "at_segment_boundary",
             "random_offset",
@@ -507,7 +506,6 @@ class DeleteRecordsTest(RedpandaTest, PartitionMovementMixin):
             )
 
     @cluster(num_nodes=3)
-    @parametrize(cloud_storage_enabled=True)
     @parametrize(cloud_storage_enabled=False)
     def test_delete_records_bounds_checking(self, cloud_storage_enabled):
         """
@@ -545,7 +543,6 @@ class DeleteRecordsTest(RedpandaTest, PartitionMovementMixin):
         bad_truncation(num_records + 1)
 
     @cluster(num_nodes=3)
-    @parametrize(cloud_storage_enabled=True)
     @parametrize(cloud_storage_enabled=False)
     def test_delete_records_empty_or_missing_topic_or_partition(
         self, cloud_storage_enabled
@@ -581,7 +578,6 @@ class DeleteRecordsTest(RedpandaTest, PartitionMovementMixin):
         assert topic_info.high_watermark == 1
 
     @cluster(num_nodes=3)
-    @parametrize(cloud_storage_enabled=True)
     @parametrize(cloud_storage_enabled=False)
     def test_delete_records_compacted_topic(self, cloud_storage_enabled):
         """
@@ -591,13 +587,13 @@ class DeleteRecordsTest(RedpandaTest, PartitionMovementMixin):
 
         with expect_exception(
             RpkException,
-            lambda e: "Request parameters do not satisfy the configured policy"
-            in str(e),
+            lambda e: (
+                "Request parameters do not satisfy the configured policy" in str(e)
+            ),
         ):
             self.rpk.trim_prefix(TEST_COMPACTED_TOPIC_NAME, 0, [0])
 
     @cluster(num_nodes=3)
-    @parametrize(cloud_storage_enabled=True)
     @parametrize(cloud_storage_enabled=False)
     def test_delete_records_topic_policy_change(self, cloud_storage_enabled):
         """
@@ -643,7 +639,6 @@ class DeleteRecordsTest(RedpandaTest, PartitionMovementMixin):
         )
 
     @cluster(num_nodes=3)
-    @parametrize(cloud_storage_enabled=True)
     @parametrize(cloud_storage_enabled=False)
     def test_delete_records_with_transactions(self, cloud_storage_enabled):
         """
@@ -702,7 +697,7 @@ class DeleteRecordsTest(RedpandaTest, PartitionMovementMixin):
 
     @cluster(num_nodes=5)
     @matrix(
-        cloud_storage_enabled=[True, False],
+        cloud_storage_enabled=[False],
         truncate_point=[
             "random_offset",
             "one_below_high_watermark",

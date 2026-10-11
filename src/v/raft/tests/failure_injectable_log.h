@@ -122,11 +122,6 @@ public:
 
     ss::future<storage::usage_report> disk_usage(storage::gc_config) final;
 
-    ss::future<storage::reclaimable_offsets>
-    get_reclaimable_offsets(storage::gc_config cfg) final;
-
-    void set_cloud_gc_offset(model::offset) final;
-
     const storage::segment_set& segments() const final;
     storage::segment_set& segments() final;
 

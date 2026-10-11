@@ -30,46 +30,6 @@
 #include <optional>
 
 namespace cluster {
-fmt::iterator format_to(recovery_stage e, fmt::iterator out) {
-    switch (e) {
-    case recovery_stage::initialized:
-        return fmt::format_to(out, "recovery_stage::initialized");
-    case recovery_stage::starting:
-        return fmt::format_to(out, "recovery_stage::starting");
-    case recovery_stage::recovered_license:
-        return fmt::format_to(out, "recovery_stage::recovered_license");
-    case recovery_stage::recovered_cluster_config:
-        return fmt::format_to(out, "recovery_stage::recovered_cluster_config");
-    case recovery_stage::recovered_users:
-        return fmt::format_to(out, "recovery_stage::recovered_users");
-    case recovery_stage::recovered_acls:
-        return fmt::format_to(out, "recovery_stage::recovered_acls");
-    case recovery_stage::recovered_remote_topic_data:
-        return fmt::format_to(
-          out, "recovery_stage::recovered_remote_topic_data");
-    case recovery_stage::recovered_cloud_topics_metastore:
-        return fmt::format_to(
-          out, "recovery_stage::recovered_cloud_topics_metastore");
-    case recovery_stage::recovered_cloud_topic_data:
-        return fmt::format_to(
-          out, "recovery_stage::recovered_cloud_topic_data");
-    case recovery_stage::recovered_topic_data:
-        return fmt::format_to(out, "recovery_stage::recovered_topic_data");
-    case recovery_stage::recovered_controller_snapshot:
-        return fmt::format_to(
-          out, "recovery_stage::recovered_controller_snapshot");
-    case recovery_stage::recovered_offsets_topic:
-        return fmt::format_to(out, "recovery_stage::recovered_offsets_topic");
-    case recovery_stage::recovered_tx_coordinator:
-        return fmt::format_to(out, "recovery_stage::recovered_tx_coordinator");
-    case recovery_stage::complete:
-        return fmt::format_to(out, "recovery_stage::complete");
-    case recovery_stage::failed:
-        return fmt::format_to(out, "recovery_stage::failed");
-    }
-    return fmt::format_to(out, "recovery_stage::unknown");
-}
-
 kafka_stages::kafka_stages(
   ss::future<> enq, ss::future<result<kafka_result>> offset_future)
   : request_enqueued(std::move(enq))
@@ -125,10 +85,6 @@ fmt::iterator format_to(topic_purge_domain d, fmt::iterator out) {
     switch (d) {
     case topic_purge_domain::cloud_storage:
         return fmt::format_to(out, "cloud_storage");
-    case topic_purge_domain::iceberg:
-        return fmt::format_to(out, "iceberg");
-    case topic_purge_domain::cloud_topic:
-        return fmt::format_to(out, "cloud_topic");
     }
     return fmt::format_to(out, "unknown({})", static_cast<int>(d));
 }
@@ -323,26 +279,11 @@ fmt::iterator incremental_topic_updates::format_to(fmt::iterator it) const {
       "{{incremental_topic_custom_updates: compression: {} "
       "cleanup_policy_bitflags: {} compaction_strategy: {} timestamp_type: {} "
       "segment_size: {} retention_bytes: {} retention_duration: {} "
-      "shadow_indexing: {}, batch_max_bytes: {}, retention_local_target_bytes: "
-      "{}, retention_local_target_ms: {}, remote_delete: {}, segment_ms: {}, "
-      "schema_registry_context: {}, "
-      "record_key_schema_id_validation: {}"
-      "record_key_schema_id_validation_compat: {}"
-      "record_key_subject_name_strategy: {}"
-      "record_key_subject_name_strategy_compat: {}"
-      "record_value_schema_id_validation: {}"
-      "record_value_schema_id_validation_compat: {}"
-      "record_value_subject_name_strategy: {}"
-      "record_value_subject_name_strategy_compat: {}, "
-      "initial_retention_local_target_bytes: {}, "
+      "batch_max_bytes: {}, retention_local_target_bytes: "
+      "{}, retention_local_target_ms: {}, segment_ms: "
+      "{}initial_retention_local_target_bytes: {}, "
       "initial_retention_local_target_ms: {}, write_caching: {}, flush_ms: {}, "
-      "flush_bytes: {}, iceberg_enabled: {}, leaders_preference: {}, "
-      "remote_read: {}, remote_write: {}, iceberg_delete: {}, "
-      "iceberg_partition_spec: {}, "
-      "iceberg_invalid_record_action: {}, "
-      "iceberg_target_lag_ms: {}, "
-      "remote_allow_gaps: {}, "
-      "topic_id: {}}}",
+      "flush_bytes: {}leaders_preference: {}, topic_id: {}}}",
       compression,
       cleanup_policy_bitflags,
       compaction_strategy,
@@ -350,35 +291,16 @@ fmt::iterator incremental_topic_updates::format_to(fmt::iterator it) const {
       segment_size,
       retention_bytes,
       retention_duration,
-      get_shadow_indexing(),
       batch_max_bytes,
       retention_local_target_bytes,
       retention_local_target_ms,
-      remote_delete,
       segment_ms,
-      schema_registry_context,
-      record_key_schema_id_validation,
-      record_key_schema_id_validation_compat,
-      record_key_subject_name_strategy,
-      record_key_subject_name_strategy_compat,
-      record_value_schema_id_validation,
-      record_value_schema_id_validation_compat,
-      record_value_subject_name_strategy,
-      record_value_subject_name_strategy_compat,
       initial_retention_local_target_bytes,
       initial_retention_local_target_ms,
       write_caching,
       flush_ms,
       flush_bytes,
-      iceberg_mode,
       leaders_preference,
-      remote_read,
-      remote_write,
-      iceberg_delete,
-      iceberg_partition_spec,
-      iceberg_invalid_record_action,
-      iceberg_target_lag_ms,
-      remote_allow_gaps,
       topic_id);
 }
 
@@ -459,17 +381,6 @@ model::revision_id topic_metadata::get_revision() const {
 std::optional<model::initial_revision_id>
 topic_metadata::get_remote_revision() const {
     return _fields.remote_revision;
-}
-
-std::optional<ss::sstring> topic_metadata::get_remote_location_hint() const {
-    const auto& remote_label = get_configuration().properties.remote_label;
-    if (!remote_label) {
-        return std::nullopt;
-    }
-
-    model::initial_revision_id remote_rev = get_remote_revision().value_or(
-      model::initial_revision_id{get_revision()});
-    return fmt::format("{}/{}", remote_label->cluster_uuid, remote_rev);
 }
 
 const topic_configuration& topic_metadata::get_configuration() const {
@@ -655,27 +566,6 @@ fmt::iterator format_to(reconfiguration_state e, fmt::iterator out) {
         return fmt::format_to(out, "cancelled");
     case reconfiguration_state::force_cancelled:
         return fmt::format_to(out, "force_cancelled");
-    }
-    __builtin_unreachable();
-}
-fmt::iterator format_to(cloud_storage_mode e, fmt::iterator out) {
-    switch (e) {
-    case cloud_storage_mode::disabled:
-        return fmt::format_to(out, "disabled");
-    case cloud_storage_mode::write_only:
-        return fmt::format_to(out, "write_only");
-    case cloud_storage_mode::read_only:
-        return fmt::format_to(out, "read_only");
-    case cloud_storage_mode::full:
-        return fmt::format_to(out, "full");
-    case cloud_storage_mode::read_replica:
-        return fmt::format_to(out, "read_replica");
-    case cloud_storage_mode::cloud_topic:
-        return fmt::format_to(out, "cloud_topic");
-    case cloud_storage_mode::cloud_topic_read_replica:
-        return fmt::format_to(out, "cloud_topic_read_replica");
-    case cloud_storage_mode::tiered_cloud_topic:
-        return fmt::format_to(out, "tiered_cloud_topic");
     }
     __builtin_unreachable();
 }
@@ -1128,20 +1018,10 @@ void adl<cluster::incremental_topic_updates>::to(
       t.segment_size,
       t.retention_bytes,
       t.retention_duration,
-      t.get_shadow_indexing(),
       t.batch_max_bytes,
       t.retention_local_target_bytes,
       t.retention_local_target_ms,
-      t.remote_delete,
       t.segment_ms,
-      t.record_key_schema_id_validation,
-      t.record_key_schema_id_validation_compat,
-      t.record_key_subject_name_strategy,
-      t.record_key_subject_name_strategy_compat,
-      t.record_value_schema_id_validation,
-      t.record_value_schema_id_validation_compat,
-      t.record_value_subject_name_strategy,
-      t.record_value_subject_name_strategy_compat,
       t.initial_retention_local_target_bytes,
       t.initial_retention_local_target_ms,
       t.write_caching,
@@ -1203,14 +1083,6 @@ adl<cluster::incremental_topic_updates>::from(iobuf_parser& in) {
           .from(in);
     }
     if (
-      version
-      <= cluster::incremental_topic_updates::version_with_shadow_indexing) {
-        updates.get_shadow_indexing() = adl<cluster::property_update<
-          std::optional<model::shadow_indexing_mode>>>{}
-                                          .from(in);
-    }
-
-    if (
       version <= cluster::incremental_topic_updates::
         version_with_batch_max_bytes_and_local_retention) {
         updates.batch_max_bytes
@@ -1220,41 +1092,13 @@ adl<cluster::incremental_topic_updates>::from(iobuf_parser& in) {
         updates.retention_local_target_ms
           = adl<cluster::property_update<tristate<std::chrono::milliseconds>>>{}
               .from(in);
-        updates.remote_delete = adl<cluster::property_update<bool>>{}.from(in);
+        adl<cluster::property_update<bool>>{}.from(in);
     }
 
     if (
       version <= cluster::incremental_topic_updates::version_with_segment_ms) {
         updates.segment_ms
           = adl<cluster::property_update<tristate<std::chrono::milliseconds>>>{}
-              .from(in);
-    }
-
-    if (
-      version <= cluster::incremental_topic_updates::
-        version_with_schema_id_validation) {
-        updates.record_key_schema_id_validation
-          = adl<cluster::property_update<std::optional<bool>>>{}.from(in);
-        updates.record_key_schema_id_validation_compat
-          = adl<cluster::property_update<std::optional<bool>>>{}.from(in);
-        updates.record_key_subject_name_strategy = adl<cluster::property_update<
-          std::optional<pandaproxy::schema_registry::subject_name_strategy>>>{}
-                                                     .from(in);
-        updates.record_key_subject_name_strategy_compat
-          = adl<cluster::property_update<std::optional<
-            pandaproxy::schema_registry::subject_name_strategy>>>{}
-              .from(in);
-        updates.record_value_schema_id_validation
-          = adl<cluster::property_update<std::optional<bool>>>{}.from(in);
-        updates.record_value_schema_id_validation_compat
-          = adl<cluster::property_update<std::optional<bool>>>{}.from(in);
-        updates
-          .record_value_subject_name_strategy = adl<cluster::property_update<
-          std::optional<pandaproxy::schema_registry::subject_name_strategy>>>{}
-                                                  .from(in);
-        updates.record_value_subject_name_strategy_compat
-          = adl<cluster::property_update<std::optional<
-            pandaproxy::schema_registry::subject_name_strategy>>>{}
               .from(in);
     }
 

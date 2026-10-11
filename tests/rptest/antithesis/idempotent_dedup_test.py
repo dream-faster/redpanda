@@ -45,7 +45,6 @@ from rptest.services.kgo_verifier_services import KgoVerifierProducer
 from rptest.services.redpanda_types import RedpandaServiceForClients
 from rptest.services.redpanda import (
     CHAOS_LOG_ALLOW_LIST,
-    SISettings,
     MetricsEndpoint,
 )
 from rptest.services.verifiable_consumer import VerifiableConsumer
@@ -356,58 +355,4 @@ class IdempotentExpiryRestartTest(AntithesisTimeoutMixin, RedpandaTest):
                 "rounds": self.NUM_ROUNDS,
                 "evictions": evictions,
             },
-        )
-
-
-class IdempotentCloudTopicsTest(AntithesisTimeoutMixin, RedpandaTest):
-    """Idempotent produce on cloud topics — rm_stm sequence tracking
-    applies to placeholder batches replicated via Raft."""
-
-    MSG_SIZE = 512
-    MSG_COUNT = 3000
-    TOPIC_NAME = "idemp-ct"
-
-    def __init__(self, test_context: TestContext) -> None:
-        si_settings = SISettings(
-            test_context,
-            cloud_storage_max_connections=10,
-            cloud_storage_enable_remote_read=False,
-            cloud_storage_enable_remote_write=False,
-            fast_uploads=True,
-        )
-
-        super().__init__(
-            test_context=test_context,
-            num_brokers=3,
-            extra_rp_conf={
-                **_BASE_CONF,
-                "cloud_topics_enabled": True,
-                "enable_cluster_metadata_upload_loop": False,
-            },
-            si_settings=si_settings,
-        )
-
-    @cluster(num_nodes=4, log_allow_list=CHAOS_LOG_ALLOW_LIST)
-    def test_idempotent_cloud_topics(self) -> None:
-        self.create_topic(
-            self.TOPIC_NAME,
-            config={
-                TopicSpec.PROPERTY_STORAGE_MODE: TopicSpec.STORAGE_MODE_CLOUD,
-            },
-        )
-
-        p = _run_producer(
-            self.test_context,
-            self.redpanda,
-            self.TOPIC_NAME,
-            self.MSG_SIZE,
-            self.MSG_COUNT,
-            128 * 1024,
-            "cloud topics",
-            self.logger,
-        )
-
-        _verify_idempotency(p, "cloud topics")
-        reachable(
-            "Idempotent cloud topics test completed", {"acked": p.produce_status.acked}
         )

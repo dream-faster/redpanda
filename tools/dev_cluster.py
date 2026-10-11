@@ -740,13 +740,13 @@ async def main() -> None:
         "--use-minio",
         action=argparse.BooleanOptionalAction,
         help="whether to spin up an instance of minio and use Redpanda configuration presets for it",
-        default=True,
+        default=False,
     )
     parser.add_argument(
         "--use-iceberg-catalog",
         action=argparse.BooleanOptionalAction,
         help="spin up an Iceberg REST catalog backed by Minio (requires --use-minio)",
-        default=True,
+        default=False,
     )
     parser.add_argument(
         "--iceberg-catalog-jar",

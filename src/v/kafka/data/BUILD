@@ -12,73 +12,24 @@ redpanda_cc_library(
 )
 
 redpanda_cc_library(
-    name = "exact_offset_replicator",
-    hdrs = ["exact_offset_replicator.h"],
-    visibility = ["//visibility:public"],
-    deps = [
-        "//src/v/base",
-        "//src/v/model",
-        "//src/v/raft",
-        "@seastar",
-    ],
-)
-
-redpanda_cc_library(
-    name = "make_exact_offset_replicator",
-    srcs = ["make_exact_offset_replicator.cc"],
-    hdrs = ["make_exact_offset_replicator.h"],
-    implementation_deps = [
-        ":partition_proxy",
-    ],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":exact_offset_replicator",
-        "//src/v/base",
-        "@seastar",
-    ],
-)
-
-redpanda_cc_library(
     name = "partition_proxy",
     srcs = [
-        "cloud_topic_partition.cc",
-        "cloud_topic_read_replica.cc",
         "partition_proxy.cc",
         "replicated_partition.cc",
     ],
     hdrs = [
-        "cloud_topic_partition.h",
-        "cloud_topic_read_replica.h",
         "partition_proxy.h",
         "replicated_partition.h",
     ],
     implementation_deps = [
         ":logger",
-        "//src/v/cloud_io:admission_control_types",
-        "//src/v/cloud_topics:log_reader_config",
-        "//src/v/cloud_topics/level_one/frontend_reader:reader",
-        "//src/v/cloud_topics/read_replica:metadata_provider",
-        "//src/v/cloud_topics/read_replica:partition_metadata",
-        "//src/v/cloud_topics/read_replica:snapshot_metastore",
-        "//src/v/cloud_topics/read_replica:snapshot_provider",
-        "//src/v/cloud_topics/read_replica:stm",
         "//src/v/cluster",
         "//src/v/cluster:types",
-        "//src/v/kafka/server:write_at_offset_stm",
         "@boost//:numeric_conversion",
     ],
     visibility = ["//visibility:public"],
     deps = [
-        ":exact_offset_replicator",
         "//src/v/base",
-        "//src/v/cloud_storage:types",
-        "//src/v/cloud_topics:data_plane_api",
-        "//src/v/cloud_topics:log_reader_config",
-        "//src/v/cloud_topics:state_accessors",
-        "//src/v/cloud_topics/frontend",
-        "//src/v/cloud_topics/frontend:errc",
-        "//src/v/cloud_topics/level_one/metastore",
-        "//src/v/cloud_topics/level_zero/frontend_reader",
         "//src/v/cluster:errc",
         "//src/v/cluster:fwd",
         "//src/v/cluster:ntp_callbacks",

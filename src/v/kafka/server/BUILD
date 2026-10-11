@@ -35,8 +35,6 @@ redpanda_cc_library(
     hdrs = [
         "handlers/configs/config_response_utils.h",
         "handlers/configs/config_utils.h",
-        "handlers/configs/storage_mode_properties.h",
-        "handlers/topics/sr_context_validator.h",
         "handlers/topics/topic_utils.h",
         "handlers/topics/types.h",
         "handlers/topics/validators.h",
@@ -57,7 +55,6 @@ redpanda_cc_library(
         "//src/v/cluster:types",
         "//src/v/config",
         "//src/v/container:chunked_vector",
-        "//src/v/datalake:partition_spec_parser",
         "//src/v/features",
         "//src/v/kafka/protocol",
         "//src/v/kafka/protocol:describe_configs",
@@ -65,9 +62,6 @@ redpanda_cc_library(
         "//src/v/kafka/protocol/schemata:create_topics_request",
         "//src/v/kafka/protocol/schemata:create_topics_response",
         "//src/v/model",
-        "//src/v/pandaproxy/schema_registry:config",
-        "//src/v/pandaproxy/schema_registry:subject_name_strategy",
-        "//src/v/pandaproxy/schema_registry:types",
         "//src/v/security",
         "//src/v/serde:chrono",
         "//src/v/ssx:sformat",
@@ -121,7 +115,6 @@ redpanda_cc_library(
     srcs = [
         "client_quota_translator.cc",
         "connection_context.cc",
-        "data_migration_group_proxy_impl.cc",
         "fetch_memory_units.cc",
         "fetch_pid_controller.cc",
         "fetch_read_coalescer.cc",
@@ -177,7 +170,6 @@ redpanda_cc_library(
         "client_quota_translator.h",
         "connection_context.h",
         "coordinator_ntp_mapper.h",
-        "data_migration_group_proxy_impl.h",
         "errors.h",
         "fetch_memory_units.h",
         "fetch_metadata_cache.h",
@@ -268,14 +260,11 @@ redpanda_cc_library(
         "usage_manager.h",
     ],
     implementation_deps = [
-        "//src/v/cluster:cloud_metadata_types",
-        "//src/v/cluster:cluster_link_errc",
         "//src/v/cluster:errc",
         "//src/v/cluster:feature_backend",
         "//src/v/cluster:leader_balancer_strategy",
         "//src/v/cluster:logger",
         "//src/v/cluster:offsets_snapshot",
-        "//src/v/cluster:plugin_backend",
         "//src/v/cluster:simple_batch_builder",
         "//src/v/cluster:topic_metrics_watcher",
         "//src/v/cluster:tx_errc",
@@ -283,8 +272,6 @@ redpanda_cc_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
-        ":datalake_throttle_manager",
-        ":datalake_usage_api",
         ":logger",
         ":qdc_monitor_config",
         ":roles",
@@ -296,17 +283,11 @@ redpanda_cc_library(
         "//src/v/bytes:iobuf",
         "//src/v/bytes:iobuf_parser",
         "//src/v/bytes:iostream",
-        "//src/v/cloud_storage",
         "//src/v/cluster",
         "//src/v/cluster:client_quota_backend",
         "//src/v/cluster:client_quota_serde",
         "//src/v/cluster:client_quota_store",
-        "//src/v/cluster:cluster_link_table",
-        "//src/v/cluster:cluster_link_types",
-        "//src/v/cluster:cluster_recovery_table",
         "//src/v/cluster:controller_log_limiter",
-        "//src/v/cluster:data_migration_group_proxy",
-        "//src/v/cluster:data_migration_table",
         "//src/v/cluster:fwd",
         "//src/v/cluster:health_monitor_types",
         "//src/v/cluster:members_table",
@@ -325,12 +306,10 @@ redpanda_cc_library(
         "//src/v/cluster:topic_table",
         "//src/v/cluster:tx_protocol_types",
         "//src/v/cluster:types",
-        "//src/v/cluster_link/model",
         "//src/v/config",
         "//src/v/container:chunked_hash_map",
         "//src/v/container:chunked_vector",
         "//src/v/container:intrusive",
-        "//src/v/datalake:partition_spec_parser",
         "//src/v/features",
         "//src/v/hashing:combine",
         "//src/v/hashing:jump_consistent",
@@ -425,12 +404,6 @@ redpanda_cc_library(
         "//src/v/model:batch_compression",
         "//src/v/net",
         "//src/v/net:types",
-        "//src/v/pandaproxy/schema_registry:config",
-        "//src/v/pandaproxy/schema_registry:fwd",
-        "//src/v/pandaproxy/schema_registry:server",
-        "//src/v/pandaproxy/schema_registry:subject_name_strategy",
-        "//src/v/pandaproxy/schema_registry:types",
-        "//src/v/pandaproxy/schema_registry:validation",
         "//src/v/raft",
         "//src/v/random:generators",
         "//src/v/reflection:adl",
@@ -492,54 +465,12 @@ redpanda_cc_library(
 )
 
 redpanda_cc_library(
-    name = "datalake_usage_api",
-    srcs = [
-        "datalake_usage_api.cc",
-    ],
-    hdrs = [
-        "datalake_usage_api.h",
-    ],
-    visibility = ["//visibility:public"],
-    deps = [
-        "//src/v/base",
-        "//src/v/container:chunked_vector",
-        "//src/v/model",
-        "@seastar",
-    ],
-)
-
-redpanda_cc_library(
-    name = "datalake_throttle_manager",
-    srcs = [
-        "datalake_throttle_manager.cc",
-    ],
-    hdrs = [
-        "datalake_throttle_manager.h",
-    ],
-    visibility = [":__subpackages__"],
-    deps = [
-        ":logger",
-        "//src/v/base",
-        "//src/v/config",
-        "//src/v/container:chunked_hash_map",
-        "//src/v/metrics",
-        "//src/v/ssx:future_util",
-        "//src/v/storage",
-        "//src/v/utils:absl_sstring_hash",
-        "//src/v/utils:human",
-        "@boost//:range",
-        "@seastar",
-    ],
-)
-
-redpanda_cc_library(
     name = "errors",
     hdrs = [
         "errors.h",
     ],
     visibility = ["//visibility:public"],
     deps = [
-        "//src/v/cluster:cluster_link_errc",
         "//src/v/cluster:errc",
         "//src/v/cluster:tx_errc",
         "//src/v/kafka/protocol",
@@ -559,31 +490,9 @@ redpanda_cc_library(
     ],
     visibility = ["//src/v/redpanda:__pkg__"],
     deps = [
-        ":datalake_throttle_manager",
         ":qdc_monitor_config",
         "//src/v/cluster:fwd",
         "@seastar",
     ],
 )
 
-redpanda_cc_library(
-    name = "write_at_offset_stm",
-    srcs = [
-        "write_at_offset_stm.cc",
-    ],
-    hdrs = [
-        "write_at_offset_stm.h",
-    ],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":logger",
-        "//src/v/base",
-        "//src/v/cluster:snapshot",
-        "//src/v/cluster:state_machine_registry",
-        "//src/v/model:batch_utils",
-        "//src/v/raft",
-        "//src/v/raft:fundamental",
-        "//src/v/ssx:future_util",
-        "@seastar",
-    ],
-)

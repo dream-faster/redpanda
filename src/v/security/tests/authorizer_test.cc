@@ -10,7 +10,6 @@
 #include "config/mock_property.h"
 #include "container/chunked_vector.h"
 #include "kafka/protocol/types.h"
-#include "pandaproxy/schema_registry/types.h"
 #include "random/generators.h"
 #include "security/acl.h"
 #include "security/acl_store.h"
@@ -111,12 +110,8 @@ TEST(AUTHORIZER_TEST, authz_resource_type_auto) {
     ASSERT_EQ(
       get_resource_type<kafka::transactional_id>(),
       security::resource_type::transactional_id);
-    ASSERT_EQ(
-      get_resource_type<pandaproxy::schema_registry::context_subject>(),
-      security::resource_type::sr_subject);
-    ASSERT_EQ(
-      get_resource_type<pandaproxy::schema_registry::registry_resource>(),
-      security::resource_type::sr_registry);
+    ASSERT_EQ(security::resource_type::sr_subject);
+    ASSERT_EQ(security::resource_type::sr_registry);
 
     ASSERT_EQ(
       get_resource_type<model::topic>(), get_resource_type<model::topic>());
@@ -1922,114 +1917,6 @@ TEST(AUTHORIZER_TEST, role_authz_remove_binding_multiple_match) {
     ASSERT_EQ(get_acls(auth, wildcard_resource), expected);
 }
 
-TEST(AUTHORIZER_TEST, authz_filter_out_non_kafka_resources) {
-    namespace ppsr = pandaproxy::schema_registry;
-    acl_principal user(principal_type::user, "alice");
-    acl_host host("192.168.2.1");
-
-    auto auth = make_test_instance();
-
-    const acl_entry allow_all(
-      acl_wildcard_user,
-      acl_wildcard_host,
-      acl_operation::all,
-      acl_permission::allow);
-
-    const acl_entry allow_read(
-      acl_wildcard_user,
-      acl_wildcard_host,
-      acl_operation::read,
-      acl_permission::allow);
-
-    const acl_entry allow_describe(
-      acl_wildcard_user,
-      acl_wildcard_host,
-      acl_operation::describe,
-      acl_permission::allow);
-
-    chunked_vector<acl_binding> bindings;
-    resource_pattern subject_resource(
-      resource_type::sr_subject, "model-", pattern_type::prefixed);
-    resource_pattern registry_resource(
-      resource_type::sr_registry,
-      resource_pattern::wildcard,
-      pattern_type::literal);
-    resource_pattern topic_resource(
-      resource_type::topic, "model", pattern_type::literal);
-    bindings.emplace_back(subject_resource, allow_read);
-    bindings.emplace_back(registry_resource, allow_describe);
-    bindings.emplace_back(topic_resource, allow_all);
-    auth.add_bindings(bindings);
-
-    auto result = auth.authorized(
-      model::topic("model"),
-      acl_operation::read,
-      user,
-      host,
-      security::superuser_required::no,
-      {});
-    ASSERT_TRUE(result.is_authorized());
-
-    auto kafka_acls = get_acls(auth, acl_binding_filter::any());
-    ASSERT_EQ(kafka_acls.size(), 1);
-
-    auto sr_acls = get_acls(
-      auth,
-      acl_binding_filter::any(
-        resource_pattern_filter::resource_subsystem::schema_registry));
-    ASSERT_EQ(sr_acls.size(), 2);
-
-    // Check prefix match for schema registry subject
-    result = auth.authorized(
-      ppsr::context_subject::from_string("model-value"),
-      acl_operation::read,
-      user,
-      host,
-      security::superuser_required::no,
-      {});
-    ASSERT_TRUE(result.is_authorized());
-
-    // Check read implies describe
-    result = auth.authorized(
-      ppsr::context_subject::from_string("model-key"),
-      acl_operation::describe,
-      user,
-      host,
-      security::superuser_required::no,
-      {});
-    ASSERT_TRUE(result.is_authorized());
-
-    // Check read does not imply write
-    result = auth.authorized(
-      ppsr::context_subject::from_string("model-key"),
-      acl_operation::write,
-      user,
-      host,
-      security::superuser_required::no,
-      {});
-    ASSERT_FALSE(result.is_authorized());
-
-    // Check global resource
-    result = auth.authorized(
-      ppsr::registry_resource(),
-      acl_operation::describe,
-      user,
-      host,
-      security::superuser_required::no,
-      {});
-    ASSERT_TRUE(result.is_authorized());
-
-    // Check that describe does not imply read
-    result = auth.authorized(
-      ppsr::registry_resource(),
-      acl_operation::read,
-      user,
-      host,
-      security::superuser_required::no,
-      {});
-    ASSERT_FALSE(result.is_authorized());
-}
-
 TEST(AUTHORIZER_TEST, authz_superuser_required) {
     acl_principal superuser(principal_type::user, "superuser1");
     acl_principal normaluser(principal_type::user, "normaluser");
@@ -3212,72 +3099,6 @@ TEST(AUTHORIZER_TEST, group_authz_whitespace_chars_in_name) {
 }
 
 // Test ACL pattern types (prefix, literal, wildcard) for context subjects.
-TEST(AUTHORIZER_TEST, authz_sr_context_subject_patterns) {
-    namespace ppsr = pandaproxy::schema_registry;
-    auto user = acl_principal{principal_type::user, "user"};
-    auto host = acl_host{"192.168.2.1"};
-
-    auto check_access = [&](authorizer& auth, std::string_view subject) {
-        return auth
-          .authorized(
-            ppsr::context_subject::from_string(subject),
-            acl_operation::read,
-            user,
-            host,
-            security::superuser_required::no,
-            {})
-          .is_authorized();
-    };
-
-    // Prefix ACL: ":.staging:" should match all subjects in .staging context
-    {
-        auto auth = make_test_instance();
-        auth.add_bindings(
-          {{resource_pattern{
-              resource_type::sr_subject, ":.staging:", pattern_type::prefixed},
-            allow_read_acl}});
-
-        EXPECT_TRUE(check_access(auth, ":.staging:topic-1"));
-        EXPECT_TRUE(check_access(auth, ":.staging:topic-2"));
-        EXPECT_FALSE(check_access(auth, ":.prod:topic-1"));
-        EXPECT_FALSE(check_access(auth, "topic-1"));
-        EXPECT_FALSE(check_access(auth, ":.:topic-1"));
-    }
-
-    // Literal ACL: should match only exact subject
-    {
-        auto auth = make_test_instance();
-        auth.add_bindings(
-          {{resource_pattern{
-              resource_type::sr_subject,
-              ":.staging:topic-1",
-              pattern_type::literal},
-            allow_read_acl}});
-
-        EXPECT_TRUE(check_access(auth, ":.staging:topic-1"));
-        EXPECT_FALSE(check_access(auth, ":.staging:topic-2"));
-        EXPECT_FALSE(check_access(auth, ":.prod:topic-1"));
-        EXPECT_FALSE(check_access(auth, "topic-1"));
-        EXPECT_FALSE(check_access(auth, ":.:topic-1"));
-    }
-
-    // Wildcard ACL: should match all subjects
-    {
-        auto auth = make_test_instance();
-        auth.add_bindings(
-          {{resource_pattern{
-              resource_type::sr_subject,
-              resource_pattern::wildcard,
-              pattern_type::literal},
-            allow_read_acl}});
-
-        EXPECT_TRUE(check_access(auth, ":.staging:topic-1"));
-        EXPECT_TRUE(check_access(auth, ":.prod:topic-1"));
-        EXPECT_TRUE(check_access(auth, "topic-1"));
-        EXPECT_TRUE(check_access(auth, ":.:topic-1"));
-    }
-}
-
 // Tests for Group principal parsing and validation
 TEST(AUTHORIZER_TEST, parse_group_principal_from_string_view) {
     // Test the fixed from_string_view<principal_type> function

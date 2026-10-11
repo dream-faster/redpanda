@@ -16,7 +16,6 @@ from ducktape.mark import parametrize
 from rptest.clients.types import TopicSpec
 from rptest.services.cluster import cluster
 from rptest.services.failure_injector import FailureInjector, FailureSpec
-from rptest.services.redpanda import SISettings
 from rptest.tests.end_to_end import EndToEndTest
 from rptest.utils.mode_checks import skip_debug_mode
 
@@ -108,7 +107,6 @@ class SimpleEndToEndTest(EndToEndTest):
         # use small segment size to enable log eviction
         self.start_redpanda(
             num_nodes=3,
-            si_settings=SISettings(test_context=self.test_context, fast_uploads=True),
             extra_rp_conf={
                 "log_segment_size": 1048576,
                 "retention_bytes": 5242880,

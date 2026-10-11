@@ -8,13 +8,25 @@
  * https://github.com/redpanda-data/redpanda/blob/master/licenses/rcl.md
  */
 
+#include "base/units.h"
 #include "storage/offset_to_filepos.h"
-#include "test_utils/archival.h"
+#include "storage/tests/utils/disk_log_builder.h"
 #include "test_utils/tmp_dir.h"
 
 #include <seastar/util/defer.hh>
 
 #include <gtest/gtest.h>
+
+namespace {
+
+storage::disk_log_builder make_log_builder(std::string_view data_path) {
+    return storage::disk_log_builder{storage::log_config{
+      {data_path.data(), data_path.size()},
+      4_KiB,
+      storage::make_sanitized_file_config()}};
+}
+
+} // namespace
 
 TEST(OffsetToFileposTest, SearchBeginOffsetNotFound) {
     temporary_dir tmp_dir("offset_to_fpos_translate");

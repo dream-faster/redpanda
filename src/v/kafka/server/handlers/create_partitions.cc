@@ -263,16 +263,6 @@ ss::future<response_ptr> create_partitions_handler::handle(
             });
       });
 
-    valid_range_end = validate_range(
-      request.data.topics.begin(),
-      valid_range_end,
-      std::back_inserter(resp.data.results),
-      error_code::policy_violation,
-      "Topic belongs to an active cluster link",
-      [&ctx](const create_partitions_topic& tp) {
-          return ctx.is_topic_mutable(tp.name);
-      });
-
     const auto now = quota_manager::clock::now();
     const auto principal = ctx.connection()->get_principal();
     valid_range_end = co_await validate_range_async(

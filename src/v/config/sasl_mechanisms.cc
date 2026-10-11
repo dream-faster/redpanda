@@ -15,10 +15,6 @@
 
 namespace config {
 
-bool is_enterprise_sasl_mechanism(const ss::sstring& sasl_mech) {
-    return std::ranges::contains(enterprise_sasl_mechanisms, sasl_mech);
-}
-
 bool has_sasl_mechanism(const std::string_view sasl_mech) {
     const auto contains_mech =
       [sasl_mech](const std::vector<ss::sstring>& sasl_mechanisms) {
@@ -52,12 +48,6 @@ get_sasl_mechanisms(const std::string_view listener) {
 
 fmt::iterator sasl_mechanisms_override::format_to(fmt::iterator it) const {
     return fmt::format_to(it, "{{{}:{}}}", listener, sasl_mechanisms);
-}
-
-bool is_enterprise_sasl_mechanisms_override(
-  const sasl_mechanisms_override& rhs) {
-    return std::ranges::any_of(
-      rhs.sasl_mechanisms, is_enterprise_sasl_mechanism);
 }
 
 } // namespace config

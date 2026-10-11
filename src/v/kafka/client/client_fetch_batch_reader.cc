@@ -83,8 +83,7 @@ public:
 
     // Implements model::record_batch_reader::impl
     fmt::iterator format_to(fmt::iterator it) const final {
-        return fmt::format_to(
-          it, "{{pandaproxy::schema_registry::client_fetcher}}");
+        return fmt::format_to(it, "{{kafka::client::client_fetcher}}");
     }
 
 private:

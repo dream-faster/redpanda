@@ -18,7 +18,6 @@
 #include "model/metadata.h"
 #include "model/namespace.h"
 #include "model/timestamp.h"
-#include "pandaproxy/schema_registry/types.h"
 #include "strings/string_switch.h"
 #include "utils/tristate.h"
 
@@ -114,34 +113,6 @@ get_bool_value(const config_map_t& config, std::string_view key) {
     return std::nullopt;
 }
 
-model::shadow_indexing_mode
-get_shadow_indexing_mode(const config_map_t& config) {
-    auto arch_enabled = get_bool_value(config, topic_property_remote_write);
-    auto si_enabled = get_bool_value(config, topic_property_remote_read);
-
-    // If topic properties are missing, patch them with the cluster config.
-    if (!arch_enabled) {
-        arch_enabled
-          = config::shard_local_cfg().cloud_storage_enable_remote_write();
-    }
-
-    if (!si_enabled) {
-        si_enabled
-          = config::shard_local_cfg().cloud_storage_enable_remote_read();
-    }
-
-    model::shadow_indexing_mode mode = model::shadow_indexing_mode::disabled;
-    if (*arch_enabled) {
-        mode = model::shadow_indexing_mode::archival;
-    }
-    if (*si_enabled) {
-        mode = mode == model::shadow_indexing_mode::archival
-                 ? model::shadow_indexing_mode::full
-                 : model::shadow_indexing_mode::fetch;
-    }
-    return mode;
-}
-
 template<typename T>
 static std::optional<T>
 get_enum_value(const config_map_t& config, std::string_view key) {
@@ -196,9 +167,6 @@ to_cluster_type(const creatable_topic& t) {
       t.replication_factor,
       config_map(t.configs));
 
-    /// Final topic_property not decoded here is \ref remote_topic_properties,
-    /// is more of an implementation detail no need to ever show user
-
     auto ret = cluster::custom_assignable_topic_configuration(cfg);
     /**
      * handle custom assignments
@@ -247,29 +215,14 @@ cluster::topic_configuration to_topic_config(
     cfg.properties.retention_duration
       = get_tristate_value<std::chrono::milliseconds>(
         config_entries, topic_property_retention_duration);
-    cfg.properties.recovery = get_bool_value(
-      config_entries, topic_property_recovery);
-    cfg.properties.shadow_indexing = get_shadow_indexing_mode(config_entries);
-    cfg.properties.read_replica_bucket = get_string_value(
-      config_entries, topic_property_read_replica);
     cfg.properties.batch_max_bytes = get_config_value<uint32_t>(
       config_entries, topic_property_max_message_bytes);
-    if (cfg.properties.read_replica_bucket.has_value()) {
-        cfg.properties.read_replica = true;
-    }
 
     cfg.properties.retention_local_target_bytes = get_tristate_value<size_t>(
       config_entries, topic_property_retention_local_target_bytes);
     cfg.properties.retention_local_target_ms
       = get_tristate_value<std::chrono::milliseconds>(
         config_entries, topic_property_retention_local_target_ms);
-
-    cfg.properties.remote_delete
-      = get_bool_value(config_entries, topic_property_remote_delete)
-          .value_or(storage::ntp_config::default_remote_delete);
-
-    cfg.properties.remote_topic_allow_gaps = get_bool_value(
-      config_entries, topic_property_remote_allow_gaps);
 
     cfg.properties.segment_ms = get_tristate_value<std::chrono::milliseconds>(
       config_entries, topic_property_segment_ms);
@@ -294,37 +247,10 @@ cluster::topic_configuration to_topic_config(
     cfg.properties.flush_bytes = get_config_value<size_t>(
       config_entries, topic_property_flush_bytes);
 
-    cfg.properties.iceberg_mode
-      = get_config_value<model::iceberg_mode>(
-          config_entries, topic_property_iceberg_mode)
-          .value_or(storage::ntp_config::default_iceberg_mode);
-
     cfg.properties.leaders_preference = get_leaders_preference(config_entries);
 
     cfg.properties.delete_retention_ms = get_delete_retention_ms(
       config_entries);
-
-    cfg.properties.iceberg_delete = get_bool_value(
-      config_entries, topic_property_iceberg_delete);
-
-    cfg.properties.iceberg_partition_spec = get_string_value(
-      config_entries, topic_property_iceberg_partition_spec);
-
-    cfg.properties.iceberg_invalid_record_action
-      = get_enum_value<model::iceberg_invalid_record_action>(
-        config_entries, topic_property_iceberg_invalid_record_action);
-
-    cfg.properties.iceberg_target_lag_ms
-      = get_duration_value<std::chrono::milliseconds>(
-        config_entries, topic_property_iceberg_target_lag_ms);
-
-    if (
-      auto s = get_string_value(
-        config_entries, topic_property_schema_registry_context);
-      s.has_value() && !s->empty()) {
-        cfg.properties.schema_registry_context
-          = pandaproxy::schema_registry::context{std::move(*s)};
-    }
 
     cfg.properties.min_cleanable_dirty_ratio = get_tristate_value<double>(
       config_entries, topic_property_min_cleanable_dirty_ratio);
@@ -353,62 +279,6 @@ cluster::topic_configuration to_topic_config(
         topic_property_message_timestamp_after_max_ms,
         /*clamp_to_duration_max=*/true);
 
-    // The exact implementation (redpanda.storage.mode.impl) wins over the
-    // alias-resolved mode. Malformed combinations are rejected by
-    // storage_mode_config_validator before conversion.
-    cfg.properties.storage_mode
-      = get_string_value(
-          config_entries, topic_property_redpanda_storage_mode_impl)
-          .and_then([](const ss::sstring& raw) {
-              return model::redpanda_storage_mode_from_impl_string(raw);
-          })
-          .or_else([&config_entries]() {
-              return get_string_value(
-                       config_entries, topic_property_redpanda_storage_mode)
-                .and_then([](const ss::sstring& raw) {
-                    return model::redpanda_storage_mode_from_user_string(
-                      raw,
-                      config::shard_local_cfg()
-                        .default_redpanda_storage_mode_tiered_impl());
-                });
-          })
-          .value_or(config::shard_local_cfg().default_redpanda_storage_mode());
-
-    schema_id_validation_config_parser schema_id_validation_config_parser{
-      cfg.properties};
-
-    for (const auto& [name, value] : config_entries) {
-        schema_id_validation_config_parser(
-          name, value, kafka::config_resource_operation::set);
-    }
-
-    return cfg;
-}
-
-cluster::topic_configuration
-schema_registry_topic_configuration(int16_t replication_factor) {
-    // Create the base topic configuration to get the cluster defaults
-    auto cfg = to_topic_config(
-      model::kafka_namespace,
-      model::schema_registry_internal_tp.topic,
-      /*partition_count=*/1,
-      replication_factor,
-      {});
-    // Now update the properties
-    cfg.properties.cleanup_policy_bitflags
-      = model::cleanup_policy_bitflags::compaction;
-    cfg.properties.compression = model::compression::none;
-    cfg.properties.retention_bytes = tristate<size_t>{disable_tristate};
-    cfg.properties.retention_duration = tristate<std::chrono::milliseconds>{
-      disable_tristate};
-    cfg.properties.retention_local_target_bytes = tristate<size_t>{
-      disable_tristate};
-    cfg.properties.retention_local_target_ms
-      = tristate<std::chrono::milliseconds>{disable_tristate};
-    cfg.properties.initial_retention_local_target_bytes = tristate<size_t>{
-      disable_tristate};
-    cfg.properties.initial_retention_local_target_ms
-      = tristate<std::chrono::milliseconds>{disable_tristate};
     return cfg;
 }
 

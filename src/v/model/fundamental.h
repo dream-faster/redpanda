@@ -77,43 +77,6 @@ inline constexpr offset operator-(offset o, offset_delta d) { return o + (-d); }
 
 } // namespace kafka
 
-namespace cloud_storage_clients {
-
-/// Bucket name type stores a plain cloud storage bucket name or a data source
-/// name (DSN) that includes bucket name and optional connection parameters
-/// overriding cluster configuration.
-///
-/// No secret information is stored in this type. It can be logged or displayed
-/// to the user as is.
-///
-/// Examples:
-///   - my-bucket
-///   - my-bucket?region=us-west-2&endpoint=http://localhost:9000
-///
-/// History note: The connection parameters in DSN format were introduced to
-/// support cross-region bucket access for Remote Read Replicas feature
-/// (https://redpandadata.atlassian.net/browse/CORE-12797). In general, the new
-/// format can be used by any feature that requires overriding cluster-level
-/// connection settings on per-bucket basis.
-using bucket_name = named_type<ss::sstring, struct bucket_name_tag>;
-
-/// Plain bucket name is the actual bucket name without any connection
-/// parameters.
-///
-/// Examples:
-///   - my-bucket
-///   - another-bucket
-using plain_bucket_name = named_type<ss::sstring, struct plain_bucket_name_tag>;
-
-} // namespace cloud_storage_clients
-
-namespace cloud_storage {
-/// Segment path in S3, expected format:
-/// <prefix>/<ns>/<topic>/<part-id>_<rev>/<base-offset>-<term-id>-<revision>.log.<archiver-term>
-using remote_segment_path
-  = named_type<std::filesystem::path, struct archival_remote_segment_path_t>;
-} // namespace cloud_storage
-
 namespace model {
 
 using node_uuid = named_type<uuid_t, struct node_uuid_type>;
@@ -456,85 +419,6 @@ using control_record_version
   = named_type<int16_t, struct control_record_version_tag>;
 
 inline constexpr control_record_version current_control_record_version{0};
-
-enum class shadow_indexing_mode : uint8_t {
-    // Upload is disabled
-    disabled = 0,
-    // Only upload data to the object storage
-    archival = 1,
-    // Enable download from object storage
-    fetch = 2,
-    // Enable both upload and download
-    full = 3,
-    // Remove archival flag (used for incremental updates)
-    drop_archival = 0xfe,
-    // Remove fetch flag (used for incremental updates)
-    drop_fetch = 0xfd,
-    // Remove both fetch and archival flags
-    drop_full = 0xfc,
-};
-
-inline bool is_archival_enabled(shadow_indexing_mode m) {
-    return m == shadow_indexing_mode::archival
-           || m == shadow_indexing_mode::full;
-}
-
-inline bool is_fetch_enabled(shadow_indexing_mode m) {
-    return m == shadow_indexing_mode::fetch || m == shadow_indexing_mode::full;
-}
-
-/// Set 'rhs' flag in 'lhs'
-constexpr shadow_indexing_mode
-add_shadow_indexing_flag(shadow_indexing_mode lhs, shadow_indexing_mode rhs) {
-    using underlying = std::underlying_type_t<shadow_indexing_mode>;
-    if (
-      rhs == shadow_indexing_mode::drop_archival
-      || rhs == shadow_indexing_mode::drop_fetch
-      || rhs == shadow_indexing_mode::drop_full) {
-        auto combined = underlying(lhs) & underlying(rhs);
-        return shadow_indexing_mode(combined);
-    }
-    auto combined = underlying(lhs) | underlying(rhs);
-    return shadow_indexing_mode(combined);
-}
-
-/// Turn normal shadow indexing flag into a 'drop_' flag. This flag
-/// can be used with 'add_shadow_indexing_flag' function to remove the flag.
-constexpr shadow_indexing_mode
-negate_shadow_indexing_flag(shadow_indexing_mode m) {
-    using underlying = std::underlying_type_t<shadow_indexing_mode>;
-    return shadow_indexing_mode(~underlying(m));
-}
-
-static_assert(
-  add_shadow_indexing_flag(
-    shadow_indexing_mode::fetch,
-    negate_shadow_indexing_flag(shadow_indexing_mode::fetch))
-  == shadow_indexing_mode::disabled);
-static_assert(
-  add_shadow_indexing_flag(
-    shadow_indexing_mode::fetch, shadow_indexing_mode::drop_fetch)
-  == shadow_indexing_mode::disabled);
-static_assert(
-  add_shadow_indexing_flag(
-    shadow_indexing_mode::archival,
-    negate_shadow_indexing_flag(shadow_indexing_mode::archival))
-  == shadow_indexing_mode::disabled);
-static_assert(
-  add_shadow_indexing_flag(
-    shadow_indexing_mode::archival, shadow_indexing_mode::drop_archival)
-  == shadow_indexing_mode::disabled);
-static_assert(
-  add_shadow_indexing_flag(
-    shadow_indexing_mode::full,
-    negate_shadow_indexing_flag(shadow_indexing_mode::full))
-  == shadow_indexing_mode::disabled);
-static_assert(
-  add_shadow_indexing_flag(
-    shadow_indexing_mode::full, shadow_indexing_mode::drop_full)
-  == shadow_indexing_mode::disabled);
-
-fmt::iterator format_to(shadow_indexing_mode si, fmt::iterator out);
 
 using client_address_t = ss::socket_address;
 

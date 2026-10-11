@@ -31,12 +31,10 @@ namespace cluster {
 
 metadata_cache::metadata_cache(
   ss::sharded<topic_table>& tp,
-  ss::sharded<data_migrations::migrated_resources>& mr,
   ss::sharded<members_table>& m,
   ss::sharded<partition_leaders_table>& leaders,
   ss::sharded<health_monitor_frontend>& health_monitor)
   : _topics_state(tp)
-  , _migrated_resources(mr)
   , _members_table(m)
   , _leaders(leaders)
   , _health_monitor(health_monitor) {}
@@ -145,17 +143,6 @@ std::vector<model::node_id> metadata_cache::node_ids() const {
 bool metadata_cache::should_reject_writes() const {
     return _health_monitor.local().get_cluster_data_disk_health()
            == storage::disk_space_alert::degraded;
-}
-
-bool metadata_cache::should_reject_reads(model::topic_namespace_view tp) const {
-    return _migrated_resources.local().get_topic_state(tp)
-           >= data_migrations::migrated_resource_state::create_only;
-}
-
-bool metadata_cache::should_reject_writes(
-  model::topic_namespace_view tp) const {
-    return _migrated_resources.local().get_topic_state(tp)
-           >= data_migrations::migrated_resource_state::read_only;
 }
 
 bool metadata_cache::contains(
@@ -283,50 +270,14 @@ uint32_t metadata_cache::get_default_batch_max_bytes() const {
     return config::shard_local_cfg().kafka_batch_max_bytes();
 }
 
-model::shadow_indexing_mode
-metadata_cache::get_default_shadow_indexing_mode() const {
-    model::shadow_indexing_mode m = model::shadow_indexing_mode::disabled;
-    if (config::shard_local_cfg().cloud_storage_enable_remote_write()) {
-        m = model::shadow_indexing_mode::archival;
-    }
-    if (config::shard_local_cfg().cloud_storage_enable_remote_read()) {
-        m = model::add_shadow_indexing_flag(
-          m, model::shadow_indexing_mode::fetch);
-    }
-    return m;
-}
-
 std::optional<std::chrono::milliseconds>
 metadata_cache::get_default_segment_ms() const {
     return config::shard_local_cfg().log_segment_ms();
 }
 
-bool metadata_cache::get_default_record_key_schema_id_validation() const {
-    return false;
-}
-
-pandaproxy::schema_registry::subject_name_strategy
-metadata_cache::get_default_record_key_subject_name_strategy() const {
-    return pandaproxy::schema_registry::subject_name_strategy::topic_name;
-}
-
-bool metadata_cache::get_default_record_value_schema_id_validation() const {
-    return false;
-}
-
-pandaproxy::schema_registry::subject_name_strategy
-metadata_cache::get_default_record_value_subject_name_strategy() const {
-    return pandaproxy::schema_registry::subject_name_strategy::topic_name;
-}
-
 std::optional<std::chrono::milliseconds>
 metadata_cache::get_default_delete_retention_ms() const {
     return config::shard_local_cfg().tombstone_retention_ms();
-}
-
-std::chrono::milliseconds
-metadata_cache::get_default_iceberg_target_lag_ms() const {
-    return config::shard_local_cfg().iceberg_target_lag_ms();
 }
 
 std::optional<double>
@@ -354,10 +305,6 @@ metadata_cache::get_default_message_timestamp_after_max_ms() const {
     return config::shard_local_cfg().log_message_timestamp_after_max_ms();
 }
 
-model::redpanda_storage_mode metadata_cache::get_default_storage_mode() const {
-    return config::shard_local_cfg().default_redpanda_storage_mode();
-}
-
 topic_properties metadata_cache::get_default_properties() const {
     topic_properties tp;
     tp.compression = {get_default_compression()};
@@ -368,8 +315,6 @@ topic_properties metadata_cache::get_default_properties() const {
     tp.retention_bytes = tristate<size_t>({get_default_retention_bytes()});
     tp.retention_duration = tristate<std::chrono::milliseconds>(
       {get_default_retention_duration()});
-    tp.recovery = {false};
-    tp.shadow_indexing = {get_default_shadow_indexing_mode()};
     tp.batch_max_bytes = get_default_batch_max_bytes();
     tp.retention_local_target_bytes = tristate{
       get_default_retention_local_target_bytes()};
@@ -385,7 +330,6 @@ topic_properties metadata_cache::get_default_properties() const {
       = get_default_message_timestamp_before_max_ms();
     tp.message_timestamp_after_max_ms
       = get_default_message_timestamp_after_max_ms();
-    tp.storage_mode = get_default_storage_mode();
 
     return tp;
 }

@@ -11,7 +11,6 @@
 #include "config/configuration.h"
 #include "config/node_config.h"
 #include "kafka/client/configuration.h"
-#include "pandaproxy/rest/configuration.h"
 #include "resource_mgmt/scheduling_groups_probe.h"
 #include "storage/api.h"
 #include "storage/backlog_controller.h"
@@ -51,36 +50,6 @@ void set_local_kafka_client_config(
       });
     if (tls_it != kafka_api_tls.end()) {
         client_config->broker_tls.set_value(tls_it->config);
-    }
-}
-
-void set_pp_kafka_client_defaults(
-  pandaproxy::rest::configuration& proxy_config,
-  kafka::client::configuration& client_config) {
-    // override pandaparoxy_client.consumer_session_timeout_ms with
-    // pandaproxy.consumer_instance_timeout_ms
-    client_config.consumer_session_timeout.set_value(
-      proxy_config.consumer_instance_timeout.value());
-
-    if (!client_config.client_identifier.is_overriden()) {
-        client_config.client_identifier.set_value(
-          std::make_optional<ss::sstring>("pandaproxy_client"));
-    }
-}
-
-void set_sr_kafka_client_defaults(kafka::client::configuration& client_config) {
-    if (!client_config.produce_batch_delay.is_overriden()) {
-        client_config.produce_batch_delay.set_value(0ms);
-    }
-    if (!client_config.produce_batch_record_count.is_overriden()) {
-        client_config.produce_batch_record_count.set_value(int32_t(0));
-    }
-    if (!client_config.produce_batch_size_bytes.is_overriden()) {
-        client_config.produce_batch_size_bytes.set_value(int32_t(0));
-    }
-    if (!client_config.client_identifier.is_overriden()) {
-        client_config.client_identifier.set_value(
-          std::make_optional<ss::sstring>("schema_registry_client"));
     }
 }
 
@@ -253,34 +222,4 @@ compaction_controller_config(ss::scheduling_group sg, uint64_t fs_avail) {
       sg,
       config::shard_local_cfg().compaction_ctrl_min_shares.bind(),
       config::shard_local_cfg().compaction_ctrl_max_shares.bind());
-}
-
-storage::backlog_controller_config
-make_upload_controller_config(ss::scheduling_group sg, uint64_t fs_avail) {
-    // This settings are similar to compaction_controller_config.
-    // The desired setpoint for archival is set to 0 since the goal is to upload
-    // all data that we have.
-    // If the size of the backlog (the data which should be uploaded to S3) is
-    // larger than this value we need to bump the scheduling priority.
-    // Otherwise, we're good with the minimal.
-    // Since the setpoint is 0 we can't really use integral component of the
-    // controller. This is because upload backlog size never gets negative so
-    // once integral part will rump up high enough it won't be able to go down
-    // even if everything is uploaded.
-
-    auto setpoint_function = []() { return 0; };
-    int64_t normalization = static_cast<int64_t>(fs_avail)
-                            / (1000 * ss::this_smp_shard_count());
-    return {
-      config::shard_local_cfg().cloud_storage_upload_ctrl_p_coeff.bind(),
-      config::mock_binding(0.0),
-      config::shard_local_cfg().cloud_storage_upload_ctrl_d_coeff.bind(),
-      normalization,
-      std::move(setpoint_function),
-      static_cast<int>(sg.get_shares()),
-      config::shard_local_cfg()
-        .cloud_storage_upload_ctrl_update_interval_ms.bind(),
-      sg,
-      config::shard_local_cfg().cloud_storage_upload_ctrl_min_shares.bind(),
-      config::shard_local_cfg().cloud_storage_upload_ctrl_max_shares.bind()};
 }

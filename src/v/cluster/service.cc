@@ -9,11 +9,10 @@
 
 #include "cluster/service.h"
 
+#include "base/outcome.h"
 #include "base/vlog.h"
 #include "cluster/client_quota_frontend.h"
 #include "cluster/client_quota_serde.h"
-#include "cluster/cluster_link/frontend.h"
-#include "cluster/cluster_link_rpc_types.h"
 #include "cluster/cluster_utils.h"
 #include "cluster/config_frontend.h"
 #include "cluster/controller.h"
@@ -30,12 +29,11 @@
 #include "cluster/metadata_cache.h"
 #include "cluster/node_status_backend.h"
 #include "cluster/partition_manager.h"
-#include "cluster/plugin_frontend.h"
-#include "cluster/plugin_rpc_types.h"
 #include "cluster/security_frontend.h"
 #include "cluster/topics_frontend.h"
 #include "cluster/types.h"
 #include "config/configuration.h"
+#include "config/node_config.h"
 #include "model/fundamental.h"
 #include "model/timeout_clock.h"
 #include "rpc/connection_cache.h"
@@ -52,7 +50,6 @@ service::service(
   ss::smp_service_group ssg,
   controller* controller,
   ss::sharded<topics_frontend>& tf,
-  ss::sharded<plugin_frontend>& pf,
   ss::sharded<members_manager>& mm,
   ss::sharded<metadata_cache>& cache,
   ss::sharded<security_frontend>& sf,
@@ -66,8 +63,7 @@ service::service(
   ss::sharded<rpc::connection_cache>& conn_cache,
   ss::sharded<partition_manager>& partition_manager,
   ss::sharded<node_status_backend>& node_status_backend,
-  ss::sharded<client_quota::frontend>& quotas_frontend,
-  ss::sharded<cluster_link::frontend>& cluster_link_frontend)
+  ss::sharded<client_quota::frontend>& quotas_frontend)
   : controller_service(sg, ssg)
   , _controller(controller)
   , _topics_frontend(tf)
@@ -83,10 +79,8 @@ service::service(
   , _hm_frontend(hm_frontend)
   , _conn_cache(conn_cache)
   , _partition_manager(partition_manager)
-  , _plugin_frontend(pf)
   , _node_status_backend(node_status_backend)
-  , _quotas_frontend(quotas_frontend)
-  , _cluster_link_frontend(cluster_link_frontend) {}
+  , _quotas_frontend(quotas_frontend) {}
 
 namespace {
 
@@ -732,72 +726,6 @@ ss::future<producer_id_lookup_reply> service::highest_producer_id(
     co_return reply;
 }
 
-ss::future<cloud_storage_usage_reply> service::cloud_storage_usage(
-  cloud_storage_usage_request req, rpc::streaming_context&) {
-    return ss::with_scheduling_group(get_scheduling_group(), [this, req]() {
-        return do_cloud_storage_usage(req);
-    });
-}
-
-ss::future<cloud_storage_usage_reply>
-service::do_cloud_storage_usage(cloud_storage_usage_request req) {
-    struct res_type {
-        uint64_t total_size{0};
-        std::vector<model::ntp> missing_partitions;
-    };
-
-    std::vector<model::ntp> missing_ntps;
-
-    absl::flat_hash_map<ss::shard_id, std::vector<model::ntp>> ntps_by_shard;
-    for (const auto& ntp : req.partitions) {
-        auto shard = _api.local().shard_for(ntp);
-        if (!shard) {
-            missing_ntps.push_back(ntp);
-        } else {
-            ntps_by_shard[*shard].push_back(ntp);
-        }
-    }
-
-    res_type result = co_await _partition_manager.map_reduce0(
-      [&partitions = ntps_by_shard](const partition_manager& pm) {
-          auto iter = partitions.find(ss::this_shard_id());
-          if (iter == partitions.end()) {
-              return res_type{};
-          }
-
-          const auto& ntps_for_shard = iter->second;
-
-          std::vector<model::ntp> missing_partitions_on_shard;
-          uint64_t size_on_shard = 0;
-          for (const auto& ntp : ntps_for_shard) {
-              auto partition = pm.get(ntp);
-
-              if (!partition) {
-                  missing_partitions_on_shard.push_back(ntp);
-              } else {
-                  size_on_shard += partition->cloud_log_size().value_or(0);
-              }
-          }
-          return res_type{
-            .total_size = size_on_shard,
-            .missing_partitions = std::move(missing_partitions_on_shard)};
-      },
-      res_type{.missing_partitions = std::move(missing_ntps)},
-      [](res_type acc, res_type map_result) {
-          acc.total_size += map_result.total_size;
-          acc.missing_partitions.insert(
-            acc.missing_partitions.end(),
-            std::make_move_iterator(map_result.missing_partitions.begin()),
-            std::make_move_iterator(map_result.missing_partitions.end()));
-
-          return acc;
-      });
-
-    co_return cloud_storage_usage_reply{
-      .total_size_bytes = result.total_size,
-      .missing_partitions = std::move(result.missing_partitions)};
-}
-
 ss::future<partition_state_reply> service::get_partition_state(
   partition_state_request req, rpc::streaming_context&) {
     return ss::with_scheduling_group(get_scheduling_group(), [this, req]() {
@@ -853,28 +781,6 @@ service::do_get_partition_state(partition_state_request req) {
       });
 }
 
-ss::future<upsert_plugin_response>
-service::upsert_plugin(upsert_plugin_request req, rpc::streaming_context&) {
-    // Capture the request values in this coroutine
-    auto transform = std::move(req.transform);
-    auto deadline = model::timeout_clock::now() + req.timeout;
-    co_await ss::coroutine::switch_to(get_scheduling_group());
-    auto ec = co_await _plugin_frontend.local().upsert_transform(
-      std::move(transform), deadline);
-    co_return upsert_plugin_response{.ec = ec};
-}
-
-ss::future<remove_plugin_response>
-service::remove_plugin(remove_plugin_request req, rpc::streaming_context&) {
-    // Capture the request values in this coroutine
-    auto name = std::move(req.name);
-    auto deadline = model::timeout_clock::now() + req.timeout;
-    co_await ss::coroutine::switch_to(get_scheduling_group());
-    auto result = co_await _plugin_frontend.local().remove_transform(
-      name, deadline);
-    co_return remove_plugin_response{.uuid = result.uuid, .ec = result.ec};
-}
-
 ss::future<delete_topics_reply>
 service::delete_topics(delete_topics_request req, rpc::streaming_context&) {
     // Capture the request values in this coroutine
@@ -902,92 +808,6 @@ ss::future<client_quota::alter_quotas_response> service::alter_client_quotas(
     auto ec = co_await _quotas_frontend.local().alter_quotas(
       std::move(req.cmd_data), deadline);
     co_return client_quota::alter_quotas_response{.ec = ec};
-}
-
-ss::future<upsert_cluster_link_response> service::upsert_cluster_link(
-  upsert_cluster_link_request req, rpc::streaming_context&) {
-    auto meta = std::move(req.metadata);
-    auto deadline = model::timeout_clock::now() + req.timeout;
-    auto result = co_await _cluster_link_frontend.local().upsert_cluster_link(
-      std::move(meta), deadline);
-    co_return upsert_cluster_link_response{.ec = result};
-}
-
-ss::future<remove_cluster_link_response> service::remove_cluster_link(
-  remove_cluster_link_request req, rpc::streaming_context&) {
-    auto name = std::move(req.cmd.link_name);
-    auto force = req.cmd.force;
-    auto deadline = model::timeout_clock::now() + req.timeout;
-    auto result = co_await _cluster_link_frontend.local().remove_cluster_link(
-      std::move(name), force, deadline);
-    co_return remove_cluster_link_response{.ec = result};
-}
-
-ss::future<add_mirror_topic_response> service::add_mirror_topic(
-  add_mirror_topic_request req, rpc::streaming_context&) {
-    auto deadline = model::timeout_clock::now() + req.timeout;
-    auto result = co_await _cluster_link_frontend.local().add_mirror_topic(
-      req.link_id, std::move(req.cmd), deadline);
-    co_return add_mirror_topic_response{.ec = result};
-}
-
-ss::future<update_mirror_topic_status_response>
-service::update_mirror_topic_status(
-  update_mirror_topic_status_request req, rpc::streaming_context&) {
-    auto deadline = model::timeout_clock::now() + req.timeout;
-    auto result
-      = co_await _cluster_link_frontend.local().update_mirror_topic_status(
-        req.link_id, std::move(req.cmd), deadline);
-    co_return update_mirror_topic_status_response{.ec = result};
-}
-
-ss::future<batch_update_mirror_topic_status_response>
-service::batch_update_mirror_topic_status(
-  batch_update_mirror_topic_status_request req, rpc::streaming_context&) {
-    auto deadline = model::timeout_clock::now() + req.timeout;
-    auto result = co_await _cluster_link_frontend.local()
-                    .batch_update_mirror_topic_status(
-                      req.link_id, std::move(req.cmd), deadline);
-    co_return batch_update_mirror_topic_status_response{.ec = result};
-}
-
-ss::future<update_mirror_topic_properties_response>
-service::update_mirror_topic_properties(
-  update_mirror_topic_properties_request req, rpc::streaming_context&) {
-    auto deadline = model::timeout_clock::now() + req.timeout;
-    auto result
-      = co_await _cluster_link_frontend.local().update_mirror_topic_properties(
-        req.link_id, std::move(req.cmd), deadline);
-    co_return update_mirror_topic_properties_response{.ec = result};
-}
-
-ss::future<update_cluster_link_configuration_response>
-service::update_cluster_link_configuration(
-  update_cluster_link_configuration_request req, rpc::streaming_context&) {
-    auto deadline = model::timeout_clock::now() + req.timeout;
-    auto result = co_await _cluster_link_frontend.local()
-                    .update_cluster_link_configuration(
-                      req.link_id, std::move(req.cmd), deadline);
-    co_return update_cluster_link_configuration_response{.ec = result};
-}
-
-ss::future<delete_mirror_topic_response> service::delete_mirror_topic(
-  delete_mirror_topic_request req, rpc::streaming_context&) {
-    auto deadline = model::timeout_clock::now() + req.timeout;
-    auto result = co_await _cluster_link_frontend.local().delete_mirror_topic(
-      req.link_id, std::move(req.cmd), deadline);
-    co_return delete_mirror_topic_response{.ec = result};
-}
-
-ss::future<get_current_cluster_epoch_response>
-service::get_current_cluster_epoch(
-  get_current_cluster_epoch_request, ::rpc::streaming_context&) {
-    auto result = co_await _controller->get_cluster_epoch_generator().invoke_on(
-      controller_stm_shard, &cluster_epoch_service<>::get_current_epoch);
-    co_return get_current_cluster_epoch_response{
-      .ec = result ? errc::success : errc::not_leader_controller,
-      .epoch = result.value_or(-1),
-    };
 }
 
 } // namespace cluster

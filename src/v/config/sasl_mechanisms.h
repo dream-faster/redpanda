@@ -25,19 +25,10 @@
 
 namespace config {
 
-inline constexpr std::string_view gssapi{"GSSAPI"};
 inline constexpr std::string_view scram{"SCRAM"};
-inline constexpr std::string_view oauthbearer{"OAUTHBEARER"};
 inline constexpr std::string_view plain{"PLAIN"};
 inline constexpr auto supported_sasl_mechanisms
-  = std::to_array<std::string_view>({gssapi, scram, oauthbearer, plain});
-
-// Source of truth about which sasl mechanisms are enterprise values.
-inline constexpr auto enterprise_sasl_mechanisms
-  = std::to_array<std::string_view>({gssapi, oauthbearer});
-
-// Checks if a mechanism is within the enterprise sasl mechanisms array
-bool is_enterprise_sasl_mechanism(const ss::sstring& sasl_mech);
+  = std::to_array<std::string_view>({scram, plain});
 
 // Checks if `sasl_mech` is enabled in sasl_mechanisms config or any override
 bool has_sasl_mechanism(const std::string_view sasl_mech);
@@ -60,10 +51,6 @@ struct sasl_mechanisms_override {
 
     fmt::iterator format_to(fmt::iterator it) const;
 };
-
-// Checks if there are any enterprise sasl mechanisms in this override
-bool is_enterprise_sasl_mechanisms_override(
-  const sasl_mechanisms_override& overide);
 
 namespace detail {
 

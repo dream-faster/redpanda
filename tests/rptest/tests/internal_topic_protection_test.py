@@ -22,11 +22,9 @@ from rptest.clients.rpk import RpkException, RpkTool
 from rptest.clients.types import TopicSpec
 from rptest.services.admin import Admin
 from rptest.services.cluster import cluster
-from rptest.services.redpanda import SchemaRegistryConfig
 from rptest.tests.cluster_config_test import wait_for_version_sync
 from rptest.tests.redpanda_test import RedpandaTest
 from rptest.util import expect_exception, wait_until_result
-from rptest.utils.schema_registry_utils import get_subjects
 
 
 class InternalTopicProtectionTest(RedpandaTest):
@@ -216,8 +214,8 @@ class InternalTopicAutoCreateTest(RedpandaTest):
     With `auto_create_topics_enabled=true`, a metadata request that names an
     internal topic (with the request's allow_auto_topic_creation flag set)
     must create the topic with its owning subsystem's configuration, not
-    cluster defaults. Otherwise e.g. `_schemas` would end up on the default
-    delete cleanup policy and schema data would be subject to retention.
+    cluster defaults. Otherwise e.g. `__consumer_offsets` would end up on the
+    default delete cleanup policy and group data would be subject to retention.
     """
 
     def __init__(self, *args, **kwargs):
@@ -287,26 +285,6 @@ class InternalTopicAutoCreateTest(RedpandaTest):
         )
 
     @cluster(num_nodes=3)
-    def test_schemas_topic(self):
-        self._metadata_auto_create("_schemas")
-
-        partitions = self._partitions("_schemas")
-        assert len(partitions) == 1, f"Expected 1 partition but got {len(partitions)}"
-        assert len(partitions[0].replicas) == 3, (
-            f"Expected RF of 3 but got {len(partitions[0].replicas)}"
-        )
-        configs = self.rpk.describe_topic_configs("_schemas")
-        cleanup_policy, source = configs["cleanup.policy"]
-        assert (cleanup_policy, source) == ("compact", "DYNAMIC_TOPIC_CONFIG"), (
-            f"Expected explicitly-set compact cleanup.policy but got "
-            f"{cleanup_policy} ({source})"
-        )
-        retention_ms, _ = configs["retention.ms"]
-        assert retention_ms == "-1", (
-            f"Expected disabled retention.ms but got {retention_ms}"
-        )
-
-    @cluster(num_nodes=3)
     def test_audit_log_topic(self):
         self._metadata_auto_create("_redpanda.audit_log")
 
@@ -338,7 +316,6 @@ class InternalTopicProtectionLargeClusterTest(RedpandaTest):
 
     def __init__(self, *args, **kwargs):
         kwargs["num_brokers"] = 5
-        kwargs["schema_registry_config"] = SchemaRegistryConfig()
         super().__init__(*args, extra_rp_conf={}, **kwargs)
 
         self.rpk = RpkTool(self.redpanda)
@@ -354,39 +331,6 @@ class InternalTopicProtectionLargeClusterTest(RedpandaTest):
         # Set minimum Rf to 5
         self._modify_cluster_config({"default_topic_replications": 5})
         self._modify_cluster_config({"minimum_topic_replications": 5})
-
-    @cluster(num_nodes=5)
-    def test_schemas_topic(self):
-        # Now access the SR, which should result in an RF of 3
-        _ = get_subjects(self.redpanda.nodes, self.logger)
-
-        topics = self.rpk.list_topics()
-        assert "_schemas" in topics, f"_schemas not in topics {topics}"
-
-        def schemas_topic_ready():
-            partitions = list(self.rpk.describe_topic("_schemas"))
-            return (len(partitions) > 0, partitions)
-
-        partitions = wait_until_result(
-            schemas_topic_ready,
-            timeout_sec=30,
-            backoff_sec=1,
-            err_msg="_schemas topic never became ready",
-        )
-        config = partitions[0]
-        assert len(config.replicas) == 3, (
-            f"Expected RF of 3 for _schemas but got {len(config.replicas)}"
-        )
-
-        self.redpanda.restart_nodes(nodes=self.redpanda.nodes)
-
-        num_found = self.redpanda.count_log_node(
-            self.redpanda.nodes[0],
-            "Topic {kafka/_schemas} has a replication factor less than specified",
-        )
-        assert num_found == 0, (
-            f"Expected to find 0 messages about _schemas but found {num_found}"
-        )
 
     @cluster(num_nodes=5)
     def test_consumer_offset_topic(self):
@@ -405,5 +349,5 @@ class InternalTopicProtectionLargeClusterTest(RedpandaTest):
             "Topic {kafka/__consumer_offsets} has a replication factor less than specified",
         )
         assert num_found == 0, (
-            f"Expected to find 0 messages about _schemas but found {num_found}"
+            f"Expected to find 0 messages about __consumer_offsets but found {num_found}"
         )

@@ -1,4 +1,4 @@
-load("@rules_go//go:def.bzl", "go_library", "go_test")
+load("@rules_go//go:def.bzl", "go_library")
 
 go_library(
     name = "embed",
@@ -26,16 +26,4 @@ go_library(
     ],
     importpath = "github.com/redpanda-data/redpanda/src/go/rpk/pkg/serde/embed",
     visibility = ["//visibility:public"],
-)
-
-go_test(
-    name = "embed_test",
-    size = "small",
-    srcs = ["embed_test.go"],
-    data = [
-        "//src/v/schema/protobuf:confluent_type_proto_files",
-        "//src/v/schema/protobuf:google_type_proto_files",
-    ],
-    embed = [":embed"],
-    deps = ["@com_github_stretchr_testify//require"],
 )

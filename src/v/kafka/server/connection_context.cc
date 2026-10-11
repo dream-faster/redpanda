@@ -33,8 +33,6 @@
 #include "model/fundamental.h"
 #include "net/exceptions.h"
 #include "security/authorizer.h"
-#include "security/gssapi_authenticator.h"
-#include "security/oidc_authenticator.h"
 #include "security/plain_authenticator.h"
 #include "security/scram_authenticator.h"
 
@@ -648,12 +646,6 @@ connection_context::record_tp_and_calculate_throttle(
         auto produce_delay
           = co_await _server.quota_mgr().record_produce_tp_and_throttle(
             principal.name_view(), r_data.client_id, request_size, now);
-        auto datalake_produce_delay
-          = co_await _server.get_datalake_producer_throttle(r_data.client_id);
-
-        produce_delay = std::max(
-          produce_delay,
-          std::chrono::duration_cast<clock::duration>(datalake_produce_delay));
         auto produce_enforced = _throttling_state.update_produce_delay(
           produce_delay, now);
         client_quota_delay = delay_t{
@@ -927,12 +919,6 @@ proto::admin::kafka_connection connection_context::to_proto() const {
               .match(
                 security::scram_sha512_authenticator::name,
                 proto::admin::authentication_mechanism::sasl_scram)
-              .match(
-                security::gssapi_authenticator::name,
-                proto::admin::authentication_mechanism::sasl_gssapi)
-              .match(
-                security::oidc::sasl_authenticator::name,
-                proto::admin::authentication_mechanism::sasl_oauthbearer)
               .match(
                 security::plain_authenticator::name,
                 proto::admin::authentication_mechanism::sasl_plain)

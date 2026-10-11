@@ -187,19 +187,8 @@ public:
     size_t local_size_bytes() const override {
         throw std::runtime_error("unimplemented");
     }
-    ss::future<std::optional<size_t>> cloud_size_bytes() const override {
-        throw std::runtime_error("unimplemented");
-    }
     model::offset offset_lag() const override {
         throw std::runtime_error("unimplemented");
-    }
-    ss::future<cluster::partition_cloud_storage_status>
-    get_cloud_storage_status() const override {
-        throw std::runtime_error("unimplemented");
-    }
-    std::unique_ptr<kafka::exact_offset_replicator>
-      make_exact_offset_replicator() && final {
-        return nullptr;
     }
 
 private:
@@ -549,11 +538,6 @@ public:
 
 private:
     fake_partition_manager_proxy* _fake_proxy;
-};
-
-class fake_shadow_link_registry : public shadow_link_registry {
-public:
-    bool is_topic_mutable(const model::topic&) const final { return true; }
 };
 
 class kafka_data_test_fixture {

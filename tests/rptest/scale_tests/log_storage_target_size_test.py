@@ -17,13 +17,10 @@ from rptest.services.cluster import cluster
 from rptest.services.kgo_verifier_services import (
     KgoVerifierProducer,
 )
-from rptest.services.redpanda import SISettings
 from rptest.tests.redpanda_test import RedpandaTest
 
 
 class LogStorageTargetSizeTest(RedpandaTest):
-    segment_upload_interval = 30
-    manifest_upload_interval = 10
     retention_local_trim_interval = 5
 
     def __init__(self, test_context, *args, **kwargs):
@@ -90,8 +87,8 @@ class LogStorageTargetSizeTest(RedpandaTest):
 
         # configure and start redpanda
         extra_rp_conf = {
-            "cloud_storage_segment_max_upload_interval_sec": self.segment_upload_interval,
-            "cloud_storage_manifest_max_upload_interval_sec": self.manifest_upload_interval,
+            "retention_local_strict": strict,
+            "log_segment_size": log_segment_size,
             "retention_local_trim_interval": self.retention_local_trim_interval * 1000,
             "retention_local_target_capacity_bytes": target_size,
             "disk_reservation_percent": 0,
@@ -109,13 +106,7 @@ class LogStorageTargetSizeTest(RedpandaTest):
                 }
             )
 
-        si_settings = SISettings(
-            test_context=self.test_context,
-            retention_local_strict=strict,
-            log_segment_size=log_segment_size,
-        )
         self.redpanda.set_extra_rp_conf(extra_rp_conf)
-        self.redpanda.set_si_settings(si_settings)
         self.redpanda.start()
 
         # Sanity check test parameters against the nodes we are running on

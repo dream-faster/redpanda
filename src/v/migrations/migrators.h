@@ -11,5 +11,4 @@
 // out the headers for each migrator class
 #pragma once
 
-#include "migrations/cloud_storage_config.h"
 #include "migrations/shard_placement_migrator.h"

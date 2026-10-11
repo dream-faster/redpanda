@@ -22,6 +22,3 @@ area/redpanda:
 - changed-files:
   - any-glob-to-any-file: ['src/v/**/*']
 
-area/wasm:
-- changed-files:
-  - any-glob-to-any-file: ['src/transform-sdk/**/*', 'src/v/transform/**/*', 'src/v/wasm/**/*']

@@ -13,10 +13,10 @@
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/node_hash_map.h"
 #include "kafka/protocol/types.h"
-#include "pandaproxy/schema_registry/types.h"
 #include "security/acl_store.h"
 #include "serde/read_header.h"
 #include "serde/rw/rw.h"
+#include "strings/string_switch.h"
 #include "utils/to_string.h"
 
 #include <seastar/core/loop.hh>
@@ -781,12 +781,6 @@ resource_type get_resource_type() {
         return resource_type::cluster;
     } else if constexpr (std::is_same_v<T, kafka::transactional_id>) {
         return resource_type::transactional_id;
-    } else if constexpr (
-      std::is_same_v<T, pandaproxy::schema_registry::context_subject>) {
-        return resource_type::sr_subject;
-    } else if constexpr (
-      std::is_same_v<T, pandaproxy::schema_registry::registry_resource>) {
-        return resource_type::sr_registry;
     } else {
         static_assert(base::unsupported_type<T>::value, "Unsupported type");
     }
@@ -796,10 +790,6 @@ template resource_type get_resource_type<model::topic>();
 template resource_type get_resource_type<kafka::group_id>();
 template resource_type get_resource_type<acl_cluster_name>();
 template resource_type get_resource_type<kafka::transactional_id>();
-template resource_type
-get_resource_type<pandaproxy::schema_registry::context_subject>();
-template resource_type
-get_resource_type<pandaproxy::schema_registry::registry_resource>();
 
 template<typename T>
 const std::vector<acl_operation>& get_allowed_operations() {
@@ -879,10 +869,6 @@ template const std::vector<acl_operation>&
 get_allowed_operations<acl_cluster_name>();
 template const std::vector<acl_operation>&
 get_allowed_operations<kafka::transactional_id>();
-template const std::vector<acl_operation>&
-get_allowed_operations<pandaproxy::schema_registry::context_subject>();
-template const std::vector<acl_operation>&
-get_allowed_operations<pandaproxy::schema_registry::registry_resource>();
 
 chunked_vector<audit::group> acl_principals_to_audit_groups(
   const chunked_vector<acl_principal>& principals) {

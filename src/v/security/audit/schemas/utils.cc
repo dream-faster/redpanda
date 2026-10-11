@@ -64,8 +64,6 @@
 #include "security/audit/schemas/types.h"
 #include "security/audit/types.h"
 #include "security/authorizer.h"
-#include "security/gssapi_authenticator.h"
-#include "security/oidc_authenticator.h"
 #include "security/plain_authenticator.h"
 #include "security/request_auth.h"
 #include "security/scram_authenticator.h"
@@ -219,12 +217,6 @@ mechanism_string_to_auth_protocol(std::string_view mech) {
     return string_switch<authentication::auth_protocol_variant>(mech)
       .match(security::scram_sha256_authenticator::name, "SASL-SCRAM")
       .match(security::scram_sha512_authenticator::name, "SASL-SCRAM")
-      .match(
-        security::gssapi_authenticator::name,
-        authentication::auth_protocol_id::kerberos)
-      .match(
-        security::oidc::sasl_authenticator::name,
-        authentication::auth_protocol_id::oauth_2_0)
       .match(security::plain_authenticator::name, "SASL-PLAIN")
       .default_match(ss::sstring{mech});
 }

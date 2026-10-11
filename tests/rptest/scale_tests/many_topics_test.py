@@ -38,8 +38,6 @@ from rptest.services.redpanda import (
     RESTART_LOG_ALLOW_LIST,
     LoggingConfig,
     MetricsEndpoint,
-    PandaproxyConfig,
-    SchemaRegistryConfig,
 )
 from rptest.tests.redpanda_test import RedpandaTest
 from rptest.util import firewall_blocked, inject_remote_script
@@ -116,8 +114,6 @@ class ManyTopicsTest(RedpandaTest):
                 "offset_translator": "warn",
             },
         )
-        kwargs["pandaproxy_config"] = PandaproxyConfig()
-        kwargs["schema_registry_config"] = SchemaRegistryConfig()
         # Cloud storage is disabled as it currently takes too long to clean-up.
         # kwargs['si_settings'] = SISettings(test_context=test_context)
 

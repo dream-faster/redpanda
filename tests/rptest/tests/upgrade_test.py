@@ -9,17 +9,13 @@
 
 import re
 import time
-from collections import defaultdict
 
-from ducktape.mark import matrix, parametrize
-from ducktape.utils.util import wait_until
+from ducktape.mark import parametrize
 from packaging.version import Version
 
 from rptest.clients.default import DefaultClient
 from rptest.clients.offline_log_viewer import OfflineLogViewer
-from rptest.clients.rpk import RpkTool
 from rptest.clients.types import TopicSpec
-from rptest.services.admin import Admin
 from rptest.services.cluster import cluster
 from rptest.services.kgo_verifier_services import (
     KgoVerifierConsumerGroupConsumer,
@@ -29,9 +25,6 @@ from rptest.services.kgo_verifier_services import (
 )
 from rptest.services.redpanda import (
     RESTART_LOG_ALLOW_LIST,
-    CloudStorageType,
-    SISettings,
-    get_cloud_storage_type,
 )
 from rptest.services.redpanda_installer import (
     LATEST_RELEASED_MAJOR,
@@ -42,11 +35,7 @@ from rptest.services.redpanda_installer import (
 from rptest.tests.end_to_end import EndToEndTest
 from rptest.tests.prealloc_nodes import PreallocNodesTest
 from rptest.tests.redpanda_test import RedpandaTest
-from rptest.util import (
-    wait_for_local_storage_truncate,
-)
-from rptest.utils.mode_checks import skip_debug_mode, skip_fips_mode
-from rptest.utils.si_utils import BucketView
+from rptest.utils.mode_checks import skip_debug_mode
 
 
 class UpgradeFromSpecificVersion(RedpandaTest):
@@ -417,272 +406,6 @@ class UpgradeWithWorkloadTest(EndToEndTest):
             min_records=post_rollback_num_msgs + (self.producer_msgs_per_sec * 3),
             enable_idempotence=True,
         )
-
-
-class UpgradeFromPriorFeatureVersionCloudStorageTest(RedpandaTest):
-    """
-    Check that a mixed-version cluster does not run into issues with
-    an older node trying to read cloud storage data from a newer node.
-    """
-
-    def __init__(self, test_context):
-        super().__init__(
-            test_context=test_context,
-            num_brokers=3,
-            si_settings=SISettings(
-                test_context, cloud_storage_housekeeping_interval_ms=1000
-            ),
-            extra_rp_conf={
-                # We will exercise storage/cloud_storage read paths, get the
-                # batch cache out of the way to ensure reads hit storage layer.
-                "disable_batch_cache": True,
-                # We will manually manipulate leaderships, do not want to fight
-                # with the leader balancer
-                "enable_leader_balancer": False,
-            },
-        )
-        self.installer = self.redpanda._installer
-        self.rpk = RpkTool(self.redpanda)
-
-    # This test starts the Redpanda service inline (see 'install_and_start') at the beginning
-    # of the test body. By default, in the Azure CDT env, the service startup
-    # logic attempts to set the azure specific cluster configs.
-    # However, these did not exist prior to v23.1 and the test would fail
-    # before it can be skipped.
-    def setUp(self):
-        pass
-
-    def install_and_start(self):
-        self.prev_version = self.installer.highest_from_prior_feature_version(
-            RedpandaInstaller.HEAD
-        )
-        self.installer.install(self.redpanda.nodes, self.prev_version)
-        super().setUp()
-
-    # before v24.2, dns query to s3 endpoint do not include the bucketname, which is required for AWS S3 fips endpoints
-    @skip_fips_mode
-    @cluster(num_nodes=4, log_allow_list=RESTART_LOG_ALLOW_LIST)
-    @matrix(
-        cloud_storage_type=get_cloud_storage_type(applies_only_on=[CloudStorageType.S3])
-    )
-    def test_rolling_upgrade(self, cloud_storage_type):
-        """
-        Verify that when tiered storage writes happen during a rolling upgrade,
-        we continue to write remote content that old versions can read, until
-        the upgrade is complete.
-
-        This ensures that rollbacks remain possible.
-        """
-        self.install_and_start()
-
-        initial_version = Version(self.redpanda.get_version(self.redpanda.nodes[0]))
-
-        admin = Admin(self.redpanda)
-
-        segment_bytes = 512 * 1024
-        local_retention_bytes = 2 * 512 * 1024
-        topic_config = {
-            # Tiny segments
-            "segment.bytes": segment_bytes,
-            "retention.local.target.bytes": local_retention_bytes,
-        }
-
-        if initial_version < Version("22.3.0"):
-            # We are starting with Redpanda <=22.2, so much use old style declaration of local retention
-            topic_config["retention.bytes"] = topic_config[
-                "retention.local.target.bytes"
-            ]
-            del topic_config["retention.local.target.bytes"]
-
-        # Create a topic with small local retention
-        topic = "cipot"
-        n_partitions = 1
-        self.rpk.create_topic(
-            topic, partitions=n_partitions, replicas=3, config=topic_config
-        )
-
-        # For convenience, write records about the size of a segment
-        record_size = segment_bytes
-
-        # Track how many records we produced, so that we can validate consume afterward
-        expect_records = defaultdict(int)
-
-        def produce(partition, n_records):
-            producer = KgoVerifierProducer(
-                self.test_context,
-                self.redpanda,
-                topic,
-                record_size,
-                n_records,
-                batch_max_bytes=int(record_size * 2),
-            )
-            producer.start()
-            producer.wait()
-            producer.free()
-            expect_records[partition] += n_records
-
-        def verify():
-            for p in range(0, n_partitions):
-                self.rpk.consume(topic, n=expect_records[p], partition=p, quiet=True)
-
-        # Ensure some manifests + segments are written from the original version (old feature release)
-        for p in range(0, n_partitions):
-            n_records = 10
-            produce(p, n_records)
-
-        # Wait for archiver to upload to S3
-        wait_for_local_storage_truncate(
-            self.redpanda,
-            topic,
-            target_bytes=local_retention_bytes + segment_bytes,
-            timeout_sec=60,
-        )
-
-        # Restart 2/3 nodes, leave last node on old version
-        new_version_nodes = self.redpanda.nodes[:-1]
-        self.installer.install(self.redpanda.nodes, RedpandaInstaller.HEAD)
-        self.redpanda.rolling_restart_nodes(
-            new_version_nodes, start_timeout=90, stop_timeout=90
-        )
-
-        new_version_node = self.redpanda.nodes[0]
-        old_node = self.redpanda.nodes[-1]
-
-        # Verify all data readable
-        verify()
-
-        # Pick some arbitrary partition to write data to via a new-version node
-        newdata_p = 0
-
-        # There might not be any partitions with leadership on new version
-        # node yet, so just transfer one there.
-
-        admin.transfer_leadership_to(
-            namespace="kafka",
-            topic=topic,
-            partition=newdata_p,
-            target_id=self.redpanda.idx(new_version_node),
-        )
-
-        # Create some new segments in S3 from a new-version node: later we will
-        # cause the old node to try and read them to check that compatibility.
-        n_records = 10
-        produce(newdata_p, n_records)
-
-        # Certain version jumps block tiered storage uploads during the upgrade:
-        #  22.2.x -> 22.3.x (when compaction/retention etc was added)
-        #  23.1.x -> 23.2.x (when infinite retention was added + other improvements)
-        block_uploads_during_upgrade = (
-            initial_version < Version("22.3.0")
-            or initial_version > Version("23.1.0")
-            and initial_version < Version("23.2.0")
-        )
-
-        #  23.1.x -> 23.2.x: the `cloud_storage_manifest_max_upload_interval_sec` is new,
-        #                    and needs to be set to avoid the test timing out waiting for
-        #                    local log trim, as in 23.2.x we are lazy about uploading manifests by default.
-        if initial_version > Version("23.1.0") and initial_version < Version("23.2.0"):
-            admin.patch_cluster_config(
-                upsert={
-                    "cloud_storage_manifest_max_upload_interval_sec": 1,
-                    "cloud_storage_spillover_manifest_max_segments": 2,
-                    "cloud_storage_spillover_manifest_size": None,
-                },
-                node=new_version_node,
-            )
-
-        if block_uploads_during_upgrade:
-            # If uploads are blocked during upgrade, we expect the new
-            # nodes not to be able to trim their local logs.
-            time.sleep(10)
-
-            storage = self.redpanda.storage()
-            topic_partitions = storage.partitions("kafka", topic)
-            for p in topic_partitions:
-                if p.num != newdata_p:
-                    # We are only checking our test NTP
-                    continue
-
-                if p.node in new_version_nodes:
-                    # Only new nodes should have paused uploads, and
-                    # therefore accumulated local segments
-                    assert len(p.segments) > 2
-        else:
-            # In the general case, S3 PUTs are permitted during upgrade, so we should
-            # see local storage getting truncated
-            wait_for_local_storage_truncate(
-                self.redpanda,
-                topic,
-                partition_idx=newdata_p,
-                target_bytes=local_retention_bytes + segment_bytes,
-                timeout_sec=60,
-            )
-
-        # capture the cloud storage state to run a progress check later
-        bucket_view = BucketView(self.redpanda)
-        manifest_mid_upgrade = bucket_view.manifest_for_ntp(
-            topic=topic, partition=newdata_p
-        )
-
-        # Move leadership to the old version node and check the partition is readable
-        # from there.
-        admin.transfer_leadership_to(
-            namespace="kafka",
-            topic=topic,
-            partition=newdata_p,
-            target_id=self.redpanda.idx(old_node),
-        )
-
-        produce(newdata_p, 10)
-
-        # Verify all data readable
-        verify()
-
-        # Finish the upgrade
-        self.redpanda.rolling_restart_nodes(
-            [self.redpanda.nodes[-1]], start_timeout=90, stop_timeout=90
-        )
-        unique_versions = wait_for_num_versions(self.redpanda, 1)
-        head_version_str = self.redpanda.get_version(self.redpanda.nodes[0])
-        head_version = Version(head_version_str)
-        assert initial_version < head_version, f"{initial_version} vs {head_version}"
-        assert head_version_str in unique_versions, unique_versions
-
-        # Verify all data readable
-        verify()
-
-        wait_for_local_storage_truncate(
-            self.redpanda,
-            topic,
-            partition_idx=newdata_p,
-            target_bytes=local_retention_bytes + segment_bytes,
-            timeout_sec=60,
-        )
-
-        def insync_offset_advanced():
-            bucket_view.reset()
-            current_manifest = bucket_view.manifest_for_ntp(
-                topic=topic, partition=newdata_p
-            )
-
-            return (
-                current_manifest["insync_offset"]
-                > manifest_mid_upgrade["insync_offset"]
-            )
-
-        # Wait for a manifest re-upload such that rp-storage-tool
-        # does not flag expected anomalies due to segment merger reuploads.
-        wait_until(
-            insync_offset_advanced,
-            timeout_sec=10,
-            backoff_sec=2,
-            err_msg="New manifest was not uploaded post upgrade",
-        )
-
-        # Check that spillover commands applied cleanly. If they did not, it's an
-        # indication that the upgrade has led to inconsistent state accross
-        # archival STMs on different nodes.
-        assert self.redpanda.search_log_any("Can't apply spillover_cmd") is False
 
 
 class RedpandaInstallerTest(RedpandaTest):

@@ -7,15 +7,12 @@
 # the Business Source License, use of this software will be governed
 # by the Apache License, Version 2.0
 
-import concurrent.futures
-import datetime
 import re
-import threading
 import time
 from logging import Logger
 from typing import Callable
 
-from ducktape.mark import matrix, parametrize
+from ducktape.mark import parametrize
 from ducktape.mark.resource import cluster as ducktape_cluster
 from ducktape.tests.test import Test
 from kafkatest.services.kafka import KafkaService
@@ -26,26 +23,19 @@ from rptest.clients.default import DefaultClient
 from rptest.clients.kafka_cat import KafkaCat
 from rptest.clients.rpk import RpkTool
 from rptest.clients.types import TopicSpec
-from rptest.context.cloud_storage import ReadReplicaSourceMode, get_read_replica_sources
 from rptest.services.admin import Admin
-from rptest.clients.admin.v2 import Admin as AdminV2, metastore_pb, ntp_pb
 from rptest.services.cluster import cluster
 from rptest.services.kafka import KafkaServiceAdapter
 from rptest.services.kgo_verifier_services import KgoVerifierProducer
 from rptest.services.metrics_check import MetricCheck
 from rptest.services.redpanda import (
-    CloudStorageType,
     RedpandaService,
     SISettings,
-    get_cloud_storage_type,
-    make_redpanda_service,
 )
 from rptest.tests.redpanda_test import RedpandaTest
 from rptest.util import (
-    segments_count,
     wait_for_local_storage_truncate,
     wait_until,
-    wait_until_result,
 )
 from rptest.utils.si_utils import NTP, BucketView
 
@@ -401,8 +391,6 @@ class TimeQueryTest(RedpandaTest, BaseTimeQuery):
             )
 
     @cluster(num_nodes=4)
-    @parametrize(cloud_storage=True, batch_cache=False, spillover=False)
-    @parametrize(cloud_storage=True, batch_cache=False, spillover=True)
     @parametrize(cloud_storage=False, batch_cache=True, spillover=False)
     @parametrize(cloud_storage=False, batch_cache=False, spillover=False)
     def test_timequery(self, cloud_storage: bool, batch_cache: bool, spillover: bool):
@@ -416,84 +404,6 @@ class TimeQueryTest(RedpandaTest, BaseTimeQuery):
         self._test_timequery_below_start_offset(cluster=self.redpanda)
 
     @cluster(num_nodes=4)
-    def test_timequery_with_local_gc(self):
-        # Reduce the segment size so we generate more segments and are more
-        # likely to race timequeries with GC.
-        self.log_segment_size = int(self.log_segment_size / 32)
-        total_segments = 32 * 12
-        self.set_up_cluster(cloud_storage=True, batch_cache=False, spillover=False)
-        local_retention = self.log_segment_size * 4
-        record_size = 1024
-        msg_count = (self.log_segment_size * total_segments) // record_size
-
-        topic, timestamps = self._create_and_produce(
-            self.redpanda, True, local_retention, record_size, msg_count
-        )
-
-        # While waiting for local GC to occur, run several concurrent
-        # timequeries all across the keyspace at once.
-        num_threads = 4
-        num_offsets_per_thread = int(msg_count / num_threads)
-        errors = [0 for _ in range(num_threads)]
-        should_stop = threading.Event()
-
-        failed_offsets = set()
-
-        def check_offset(kcat, o):
-            expected_offset = o
-            ts = timestamps[o]
-            offset = kcat.query_offset(topic.name, 0, ts)
-            if expected_offset != offset:
-                self.logger.exception(
-                    f"Timestamp {ts} returned {offset} instead of {expected_offset}"
-                )
-                return True
-            else:
-                return False
-
-        def query_slices(tid):
-            kcat = KafkaCat(self.redpanda)
-            while not should_stop.is_set():
-                start_idx = tid * num_offsets_per_thread
-                end_idx = start_idx + num_offsets_per_thread
-                # Step 100 offsets at a time so we only end up with a few dozen
-                # queries per thread at a time.
-                for idx in range(start_idx, end_idx, 100):
-                    if check_offset(kcat, idx):
-                        failed_offsets.add(idx)
-                        errors[tid] += 1
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor:
-            try:
-                # Evaluate the futures with list().
-                executor.map(query_slices, range(num_threads))
-                wait_for_local_storage_truncate(
-                    redpanda=self.redpanda,
-                    topic=topic.name,
-                    target_bytes=local_retention,
-                )
-            finally:
-                should_stop.set()
-
-        # Re-issue queries the failed offsets: this tells us if the error
-        # was transient, and if it happens again it gives us a cleaner
-        # log to analyze compared with the concurrent operations above.
-        # A transient failure is still a failure, but it's interesting
-        # to know that it was transient when investigating the bug.
-        if failed_offsets:
-            self.logger.info("Re-issuing queries on failed offsets...")
-            kcat = KafkaCat(self.redpanda)
-            for o in failed_offsets:
-                if check_offset(kcat, o):
-                    self.logger.info(f"Reproducible failure at {o}")
-                else:
-                    self.logger.info(f"Query at {o} succeeded on retry")
-
-        assert not any([e > 0 for e in errors])
-
-    @cluster(num_nodes=4)
-    @parametrize(cloud_storage=True, spillover=False)
-    @parametrize(cloud_storage=True, spillover=True)
     @parametrize(cloud_storage=False, spillover=False)
     def test_timequery_with_trim_prefix(self, cloud_storage: bool, spillover: bool):
         self.set_up_cluster(
@@ -551,262 +461,6 @@ class TimeQueryTest(RedpandaTest, BaseTimeQuery):
         rpk.trim_prefix(topic.name, offset=p.high_watermark, partitions=[0])
         kcat = KafkaCat(self.redpanda)
         offset = kcat.query_offset(topic.name, 0, timestamps[0] - 1000)
-        assert offset == -1, f"Expected -1, got {offset}"
-
-    @cluster(
-        num_nodes=4, log_allow_list=["Failed to upload spillover manifest {timed_out}"]
-    )
-    def test_timequery_with_spillover_gc_delayed(self):
-        self.set_up_cluster(cloud_storage=True, batch_cache=False, spillover=True)
-        total_segments = 16
-        record_size = 1024
-        msg_count = (self.log_segment_size * total_segments) // record_size
-        local_retention = self.log_segment_size * 4
-        topic_retention = self.log_segment_size * 8
-        topic, timestamps = self._create_and_produce(
-            self.redpanda, True, local_retention, record_size, msg_count
-        )
-
-        # Confirm messages written
-        rpk = RpkTool(self.redpanda)
-        p = next(rpk.describe_topic(topic.name))
-        assert p.high_watermark == msg_count
-
-        # If using cloud storage, we must wait for some segments
-        # to fall out of local storage, to ensure we are really
-        # hitting the cloud storage read path when querying.
-        wait_for_local_storage_truncate(
-            redpanda=self.redpanda, topic=topic.name, target_bytes=local_retention
-        )
-
-        # Set timeout to 0 to prevent the cloud storage housekeeping from
-        # running, triggering gc, and advancing clean offset.
-        self.redpanda.set_cluster_config(
-            {"cloud_storage_manifest_upload_timeout_ms": 0}
-        )
-        # Disable internal scrubbing as it won't be able to make progress.
-        self.si_settings.skip_end_of_test_scrubbing = True
-
-        self.client().alter_topic_config(topic.name, "retention.bytes", topic_retention)
-        self.logger.info("Waiting for start offset to advance...")
-        start_offset = wait_until_result(
-            lambda: next(rpk.describe_topic(topic.name)).start_offset > 0,
-            timeout_sec=120,
-            backoff_sec=5,
-            err_msg="Start offset did not advance",
-        )
-
-        start_offset = next(rpk.describe_topic(topic.name)).start_offset
-
-        # Query below valid timestamps the offset of the first message.
-        kcat = KafkaCat(self.redpanda)
-
-        test_cases = [
-            (timestamps[0] - 1000, start_offset, "before start of log"),
-            (timestamps[0], start_offset, "first message but out of retention now"),
-            (
-                timestamps[start_offset - 1],
-                start_offset,
-                "before new HWM, out of retention",
-            ),
-            (timestamps[start_offset], start_offset, "new HWM"),
-            (
-                timestamps[start_offset + 10],
-                start_offset + 10,
-                "few messages after new HWM",
-            ),
-            (timestamps[msg_count - 1] + 1000, -1, "after last message"),
-        ]
-
-        # Basic time query cases.
-        for ts, expected_offset, desc in test_cases:
-            self.logger.info(f"Querying ts={ts} ({desc})")
-            offset = kcat.query_offset(topic.name, 0, ts)
-            self.logger.info(f"Time query returned offset {offset}")
-            assert offset == expected_offset, (
-                f"Expected {expected_offset}, got {offset}"
-            )
-
-        # Now check every single one of them to make sure there are no
-        # off-by-one errors, iterators aren't getting stuck on segment and
-        # spillover boundaries, etc. The segment boundaries are not exact
-        # due to internal messages, segment roll logic, etc. but the tolerance
-        # should cover that.
-        boundary_ranges = []
-        for i in range(1, total_segments):
-            boundary_ranges.append(
-                (
-                    int(i * self.log_segment_size / record_size - 100),
-                    int(i * self.log_segment_size / record_size + 100),
-                )
-            )
-
-        for r in boundary_ranges:
-            self.logger.debug(f"Checking range {r}")
-            for o in range(int(r[0]), int(r[1])):
-                ts = timestamps[o]
-                self.logger.debug(f"  Querying ts={ts}")
-                offset = kcat.query_offset(topic.name, 0, ts)
-                if o < start_offset:
-                    assert offset == start_offset, (
-                        f"Expected {start_offset}, got {offset}"
-                    )
-                else:
-                    assert offset == o, f"Expected {o}, got {offset}"
-
-    @cluster(num_nodes=4)
-    def test_timequery_empty_local_log(self):
-        self.set_up_cluster(cloud_storage=True, batch_cache=False, spillover=False)
-
-        total_segments = 3
-        record_size = 1024
-        msg_count = (self.log_segment_size * total_segments) // record_size
-        local_retention = 1  # Any value works for this test.
-        topic, timestamps = self._create_and_produce(
-            self.redpanda, True, local_retention, record_size, msg_count
-        )
-
-        # Confirm messages written
-        rpk = RpkTool(self.redpanda)
-        p = next(rpk.describe_topic(topic.name))
-        assert p.high_watermark == msg_count
-
-        # Restart the cluster to force segment roll. The newly created segment
-        # will have no user data which is what we want to test.
-        self.redpanda.restart_nodes(self.redpanda.nodes)
-        wait_until(
-            lambda: len(list(rpk.describe_topic(topic.name))) > 0, 30, backoff_sec=2
-        )
-
-        wait_until(
-            lambda: next(segments_count(self.redpanda, topic.name, 0)) == 1,
-            timeout_sec=30,
-            backoff_sec=2,
-            err_msg="Expected only one segment to be present",
-        )
-
-        kcat = KafkaCat(self.redpanda)
-
-        # Query below valid timestamps the offset of the first message.
-        offset = kcat.query_offset(topic.name, 0, timestamps[0] - 1000)
-        assert offset == 0, f"Expected 0, got {offset}"
-
-        # Query with a timestamp in-between cloud log and the configuration
-        # batch present in the local log.
-        offset = kcat.query_offset(topic.name, 0, timestamps[msg_count - 1] + 1000)
-        assert offset == -1, f"Expected -1, got {offset}"
-
-        # Query with a timestamp in the future.
-        offset = kcat.query_offset(
-            topic.name,
-            0,
-            int(time.time() + datetime.timedelta(days=1).total_seconds()) * 1000,
-        )
-        assert offset == -1, f"Expected -1, got {offset}"
-
-
-class CloudTopicsTimeQueryTest(RedpandaTest):
-    """Test time queries on cloud topics (direct-to-S3 storage mode)."""
-
-    record_size = 4096
-    max_object_size = 4 * 1024 * 1024
-
-    base_ts = int(time.time() - 600) * 1000
-
-    def setUp(self):
-        pass
-
-    def _set_up_cluster(self):
-        self.redpanda.set_extra_rp_conf(
-            {
-                "enable_cluster_metadata_upload_loop": False,
-                "cloud_topics_long_term_flush_interval": 1000,
-                "cloud_topics_reconciliation_max_object_size": self.max_object_size,
-                "disable_batch_cache": True,
-                "enable_leader_balancer": False,
-                "log_retention_ms": -1,
-            }
-        )
-        si_settings = SISettings(
-            self.test_context,
-            cloud_storage_max_connections=10,
-            cloud_storage_enable_remote_read=False,
-            cloud_storage_enable_remote_write=False,
-            fast_uploads=True,
-        )
-        self.redpanda.set_si_settings(si_settings)
-        self.redpanda.start()
-
-    @cluster(num_nodes=4)
-    def test_timequery(self):
-        self._set_up_cluster()
-
-        topic_name = "tqtopic"
-        # Produce enough data to span multiple L1 objects so timequeries
-        # exercise cross-object lookup in the metastore.
-        num_objects = 4
-        msg_count = (self.max_object_size * num_objects) // self.record_size
-
-        rpk = RpkTool(self.redpanda)
-        rpk.create_topic(
-            topic=topic_name,
-            partitions=1,
-            replicas=3,
-            config={
-                TopicSpec.PROPERTY_STORAGE_MODE: TopicSpec.STORAGE_MODE_CLOUD,
-                "message.timestamp.type": "CreateTime",
-                "retention.ms": "-1",
-            },
-        )
-
-        producer = KgoVerifierProducer(
-            context=self.test_context,
-            redpanda=self.redpanda,
-            topic=topic_name,
-            msg_size=self.record_size,
-            msg_count=msg_count,
-            batch_max_bytes=self.record_size * 10,
-            fake_timestamp_ms=self.base_ts,
-        )
-        producer.start()
-        producer.wait()
-
-        p = next(rpk.describe_topic(topic_name))
-        assert p.high_watermark == msg_count
-
-        admin = AdminV2(self.redpanda)
-
-        def is_reconciled():
-            metastore = admin.metastore()
-            req = metastore_pb.GetOffsetsRequest(
-                partition=ntp_pb.TopicPartition(topic=topic_name, partition=0)
-            )
-            next_offset = metastore.get_offsets(req=req).offsets.next_offset
-            return next_offset >= msg_count
-
-        wait_until(
-            is_reconciled,
-            timeout_sec=120,
-            backoff_sec=5,
-            err_msg="Data not reconciled to metastore",
-            retry_on_exc=True,
-        )
-
-        timestamps = {i: self.base_ts + i for i in range(msg_count)}
-
-        kcat = KafkaCat(self.redpanda)
-
-        step = msg_count // num_objects // 10
-        for o in range(0, msg_count, step):
-            ts = timestamps[o]
-            self.logger.info(f"Querying ts={ts} (expect offset={o})")
-            offset = kcat.query_offset(topic_name, 0, ts)
-            assert offset == o, f"Expected {o}, got {offset}"
-
-        offset = kcat.query_offset(topic_name, 0, self.base_ts - 1000)
-        assert offset == 0, f"Expected 0, got {offset}"
-
-        offset = kcat.query_offset(topic_name, 0, timestamps[msg_count - 1] + 1000)
         assert offset == -1, f"Expected -1, got {offset}"
 
 
@@ -872,165 +526,3 @@ class TimeQueryKafkaTest(Test, BaseTimeQuery):
     @ducktape_cluster(num_nodes=5)
     def test_timequery_below_start_offset(self):
         self._test_timequery_below_start_offset(cluster=self.kafka)
-
-
-class TestReadReplicaTimeQuery(RedpandaTest):
-    """Test time queries with read-replica topic."""
-
-    log_segment_size = 1024 * 1024
-    topic_name = "panda-topic"
-    base_ts = int(time.time() - 600) * 1000
-
-    def __init__(
-        self,
-        test_context,
-        mode: ReadReplicaSourceMode = ReadReplicaSourceMode.TIERED_STORAGE,
-    ):
-        extra_rp_conf = {
-            "cloud_topics_long_term_flush_interval": 1000,
-        }
-
-        super(TestReadReplicaTimeQuery, self).__init__(
-            test_context=test_context,
-            si_settings=SISettings(
-                test_context,
-                log_segment_size=TestReadReplicaTimeQuery.log_segment_size,
-                cloud_storage_segment_max_upload_interval_sec=5,
-            ),
-            extra_rp_conf=extra_rp_conf,
-        )
-
-        self.mode = mode
-
-        # Read replica shouldn't have its own bucket.
-        # For cloud topics mode, disable metastore flush loop and level zero GC
-        rr_extra_conf = {
-            "enable_cluster_metadata_upload_loop": False,
-            "cloud_topics_disable_metastore_flush_loop_for_tests": True,
-            "cloud_topics_disable_level_zero_gc_for_tests": True,
-        }
-
-        self.rr_settings = SISettings(
-            test_context,
-            bypass_bucket_creation=True,
-            cloud_storage_readreplica_manifest_sync_timeout_ms=500,
-        )
-        self.rr_extra_conf = rr_extra_conf
-
-        self.rr_cluster = None
-
-    def start_read_replica_cluster(self, num_brokers) -> None:
-        # NOTE: the RRR cluster won't have a bucket, so don't upload.
-        self.rr_cluster = make_redpanda_service(
-            self.test_context,
-            num_brokers=num_brokers,
-            si_settings=self.rr_settings,
-            extra_rp_conf=self.rr_extra_conf,
-        )
-        self.rr_cluster.start(start_si=False)
-
-    def create_read_replica_topic(self) -> None:
-        try:
-            rpk_rr_cluster = RpkTool(self.rr_cluster)
-            conf = {
-                "redpanda.remote.readreplica": self.si_settings.cloud_storage_bucket,
-            }
-            rpk_rr_cluster.create_topic(self.topic_name, config=conf)
-        except Exception:
-            self.logger.warn("Failed to create a read-replica topic")
-            return False
-        return True
-
-    def setup_clusters(self, num_messages=0, partition_count=1) -> None:
-        # Create topic spec based on mode
-        if self.mode == ReadReplicaSourceMode.CLOUD_TOPICS:
-            spec = TopicSpec(
-                name=self.topic_name,
-                partition_count=partition_count,
-                replication_factor=3,
-                redpanda_storage_mode=TopicSpec.STORAGE_MODE_CLOUD,
-            )
-        else:
-            spec = TopicSpec(
-                name=self.topic_name,
-                partition_count=partition_count,
-                redpanda_remote_write=True,
-                replication_factor=3,
-            )
-
-        DefaultClient(self.redpanda).create_topic(spec)
-
-        producer = KgoVerifierProducer(
-            context=self.test_context,
-            redpanda=self.redpanda,
-            topic=self.topic_name,
-            msg_size=1024,
-            msg_count=num_messages,
-            batch_max_bytes=10240,
-            fake_timestamp_ms=self.base_ts,
-        )
-
-        producer.start()
-        producer.wait()
-
-        self.start_read_replica_cluster(num_brokers=3)
-
-        # wait until the read replica topic creation succeeds
-        wait_until(
-            self.create_read_replica_topic,
-            timeout_sec=300,
-            backoff_sec=5,
-            err_msg="Read replica topic is not created",
-        )
-
-    def query_timestamp(self, ts, kcat_src, kcat_rr):
-        self.logger.info(f"Querying ts={ts}")
-        offset_src = kcat_src.query_offset(self.topic_name, 0, ts)
-        offset_rr = kcat_rr.query_offset(self.topic_name, 0, ts)
-        self.logger.info(
-            f"Time query {ts} expected offset {offset_src}, read-replica {offset_rr}"
-        )
-        matches = offset_src == offset_rr
-        if not matches:
-            try:
-                record = kcat_src.consume_one(self.topic_name, 0, offset_src)
-                self.logger.info(f"src cluster record at {offset_src}: {record}")
-            except Exception:
-                pass
-            try:
-                record = kcat_rr.consume_one(self.topic_name, 0, offset_rr)
-                self.logger.info(f"rr cluster record at {offset_rr}: {record}")
-            except Exception:
-                pass
-        assert matches, f"Expected offset {offset_src}, got {offset_rr}"
-
-    @ducktape_cluster(num_nodes=7)
-    @matrix(
-        cloud_storage_type=get_cloud_storage_type(docker_use_arbitrary=True),
-        mode=get_read_replica_sources(),
-    )
-    def test_timequery(
-        self, cloud_storage_type: CloudStorageType, mode: ReadReplicaSourceMode
-    ):
-        self.mode = mode
-        num_messages = 1000
-        self.setup_clusters(num_messages, 3)
-
-        def read_replica_ready():
-            orig = RpkTool(self.redpanda).describe_topic(self.topic_name)
-            repl = RpkTool(self.rr_cluster).describe_topic(self.topic_name)
-            for o, r in zip(orig, repl):
-                if o.high_watermark > r.high_watermark:
-                    return False
-            return True
-
-        wait_until(
-            read_replica_ready,
-            timeout_sec=200,
-            backoff_sec=3,
-            err_msg="Read replica is not ready",
-        )
-        kcat1 = KafkaCat(self.redpanda)
-        kcat2 = KafkaCat(self.rr_cluster)
-        for ix in range(0, num_messages, 20):
-            self.query_timestamp(self.base_ts + ix, kcat1, kcat2)

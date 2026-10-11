@@ -21,7 +21,6 @@ redpanda_cc_library(
         "record.cc",
         "record_batch_reader.cc",
         "record_utils.cc",
-        "transform.cc",
         "validation.cc",
     ],
     hdrs = [
@@ -42,7 +41,6 @@ redpanda_cc_library(
         "record_utils.h",
         "timeout_clock.h",
         "timestamp.h",
-        "transform.h",
         "validation.h",
     ],
     visibility = ["//visibility:public"],

@@ -17,27 +17,10 @@
 namespace cluster {
 
 model::offset partition_kafka_start_offset(const partition& p) {
-    if (p.is_read_replica_mode_enabled() && p.cloud_data_available()) {
-        // Always assume remote read in this case.
-        return p.start_cloud_offset();
-    }
-    auto local_start = p.log()->from_log_offset(p.raft_start_offset());
-    if (
-      p.is_remote_fetch_enabled() && p.cloud_data_available()
-      && p.start_cloud_offset() < local_start) {
-        return p.start_cloud_offset();
-    }
-    return local_start;
+    return p.log()->from_log_offset(p.raft_start_offset());
 }
 
 model::offset kafka_high_watermark(const partition& p) {
-    if (p.is_read_replica_mode_enabled()) {
-        if (p.cloud_data_available()) {
-            return p.next_cloud_offset();
-        } else {
-            return model::offset(0);
-        }
-    }
     return p.log()->from_log_offset(p.high_watermark());
 }
 
@@ -45,16 +28,6 @@ model::offset kafka_start_offset_with_override(
   const partition& p, model::offset start_override) {
     if (start_override == model::offset{}) {
         return partition_kafka_start_offset(p);
-    }
-    if (p.is_read_replica_mode_enabled()) {
-        // The start override may fall ahead of the HWM since read replicas
-        // compute HWM based on uploaded segments, and the override may
-        // appear in the manifest before uploading corresponding segments.
-        // Clamp down to the HWM.
-        const auto hwm = kafka_high_watermark(p);
-        if (hwm <= start_override) {
-            return hwm;
-        }
     }
     return std::max(partition_kafka_start_offset(p), start_override);
 }

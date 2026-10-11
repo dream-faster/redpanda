@@ -112,17 +112,7 @@ void topic_id_api_version_limiter(api_versions_response& r) {
 }
 
 void remove_unavailable_reserved_apis(
-  api_versions_response& r, const features::feature_table& ft) {
-    if (ft.is_active(features::feature::shadow_link_role_sync)) {
-        return;
-    }
-
-    auto to_remove = std::ranges::remove(
-      r.data.api_keys,
-      describe_redpanda_roles_api::key,
-      &api_versions_response_key::api_key);
-    r.data.api_keys.erase_to_end(to_remove.begin());
-}
+  api_versions_response&, const features::feature_table&) {}
 
 api_versions_response api_versions_handler::handle_raw(request_context& ctx) {
     // Unlike other request types, we handle ApiVersion requests

@@ -10,7 +10,6 @@ go_library(
         "create.go",
         "delete.go",
         "describe.go",
-        "describe_storage.go",
         "list.go",
         "produce.go",
         "schema_context.go",

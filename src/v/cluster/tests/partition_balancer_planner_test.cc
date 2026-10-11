@@ -7,9 +7,9 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0
 
+#include "absl/container/node_hash_set.h"
 #include "base/vlog.h"
 #include "cluster/controller_snapshot.h"
-#include "cluster/data_migrated_resources.h"
 #include "cluster/health_monitor_types.h"
 #include "cluster/tests/partition_balancer_planner_fixture.h"
 #include "test_utils/boost_fixture.h"
@@ -1000,8 +1000,7 @@ FIXTURE_TEST(
             planning_fiber.get();
         }
     });
-    cluster::data_migrations::migrated_resources migrated_resources;
-    cluster::topic_table other_tt(migrated_resources, model::node_id{0});
+    cluster::topic_table other_tt(model::node_id{0});
     model::offset controller_offset{0};
     std::set<ss::sstring> cur_topics;
     bool node_isolated = false;

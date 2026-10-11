@@ -11,10 +11,8 @@ import copy
 import random
 import signal
 import time
-from typing import Any
 
 import requests
-from ducktape.cluster.cluster_spec import ClusterSpec
 from ducktape.mark import matrix
 from ducktape.utils.util import wait_until
 
@@ -28,17 +26,13 @@ from rptest.services.kaf_producer import KafProducer
 from rptest.services.redpanda import (
     PREV_VERSION_LOG_ALLOW_LIST,
     RESTART_LOG_ALLOW_LIST,
-    SISettings,
-    get_cloud_storage_type,
-    make_redpanda_service,
 )
-from rptest.services.redpanda_installer import InstallOptions, RedpandaInstaller
+from rptest.services.redpanda_installer import InstallOptions
 from rptest.services.rpk_consumer import RpkConsumer
 from rptest.services.rpk_producer import RpkProducer
 from rptest.tests.end_to_end import EndToEndTest
 from rptest.tests.partition_movement import PartitionMovementMixin
 from rptest.util import wait_until_result
-from rptest.utils.mode_checks import skip_debug_mode, skip_fips_mode
 
 # Errors we should tolerate when moving partitions around
 PARTITION_MOVEMENT_LOG_ERRORS = [
@@ -935,203 +929,3 @@ class PartitionMovementTest(PartitionMovementMixin, EndToEndTest):
         )
         self.redpanda.set_cluster_config({"raft_learner_recovery_rate": 500 * (2**20)})
         wait_until(lambda: len(admin.list_reconfigurations()) == 0, 120, 1)
-
-
-class SIPartitionMovementTest(PartitionMovementMixin, EndToEndTest):
-    """
-    Run partition movement tests with shadow indexing enabled
-    """
-
-    def __init__(self, ctx, *args, **kwargs):
-        # Force shadow indexing to be used by most reads
-        # in one test
-        si_settings = SISettings(
-            ctx,
-            cloud_storage_max_connections=5,
-            log_segment_size=10240,  # 10KiB
-            cloud_storage_enable_remote_read=True,
-            cloud_storage_enable_remote_write=True,
-        )
-        super(SIPartitionMovementTest, self).__init__(
-            ctx,
-            *args,
-            extra_rp_conf={
-                # Disable leader balancer, as this test is doing its own
-                # partition movement and the balancer would interfere
-                "enable_leader_balancer": False,
-                "delete_retention_ms": 1000,
-            },
-            si_settings=si_settings,
-            **kwargs,
-        )
-        self._ctx = ctx
-
-    def _get_scale_params(self):
-        """
-        Helper for reducing traffic generation parameters
-        when running on a slower debug build of redpanda.
-        """
-        throughput = 100 if self.debug_mode else 1000
-        records = 500 if self.debug_mode else 5000
-        moves = 5 if self.debug_mode else 25
-        partitions = 1 if self.debug_mode else 10
-        return throughput, records, moves, partitions
-
-    def _partial_upgrade(self, num_to_upgrade: int):
-        nodes = self.redpanda.nodes[0:num_to_upgrade]
-        self.logger.info(f"Upgrading nodes: {[node.name for node in nodes]}")
-
-        self.redpanda._installer.install(nodes, RedpandaInstaller.HEAD)
-        self.redpanda.rolling_restart_nodes(nodes, start_timeout=90, stop_timeout=90)
-
-    def _finish_upgrade(self, num_upgraded_already: int):
-        nodes = self.redpanda.nodes[num_upgraded_already:]
-        self.logger.info(f"Upgrading nodes: {[node.name for node in nodes]}")
-
-        self.redpanda._installer.install(nodes, RedpandaInstaller.HEAD)
-        self.redpanda.rolling_restart_nodes(nodes, start_timeout=90, stop_timeout=90)
-
-    # before v24.2, dns query to s3 endpoint do not include the bucketname, which is required for AWS S3 fips endpoints
-    @skip_fips_mode
-    @skip_debug_mode  # rolling restarts require more reliable recovery that a slow debug mode cluster can provide
-    @cluster(num_nodes=5, log_allow_list=PREV_VERSION_LOG_ALLOW_LIST)
-    @matrix(
-        num_to_upgrade=[0, 2],
-        cloud_storage_type=get_cloud_storage_type(),
-        with_cloud_topics=[True, False],
-    )
-    def test_shadow_indexing(
-        self, num_to_upgrade, cloud_storage_type, with_cloud_topics: bool
-    ):
-        """
-        Test interaction between the shadow indexing and the partition movement.
-        Partition movement generate partitions with different revision-ids and the
-        archival/shadow-indexing subsystem is using revision to generate unique object
-        keys inside the remote storage.
-        """
-        test_mixed_versions: bool = num_to_upgrade > 0
-        if test_mixed_versions and with_cloud_topics:
-            # Upgrades not supported with cloud topics yet.
-            # Avoid the "Test requested 5 nodes, used only 0" error.
-            self.logger.warn("skipping test, upgrades with cloud topics not supported")
-            self.redpanda = make_redpanda_service(self.test_context, 0)
-            self.test_context.cluster.alloc(ClusterSpec.simple_linux(5))
-            return
-        extra_rp_conf: dict = {}
-
-        throughput, records, moves, partitions = self._get_scale_params()
-        install_opts = InstallOptions(install_previous_version=test_mixed_versions)
-        self.start_redpanda(
-            num_nodes=3, install_opts=install_opts, extra_rp_conf=extra_rp_conf
-        )
-
-        self.topic = "topic"
-        config = dict[str, Any]()
-        if with_cloud_topics:
-            config[TopicSpec.PROPERTY_STORAGE_MODE] = TopicSpec.STORAGE_MODE_CLOUD
-        self.rpk_client().create_topic(
-            self.topic,
-            partitions=partitions,
-            replicas=3,
-            config=config,
-        )
-        self.start_producer(1, throughput=throughput)
-        self.start_consumer(1)
-        self.await_startup()
-
-        if test_mixed_versions:
-            self.redpanda.set_feature_active("node_local_core_assignment", active=True)
-
-        # We will start an upgrade halfway through the test: this ensures
-        # that a single-version cluster existed for long enough to actually
-        # upload some data to S3, before the upgrade potentially pauses
-        # PUTs, as it does in a format-changing step like a 22.2->22.3 upgrade
-        upgrade_at_step = moves // 2
-
-        for i in range(moves):
-            if i == upgrade_at_step and test_mixed_versions:
-                self._partial_upgrade(num_to_upgrade)
-
-            self._move_and_verify()
-
-        self.run_validation(
-            enable_idempotence=False, consumer_timeout_sec=45, min_records=records
-        )
-
-        self._finish_upgrade(num_to_upgrade)
-
-    @cluster(num_nodes=5, log_allow_list=PREV_VERSION_LOG_ALLOW_LIST)
-    @skip_debug_mode  # rolling restarts require more reliable recovery that a slow debug mode cluster can provide
-    # Redpandas before v23.1 did not have support for ABS.
-    @matrix(
-        num_to_upgrade=[0, 2],
-        cloud_storage_type=get_cloud_storage_type(),
-        with_cloud_topics=[True, False],
-    )
-    def test_cross_shard(
-        self, num_to_upgrade, cloud_storage_type, with_cloud_topics: bool
-    ):
-        """
-        Test interaction between the shadow indexing and the partition movement.
-        Move partitions with SI enabled between shards.
-        """
-        test_mixed_versions: bool = num_to_upgrade > 0
-        if test_mixed_versions and with_cloud_topics:
-            # Upgrades not supported with cloud topics yet.
-            # Avoid the "Test requested 5 nodes, used only 0" error.
-            self.logger.warn("skipping test, upgrades with cloud topics not supported")
-            self.redpanda = make_redpanda_service(self.test_context, 0)
-            self.test_context.cluster.alloc(ClusterSpec.simple_linux(5))
-            return
-        extra_rp_conf: dict = {}
-
-        throughput, records, moves, partitions = self._get_scale_params()
-
-        install_opts = InstallOptions(install_previous_version=test_mixed_versions)
-        self.start_redpanda(
-            num_nodes=3, install_opts=install_opts, extra_rp_conf=extra_rp_conf
-        )
-
-        self.topic = "topic"
-        config = dict[str, Any]()
-        if with_cloud_topics:
-            config[TopicSpec.PROPERTY_STORAGE_MODE] = TopicSpec.STORAGE_MODE_CLOUD
-        self.rpk_client().create_topic(
-            self.topic,
-            partitions=partitions,
-            replicas=3,
-            config=config,
-        )
-        self.start_producer(1, throughput=throughput)
-        self.start_consumer(1)
-        self.await_startup()
-
-        if test_mixed_versions:
-            self.redpanda.set_feature_active("node_local_core_assignment", active=True)
-
-        admin = Admin(self.redpanda)
-        topic = self.topic
-        partition = 0
-
-        # We will start an upgrade halfway through the test: this ensures
-        # that a single-version cluster existed for long enough to actually
-        # upload some data to S3, before the upgrade potentially pauses
-        # PUTs, as it does in a format-changing step like a 22.2->22.3 upgrade
-        upgrade_at_step = moves // 2
-
-        for i in range(moves):
-            if i == upgrade_at_step and test_mixed_versions:
-                self._partial_upgrade(num_to_upgrade)
-
-            assignments = self._get_current_node_cores(admin, topic, partition)
-            for a in assignments:
-                # Bounce between core 0 and 1
-                a["core"] = (a["core"] + 1) % 2
-            self._set_partition_assignments(topic, partition, assignments, admin=admin)
-            self._wait_post_move(topic, partition, assignments, 360)
-
-        self.run_validation(
-            enable_idempotence=False, consumer_timeout_sec=45, min_records=records
-        )
-
-        self._finish_upgrade(num_to_upgrade)

@@ -188,12 +188,10 @@ bool operator==(
 fmt::iterator cluster_health_report::format_to(fmt::iterator it) const {
     return fmt::format_to(
       it,
-      "{{raft0_leader: {}, node_states: {}, node_reports_count: {}, "
-      "bytes_in_cloud_storage: {} }}",
+      "{{raft0_leader: {}, node_states: {}, node_reports_count: {}}}",
       raft0_leader,
       node_states,
-      node_reports.size(),
-      bytes_in_cloud_storage);
+      node_reports.size());
 }
 fmt::iterator format_to(follower_status e, fmt::iterator out) {
     switch (e) {
@@ -219,7 +217,7 @@ fmt::iterator partition_status::format_to(fmt::iterator it) const {
       it,
       "{{id: {}, term: {}, leader_id: {}, revision_id: {}, size_bytes: {}, "
       "reclaimable_size_bytes: {}, under_replicated: {}, shard: {}, "
-      "followers_stats: {}, kafka_highwatermark: {}, ct_max_gc_epoch: {}, "
+      "followers_stats: {}, kafka_highwatermark: {}, "
       "log_start_offset: {}}}",
       id,
       term,
@@ -231,7 +229,6 @@ fmt::iterator partition_status::format_to(fmt::iterator it) const {
       shard,
       followers_stats,
       high_watermark,
-      cloud_topic_max_gc_eligible_epoch,
       log_start_offset);
 }
 
@@ -275,7 +272,6 @@ cluster_health_report cluster_health_report::copy() const {
     cluster_health_report r;
     r.raft0_leader = raft0_leader;
     r.node_states = node_states;
-    r.bytes_in_cloud_storage = bytes_in_cloud_storage;
     r.node_reports.reserve(node_reports.size());
     for (auto& nr : node_reports) {
         r.node_reports.emplace_back(ss::make_lw_shared(nr->copy()));
@@ -358,7 +354,7 @@ fmt::iterator cluster_health_overview::format_to(fmt::iterator it) const {
       it,
       "{{controller_id: {}, nodes: {}, unhealthy_reasons: {}, nodes_down: {}, "
       "high_disk_usage_nodes: {}, nodes_in_recovery_mode: {}, "
-      "bytes_in_cloud_storage: {}, leaderless_count: {}, "
+      "leaderless_count: {}, "
       "under_replicated_count: {}, leaderless_partitions: {}, "
       "under_replicated_partitions: {}, refresh_failed: {}, "
       "all_members_reported: {}}}",
@@ -368,7 +364,6 @@ fmt::iterator cluster_health_overview::format_to(fmt::iterator it) const {
       nodes_down,
       high_disk_usage_nodes,
       nodes_in_recovery_mode,
-      bytes_in_cloud_storage,
       leaderless_count,
       under_replicated_count,
       leaderless_partitions,

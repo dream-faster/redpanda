@@ -12,34 +12,22 @@
 #include "absl/log/globals.h"
 #include "base/vlog.h"
 #include "cli_parser.h"
-#include "cloud_io/cache_service.h"
-#include "cloud_storage_clients/client_pool.h"
-#include "cluster/cloud_metadata/offsets_upload_router.h"
-#include "cluster/cloud_metadata/offsets_uploader.h"
 #include "cluster/cluster_discovery.h"
 #include "cluster/config_manager.h"
 #include "cluster/controller.h"
 #include "cluster/node_isolation_watcher.h"
-#include "cluster/topic_recovery_service.h"
 #include "compression/async_stream_zstd.h"
 #include "compression/lz4_decompression_buffers.h"
 #include "compression/stream_zstd.h"
 #include "config/configuration.h"
 #include "config/node_config.h"
 #include "crash_tracker/signals.h"
-#include "datalake/coordinator/coordinator_manager.h"
-#include "datalake/credential_manager.h"
-#include "datalake/datalake_manager.h"
-#include "datalake/datalake_usage_aggregator.h"
 #include "features/feature_table.h"
 #include "kafka/client/configuration.h"
 #include "kafka/server/rm_group_frontend.h"
 #include "metrics/prometheus_sanitize.h"
 #include "migrations/migrators.h"
 #include "net/tls_certificate_probe.h"
-#include "pandaproxy/rest/api.h"
-#include "pandaproxy/rest/configuration.h"
-#include "pandaproxy/schema_registry/api.h"
 #include "resource_mgmt/cpu_profiler.h"
 #include "resource_mgmt/memory_groups.h"
 #include "resource_mgmt/memory_sampling.h"
@@ -53,7 +41,6 @@
 #include "utils/file_io.h"
 #include "utils/human.h"
 #include "version/version.h"
-#include "wasm/cache.h"
 
 #include <seastar/core/memory.hh>
 #include <seastar/core/metrics.hh>
@@ -82,12 +69,6 @@ void set_local_kafka_client_config(
   std::optional<kafka::client::configuration>& client_config,
   const config::node_config& config);
 
-void set_pp_kafka_client_defaults(
-  pandaproxy::rest::configuration& proxy_config,
-  kafka::client::configuration& client_config);
-
-void set_sr_kafka_client_defaults(kafka::client::configuration& client_config);
-
 void set_auditing_kafka_client_defaults(
   kafka::client::configuration& client_config);
 
@@ -112,21 +93,6 @@ void application::shutdown() {
             return rpc_server.invoke_on_all(&rpc::rpc_server::shutdown_input);
         });
     }
-    // Stop routing upload requests, as each may take a while to finish.
-    if (offsets_upload_router.local_is_initialized()) {
-        shutdown_with_watchdog(
-          offsets_upload_router, [](auto& offsets_upload_router) {
-              return offsets_upload_router.invoke_on_all(
-                &cluster::cloud_metadata::offsets_upload_router::request_stop);
-          });
-    }
-    if (offsets_uploader.local_is_initialized()) {
-        shutdown_with_watchdog(offsets_uploader, [](auto& offsets_uploader) {
-            return offsets_uploader.invoke_on_all(
-              &cluster::cloud_metadata::offsets_uploader::request_stop);
-        });
-    }
-
     // We schedule shutting down controller input and aborting its operation as
     // one of the first shutdown steps. This way we terminate all long running
     // operations before shutting down the RPC server, preventing it from
@@ -153,57 +119,6 @@ void application::shutdown() {
         });
     }
 
-    if (topic_recovery_service.local_is_initialized()) {
-        shutdown_with_watchdog(
-          topic_recovery_service, [](auto& topic_recovery_service) {
-              return topic_recovery_service.invoke_on_all(
-                &cloud_storage::topic_recovery_service::shutdown_recovery);
-          });
-    }
-
-    if (upstreams.local_is_initialized()) {
-        upstreams
-          .invoke_on_all(
-            &cloud_storage_clients::upstream_registry::prepare_stop)
-          .get();
-    }
-
-    // Stop any I/O to object store: this will cause any readers in flight
-    // to abort and enables partition shutdown to proceed reliably.
-    if (cloud_storage_clients.local_is_initialized()) {
-        shutdown_with_watchdog(
-          cloud_storage_clients, [](auto& cloud_storage_clients) {
-              return cloud_storage_clients.invoke_on_all(
-                &cloud_storage_clients::client_pool::shutdown_connections);
-          });
-    }
-    if (cloud_io.local_is_initialized()) {
-        shutdown_with_watchdog(cloud_io, [](auto& cloud_io) {
-            return cloud_io.invoke_on_all(&cloud_io::remote::request_stop);
-        });
-    }
-    /**
-     * Shutdown the datalake services before stopping all the partitions.
-     * NOTE: translators may call into the coordinator via the coordinator
-     * frontend; stop the coordinators first to stop all work as quickly as
-     * possible.
-     */
-    if (_datalake_coordinator_mgr.local_is_initialized()) {
-        shutdown_with_watchdog(_datalake_coordinator_mgr, [](auto& mgr) {
-            return mgr.invoke_on_all(
-              &datalake::coordinator::coordinator_manager::shutdown);
-        });
-    }
-    if (_datalake_manager.local_is_initialized()) {
-        shutdown_with_watchdog(_datalake_manager, [](auto& mgr) {
-            return mgr.invoke_on_all(&datalake::datalake_manager::shutdown);
-        });
-    }
-    if (_datalake_credential_mgr.local_is_initialized()) {
-        shutdown_with_watchdog(_datalake_credential_mgr, [](auto& mgr) {
-            return mgr.invoke_on_all(&datalake::credential_manager::stop);
-        });
-    }
     // Stop all partitions before destructing the subsystems (transaction
     // coordinator, etc). This interrupts ongoing replication requests,
     // allowing higher level state machines to shutdown cleanly.
@@ -223,15 +138,6 @@ void application::shutdown() {
         shutdown_with_watchdog(_kafka_server, [](auto& kafka_server) {
             return kafka_server.stop();
         });
-    }
-
-    // Shutdown cloud topics _after_ partitions have been shut down to ensure
-    // in-flight replication is stopped, and _after_ the kafka server in order
-    // to ensure we don't serve any last minute requests with cloud topics
-    // machinery mid tear-down.
-    if (cloud_topics_app) {
-        shutdown_with_watchdog(
-          cloud_topics_app, [](auto& app) { return app->stop(); });
     }
 
     if (_kafka_conn_quotas.local_is_initialized()) {
@@ -356,14 +262,7 @@ int application::run(int ac, char** av) {
                 initialize();
                 check_environment();
                 setup_metrics();
-                test_cfg cfg;
-                cfg.ct_test_cfg.skip_flush_loop
-                  = config::shard_local_cfg()
-                      .cloud_topics_disable_metastore_flush_loop_for_tests();
-                cfg.ct_test_cfg.skip_level_zero_gc
-                  = config::shard_local_cfg()
-                      .cloud_topics_disable_level_zero_gc_for_tests();
-                wire_up_and_start(app_signal, false, cfg);
+                wire_up_and_start(app_signal, false, test_cfg{});
                 post_start_tasks();
                 app_signal.wait().get();
                 if (!audit_mgr.local().report_redpanda_app_event(
@@ -393,12 +292,7 @@ int application::run(int ac, char** av) {
     });
 }
 
-void application::initialize(
-  std::optional<YAML::Node> proxy_cfg,
-  std::optional<YAML::Node> proxy_client_cfg,
-  std::optional<YAML::Node> schema_reg_cfg,
-  std::optional<YAML::Node> schema_reg_client_cfg,
-  std::optional<YAML::Node> audit_log_client_cfg) {
+void application::initialize(std::optional<YAML::Node> audit_log_client_cfg) {
     ss::smp::invoke_on_all([] {
         // initialize memory groups now that our configuration is loaded
         memory_groups();
@@ -482,31 +376,6 @@ void application::initialize(
       })
       .get();
 
-    if (proxy_cfg) {
-        _proxy_config.emplace(*proxy_cfg);
-        for (const auto& e : _proxy_config->errors()) {
-            vlog(
-              _log.warn,
-              "Pandaproxy property '{}' validation error: {}",
-              e.first,
-              e.second);
-        }
-        if (_proxy_config->errors().size() > 0) {
-            throw std::invalid_argument(
-              "Validation errors in pandaproxy config");
-        }
-    }
-
-    if (proxy_client_cfg) {
-        _proxy_client_config.emplace(*proxy_client_cfg);
-    }
-    if (schema_reg_cfg) {
-        _schema_reg_config.emplace(*schema_reg_cfg);
-    }
-
-    if (schema_reg_client_cfg) {
-        _schema_reg_client_config.emplace(*schema_reg_client_cfg);
-    }
     if (audit_log_client_cfg) {
         _audit_log_client_config.emplace(*audit_log_client_cfg);
     }
@@ -807,36 +676,6 @@ void application::hydrate_cluster_config(const YAML::Node& config) {
     // config file on first-start or upgrade cases.
     _config_preload = cluster::config_manager::preload(config).get();
 
-    if (config["pandaproxy"]) {
-        _proxy_config.emplace(config["pandaproxy"]);
-        for (const auto& e : _proxy_config->errors()) {
-            vlog(
-              _log.warn,
-              "Pandaproxy property '{}' validation error: {}",
-              e.first,
-              e.second);
-        }
-        if (_proxy_config->errors().size() > 0) {
-            throw std::invalid_argument(
-              "Validation errors in pandaproxy config");
-        }
-        if (config["pandaproxy_client"]) {
-            _proxy_client_config.emplace(config["pandaproxy_client"]);
-        } else {
-            set_local_kafka_client_config(_proxy_client_config, config::node());
-        }
-        set_pp_kafka_client_defaults(*_proxy_config, *_proxy_client_config);
-    }
-    if (config["schema_registry"]) {
-        _schema_reg_config.emplace(config["schema_registry"]);
-        if (config["schema_registry_client"]) {
-            _schema_reg_client_config.emplace(config["schema_registry_client"]);
-        } else {
-            set_local_kafka_client_config(
-              _schema_reg_client_config, config::node());
-        }
-        set_sr_kafka_client_defaults(*_schema_reg_client_config);
-    }
     /// Auditing will be toggled via cluster config settings, internal audit
     /// client options can be configured via local config properties
     if (config["audit_log_client"]) {
@@ -868,18 +707,6 @@ void application::log_cluster_config() {
     vlog(_log.info, "(use `rpk redpanda config set <cfg> <value>` to change)");
     config_printer("redpanda", config::node());
 
-    if (_proxy_config) {
-        config_printer("pandaproxy", *_proxy_config);
-    }
-    if (_proxy_client_config) {
-        config_printer("pandaproxy_client", *_proxy_client_config);
-    }
-    if (_schema_reg_config) {
-        config_printer("schema_registry", *_schema_reg_config);
-    }
-    if (_schema_reg_client_config) {
-        config_printer("schema_registry_client", *_schema_reg_client_config);
-    }
     if (_audit_log_client_config) {
         config_printer("audit_log_client", *_audit_log_client_config);
     }
@@ -907,8 +734,6 @@ void application::check_environment() {
     memory_groups().log_memory_group_allocations(_log);
     storage::directories::initialize(
       config::node().data_directory().as_sstring())
-      .get();
-    cloud_io::cache::initialize(config::node().cloud_storage_cache_path())
       .get();
 
     if (config::shard_local_cfg().storage_strict_data_init()) {
@@ -998,46 +823,6 @@ void application::schedule_crash_tracker_file_cleanup() {
             _crash_tracker_service->stop().get();
         }
     });
-}
-
-ss::future<> application::set_proxy_config(ss::sstring name, std::any val) {
-    return _proxy->set_config(std::move(name), std::move(val));
-}
-
-bool application::requires_cloud_io() {
-    return archival_storage_enabled() || datalake_enabled();
-}
-
-bool application::archival_storage_enabled() {
-    const auto& cfg = config::shard_local_cfg();
-    return cfg.cloud_storage_enabled();
-}
-
-bool application::wasm_data_transforms_enabled() {
-    return config::shard_local_cfg().data_transforms_enabled.value()
-           && !config::node().emergency_disable_data_transforms.value();
-}
-
-bool application::datalake_enabled() {
-    return config::shard_local_cfg().iceberg_enabled()
-           && !config::node().recovery_mode_enabled();
-}
-
-ss::shared_ptr<kafka::datalake_usage_api>
-application::make_datalake_usage_aggregator() {
-    if (datalake_enabled()) {
-        return ss::make_shared<datalake::default_datalake_usage_api_impl>(
-          controller.get(),
-          &controller->get_topics_state(),
-          &_datalake_coordinator_fe);
-    }
-    return ss::make_shared<datalake::disabled_datalake_usage_api_impl>(
-      controller.get());
-}
-
-ss::future<>
-application::set_proxy_client_config(ss::sstring name, std::any val) {
-    return _proxy->set_client_config(std::move(name), std::move(val));
 }
 
 void application::trigger_abort_source() {

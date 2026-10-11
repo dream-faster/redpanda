@@ -33,7 +33,7 @@ func (p *RowPanel) MarshalJSON() ([]byte, error) {
 	}{
 		p.Type(),
 		len(p.Panels) > 0,
-		(PanelAlias)(*p),
+		PanelAlias(*p),
 	}
 	return json.Marshal(typedPanel)
 }

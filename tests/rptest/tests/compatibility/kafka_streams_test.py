@@ -14,7 +14,6 @@ from rptest.clients.types import TopicSpec
 from rptest.services.cluster import cluster
 from rptest.services.compatibility.example_runner import ExampleRunner
 from rptest.services.kaf_producer import KafProducer
-from rptest.services.redpanda import PandaproxyConfig, SchemaRegistryConfig
 from rptest.services.rpk_consumer import RpkConsumer
 from rptest.tests.redpanda_test import RedpandaTest
 
@@ -32,14 +31,10 @@ class KafkaStreamsTest(RedpandaTest):
     def __init__(
         self,
         test_context,
-        pandaproxy_config: PandaproxyConfig,
-        schema_registry_config: SchemaRegistryConfig,
         extra_rp_conf={},
     ):
         super(KafkaStreamsTest, self).__init__(
             test_context=test_context,
-            pandaproxy_config=pandaproxy_config,
-            schema_registry_config=schema_registry_config,
             extra_rp_conf=extra_rp_conf,
         )
 
@@ -71,14 +66,10 @@ class KafkaStreamsDriverBase(KafkaStreamsTest):
     def __init__(
         self,
         test_context,
-        pandaproxy_config: PandaproxyConfig,
-        schema_registry_config: SchemaRegistryConfig,
         extra_rp_conf={},
     ):
         super(KafkaStreamsDriverBase, self).__init__(
             test_context=test_context,
-            pandaproxy_config=pandaproxy_config,
-            schema_registry_config=schema_registry_config,
             extra_rp_conf=extra_rp_conf,
         )
 
@@ -111,13 +102,9 @@ class KafkaStreamsProdConsBase(KafkaStreamsTest):
     def __init__(
         self,
         test_context,
-        pandaproxy_config: PandaproxyConfig,
-        schema_registry_config: SchemaRegistryConfig,
     ):
         super(KafkaStreamsProdConsBase, self).__init__(
             test_context=test_context,
-            pandaproxy_config=pandaproxy_config,
-            schema_registry_config=schema_registry_config,
         )
 
     def is_valid_msg(self, msg):
@@ -177,8 +164,6 @@ class KafkaStreamsTopArticles(KafkaStreamsDriverBase):
     def __init__(self, test_context):
         super(KafkaStreamsTopArticles, self).__init__(
             test_context=test_context,
-            pandaproxy_config=PandaproxyConfig(),
-            schema_registry_config=SchemaRegistryConfig(),
         )
 
 
@@ -199,8 +184,6 @@ class KafkaStreamsSessionWindow(KafkaStreamsDriverBase):
     def __init__(self, test_context):
         super(KafkaStreamsSessionWindow, self).__init__(
             test_context=test_context,
-            pandaproxy_config=PandaproxyConfig(),
-            schema_registry_config=SchemaRegistryConfig(),
             # This example produces a message with a timestamp 1.5hours in the future:
             # https://github.com/confluentinc/kafka-streams-examples/blob/57f5b4163c5e2e42959c8a4355736e1c8be08db1/src/main/java/io/confluent/examples/streams/SessionWindowsExampleDriver.java#L124
             extra_rp_conf={"log_message_timestamp_after_max_ms": 2 * 3600 * 1000},
@@ -224,8 +207,6 @@ class KafkaStreamsJsonToAvro(KafkaStreamsDriverBase):
     def __init__(self, test_context):
         super(KafkaStreamsJsonToAvro, self).__init__(
             test_context=test_context,
-            pandaproxy_config=PandaproxyConfig(),
-            schema_registry_config=SchemaRegistryConfig(),
         )
 
 
@@ -244,8 +225,6 @@ class KafkaStreamsPageView(RedpandaTest):
     def __init__(self, test_context):
         super(KafkaStreamsPageView, self).__init__(
             test_context=test_context,
-            pandaproxy_config=PandaproxyConfig(),
-            schema_registry_config=SchemaRegistryConfig(),
         )
 
         self._timeout = 300
@@ -287,8 +266,6 @@ class KafkaStreamsWikipedia(RedpandaTest):
     def __init__(self, test_context):
         super(KafkaStreamsWikipedia, self).__init__(
             test_context=test_context,
-            pandaproxy_config=PandaproxyConfig(),
-            schema_registry_config=SchemaRegistryConfig(),
         )
 
         self._timeout = 300
@@ -333,8 +310,6 @@ class KafkaStreamsSumLambda(KafkaStreamsDriverBase):
     def __init__(self, test_context):
         super(KafkaStreamsSumLambda, self).__init__(
             test_context=test_context,
-            pandaproxy_config=PandaproxyConfig(),
-            schema_registry_config=SchemaRegistryConfig(),
         )
 
 
@@ -363,8 +338,6 @@ class KafkaStreamsAnomalyDetection(KafkaStreamsProdConsBase):
     def __init__(self, test_context):
         super(KafkaStreamsAnomalyDetection, self).__init__(
             test_context=test_context,
-            pandaproxy_config=PandaproxyConfig(),
-            schema_registry_config=SchemaRegistryConfig(),
         )
 
     def is_valid_msg(self, msg):
@@ -397,8 +370,6 @@ class KafkaStreamsUserRegion(KafkaStreamsProdConsBase):
     def __init__(self, test_context):
         super(KafkaStreamsUserRegion, self).__init__(
             test_context=test_context,
-            pandaproxy_config=PandaproxyConfig(),
-            schema_registry_config=SchemaRegistryConfig(),
         )
 
     def is_valid_msg(self, msg):
@@ -431,8 +402,6 @@ class KafkaStreamsWordCount(KafkaStreamsProdConsBase):
     def __init__(self, test_context):
         super(KafkaStreamsWordCount, self).__init__(
             test_context=test_context,
-            pandaproxy_config=PandaproxyConfig(),
-            schema_registry_config=SchemaRegistryConfig(),
         )
 
     def is_valid_msg(self, msg):
@@ -458,8 +427,6 @@ class KafkaStreamsMapFunction(KafkaStreamsProdConsBase):
     def __init__(self, test_context):
         super(KafkaStreamsMapFunction, self).__init__(
             test_context=test_context,
-            pandaproxy_config=PandaproxyConfig(),
-            schema_registry_config=SchemaRegistryConfig(),
         )
 
     def is_valid_msg(self, msg):

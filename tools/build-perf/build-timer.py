@@ -209,7 +209,7 @@ def main() -> None:
     def sanopts(sans: List[str]):
         sanlist = ",".join(sans)
         base = "--copt -O1 "
-        sanpart = f"--copt -fsanitize={sanlist} --linkopt -fsanitize={sanlist} --@krb5//:sanitizers={sanlist} --linkopt -fsanitize-link-c++-runtime"
+        sanpart = f"--copt -fsanitize={sanlist} --linkopt -fsanitize={sanlist} --linkopt -fsanitize-link-c++-runtime"
         return (base + sanpart) if sanlist else base
 
     try:
