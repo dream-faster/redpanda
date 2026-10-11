@@ -32,68 +32,33 @@ class EnterpriseFeaturesTestBase(RedpandaTest):
 
 class Feature(IntEnum):
     audit_logging = 0
-    cloud_storage = 1
-    partition_auto_balancing_continuous = 2
-    core_balancing_continuous = 3
-    gssapi = 4
-    oidc = 5
-    schema_id_validation = 6
-    rbac = 7
-    fips = 8
-    datalake_iceberg = 9
-    leadership_pinning = 10
-    gssapi_override = 11
-    oidc_override = 12
-    shadow_linking = 13
-    topic_deletion_disabled = 14
+    partition_auto_balancing_continuous = 1
+    core_balancing_continuous = 2
+    rbac = 3
+    fips = 4
+    leadership_pinning = 5
+    topic_deletion_disabled = 6
 
 
-def to_enterprise_feature(feature):
-    # These are different ways to enable the same enterprise features
-    mappings = {
-        Feature.gssapi_override: Feature.gssapi,
-        Feature.oidc_override: Feature.oidc,
-    }
-    if feature not in mappings:
-        return feature
-    return mappings[feature]
-
-
-enterprise_features = set([to_enterprise_feature(f) for f in Feature])
+enterprise_features = set(Feature)
 autoenable_features = set(
     [Feature.partition_auto_balancing_continuous, Feature.core_balancing_continuous]
 )
 
 FEATURE_DEPENDENT_CONFIG = {
     Feature.audit_logging: "audit_enabled",
-    Feature.cloud_storage: "cloud_storage_enabled",
     Feature.partition_auto_balancing_continuous: "partition_autobalancing_mode",
     Feature.core_balancing_continuous: "core_balancing_continuous",
-    Feature.gssapi: "sasl_mechanisms",
-    Feature.oidc: "sasl_mechanisms",
-    Feature.schema_id_validation: "enable_schema_id_validation",
-    Feature.datalake_iceberg: "datalake_iceberg",
     Feature.leadership_pinning: "default_leaders_preference",
-    Feature.gssapi_override: "sasl_mechanisms_overrides",
-    Feature.oidc_override: "sasl_mechanisms_overrides",
-    Feature.shadow_linking: "enable_shadow_linking",
     Feature.topic_deletion_disabled: "delete_topic_enable",
 }
 
 SKIP_FEATURES = [
-    Feature.cloud_storage,  # TODO(oren): initially omitted because it's a bit complicated to initialize infra
-    Feature.datalake_iceberg,  # TODO: also depends on cloud infra
     Feature.fips,  # NOTE(oren): omit because it's too much of a pain for CDT
 ]
 
 
 class EnterpriseFeaturesTest(EnterpriseFeaturesTestBase):
-    OIDC_UPDATE_FAILURE_LOGS = [
-        # Example: security - oidc_service.cc:232 - Error updating jwks: security::exception (Invalid jwks: Invalid response from jwks_uri: https://auth.prd.cloud.redpanda.com:443/.well-known/jwks.json)"
-        "Error updating jwks",
-        "Error updating metadata",
-    ]
-
     def __init__(self, *args, **kwargs):
         super().__init__(
             *args,
@@ -168,48 +133,12 @@ class EnterpriseFeaturesTest(EnterpriseFeaturesTestBase):
                 },
                 expect_restart=True,
             )
-        elif feature == Feature.cloud_storage:
-            self.redpanda.set_cluster_config(
-                {"cloud_storage_enabled": "true"}, expect_restart=True
-            )
         elif feature == Feature.partition_auto_balancing_continuous:
             self.redpanda.set_cluster_config(
                 {"partition_autobalancing_mode": "continuous"}
             )
         elif feature == Feature.core_balancing_continuous:
             self.redpanda.set_cluster_config({"core_balancing_continuous": "true"})
-        elif feature == Feature.gssapi:
-            self.redpanda.set_cluster_config({"sasl_mechanisms": ["SCRAM", "GSSAPI"]})
-        elif feature == Feature.gssapi_override:
-            self.redpanda.set_cluster_config(
-                {
-                    "sasl_mechanisms_overrides": [
-                        {
-                            "listener": "some_listener",
-                            "sasl_mechanisms": ["SCRAM", "GSSAPI"],
-                        }
-                    ]
-                }
-            )
-        elif feature == Feature.oidc:
-            # Note: the default OIDC server is flaky in CI, so use `OIDC_UPDATE_FAILURE_LOGS`
-            # to ignore the related error logs in the background updater.
-            self.redpanda.set_cluster_config(
-                {"sasl_mechanisms": ["SCRAM", "OAUTHBEARER"]}
-            )
-        elif feature == Feature.oidc_override:
-            self.redpanda.set_cluster_config(
-                {
-                    "sasl_mechanisms_overrides": [
-                        {
-                            "listener": "some_listener",
-                            "sasl_mechanisms": ["SCRAM", "OAUTHBEARER"],
-                        }
-                    ]
-                }
-            )
-        elif feature == Feature.schema_id_validation:
-            self.redpanda.set_cluster_config({"enable_schema_id_validation": "compat"})
         elif feature == Feature.rbac:
             # NOTE(oren): make sure the role has propagated to every node since we don't know
             # where the get_enterprise request will go
@@ -235,10 +164,6 @@ class EnterpriseFeaturesTest(EnterpriseFeaturesTestBase):
                     "openssl_module_directory": self.redpanda.get_openssl_modules_directory(),
                 },
             )
-        elif feature == Feature.datalake_iceberg:
-            self.redpanda.set_cluster_config(
-                {"iceberg_enabled": "true"}, expect_restart=True
-            )
         elif feature == Feature.leadership_pinning:
             self.redpanda.set_cluster_config(
                 {"default_leaders_preference": "racks:rack1"}, expect_restart=True
@@ -249,15 +174,13 @@ class EnterpriseFeaturesTest(EnterpriseFeaturesTestBase):
                 replicas=1,
                 config={"redpanda.leaders.preference": "racks:rack1"},
             )
-        elif feature == Feature.shadow_linking:
-            self.redpanda.set_cluster_config({"enable_shadow_linking": "true"})
         elif feature == Feature.topic_deletion_disabled:
             self.redpanda.set_cluster_config({"delete_topic_enable": "false"})
         else:
             assert False, f"Unexpected feature={feature}"
 
     @skip_fips_mode
-    @cluster(num_nodes=3, log_allow_list=OIDC_UPDATE_FAILURE_LOGS)
+    @cluster(num_nodes=3)
     @matrix(
         feature=[f for f in Feature if f not in SKIP_FEATURES],
         install_license=[
@@ -298,10 +221,8 @@ class EnterpriseFeaturesTest(EnterpriseFeaturesTestBase):
 
         self.logger.debug(f"Check that {feature.name} has the expected state")
 
-        efeature = to_enterprise_feature(feature)
-
         statuses = self.check_feature(
-            efeature,
+            feature,
             enabled=has_license or is_autoenable,
             license_valid=has_license,
         )
@@ -310,7 +231,7 @@ class EnterpriseFeaturesTest(EnterpriseFeaturesTestBase):
             "Everything else should be in the default state regardless of license status"
         )
 
-        other_features = [f for f in enterprise_features if f != efeature]
+        other_features = [f for f in enterprise_features if f != feature]
         other_statuses = {
             f: {"status": statuses[f], "expected": f in autoenable_features}
             for f in other_features

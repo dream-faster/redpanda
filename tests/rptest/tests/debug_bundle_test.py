@@ -46,8 +46,6 @@ from rptest.services.tls import Certificate, CertificateAuthority, TLSCertManage
 from rptest.tests.redpanda_test import RedpandaTest
 from rptest.util import wait_until_result
 
-_OIDC_TOKEN_AUDIENCE = "account"
-
 
 class DebugBundleErrorCode:
     SUCCESS = 0

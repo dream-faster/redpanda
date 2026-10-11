@@ -526,7 +526,7 @@ class AdminSecurityReportTest(RedpandaTest):
         )
         self.tls = TLSCertManager(self.logger)
         self.security = SecurityConfig()
-        self.security.http_authentication = ["BASIC", "OIDC"]
+        self.security.http_authentication = ["BASIC"]
         self.security.tls_provider = SaslPlainTLSProvider(tls=self.tls)
         self.redpanda.set_security_settings(self.security)
 
@@ -563,14 +563,14 @@ class AdminSecurityReportTest(RedpandaTest):
             tls_enabled=True,
             mutual_tls_enabled=True,
             authorization_enabled=True,
-            authentication_methods=["BASIC", "OIDC"],
+            authentication_methods=["BASIC"],
         )
 
         no_tls_interface = AdminInterface(
             tls_enabled=False,
             mutual_tls_enabled=False,
             authorization_enabled=True,
-            authentication_methods=["BASIC", "OIDC"],
+            authentication_methods=["BASIC"],
         )
 
         admin = Admin(

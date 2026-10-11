@@ -23,49 +23,27 @@ from rptest.clients.default import DefaultClient
 from rptest.clients.kafka_cat import KafkaCat
 from rptest.clients.rpk import RpkTool
 from rptest.clients.types import TopicSpec
-from rptest.services.admin import Admin
 from rptest.services.cluster import cluster
 from rptest.services.kafka import KafkaServiceAdapter
 from rptest.services.kgo_verifier_services import KgoVerifierProducer
 from rptest.services.metrics_check import MetricCheck
-from rptest.services.redpanda import (
-    RedpandaService,
-    SISettings,
-)
+from rptest.services.redpanda import RedpandaService
 from rptest.tests.redpanda_test import RedpandaTest
-from rptest.util import (
-    wait_for_local_storage_truncate,
-    wait_until,
-)
-from rptest.utils.si_utils import NTP, BucketView
+from rptest.util import wait_until
 
 
 class BaseTimeQuery:
     log_segment_size: int
+    read_bytes_limit: int
     client: Callable[[], DefaultClient]
     test_context: dict
     logger: Logger
 
     base_ts = int(time.time() - 600) * 1000
 
-    def _create_and_produce(
-        self, cluster, cloud_storage, local_retention, record_size, msg_count
-    ):
+    def _create_and_produce(self, cluster, record_size, msg_count):
         topic = TopicSpec(name="tqtopic", partition_count=1, replication_factor=3)
         self.client().create_topic(topic)
-
-        if cloud_storage:
-            for k, v in {
-                "redpanda.remote.read": "true",
-                "redpanda.remote.write": "true",
-                "retention.local.target.bytes": local_retention,
-                # See comment about disabling `retention.ms` below.
-                "retention.local.target.ms": -1,
-            }.items():
-                self.client().alter_topic_config(topic.name, k, v)
-            desc = self.client().describe_topic_configs(topic.name)
-            assert desc["redpanda.remote.read"] == "true"
-            assert desc["redpanda.remote.write"] == "true"
 
         # Configure topic to trust client-side timestamps, so that
         # we can generate fake ones for the test
@@ -105,11 +83,10 @@ class BaseTimeQuery:
         timestamps = dict((i, self.base_ts + i) for i in range(0, msg_count))
         return topic, timestamps
 
-    def _test_timequery(self, cluster, cloud_storage: bool, batch_cache: bool):
+    def _test_timequery(self, cluster, batch_cache: bool):
         total_segments = 12
         record_size = 1024
         msg_count = (self.log_segment_size * total_segments) // record_size
-        local_retention = self.log_segment_size * 4
         kcat = KafkaCat(cluster)
 
         # Test the base case with an empty topic.
@@ -122,9 +99,7 @@ class BaseTimeQuery:
         assert offset == -1, f"Expected -1, got {offset}"
 
         # Create a topic and produce a run of messages we will query.
-        topic, timestamps = self._create_and_produce(
-            cluster, cloud_storage, local_retention, record_size, msg_count
-        )
+        topic, timestamps = self._create_and_produce(cluster, record_size, msg_count)
         for k, v in timestamps.items():
             self.logger.debug(f"  Offset {k} -> Timestamp {v}")
 
@@ -133,24 +108,10 @@ class BaseTimeQuery:
         p = next(rpk.describe_topic(topic.name))
         assert p.high_watermark == msg_count
 
-        if cloud_storage:
-            # If using cloud storage, we must wait for some segments
-            # to fall out of local storage, to ensure we are really
-            # hitting the cloud storage read path when querying.
-            wait_for_local_storage_truncate(
-                redpanda=cluster, topic=topic.name, target_bytes=local_retention
-            )
-
         # Identify partition leader for use in our metrics checks
         leader_node = cluster.get_node(next(rpk.describe_topic(topic.name)).leader)
 
-        # For when using cloud storage, we expect offsets ahead
-        # of this to still hit raft for their timequeries.
         is_redpanda = isinstance(cluster, RedpandaService)
-        if is_redpanda:
-            admin = Admin(self.redpanda)
-            status = admin.get_partition_cloud_storage_status(topic.name, 0)
-            local_start_offset = status["local_log_start_offset"]
 
         # Class defining expectations of timequery results to be checked
         class ex:
@@ -175,41 +136,16 @@ class BaseTimeQuery:
             ex(-1, timestamps[msg_count - 1] + 1000, False),  # After last message
         ]
 
-        # Remember which offsets we already hit, so that we can
-        # make a good guess at whether subsequent hits on the same
-        # offset should cause cloud downloads.
-        hit_offsets = set()
-
-        cloud_metrics = None
         local_metrics = None
 
         def diff_bytes(old, new):
-            # Each timequery will download a maximum of two chunks, but
-            # we make the check extra generous to account for the index
-            # download.
-            return new - old <= self.chunk_size * 5
-
-        def diff_chunks(old, new):
-            # The sampling step for a segment's remote index is 64 KiB and the chunk
-            # size in this the is 128 KiB. Therefore, a timequery should never require
-            # more than two chunks. If the samples were perfectly aligned with the chunks,
-            # we'd only need one chunk, but that's not always the case.
-            return new - old <= 2
+            return new - old <= self.read_bytes_limit
 
         for e in expectations:
             ts = e.ts
             o = e.offset
 
-            if is_redpanda and cloud_storage:
-                cloud_metrics = MetricCheck(
-                    self.logger,
-                    cluster,
-                    leader_node,
-                    re.compile("vectorized_cloud_storage_.*"),
-                    reduce=sum,
-                )
-
-            if is_redpanda and not cloud_storage:
+            if is_redpanda:
                 local_metrics = MetricCheck(
                     self.logger,
                     cluster,
@@ -223,39 +159,13 @@ class BaseTimeQuery:
             self.logger.info(f"Time query returned offset {offset}")
             assert offset == o
 
-            if (
-                is_redpanda
-                and cloud_storage
-                and o < local_start_offset
-                and o not in hit_offsets
-                and e.expect_read
-            ):
-                # The number of bytes downloaded to query this offset is less than log segment size. We cannot rely
-                # on the number of segments downloaded, as chunked read registers each chunk as one segment, and a
-                # number of chunks may be downloaded to query an offset in a segment. The sum of bytes downloaded
-                # through chunks must be less than the segment size.
-                cloud_metrics.expect(
-                    [("vectorized_cloud_storage_bytes_received_total", diff_bytes)]
-                )
-
-                cloud_metrics.expect(
-                    [
-                        (
-                            "vectorized_cloud_storage_read_path_chunks_hydrated_total",
-                            diff_chunks,
-                        )
-                    ]
-                )
-
-            if is_redpanda and not cloud_storage and not batch_cache and e.expect_read:
+            if is_redpanda and not batch_cache and e.expect_read:
                 # Expect to read at most one segment from disk: this validates that
                 # we are correctly looking up the right segment before seeking to
                 # the exact offset, and not e.g. reading from the start of the log.
                 local_metrics.expect(
                     [("vectorized_storage_log_read_bytes_total", diff_bytes)]
                 )
-
-            hit_offsets.add(o)
 
         # TODO: do some double-restarts to generate segments with
         # no user data, to check that their timestamps don't
@@ -271,9 +181,7 @@ class BaseTimeQuery:
         record_size = 1024
         msg_count = (self.log_segment_size * total_segments) // record_size
 
-        topic, timestamps = self._create_and_produce(
-            cluster, False, local_retain_segments, record_size, msg_count
-        )
+        topic, timestamps = self._create_and_produce(cluster, record_size, msg_count)
 
         self.client().alter_topic_config(
             topic.name, "retention.bytes", self.log_segment_size * local_retain_segments
@@ -311,14 +219,16 @@ class TimeQueryTest(RedpandaTest, BaseTimeQuery):
     # lookup of the proper segment for a time index, as well
     # as the lookup of the offset within that segment.
     log_segment_size = 1024 * 1024
-    chunk_size = 1024 * 128
+    # Upper bound on bytes read from disk by a single timequery: well under
+    # one segment, so a lookup that scans from the start of the log fails.
+    read_bytes_limit = 1024 * 128 * 5
 
     def setUp(self):
         # Don't start up redpanda yet, because we will need the
         # test parameter to set cluster configs before starting.
         pass
 
-    def set_up_cluster(self, cloud_storage: bool, batch_cache: bool, spillover: bool):
+    def set_up_cluster(self, batch_cache: bool):
         self.redpanda.set_extra_rp_conf(
             {
                 # Testing with batch cache disabled is important, because otherwise
@@ -329,33 +239,12 @@ class TimeQueryTest(RedpandaTest, BaseTimeQuery):
                 # staying in one place.
                 "enable_leader_balancer": False,
                 "log_segment_size_min": 32 * 1024,
-                "cloud_storage_cache_chunk_size": self.chunk_size,
-                # Avoid configuring spillover so tests can do it themselves.
-                "cloud_storage_spillover_manifest_size": None,
+                "log_segment_size": self.log_segment_size,
                 # Disable time-based retention so that we can use synthetic
                 # timestamps that may fall outside of the default retention window.
                 "log_retention_ms": -1,
             }
         )
-
-        if cloud_storage:
-            si_settings = SISettings(
-                self.test_context,
-                cloud_storage_max_connections=5,
-                log_segment_size=self.log_segment_size,
-                # Off by default: test is parametrized to turn
-                # on if SI is wanted.
-                cloud_storage_enable_remote_read=True,
-                cloud_storage_enable_remote_write=True,
-            )
-            if spillover:
-                # Enable spillover with a low limit so that we can test
-                # timequery fetching from spillover manifest.
-                si_settings.cloud_storage_spillover_manifest_max_segments = 2
-                si_settings.cloud_storage_housekeeping_interval_ms = 1000
-            self.redpanda.set_si_settings(si_settings)
-        else:
-            self.redpanda.add_extra_rp_conf({"log_segment_size": self.log_segment_size})
 
         # `test_timequery_with_local_gc` attempts to set the `log_segment_size` lower than the minimum
         # value of 1_MiB- disable bounded property checks to allow this.
@@ -364,71 +253,32 @@ class TimeQueryTest(RedpandaTest, BaseTimeQuery):
         )
         self.redpanda.start()
 
-    def _do_test_timequery(
-        self, cloud_storage: bool, batch_cache: bool, spillover: bool
-    ):
-        self.set_up_cluster(cloud_storage, batch_cache, spillover)
-        self._test_timequery(
-            cluster=self.redpanda, cloud_storage=cloud_storage, batch_cache=batch_cache
-        )
-        if spillover:
-            # Check that we are actually using the spillover manifest
-            def check():
-                try:
-                    bucket = BucketView(self.redpanda)
-                    res = bucket.get_spillover_metadata(
-                        ntp=NTP(ns="kafka", topic="tqtopic", partition=0)
-                    )
-                    return res is not None and len(res) > 0
-                except Exception:
-                    return False
-
-            wait_until(
-                check,
-                timeout_sec=120,
-                backoff_sec=5,
-                err_msg="Spillover use is not detected",
-            )
+    @cluster(num_nodes=4)
+    @parametrize(batch_cache=True)
+    @parametrize(batch_cache=False)
+    def test_timequery(self, batch_cache: bool):
+        self.set_up_cluster(batch_cache)
+        self._test_timequery(cluster=self.redpanda, batch_cache=batch_cache)
 
     @cluster(num_nodes=4)
-    @parametrize(cloud_storage=False, batch_cache=True, spillover=False)
-    @parametrize(cloud_storage=False, batch_cache=False, spillover=False)
-    def test_timequery(self, cloud_storage: bool, batch_cache: bool, spillover: bool):
-        self._do_test_timequery(cloud_storage, batch_cache, spillover)
-
-    @cluster(num_nodes=4)
-    @parametrize(spillover=False)
-    @parametrize(spillover=True)
-    def test_timequery_below_start_offset(self, spillover: bool):
-        self.set_up_cluster(cloud_storage=False, batch_cache=False, spillover=spillover)
+    def test_timequery_below_start_offset(self):
+        self.set_up_cluster(batch_cache=False)
         self._test_timequery_below_start_offset(cluster=self.redpanda)
 
     @cluster(num_nodes=4)
-    @parametrize(cloud_storage=False, spillover=False)
-    def test_timequery_with_trim_prefix(self, cloud_storage: bool, spillover: bool):
-        self.set_up_cluster(
-            cloud_storage=cloud_storage, batch_cache=False, spillover=spillover
-        )
+    def test_timequery_with_trim_prefix(self):
+        self.set_up_cluster(batch_cache=False)
         total_segments = 12
         record_size = 1024
         msg_count = (self.log_segment_size * total_segments) // record_size
-        local_retention = self.log_segment_size * 4
         topic, timestamps = self._create_and_produce(
-            self.redpanda, True, local_retention, record_size, msg_count
+            self.redpanda, record_size, msg_count
         )
 
         # Confirm messages written
         rpk = RpkTool(self.redpanda)
         p = next(rpk.describe_topic(topic.name))
         assert p.high_watermark == msg_count
-
-        if cloud_storage:
-            # If using cloud storage, we must wait for some segments
-            # to fall out of local storage, to ensure we are really
-            # hitting the cloud storage read path when querying.
-            wait_for_local_storage_truncate(
-                redpanda=self.redpanda, topic=topic.name, target_bytes=local_retention
-            )
 
         num_batches_per_segment = self.log_segment_size // record_size
         new_lwm = int(num_batches_per_segment * 2.5)
@@ -451,8 +301,6 @@ class TimeQueryTest(RedpandaTest, BaseTimeQuery):
         )
 
         # Query below valid timestamps the offset of the only message left.
-        # This is an edge-case where tiered storage, if in use, becomes
-        # completely irrelevant.
         kcat = KafkaCat(self.redpanda)
         offset = kcat.query_offset(topic.name, 0, timestamps[0] - 1000)
         assert offset == msg_count - 1, f"Expected {msg_count - 1}, got {offset}"
@@ -521,7 +369,7 @@ class TimeQueryKafkaTest(Test, BaseTimeQuery):
 
     @ducktape_cluster(num_nodes=5)
     def test_timequery(self):
-        self._test_timequery(cluster=self.kafka, cloud_storage=False, batch_cache=True)
+        self._test_timequery(cluster=self.kafka, batch_cache=True)
 
     @ducktape_cluster(num_nodes=5)
     def test_timequery_below_start_offset(self):

@@ -342,8 +342,6 @@ class ControllerForcedReconfiguration_SmokeTest(
         topic = TopicSpec(
             replication_factor=3,
             partition_count=1,
-            redpanda_remote_read=True,
-            redpanda_remote_write=True,
         )
 
         self.client().create_topic(topic)
@@ -522,8 +520,6 @@ class ControllerForcedReconfiguration_Size5(
         topic = TopicSpec(
             replication_factor=3,
             partition_count=3,
-            redpanda_remote_read=True,
-            redpanda_remote_write=True,
         )
 
         """ setup 1: bootstrap """

@@ -48,7 +48,6 @@ class NodesDecommissioningTest(PreallocNodesTest):
         self._topic = None
 
         extra_rp_conf = dict(
-            enable_cluster_metadata_upload_loop=False,
             retention_local_trim_interval=5_000,
         )
 

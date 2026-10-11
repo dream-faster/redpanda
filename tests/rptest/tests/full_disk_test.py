@@ -10,7 +10,6 @@ import random
 from time import sleep, time
 
 import requests
-from ducktape.cluster.cluster import ClusterNode
 from ducktape.tests.test import TestContext
 from ducktape.utils.util import wait_until
 from kafka import KafkaProducer
@@ -24,7 +23,6 @@ from rptest.services.cluster import cluster
 from rptest.services.redpanda import (
     LoggingConfig,
     MetricsEndpoint,
-    RedpandaService,
 )
 from rptest.tests.end_to_end import EndToEndTest
 from rptest.tests.redpanda_test import RedpandaTest
@@ -614,27 +612,3 @@ class DiskStatsOverrideTest(RedpandaTest):
         # rounding to block size. use a 4K block threshold to test.
         delta = abs(stat["free_bytes"] - stat["total_bytes"])
         assert delta <= 4096
-
-
-def min_local_start_offset(redpanda: RedpandaService, topic: str):
-    min_offset = None
-    for node in redpanda.nodes:
-        for p in local_start_offsets(redpanda, node, topic):
-            if min_offset is None:
-                min_offset = p["local_log_start_offset"]
-            else:
-                min_offset = max(min_offset, p["local_log_start_offset"])
-    return min_offset
-
-
-def local_start_offsets(redpanda: RedpandaService, node: ClusterNode, topic: str):
-    admin = Admin(redpanda, default_node=node)
-    partitions = admin.get_partitions(topic)
-
-    for p in partitions:
-        status = admin.get_partition_cloud_storage_status(topic, p["partition_id"])
-
-        yield {
-            "partition": p["partition_id"],
-            "local_log_start_offset": status["local_log_start_offset"],
-        }

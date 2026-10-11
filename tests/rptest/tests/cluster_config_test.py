@@ -26,10 +26,8 @@ from rptest.clients.rpk_remote import RpkRemoteTool
 from rptest.services.admin import Admin
 from rptest.services.cluster import cluster
 from rptest.services.redpanda import (
-    OIDC_ALLOW_LIST,
     RESTART_LOG_ALLOW_LIST,
     RedpandaService,
-    SISettings,
 )
 from rptest.services.redpanda_installer import (
     RedpandaInstaller,
@@ -42,17 +40,6 @@ BOOTSTRAP_CONFIG = {
     # A non-default value for checking bootstrap import works
     "enable_idempotence": False,
 }
-
-SECRET_CONFIG_NAMES = frozenset(
-    [
-        "cloud_storage_secret_key",
-        "cloud_storage_azure_shared_key",
-        "iceberg_rest_catalog_client_secret",
-        "iceberg_rest_catalog_token",
-        "iceberg_rest_catalog_aws_secret_key",
-        "oidc_http_proxy_password",
-    ]
-)
 
 
 def check_restart_clears(admin, redpanda, nodes=None):
@@ -293,24 +280,10 @@ class ClusterConfigTest(RedpandaTest, ClusterConfigHelpersMixin):
     def __init__(self, *args, **kwargs):
         rp_conf = BOOTSTRAP_CONFIG.copy()
 
-        # Force verbose logging for the secret redaction test
-        kwargs["log_level"] = "trace"
-
         # An explicit cluster_id prevents metrics_report from auto-setting
         # it, and thereby prevents it doing a background write of a new
         # config version that would disrupt our tests.
         rp_conf["cluster_id"] = "placeholder"
-
-        # Explicitly disable metadata uploads, since some tests may mess around
-        # with cloud configs and prevent uploads from succeeding.
-        rp_conf["enable_cluster_metadata_upload_loop"] = False
-
-        # Cloud topics infrastructure now starts whenever cloud_storage_enabled
-        # is true. Tests that point cloud storage at a fake bucket (e.g.
-        # test_cloud_validation) would otherwise have the L1 metastore flush loop
-        # make real object-storage PUTs that fail with a hard S3 error and trip
-        # the bad-log-lines check.
-        rp_conf["cloud_topics_disable_metastore_flush_loop_for_tests"] = True
 
         super(ClusterConfigTest, self).__init__(*args, extra_rp_conf=rp_conf, **kwargs)
 
@@ -503,32 +476,32 @@ class ClusterConfigTest(RedpandaTest, ClusterConfigHelpersMixin):
         # Initially set both values together
         patch_result = self.admin.patch_cluster_config(
             upsert={
-                "cloud_storage_access_key": "user",
-                "cloud_storage_secret_key": "pass",
+                "metrics_reporter_url": "user",
+                "cluster_id": "pass",
             }
         )
         wait_for_version_sync(self.admin, self.redpanda, patch_result["config_version"])
-        self._check_value_everywhere("cloud_storage_access_key", "user")
-        self._check_value_everywhere("cloud_storage_secret_key", "[secret]")
+        self._check_value_everywhere("metrics_reporter_url", "user")
+        self._check_value_everywhere("cluster_id", "pass")
 
         # Check initially set values survive a restart
         self.redpanda.restart_nodes(self.redpanda.nodes)
-        self._check_value_everywhere("cloud_storage_access_key", "user")
-        self._check_value_everywhere("cloud_storage_secret_key", "[secret]")
+        self._check_value_everywhere("metrics_reporter_url", "user")
+        self._check_value_everywhere("cluster_id", "pass")
 
         # Set just one of the values
         patch_result = self.admin.patch_cluster_config(
-            upsert={"cloud_storage_access_key": "user2"}
+            upsert={"metrics_reporter_url": "user2"}
         )
         wait_for_version_sync(self.admin, self.redpanda, patch_result["config_version"])
-        self._check_value_everywhere("cloud_storage_access_key", "user2")
-        self._check_value_everywhere("cloud_storage_secret_key", "[secret]")
+        self._check_value_everywhere("metrics_reporter_url", "user2")
+        self._check_value_everywhere("cluster_id", "pass")
 
         # Check that the recently set value persists, AND the originally
         # set value of another property is not corrupted.
         self.redpanda.restart_nodes(self.redpanda.nodes)
-        self._check_value_everywhere("cloud_storage_access_key", "user2")
-        self._check_value_everywhere("cloud_storage_secret_key", "[secret]")
+        self._check_value_everywhere("metrics_reporter_url", "user2")
+        self._check_value_everywhere("cluster_id", "pass")
 
     @cluster(num_nodes=3)
     def test_simple_live_change(self):
@@ -694,7 +667,7 @@ class ClusterConfigTest(RedpandaTest, ClusterConfigHelpersMixin):
                 # Should not succeed!
                 assert False
 
-    @cluster(num_nodes=3, log_allow_list=OIDC_ALLOW_LIST)
+    @cluster(num_nodes=3, log_allow_list=[re.compile("SASL/PLAIN is enabled")])
     def test_valid_settings(self):
         """
         Bulk exercise of all config settings & the schema endpoint:
@@ -720,37 +693,9 @@ class ClusterConfigTest(RedpandaTest, ClusterConfigHelpersMixin):
             "audit_enabled",
         }
 
-        # Don't enable schema id validation: the interdepedencies are too complex and are tested elsewhere.
-        exclude_settings.add("enable_schema_id_validation")
-
-        # Don't modify oidc_discovery_url, if it's invalid, logging will break the test.
-        exclude_settings.add("oidc_discovery_url")
-
-        # Don't modify oidc_principal mapping, the value is complex and tested elsewhere.
-        exclude_settings.add("oidc_principal_mapping")
-
-        # Don't modify oidc_group_claim_path, the value is complex and tested elsewhere
-        exclude_settings.add("oidc_group_claim_path")
-
-        # Don't modify iceberg_default_partition_spec, it has its own syntax
-        # and is tested elsewhere.
-        exclude_settings.add("iceberg_default_partition_spec")
-
-        # Exclude iceberg catalog settings, these need to be a specific value
-        # to be valid, and if we enable iceberg and these settings things break.
-        exclude_settings.update(
-            [
-                "iceberg_rest_catalog_trust",
-                "iceberg_rest_catalog_trust_file",
-                "iceberg_rest_catalog_crl",
-                "iceberg_rest_catalog_crl_file",
-            ]
-        )
-        # Cloud storage and iceberg depend on properly configured cloud IO.
-        # Skip them to avoid breaking the test.
+        # Only accepted for compatibility: its validator rejects `true`, which
+        # is the value the boolean rule below would pick.
         exclude_settings.add("cloud_storage_enabled")
-        exclude_settings.add("iceberg_enabled")
-        exclude_settings.add("default_redpanda_storage_mode")
 
         # Partition balancer relies on relative sizes of these values
         exclude_settings.update(
@@ -814,22 +759,13 @@ class ClusterConfigTest(RedpandaTest, ClusterConfigHelpersMixin):
             if name == "sasl_mechanisms":
                 # The default value is ['SCRAM'], but the array cannot contain
                 # arbitrary strings because the config system validates them.
-                valid_value = ["SCRAM", "GSSAPI", "OAUTHBEARER"]
+                valid_value = ["SCRAM", "PLAIN"]
 
             if name == "http_authentication":
                 # The default value is ['BASIC'], but the array cannot contain
                 # arbitrary strings because the config system validates them.
                 # Removing BASIC breaks tests that use the admin API.
-                valid_value = ["BASIC", "OIDC"]
-
-            if name == "sasl_kerberos_principal_mapping":
-                # The default value is ['DEFAULT'], but the array must contain
-                # valid Kerberos mapping rules
-                valid_value = [
-                    "RULE:[1:$1]/L",
-                    "RULE:[2:$1](Test.*)s/ABC///L",
-                    "DEFAULT",
-                ]
+                valid_value = ["BASIC"]
 
             if name == "admin_api_require_auth":
                 # Don't lock ourselves out of the admin API!
@@ -854,15 +790,6 @@ class ClusterConfigTest(RedpandaTest, ClusterConfigHelpersMixin):
             if name == "enable_consumer_group_metrics":
                 valid_value = random.choice([[], ["group"], ["partition"]])
 
-            if name == "datalake_scheduler_block_size_bytes":
-                valid_value = random.choice(range(1048576, 8388608 + 1))
-
-            if name == "datalake_scheduler_max_concurrent_translations":
-                valid_value = random.choice(range(1, 8 + 1))
-
-            if name == "datalake_scheduler_time_slice_ms":
-                valid_value = random.choice(range(1000, 60000 + 1))
-
             if name == "tls_certificate_name_format":
                 valid_value = random.choice(
                     [e for e in p["enum_values"] if e != initial_value]
@@ -872,32 +799,6 @@ class ClusterConfigTest(RedpandaTest, ClusterConfigHelpersMixin):
                 # Doubling the default puts it out of the valid range.
                 # Do this instead.
                 valid_value = 10000
-
-            if name in (
-                "cloud_topics_reconciliation_target_fill_ratio",
-                "cloud_topics_reconciliation_speedup_blend",
-                "cloud_topics_reconciliation_slowdown_blend",
-            ):
-                # Doubling the default puts it out of the valid range.
-                # Do this instead.
-                valid_value = 0.5
-
-            if name in (
-                "cloud_topics_upload_part_size",
-                "cloud_topics_reconciliation_parallelism",
-                "cloud_topics_compaction_key_map_memory",
-            ):
-                # These feed into memory reservations (part_size *
-                # parallelism for reconciler, key_map_memory for
-                # compaction). Doubling all of them together causes the
-                # combined reservation to exceed available per-shard
-                # memory on restart. Use modest non-default values.
-                if name == "cloud_topics_upload_part_size":
-                    valid_value = 5242880  # 5 MiB (minimum)
-                elif name == "cloud_topics_reconciliation_parallelism":
-                    valid_value = 4
-                else:
-                    valid_value = 16777216  # 16 MiB (minimum)
 
             if name == "tls_v1_2_cipher_suites":
                 valid_value = ":".join(
@@ -960,12 +861,6 @@ class ClusterConfigTest(RedpandaTest, ClusterConfigHelpersMixin):
                 # String-ized comparison, because the example values are strings,
                 # whereas by the time we read them back they're properly typed.
                 actual = read_back.get(k, None)
-                if k in SECRET_CONFIG_NAMES:
-                    # Expect a redacted value for secrets. Redpanda redacts the
-                    # values and we have no way of cross checking the actual
-                    # values match.
-                    expect = "[secret]"
-
                 if isinstance(actual, bool):
                     # Lowercase because yaml and python capitalize bools differently.
                     actual = str(actual).lower()
@@ -1117,42 +1012,6 @@ class ClusterConfigTest(RedpandaTest, ClusterConfigHelpersMixin):
         noop_version, _ = self._import(text, allow_noop=True, all=True)
         assert noop_version is None
 
-        # Now try setting a secret.
-        text = text.replace(
-            "cloud_storage_secret_key:", "cloud_storage_secret_key: different_secret"
-        )
-        version_e, import_output = self._import(text, all)
-        assert version_e is not None
-        assert version_e > version_d
-
-        # Check that rpk doesn't print the secret to stdout.
-        assert "different_secret" not in import_output
-        # Instead, prints a [redacted] text.
-        assert "[redacted]" in import_output
-
-        # Because rpk doesn't know the contents of the secrets, it can't
-        # determine whether a secret is new. The request should be de-duped on
-        # the server side, and the same config version should be returned.
-        version_f, _ = self._import(text, all)
-        assert version_f is not None
-        assert version_f == version_e
-
-        # Attempting to change the secret to the redacted version, on the other
-        # hand, results in no version change, to prevent against accidentally
-        # setting the secret to the redacted string.
-        text = text.replace(
-            "cloud_storage_secret_key: different_secret",
-            "cloud_storage_secret_key: [secret]",
-        )
-        noop_version, _ = self._import(text, allow_noop=True, all=True)
-        assert noop_version is None
-
-        # Removing a secret should succeed with a new version.
-        text = text.replace("cloud_storage_secret_key: [secret]", "")
-        version_g, _ = self._import(text, all)
-        assert version_g is not None
-        assert version_g > version_f
-
     @cluster(num_nodes=3)
     @parametrize(all=True)
     @parametrize(all=False)
@@ -1225,17 +1084,25 @@ class ClusterConfigTest(RedpandaTest, ClusterConfigHelpersMixin):
         Test import/export of string fields, make sure they don't end
         up with extraneous quotes
         """
+        # metrics_reporter_url is a tunable, so it only shows up with --all
+        original = next(
+            line
+            for line in self._export(all=True).splitlines()
+            if line.startswith("metrics_reporter_url:")
+        )
         version_a, _ = self._export_import_modify_one(
-            "cloud_storage_access_key:\n", "cloud_storage_access_key: foobar\n"
+            original, "metrics_reporter_url: foobar", all=True
         )
         wait_for_version_sync(self.admin, self.redpanda, version_a)
-        self._check_value_everywhere("cloud_storage_access_key", "foobar")
+        self._check_value_everywhere("metrics_reporter_url", "foobar")
 
         version_b, _ = self._export_import_modify_one(
-            "cloud_storage_access_key: foobar\n", 'cloud_storage_access_key: "foobaz"'
+            "metrics_reporter_url: foobar",
+            'metrics_reporter_url: "foobaz"',
+            all=True,
         )
         wait_for_version_sync(self.admin, self.redpanda, version_b)
-        self._check_value_everywhere("cloud_storage_access_key", "foobaz")
+        self._check_value_everywhere("metrics_reporter_url", "foobaz")
 
     @cluster(num_nodes=3)
     def test_rpk_status(self):
@@ -1359,22 +1226,10 @@ class ClusterConfigTest(RedpandaTest, ClusterConfigHelpersMixin):
 
         valid_aliased_examples = [
             AliasedExample(
-                "data_transforms_per_core_memory_reservation",
-                "wasm_per_core_memory_reservation",
+                "log_retention_ms",
+                "delete_retention_ms",
                 "123456789",
                 123456789,
-            ),
-            AliasedExample(
-                "cloud_storage_graceful_transfer_timeout_ms",
-                "cloud_storage_graceful_transfer_timeout",
-                "1024",
-                1024,
-            ),
-            AliasedExample(
-                "cloud_storage_max_segment_readers_per_shard",
-                "cloud_storage_max_readers_per_shard",
-                "128",
-                128,
             ),
         ]
 
@@ -1437,22 +1292,10 @@ class ClusterConfigTest(RedpandaTest, ClusterConfigHelpersMixin):
         # Reset valid_aliased_examples before we attempt to repeat tests by setting with alias.
         valid_aliased_examples = [
             AliasedExample(
-                "data_transforms_per_core_memory_reservation",
-                "wasm_per_core_memory_reservation",
+                "log_retention_ms",
+                "delete_retention_ms",
                 "987654321",
                 987654321,
-            ),
-            AliasedExample(
-                "cloud_storage_graceful_transfer_timeout_ms",
-                "cloud_storage_graceful_transfer_timeout",
-                "4096",
-                4096,
-            ),
-            AliasedExample(
-                "cloud_storage_max_segment_readers_per_shard",
-                "cloud_storage_max_readers_per_shard",
-                "512",
-                512,
             ),
         ]
 
@@ -1620,38 +1463,6 @@ class ClusterConfigTest(RedpandaTest, ClusterConfigHelpersMixin):
             raise AssertionError(f"Filtered JSON parsing failed: {e}")
 
     @cluster(num_nodes=3)
-    def test_secret_redaction(self):
-        def set_and_search(key, value, expect_log):
-            patch_result = self.admin.patch_cluster_config(upsert={key: value})
-            wait_for_version_sync(
-                self.admin, self.redpanda, patch_result["config_version"]
-            )
-
-            # Check value was/was not printed to log while applying
-            assert self.redpanda.search_log_any(value) is expect_log
-
-            # Check we do/don't print on next startup
-            self.redpanda.restart_nodes(self.redpanda.nodes)
-            assert self.redpanda.search_log_any(value) is expect_log
-
-        # Default valued secrets are still shown.
-        self._check_value_everywhere("cloud_storage_secret_key", None)
-
-        secret_key = "cloud_storage_secret_key"
-        secret_value = "ThePandaFliesTonight"
-        set_and_search(secret_key, secret_value, False)
-
-        # Once set, we shouldn't be able to access the secret values.
-        self._check_value_everywhere("cloud_storage_secret_key", "[secret]")
-
-        # To avoid false negatives in the test of a secret, go through the same procedure
-        # but on a non-secret property, thereby validating that our log scanning procedure
-        # would have detected the secret if it had been printed
-        unsecret_key = "cloud_storage_api_endpoint"
-        unsecret_value = "nowhere"
-        set_and_search(unsecret_key, unsecret_value, True)
-
-    @cluster(num_nodes=3)
     def test_incremental_alter_configs(self):
         """
         Central config can also be accessed via Kafka API -- exercise that
@@ -1730,40 +1541,6 @@ class ClusterConfigTest(RedpandaTest, ClusterConfigHelpersMixin):
             in result["error_message"]
         ), result
 
-    # Note: "shared_key" is base64 encoded. It is decoded and that is the password used
-    ABS_STATIC_CFG = {
-        "cloud_storage_enabled": "true",
-        "cloud_storage_azure_storage_account": "theazureaccount",
-        "cloud_storage_azure_container": "theazurecontainer",
-        "cloud_storage_azure_shared_key": "aGVsbG90aGVyZXN0cmFuZ2Vy",
-        "cloud_storage_credentials_source": "config_file",
-    }
-    ABS_VM_INSTANCE_METADATA = {
-        "cloud_storage_enabled": "true",
-        "cloud_storage_azure_storage_account": "theazureaccount",
-        "cloud_storage_azure_container": "theazurecontainer",
-        "cloud_storage_azure_managed_identity_id": "00000000-0000-0000-0000-000000000000",
-        "cloud_storage_credentials_source": "azure_vm_instance_metadata",
-    }
-    ABS_ASK_OIDC_FEDERATION = {
-        "cloud_storage_enabled": "true",
-        "cloud_storage_azure_storage_account": "theazureaccount",
-        "cloud_storage_azure_container": "theazurecontainer",
-        "cloud_storage_credentials_source": "azure_aks_oidc_federation",
-        "__env__": {
-            # Required for AKS to function correctly, the token file is just a placeholder
-            # to make the refresh credentials system boot up.
-            "AZURE_CLIENT_ID": "client_id",
-            "AZURE_TENANT_ID": "tenantid",
-            "AZURE_FEDERATED_TOKEN_FILE": "/etc/hosts",
-            "AZURE_AUTHORITY_HOST": "http://localhost:42",
-        },
-    }
-
-    # We need to use a string as the value for `update`, to not trigger
-    # `OSError: [Errno 36] File name too long`
-    # caused by ducktape creating a folder for the run + parameters.
-
     @cluster(num_nodes=3)
     def test_status_read_after_write_consistency(self):
         """
@@ -1806,25 +1583,6 @@ class ClusterConfigTest(RedpandaTest, ClusterConfigHelpersMixin):
                 s for s in status if s["node_id"] == self.redpanda.idx(controller_node)
             )
             assert local_status["config_version"] == config_version
-
-    @cluster(num_nodes=3)
-    @parametrize(value="http://pandazone", valid=False)
-    @parametrize(value="https://securepandazone", valid=False)
-    @parametrize(value="pandazone", valid=True)
-    def test_validate_cloud_storage_api_endpoint(self, value, valid):
-        try:
-            self.admin.patch_cluster_config(
-                upsert={"cloud_storage_api_endpoint": value}
-            )
-        except requests.exceptions.HTTPError as e:
-            # Invalid api endpoint
-            assert not valid
-            assert e.response.status_code == 400
-        else:
-            # Valid api endpoint
-            assert valid
-
-    # None for pct_value is std::nullopt, which defaults to 0.0 in the cloud cache.
 
     @cluster(num_nodes=1)
     def test_disable_bounded_property_checks(self):
@@ -1876,13 +1634,6 @@ class PropertyAliasData(NamedTuple):
     """Setting property will ask for a restart."""
 
 
-cloud_storage_graceful_transfer_timeout = PropertyAliasData(
-    primary_name="cloud_storage_graceful_transfer_timeout_ms",
-    aliased_name="cloud_storage_graceful_transfer_timeout",
-    redpanda_version=(23, 2),
-    test_values=(1234, 1235, 1236),
-    expect_restart=False,
-)
 log_retention_ms = PropertyAliasData(
     primary_name="log_retention_ms",
     aliased_name="delete_retention_ms",
@@ -1890,21 +1641,10 @@ log_retention_ms = PropertyAliasData(
     test_values=(1000000, 300000, 500000),
     expect_restart=False,
 )
-# NOTE due to https://github.com/redpanda-data/redpanda/issues/13432 ,
-# test_values can't be -1 (a valid value nonetheless to signal infinite value)
-data_transforms_per_core_memory_reservation = PropertyAliasData(
-    primary_name="data_transforms_per_core_memory_reservation",
-    aliased_name="wasm_per_core_memory_reservation",
-    redpanda_version=(23, 3),
-    test_values=(27000000, 37000000, 47000000),
-    expect_restart=True,
-)
 
 # Mapping from identifier string to PropertyAliasData for use in @matrix annotations
 PROPERTY_ALIAS_SETS: dict[str, PropertyAliasData] = {
-    "cloud_storage_graceful_transfer_timeout": cloud_storage_graceful_transfer_timeout,
     "log_retention_ms": log_retention_ms,
-    "data_transforms_per_core_memory_reservation": data_transforms_per_core_memory_reservation,
 }
 
 
@@ -1920,13 +1660,7 @@ class ClusterConfigAliasTest(RedpandaTest, ClusterConfigHelpersMixin):
         pass  # Will start cluster in test
 
     @cluster(num_nodes=3)
-    @matrix(
-        prop_set_name=[
-            "cloud_storage_graceful_transfer_timeout",
-            "log_retention_ms",
-            "data_transforms_per_core_memory_reservation",
-        ]
-    )
+    @matrix(prop_set_name=["log_retention_ms"])
     def test_aliasing(self, prop_set_name: str):
         prop_set = PROPERTY_ALIAS_SETS[prop_set_name]
         """
@@ -1985,7 +1719,7 @@ class ClusterConfigAliasTest(RedpandaTest, ClusterConfigHelpersMixin):
     @cluster(num_nodes=3)
     @matrix(
         wipe_cache=[False, True],
-        prop_set_name=["cloud_storage_graceful_transfer_timeout", "log_retention_ms"],
+        prop_set_name=["log_retention_ms"],
     )
     def test_aliasing_with_upgrade(self, wipe_cache: bool, prop_set_name: str):
         prop_set = PROPERTY_ALIAS_SETS[prop_set_name]
@@ -2207,9 +1941,7 @@ class ClusterConfigNodeAddTest(RedpandaTest):
 
 class ClusterConfigMultiNodeBootstrapTest(RedpandaTest):
     def __init__(self, test_context):
-        super().__init__(
-            test_context, num_brokers=3, si_settings=SISettings(test_context)
-        )
+        super().__init__(test_context, num_brokers=3)
         self.admin = Admin(self.redpanda)
         self.rpk = RpkTool(self.redpanda)
 
@@ -2505,138 +2237,6 @@ class ClusterConfigMultiNodeBootstrapTest(RedpandaTest):
             backoff_sec=2,
             err_msg="cluster did not become healthy after full restart",
         )
-
-    @cluster(num_nodes=3)
-    def test_cluster_recovery_needs_restart_property(self):
-        """
-        After cluster recovery applies a needs_restart=yes property, the
-        active value should remain at the default until nodes restart.
-        After a restart, the recovered value should be in active because
-        bootstrap reads the local cache (which apply_delta -> store_delta
-        wrote during recovery).
-        """
-        # Faster cluster metadata upload so the source backup is captured
-        # quickly. enable_cluster_metadata_upload_loop is true by default.
-        self.redpanda.add_extra_rp_conf(
-            {
-                "controller_snapshot_max_age_sec": 1,
-                "cloud_storage_cluster_metadata_upload_interval_ms": 1000,
-            }
-        )
-
-        all_nodes = self.redpanda.nodes
-        self.redpanda.start(all_nodes)
-        wait_until(
-            lambda: len(self.admin.get_cluster_config_status()) == 3,
-            timeout_sec=30,
-            backoff_sec=1,
-        )
-
-        PROPERTY_NAME = "storage_compaction_key_map_memory_limit_percent"
-        PROPERTY_DEFAULT = 12
-        NEW_PROPERTY_VALUE = 6
-        # storage_compaction_key_map_memory_limit_percent is needs_restart=yes with default 12.
-        new_setting = (
-            PROPERTY_NAME,
-            NEW_PROPERTY_VALUE,
-        )
-        patch_result = self.admin.patch_cluster_config(upsert=dict([new_setting]))
-        new_version = patch_result["config_version"]
-        wait_for_active_nodes_version_status_sync(
-            self.admin, self.redpanda, new_version, nodes=all_nodes
-        )
-
-        # Let the metadata upload loop capture the post-patch state.
-        time.sleep(5)
-
-        # Wipe and bring up a fresh cluster.
-        self.redpanda.stop()
-        for n in all_nodes:
-            self.redpanda.remove_local_data(n)
-        self.redpanda.restart_nodes(all_nodes)
-        self.admin.await_stable_leader(
-            "controller",
-            partition=0,
-            namespace="redpanda",
-            timeout_s=60,
-            backoff_s=2,
-        )
-
-        # Use suppress_pending=True so we read the active value only, not
-        # the pending-aware view that rpk cluster_config_get returns by
-        # default. We want to verify that the recovered value lands in
-        # pending without changing active until restart.
-        for n in all_nodes:
-            v = self.admin.get_cluster_config(
-                node=n, key=PROPERTY_NAME, suppress_pending=True
-            )[PROPERTY_NAME]
-            assert v == PROPERTY_DEFAULT, (
-                f"Expected active {PROPERTY_NAME}={v} to be default value "
-                f"{PROPERTY_DEFAULT=} on {n.name} pre-recovery"
-            )
-
-        # Run cluster recovery.
-        self.admin.initialize_cluster_recovery()
-
-        def cluster_recovery_complete():
-            return (
-                "inactive" in self.admin.get_cluster_recovery_status().json()["state"]
-            )
-
-        wait_until(cluster_recovery_complete, timeout_sec=60, backoff_sec=1)
-
-        status = self.admin.get_cluster_config_status()
-        for n in status:
-            assert n["restart"] is True, (
-                f"Expected restart=true after recovery for needs_restart "
-                f"property, got status {status}"
-            )
-
-        # After recovery, the needs_restart=yes property is in pending.
-        # Active stays at the pre-recovery value; the pending-aware view
-        # already reflects the recovered value.
-        for n in all_nodes:
-            active = self.admin.get_cluster_config(
-                node=n, key=PROPERTY_NAME, suppress_pending=True
-            )[PROPERTY_NAME]
-            assert active == PROPERTY_DEFAULT, (
-                f"Expected active {PROPERTY_NAME}={active} to still be "
-                f"default {PROPERTY_DEFAULT=} on {n.name} after recovery "
-                f"(needs_restart=yes properties land in pending, not active)"
-            )
-            pending = self.admin.get_cluster_config(node=n, key=PROPERTY_NAME)[
-                PROPERTY_NAME
-            ]
-            assert pending == NEW_PROPERTY_VALUE, (
-                f"Expected pending-aware view of {PROPERTY_NAME}={pending} "
-                f"to reflect the recovered value {NEW_PROPERTY_VALUE=} on "
-                f"{n.name}"
-            )
-
-        self.redpanda.restart_nodes(all_nodes)
-        self.admin.await_stable_leader(
-            "controller",
-            partition=0,
-            namespace="redpanda",
-            timeout_s=60,
-            backoff_s=2,
-        )
-
-        # After restart, hydrate_cluster_config -> load_cache ->
-        # preload_local writes the recovered value into active.
-        for n in all_nodes:
-            v = self.admin.get_cluster_config(
-                node=n, key=PROPERTY_NAME, suppress_pending=True
-            )[PROPERTY_NAME]
-            assert v == NEW_PROPERTY_VALUE, (
-                f"Expected active {PROPERTY_NAME}={v} to be "
-                f"{NEW_PROPERTY_VALUE=} on {n.name} after recovery + restart"
-            )
-        status = self.admin.get_cluster_config_status()
-        for n in status:
-            assert n["restart"] is False, (
-                f"Unexpected restart=true after post-recovery restart: {status}"
-            )
 
 
 class ClusterConfigLegacyDefaultTest(RedpandaTest, ClusterConfigHelpersMixin):

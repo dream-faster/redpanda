@@ -405,8 +405,8 @@ def wait_for_local_storage_truncate(
     nodes: Optional[list[ClusterNode]] = None,
 ):
     """
-    For use in tiered storage tests: wait until the locally retained data
-    size for this partition is as close to the target threshold on all nodes.
+    Wait until the locally retained data size for this partition is as
+    close to the target threshold on all nodes.
     Size-based retention will not reclaim more than the target threshold, and
     since we reclaim with segment granularity, we can check that we the as close
     as possible property by examining the remaining segments.

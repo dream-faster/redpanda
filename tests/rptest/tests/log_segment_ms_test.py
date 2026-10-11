@@ -344,9 +344,6 @@ class SegmentMsTest(RedpandaTest):
             err_msg="failed waiting for the segment to roll",
         )
 
-        self.client().alter_topic_config(
-            topic.name, "retention.local.target.ms", "10000"
-        )
         self.client().alter_topic_config(topic.name, "retention.ms", "10000")
 
         # wait for retention policy to trigger
@@ -438,9 +435,6 @@ class SegmentMsTest(RedpandaTest):
         )
         consumer.start()
 
-        self.client().alter_topic_config(
-            topic.name, "retention.local.target.ms", "10000"
-        )
         self.client().alter_topic_config(topic.name, "retention.ms", "10000")
 
         # wait for retention policy to trigger

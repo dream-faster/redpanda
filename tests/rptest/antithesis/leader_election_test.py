@@ -22,9 +22,6 @@
 #   - sometimes: a leader exists (liveness — elections complete)
 #   - sometimes: a leadership change was observed (elections actually happen)
 #   - always: at most one leader per partition at any observation point
-#
-# Raft elections are independent of the storage path (local disk, tiered
-# storage, cloud topics), so one test covers all variants.
 
 from __future__ import annotations
 

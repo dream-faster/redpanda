@@ -98,21 +98,6 @@ class DescribeTopicsTest(RedpandaTest):
                 value="CreateTime",
                 doc_string="Default timestamp type for topic messages (CreateTime or LogAppendTime). The topic property `message.timestamp.type` overrides the value of `log_message_timestamp_type` at the topic level.",
             ),
-            "redpanda.remote.delete": ConfigProperty(
-                config_type="BOOLEAN",
-                value="true",
-                doc_string="Controls whether topic deletion should imply deletion in S3",
-            ),
-            "redpanda.remote.read": ConfigProperty(
-                config_type="BOOLEAN",
-                value="false",
-                doc_string="Default remote read config value for new topics",
-            ),
-            "redpanda.remote.write": ConfigProperty(
-                config_type="BOOLEAN",
-                value="false",
-                doc_string="Default remote write value for new topics",
-            ),
             "retention.bytes": ConfigProperty(
                 config_type="LONG",
                 value="-1",
@@ -164,53 +149,6 @@ class DescribeTopicsTest(RedpandaTest):
                 "Kafka-compatible alias, `log.roll.ms`. The topic property `segment.ms` "
                 "overrides the value of `log_segment_ms` at the topic level.",
             ),
-            "redpanda.key.schema.id.validation": ConfigProperty(
-                config_type="BOOLEAN",
-                value="false",
-                doc_string="Enable validation of the schema id for keys on a record",
-            ),
-            "redpanda.key.subject.name.strategy": ConfigProperty(
-                config_type="STRING",
-                value="TopicNameStrategy",
-                doc_string="The subject name strategy for keys if redpanda.key.schema.id.validation is enabled",
-            ),
-            "redpanda.value.schema.id.validation": ConfigProperty(
-                config_type="BOOLEAN",
-                value="false",
-                doc_string="Enable validation of the schema id for values on a record",
-            ),
-            "redpanda.value.subject.name.strategy": ConfigProperty(
-                config_type="STRING",
-                value="TopicNameStrategy",
-                doc_string="The subject name strategy for values if redpanda.value.schema.id.validation is enabled",
-            ),
-            "confluent.key.schema.validation": ConfigProperty(
-                config_type="BOOLEAN",
-                value="false",
-                doc_string="Enable validation of the schema id for keys on a record",
-            ),
-            "confluent.key.subject.name.strategy": ConfigProperty(
-                config_type="STRING",
-                value="io.confluent.kafka.serializers.subject.TopicNameStrategy",
-                doc_string="The subject name strategy for keys if confluent.key.schema.validation is enabled",
-            ),
-            "confluent.value.schema.validation": ConfigProperty(
-                config_type="BOOLEAN",
-                value="false",
-                doc_string="Enable validation of the schema id for values on a record",
-            ),
-            "confluent.value.subject.name.strategy": ConfigProperty(
-                config_type="STRING",
-                value="io.confluent.kafka.serializers.subject.TopicNameStrategy",
-                doc_string="The subject name strategy for values if confluent.value.schema.validation is enabled",
-            ),
-            "redpanda.schema.registry.context": ConfigProperty(
-                config_type="STRING",
-                value=".",
-                doc_string="Schema Registry context used to look up schemas referenced by "
-                "records in this topic (e.g. by the in-broker Iceberg translator). "
-                "Defaults to the Schema Registry default context ('.').",
-            ),
             "initial.retention.local.target.bytes": ConfigProperty(
                 config_type="LONG",
                 value="-1",
@@ -246,11 +184,6 @@ class DescribeTopicsTest(RedpandaTest):
                 value="262144",
                 doc_string="Maximum number of bytes that are not flushed per partition. If the configured threshold is reached, the log is automatically flushed even if it has not been explicitly requested.",
             ),
-            "redpanda.iceberg.mode": ConfigProperty(
-                config_type="STRING",
-                value="disabled",
-                doc_string="Iceberg enablement mode for the topic.",
-            ),
             "redpanda.leaders.preference": ConfigProperty(
                 config_type="STRING",
                 value="none",
@@ -261,21 +194,6 @@ class DescribeTopicsTest(RedpandaTest):
                 value="-1",
                 doc_string="The retention time for tombstone records and transaction markers in a compacted topic.",
             ),
-            "redpanda.iceberg.delete": ConfigProperty(
-                config_type="BOOLEAN",
-                value="true",
-                doc_string="If true, delete the corresponding Iceberg table when deleting the topic.",
-            ),
-            "redpanda.iceberg.partition.spec": ConfigProperty(
-                config_type="STRING",
-                value="",
-                doc_string="Partition spec of the corresponding Iceberg table.",
-            ),
-            "redpanda.iceberg.invalid.record.action": ConfigProperty(
-                config_type="STRING",
-                value="dlq_table",
-                doc_string="Action to take when an invalid record is encountered.",
-            ),
             "min.cleanable.dirty.ratio": ConfigProperty(
                 config_type="DOUBLE",
                 value="0.5",
@@ -284,17 +202,6 @@ class DescribeTopicsTest(RedpandaTest):
                 "before a partition's log is eligible for compaction in a compact topic. "
                 "The topic property `min.cleanable.dirty.ratio` overrides the value of "
                 "`min_cleanable_dirty_ratio` at the topic level.",
-            ),
-            "redpanda.remote.allowgaps": ConfigProperty(
-                config_type="BOOLEAN",
-                value="false",
-                doc_string="controls the eviction of locally-stored log segments when "
-                "tiered storage uploads are paused. set to `false` (default) to "
-                "only evict data that has already been uploaded to cloud storage. "
-                "if the retained data fills the local volume, redpanda will "
-                "throttle producers. set to `true` to allow the eviction of "
-                "locally-stored log segments, which may create gaps in "
-                "offsets.",
             ),
             "min.compaction.lag.ms": ConfigProperty(
                 config_type="LONG",
@@ -334,25 +241,6 @@ class DescribeTopicsTest(RedpandaTest):
                 "`message.timestamp.after.max.ms` overrides the value of "
                 "`log_message_timestamp_after_max_ms` at the topic level.",
             ),
-            "redpanda.storage.mode": ConfigProperty(
-                config_type="STRING",
-                value="unset",
-                doc_string="Default storage mode for newly-created topics. Determines how topic "
-                "data is stored: `local` for broker-local storage only, `tiered` for "
-                "both local and object storage, `cloud` for object-only storage using "
-                "the Cloud Topics architecture, or `unset` to use legacy "
-                "remote.read/write configs for backwards compatibility.",
-            ),
-            "redpanda.storage.mode.impl": ConfigProperty(
-                config_type="STRING",
-                value="unset",
-                doc_string="Exact implementation of the topic's storage mode. Tiered "
-                "topics report tiered_v1 (classic tiered-storage "
-                "architecture) or tiered_v2 (new tiered-storage "
-                "architecture); other modes mirror redpanda.storage.mode. "
-                "Read-only after creation: supply it at topic creation to "
-                "select the implementation explicitly.",
-            ),
         }
 
         tp_spec = TopicSpec()
@@ -375,7 +263,6 @@ class DescribeTopicsTest(RedpandaTest):
         #     3. An empty line
 
         # kcl marks read-only properties with a trailing asterisk
-        # (e.g. redpanda.storage.mode.impl*)
         property_re = re.compile(
             r"^(?P<name>[a-z.]+?)\*?\s+(?P<type>[a-z]+?)\s+(?P<value>\S+?)\s+(?P<src>[a-z_]+?)$"
         )

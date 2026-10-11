@@ -21,8 +21,6 @@ class UsageStatsReportingTest(RedpandaTest):
             and stats.disk_bytes_written == 0
             and stats.internal_rpc_bytes_recv == 0
             and stats.internal_rpc_bytes_sent == 0
-            and stats.cloud_storage_gets == 0
-            and stats.cloud_storage_puts == 0
         ), "Before restarting Redpanda, the usage stats should be 0"
 
         # restart nodes to trigger usage stats reporting
