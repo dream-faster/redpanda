@@ -7,10 +7,18 @@ on:
         description: 'Tag for the Docker image (default: commit sha)'
         required: false
         type: string
+      stock_image:
+        description: 'Image the upgrade test rolls FROM (default: newest public v26.2.x, which has no dedup; pass the deployed dedup build to exercise dedup state across the roll)'
+        required: false
+        type: string
   workflow_call:
     inputs:
       image_tag:
         description: 'Tag for the Docker image (default: commit sha)'
+        required: false
+        type: string
+      stock_image:
+        description: 'Image the upgrade test rolls FROM (default: newest public v26.2.x, which has no dedup; pass the deployed dedup build to exercise dedup state across the roll)'
         required: false
         type: string
     outputs:
@@ -212,8 +220,11 @@ jobs:
             docker push "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
           fi
 
-  # Roll the published image over a three node stock v26.2.x cluster, one node
-  # at a time, on the same data volumes.
+  # Roll the published image over a three node cluster, one node at a time, on
+  # the same data volumes. Without stock_image the baseline is the newest
+  # public v26.2.x, which proves the legacy_wire slots but carries no dedup
+  # state; pass the deployed dedup build to also check that the index survives
+  # the roll.
   upgrade:
     needs: build
     permissions:
@@ -222,3 +233,4 @@ jobs:
     uses: ./.github/workflows/upgrade-test.yml
     with:
       slim_image: ${{ needs.build.outputs.image_ref }}
+      stock_image: ${{ inputs.stock_image }}

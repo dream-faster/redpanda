@@ -160,6 +160,30 @@ sleep 15
 rpk 0 topic create after-snapshot -p 3 -r 3 >/dev/null || fail "create after-snapshot"
 for i in $(seq 1 50); do echo "s-$i"; done | rpk_in 0 topic produce after-snapshot -p 0 >/dev/null
 
+# Dedup index state only exists when the node being replaced already runs
+# dedup, so probe for the property instead of assuming it: upstream stock
+# rejects it, a predecessor built from this branch accepts it. Pass that
+# image as the baseline (docker-build's stock_image input) to exercise this.
+#
+# --acks=1 is deliberate. rpk's default --acks=-1 keeps franz-go's idempotent
+# producer, and the dedup filter bypasses idempotent and transactional produce
+# by design, so duplicates would sail through and the leg would assert nothing.
+# Only --acks=0 and --acks=1 disable idempotency, and --acks=0 gives no ack to
+# order the counts against.
+DEDUP=false
+if rpk 0 topic create deduped -p 1 -r 3 \
+  -c redpanda.dedup.window.ms=3600000 >/dev/null 2>&1; then
+  DEDUP=true
+  printf 'k1:v1\nk2:v2\nk1:v3\n' |
+    rpk_in 0 topic produce deduped --acks=1 -f '%k:%v\n' -p 0 >/dev/null ||
+    fail "produce deduped"
+  sleep 5
+  got=$(count 0 deduped 0)
+  [[ $got == 2 ]] || fail "dedup did not suppress before the upgrade: $got/2"
+else
+  echo "-- baseline has no dedup property; skipping the dedup leg"
+fi
+
 echo "== rolling upgrade to slim: $SLIM"
 for id in 2 1 0; do
   echo "-- upgrading node $id"
@@ -188,6 +212,27 @@ done
 got=$(count 1 after-snapshot 0)
 [[ $got == 50 ]] || fail "after-snapshot has $got/50"
 expect_config 0 plain min.cleanable.dirty.ratio 0.3 || fail "topic config lost"
+if [[ $DEDUP == true ]]; then
+  echo "-- dedup state across the upgrade"
+  expect_config 0 deduped redpanda.dedup.window.ms 3600000 || fail "dedup config lost"
+  # A key first seen before the roll must still be suppressed. The index is
+  # log-derived, so this passes only if the dedup snapshot and the replayed
+  # log both survived the node replacements -- the disruption this leg exists
+  # to catch.
+  printf 'k1:v4\n' |
+    rpk_in 0 topic produce deduped --acks=1 -f '%k:%v\n' -p 0 >/dev/null ||
+    fail "produce deduped after the upgrade"
+  sleep 5
+  got=$(count 0 deduped 0)
+  [[ $got == 2 ]] || fail "pre-upgrade dedup state lost: $got/2"
+  # And the filter still indexes identities it sees for the first time now.
+  printf 'k3:v5\nk3:v6\n' |
+    rpk_in 0 topic produce deduped --acks=1 -f '%k:%v\n' -p 0 >/dev/null ||
+    fail "produce a new dedup identity"
+  sleep 5
+  got=$(count 0 deduped 0)
+  [[ $got == 3 ]] || fail "dedup stopped working after the upgrade: $got/3"
+fi
 expect_config 0 retained retention.ms 86400000 || fail "retention lost"
 rpk 2 group describe upgrade-group | grep -q 'upgrade-group' || fail "group lost"
 rpk 1 topic list | grep -q compacted || fail "compacted topic lost"
