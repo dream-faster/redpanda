@@ -40,7 +40,6 @@ setup(
         "google-cloud-storage==3.1.0",
         "proto-plus==1.26.1",
         "rsa==4.9",
-        "python-keycloak==5.8.1",
         "z3-solver==4.12.6",
         "hypothesis==6.82",
         "jsonschema==4.26.0",

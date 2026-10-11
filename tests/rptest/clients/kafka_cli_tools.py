@@ -17,7 +17,6 @@ from typing import Any, NamedTuple, Optional, Sequence, cast
 from ducktape.utils.util import wait_until
 
 from rptest.clients.types import TopicSpec
-from rptest.services.keycloak import OAuthConfig
 from rptest.services.redpanda_types import (
     RedpandaServiceForClients,
     check_username_password,
@@ -91,8 +90,6 @@ class KafkaCliTools:
         user: str | None = None,
         passwd: str | None = None,
         algorithm: str | None = "SCRAM-SHA-256",
-        protocol: str = "SASL_PLAINTEXT",
-        oauth_cfg: OAuthConfig | None = None,
     ):
         self._redpanda = redpanda
         self.logger = redpanda.logger
@@ -101,33 +98,18 @@ class KafkaCliTools:
 
         check_username_password(user, passwd)
 
-        if oauth_cfg:
-            assert not user, "OATH cannot be combined with username/password authn"
-        self._oauth_cfg = oauth_cfg
-
+        # plain or SASL authn: start with the redpanda default client credentials
+        # and then apply any passed-in overrides
         security_config_text = None
-        if self._oauth_cfg is None:
-            # plain or SASL authn: start with the redpanda default client credentials
-            # and then apply any passed-in overrides
-            security = redpanda.kafka_client_security()
-            if user:
-                security = security.override(user, passwd, algorithm, tls_enabled=None)
+        security = redpanda.kafka_client_security()
+        if user:
+            security = security.override(user, passwd, algorithm, tls_enabled=None)
 
-            if sasl := security.simple_credentials():
-                security_config_text = f"""
+        if sasl := security.simple_credentials():
+            security_config_text = f"""
 sasl.mechanism={sasl.mechanism}
 security.protocol={security.security_protocol}
 sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="{sasl.username}" password="{sasl.password}";
-"""
-        else:
-            security_config_text = f"""
-sasl.mechanism=OAUTHBEARER
-security.protocol={protocol}
-sasl.jaas.config=org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginModule required \
-  oauth.client.id="{self._oauth_cfg.client_id}" \
-  oauth.client.secret="{self._oauth_cfg.client_secret}" \
-  oauth.token.endpoint.uri="{self._oauth_cfg.token_endpoint}";
-sasl.login.callback.handler.class=io.strimzi.kafka.oauth.client.JaasClientOauthLoginCallbackHandler
 """
 
         # security config can't be parsed by the basic props parser in many of the
@@ -733,24 +715,3 @@ sasl.login.callback.handler.class=io.strimzi.kafka.oauth.client.JaasClientOauthL
     def _script(self, script: str):
         version = self._version or KafkaCliTools.VERSIONS[0]
         return "/opt/kafka-{}/bin/{}".format(version, script)
-
-    def oauth_produce(self, topic: str, num_records: int, acks: int = -1):
-        path = "/opt/strimzi-kafka-oauth/examples/producer"
-        assert self._oauth_cfg is not None, (
-            "Must provide an OAuthConfig at construction"
-        )
-        cmd = [
-            "java",
-            "-Dsecurity.protocol=sasl_plaintext",
-            f"-Dacks={acks}",
-            f"-Dbootstrap.servers={self._redpanda.brokers()}",
-            f"-Doauth.token.endpoint.uri={self._oauth_cfg.token_endpoint}",
-            f"-Doauth.client.id={self._oauth_cfg.client_id}",
-            f"-Doauth.client.secret={self._oauth_cfg.client_secret}",
-            "-cp",
-            f"{path}/target/*:{path}/target/lib/*",
-            "io.strimzi.examples.producer.ExampleProducer",
-            topic,
-            str(num_records),
-        ]
-        self._execute(cmd, "oauth_produce")

@@ -220,13 +220,6 @@ RUN /k8s && \
 
 #################################
 
-FROM base AS keycloak
-
-COPY --chown=0:0 --chmod=0755 tests/docker/ducktape-deps/keycloak /
-RUN --mount=type=cache,id=dl-cache,target=/dl-cache /keycloak && rm /keycloak
-
-#################################
-
 FROM base AS ocsf
 COPY --chown=0:0 --chmod=0755 tests/docker/ducktape-deps/ocsf-server /
 RUN --mount=target=/running/ocsf-server,type=tmpfs --mount=type=cache,target=/var/cache/apt,sharing=locked,id=ocsf-cache-apt --mount=type=cache,target=/var/lib/apt,sharing=locked,id=ocsf-lib-apt \
@@ -288,10 +281,6 @@ COPY --chown=0:0 --chmod=0755 tests/docker/ducktape-deps/arroyo /
 RUN /arroyo && \
     rm /arroyo
 
-COPY --chown=0:0 --chmod=0755 tests/docker/ducktape-deps/mitmproxy /
-RUN /mitmproxy && \
-    rm /mitmproxy
-
 RUN mkdir -p /opt/scripts/consumer_offsets_recovery
 COPY --chown=0:0 --chmod=0755 tools/consumer_offsets_recovery /opt/scripts/consumer_offsets_recovery
 RUN python3 -m pip install --force --no-cache-dir -r  /opt/scripts/consumer_offsets_recovery/requirements.txt
@@ -351,7 +340,6 @@ COPY --from=k8s /usr/local/bin/kubectl /usr/local/bin/helm /usr/local/bin/
 COPY --from=kaf /usr/local/bin/kaf /usr/local/bin/
 COPY --from=kcl /usr/local/bin/kcl /usr/local/bin/
 COPY --from=kgo-verifier /opt/kgo-verifier /opt/kgo-verifier
-COPY --from=keycloak /opt/keycloak/ /opt/keycloak/
 COPY --from=ocsf /opt/ocsf-schema/ /opt/ocsf-schema/
 COPY --from=ocsf /opt/ocsf-server/ /opt/ocsf-server/
 COPY --from=flink /opt/flink/ /opt/flink/
