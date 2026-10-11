@@ -1,7 +1,9 @@
 # Slim Redpanda — handoff
 
-Branch `claude/redpanda-slim`, based on `upstream/v26.2.x` (`fd30e45b31`).
-Head at time of writing: `c10e7333fc`.
+Built on branch `claude/redpanda-slim` from `upstream/v26.2.x` (`fd30e45b31`)
+and squash-merged into this fork's `v26.2.x` as `2d4e264da7` (#7), followed by
+`926f87a647` (#10, Helm chart compatibility). Commit hashes in the tables below
+are from the unsquashed branch.
 
 Goal: a Redpanda that is only a distributed Kafka broker on local storage,
 with everything else removed.
@@ -38,6 +40,8 @@ cluster-recovery files under `cluster/`.
 | Cluster linking and shadow links | `6540818` |
 | Schema registry and HTTP proxy | `d5dfdbf` |
 | Tiered storage, cluster recovery, data migrations | `f5bc745` |
+| GSSAPI/Kerberos and OIDC authentication | `27a742d` |
+| Ducktape tests and harness (see [Ducktape tests](#ducktape-tests)) | `6a81637`, `3b35d1c`, `ffa33a8`, `976bc99`, `30d304d`, `8fa43e1`, `ff5a497`, then the follow-up branch `claude/practical-darwin-ffahhu` |
 
 The last of these is the largest. It removes the archival upload path
 (`ntp_archiver`, `archiver_manager`, `upload_housekeeping`, `purger`,
@@ -51,6 +55,29 @@ nothing of it survives the loss of cloud storage.
 `cluster::partition` shrank from 471 to 286 lines of header and 1870 to 677
 lines of implementation; its constructor is now `(consensus_ptr,
 sharded<feature_table>&)`.
+
+### Authentication: GSSAPI and OIDC
+
+`27a742d` removes both, leaving SCRAM, PLAIN and mTLS for Kafka and HTTP Basic
+for the admin API:
+
+- **Sources and build.** `security/gssapi_*`, `krb5*`, `jwt.*`, `oidc_*`, the
+  vendored `thirdparty/krb5` headers and `bazel/thirdparty/krb5.BUILD`.
+- **Config.** `sasl_kerberos_config`, `sasl_kerberos_keytab`,
+  `sasl_kerberos_principal`, `sasl_kerberos_principal_mapping`, every `oidc_*`
+  property and `nested_group_behavior` are gone. `sasl_mechanisms` (and the
+  per-listener overrides) now accept only `SCRAM` and `PLAIN`;
+  `http_authentication` accepts only `BASIC`. With no restricted value left,
+  neither is enterprise-gated any more, and `gssapi`/`oidc` are no longer
+  reported as license-required features.
+- **Kafka.** The `GSSAPI` and `OAUTHBEARER` SASL mechanisms are not offered; a
+  handshake asking for either gets `unsupported_sasl_mechanism`. The internal
+  Kafka client lost OAUTHBEARER too.
+- **Admin API.** The v1 OIDC routes and the HTTP bearer-token path in
+  `request_auth` are gone. The admin v2 `SecurityService` keeps its three OIDC
+  RPCs (`ResolveOidcIdentity`, `RefreshOidcKeys`, `RevokeOidcSessions`) so the
+  proto and the generated ducktape bindings don't churn; they answer
+  `unimplemented`.
 
 ### Deliberate behaviour changes
 
@@ -77,6 +104,12 @@ sharded<feature_table>&)`.
 - `describe_log_dirs` no longer reports a `remote://` log dir.
 - Learner initial offset is always `nullopt` — there is no cloud-resident
   prefix for a learner to skip.
+- **Clusters using GSSAPI or OIDC are not supported.** A stored
+  `sasl_mechanisms` or `http_authentication` value naming a removed mechanism
+  is reported as an invalid property on load (`config_manager` still applies
+  it, as it does for any value written by an older version), and clients using
+  that mechanism can no longer authenticate. Move those clients to SCRAM or
+  mTLS before rolling this onto such a cluster.
 
 ---
 
@@ -107,12 +140,80 @@ Two things made this take longer than it should have:
   rule, a private field left without a reader, a declaration deleted by name
   leaving its return type behind.
 
+## Ducktape tests
+
+`tests/rptest` went from 669 Python modules (379 `*_test.py`) upstream to 438
+(246). CI still does not run ducktape, so none of the survivors have been run
+against the slim broker; what has been checked is that the whole tree passes
+the repo's pyright gate (`tools/type-checking`) and CI's pinned ruff.
+
+**Done in #7** (`6a81637` … `ff5a497`): deleted the test suites for cloud
+topics, datalake/Iceberg, cluster linking, recovery from a bucket, data
+migrations, transforms, read replicas, the schema registry and HTTP proxy,
+Kerberos, OIDC, tiered storage and the Redpanda Cloud suites, plus the services
+that only those used. Surviving tests lost their tiered-storage, Iceberg and
+OAuth cases.
+
+**Done on `claude/practical-darwin-ffahhu`:**
+
+- **Keycloak / OAuth.** `KeycloakService`, its image stage and download script,
+  `python-keycloak`, the OAUTHBEARER paths in the librdkafka and Kafka CLI
+  clients (and the strimzi-kafka-oauth build they needed), and the mitmproxy
+  service that only proxied OIDC discovery.
+- **Tiered-storage harness.** `SISettings` and the `si_settings` plumbing
+  through `RedpandaService`/`RedpandaTest`/`EndToEndTest`, bucket
+  create/scrub/cleanup, cloud diagnostics, tiered-storage cache stats,
+  `rptest.archival` (S3/ABS clients), `rptest.utils.si_utils`,
+  `rptest.context`, the `rp-storage-tool` client, the admin helpers for the
+  `/v1/cloud_storage/*` routes, and the remote/storage-mode/Iceberg `TopicSpec`
+  fields. MinIO, Azurite and its MySQL are gone from `docker-compose.yml`.
+- **Redpanda Cloud harness.** `RedpandaServiceCloud`, the cloud
+  broker/cluster/provider clients, kubectl, install packs, the cloud failure
+  injector and log search, and the kubectl/helm and teleport image stages. The
+  "mixed" local-or-cloud test base is gone; its users run on `RedpandaTest`.
+- **Per-test cleanup.** About 35 surviving test files lost tiered-storage,
+  cloud-topic, Iceberg, OIDC and Kerberos parameters and cases. Tests that only
+  used a removed property as an *example* were switched to a surviving one
+  (aliases now use `log_retention_ms`/`delete_retention_ms`, the only alias
+  left). Tests deleted outright: `log_storage_target_size_test.py` (the space
+  manager that enforced the target is gone), `test_secret_redaction` (no
+  secret cluster properties remain), `test_validate_cloud_storage_api_endpoint`,
+  `test_cluster_recovery_needs_restart_property`,
+  `test_upgrade_with_topic_configs`, `test_recovery_local_data_missing`,
+  `test_block_s3_on_all_nodes`, and the boolean topic-property tests (no
+  boolean topic properties remain).
+- **Deps.** Dropped the Azure Blob and Google Cloud SDK pins and `adlfs`.
+
+**Still left in `tests/`:**
+
+- Schema registry and HTTP proxy leftovers: `PandaproxyConfig`,
+  `SchemaRegistryConfig` and `schema_reg()` in `services/redpanda.py`,
+  schema-registry flags in the rpk client, and `test_many_subjects` /
+  `test_many_schemas` in `scale_tests/many_topics_test.py`, which cannot pass.
+- Unused Iceberg/query-engine Python deps in `tests/setup.py` (`pyiceberg`,
+  `redpanda-polaris-catalog-python`, `databricks-*`, `duckdb`, `pyhive`,
+  `thrift*`, `pyarrow`).
+- A third Kafka listener named `kerberoslistener` in
+  `services/templates/redpanda.yaml`. It is an ordinary listener now; it was
+  kept because `security_report_test.py` and listener counts depend on it.
+- The test image still builds librdkafka/kcat with GSSAPI support and installs
+  `confluent-kafka` with `--no-binary` for it. That is client-side only and
+  harmless.
+- The `tools/antithesis` compose template and `tools/pgo_bolt` still reference
+  MinIO.
+
+To type-check without docker (the `type-check.sh` wrapper needs a daemon):
+create a venv, `pip install 'pyright[nodejs]==1.1.406' -e tests/`, put its
+`bin` first on `PATH`, and run
+`tools/type-checking/type-check.py --no-venv --tests-root tests check [files]`.
+
 ## What is left
 
 1. **Run the upgrade test** (dispatch `docker-build`). It is the only thing
    standing between this and a safe rollout.
-2. **Ducktape tests under `tests/rptest` were not touched** (about 160 of 267
-   modules reference removed features) and CI does not run them.
+2. **Run the ducktape tests.** The survivors are cleaned of tiered storage,
+   cloud and OIDC/Kerberos (see [Ducktape tests](#ducktape-tests)) but none
+   have been run against the slim broker, and CI does not run them.
 3. **Vestigial config remains.** `space_management_enable`,
    `retention_local_trim_*` and `disk_reservation_percent` survive with nothing
    reading them (the space manager was deleted). Kept so stock cluster config
@@ -120,8 +221,10 @@ Two things made this take longer than it should have:
 4. `rpk`: the registry, shadow, transform, `cluster storage` and
    `topic describe-storage` commands are gone. `topic produce/consume` still
    carry schema-registry flags.
-5. MinIO and the `dev_cluster`/PGO tooling that needed it were removed (the
-   pinned MinIO archive 410s upstream).
+5. MinIO is no longer fetched by the build (the pinned archive 410s
+   upstream). `tools/dev_cluster.py` is still there, with `--use-minio` and
+   `--use-iceberg-catalog` defaulting off; `tools/pgo_bolt` and the
+   `tools/antithesis` compose template still expect MinIO.
 
 ---
 
