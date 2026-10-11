@@ -469,6 +469,30 @@ void admin_server::register_debug_routes() {
         -> ss::future<ss::json::json_return_type> {
           return cpu_profile_handler(std::move(req));
       });
+    // The chart's post-install/post-upgrade job (the operator's
+    // sync-cluster-config) always PUTs this for schema-registry and returns
+    // its error, so a missing route fails the job, fails the Helm release and
+    // rolls the brokers back. The operator itself calls the endpoint "a
+    // historical artifact" -- nothing depends on a restart actually happening.
+    // Neither service exists in this build, so there is nothing to restart and
+    // the request succeeds. An unrecognised service name still 404s, as
+    // debug.json documents.
+    register_route<superuser>(
+      ss::httpd::debug_json::restart_service,
+      [](std::unique_ptr<ss::http::request> req)
+        -> ss::future<ss::json::json_return_type> {
+          auto service = req->get_query_param("service");
+          if (service != "schema-registry" && service != "http-proxy") {
+              throw ss::httpd::not_found_exception(
+                fmt::format("Invalid service: {}", service));
+          }
+          vlog(
+            adminlog.info,
+            "Ignoring restart request for {}: not part of this build",
+            service);
+          co_return ss::json::json_return_type(ss::json::json_void());
+      });
+
     register_route<superuser>(
       ss::httpd::debug_json::set_storage_failure_injection_enabled,
       [](std::unique_ptr<ss::http::request> req) {
