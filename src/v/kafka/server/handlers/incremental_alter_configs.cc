@@ -306,6 +306,16 @@ create_topic_properties_update(
                   std::identity{});
                 continue;
             }
+
+            if (cfg.name == topic_property_message_timestamp_after_max_ms) {
+                parse_and_set_optional_duration(
+                  update.properties.message_timestamp_after_max_ms,
+                  cfg.value,
+                  op,
+                  message_timestamp_after_max_ms_validator,
+                  /*clamp_to_duration_max=*/true);
+                continue;
+            }
         } catch (const validation_error& e) {
             vlog(
               klog.debug,
