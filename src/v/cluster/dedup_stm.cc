@@ -18,16 +18,28 @@
 #include "model/namespace.h"
 #include "model/record_batch_types.h"
 #include "raft/consensus.h"
+#include "serde/async.h"
 #include "ssx/future-util.h"
 #include "storage/types.h"
 
 #include <seastar/core/metrics.hh>
 #include <seastar/core/with_timeout.hh>
 #include <seastar/coroutine/as_future.hh>
+#include <seastar/coroutine/maybe_yield.hh>
 
+#include <limits>
 #include <new>
 
 namespace cluster {
+
+namespace {
+
+// Entries serialized between preemption checks. Small enough that a batch is
+// microseconds of work, large enough that the check itself does not show up
+// next to the write.
+constexpr size_t entries_per_yield = 1024;
+
+} // namespace
 
 dedup_stm::dedup_stm(
   raft::consensus* raft,
@@ -180,21 +192,46 @@ dedup_stm::get_initial_recovery_start_offset() {
 
 dedup_stm::state_snapshot
 dedup_stm::to_snapshot(const dedup_window_filter& state, int64_t generation) {
-    auto snapshot = state.snapshot();
     state_snapshot result{
       .window_ms = state.window().count(),
       .generation = generation,
-      .max_timestamp = snapshot.max_timestamp,
+      .max_timestamp = state.max_timestamp(),
       .inserts_since_evict = static_cast<uint64_t>(
-        snapshot.inserts_since_evict)};
-    result.entries.reserve(snapshot.entries.size());
-    for (const auto& entry : snapshot.entries) {
-        result.entries.push_back(
-          {.identity_hi = entry.identity.hi,
-           .identity_lo = entry.identity.lo,
-           .timestamp = entry.timestamp});
-    }
+        state.inserts_since_evict())};
+    // Filled from the index directly rather than from state.snapshot(): this
+    // is the one pass that cannot yield, because it is what gives the
+    // serializer a view of the index that the produce path cannot move
+    // underneath it. Going through dedup_index_snapshot would make it two.
+    result.entries.reserve(state.map_size());
+    state.for_each_live_entry(
+      [&result](dedup_identity_digest identity, model::timestamp timestamp) {
+          result.entries.push_back(
+            {.identity_hi = identity.hi,
+             .identity_lo = identity.lo,
+             .timestamp = timestamp});
+      });
     return result;
+}
+
+ss::future<> dedup_stm::state_snapshot::serde_async_write(iobuf& out) {
+    // Field order, and the count-prefixed entry encoding, are serde's own --
+    // see serde/rw/vector.h. Keep them in step with serde_fields().
+    serde::write(out, window_ms);
+    serde::write(out, generation);
+    serde::write(out, max_timestamp);
+    serde::write(out, inserts_since_evict);
+    if (unlikely(
+          entries.size() > std::numeric_limits<serde::serde_size_t>::max())) {
+        throw serde::serde_exception("dedup snapshot too big");
+    }
+    serde::write(out, static_cast<serde::serde_size_t>(entries.size()));
+    size_t written = 0;
+    for (auto& entry : entries) {
+        serde::write(out, entry);
+        if (++written % entries_per_yield == 0) {
+            co_await ss::coroutine::maybe_yield();
+        }
+    }
 }
 
 void dedup_stm::restore_snapshot(
@@ -502,8 +539,10 @@ ss::future<iobuf> dedup_stm::take_raft_snapshot(model::offset) {
     // target offset. populate() is idempotent (max-timestamp-wins), so a
     // replica installing this snapshot and replaying the remaining log
     // converges to exactly this state; see the log-derived dedup RFC.
-    _state.evict_expired();
-    co_return serde::to_iobuf(to_snapshot(_state, _generation));
+    auto snapshot = to_snapshot(_state, _generation);
+    iobuf buffer;
+    co_await serde::write_async(buffer, std::move(snapshot));
+    co_return std::move(buffer);
 }
 
 bool dedup_stm::try_restore_snapshot(iobuf buffer) {
@@ -564,17 +603,20 @@ dedup_stm::apply_local_snapshot(raft::stm_snapshot_header, iobuf&& buffer) {
 
 ss::future<raft::stm_snapshot>
 dedup_stm::take_local_snapshot(ssx::semaphore_units apply_units) {
-    _state.evict_expired();
     auto snapshot = to_snapshot(_state, _generation);
     auto offset = last_applied_offset();
     apply_units.return_all();
+    // Serialized after the units are back and off the index: snapshot holds
+    // its own copy of the entries, so the yields inside write_async() cost
+    // the apply and produce paths nothing beyond the copy above.
+    iobuf buffer;
+    co_await serde::write_async(buffer, std::move(snapshot));
     // The 0 here is stm_snapshot_header::version, a channel this STM does
     // not use: unlike rm_stm/tm_stm, which dispatch between snapshot layouts
     // on it, dedup_stm versions its payload through the serde envelope
     // (state_snapshot's version/compat_version). Deliberately left at 0 so
     // there is only one place the format is versioned.
-    co_return raft::stm_snapshot::create(
-      0, offset, serde::to_iobuf(std::move(snapshot)));
+    co_return raft::stm_snapshot::create(0, offset, std::move(buffer));
 }
 
 dedup_stm_factory::dedup_stm_factory(

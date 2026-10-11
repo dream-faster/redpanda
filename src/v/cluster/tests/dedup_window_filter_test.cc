@@ -568,13 +568,14 @@ TEST(DedupWindowFilter, RebuiltBatchPreservesTimestamp) {
     EXPECT_EQ(r->header().first_timestamp, ts(5000));
 }
 
-// evict_expired() removes entries older than the window relative to the most
-// recent timestamp seen, bounding memory.
-TEST(DedupWindowFilter, EvictExpiredDropsStaleEntries) {
+// A snapshot leaves out entries older than the window relative to the most
+// recent timestamp seen, so restoring it does not carry forward state that
+// can no longer cause a drop.
+TEST(DedupWindowFilter, SnapshotLeavesOutExpiredEntries) {
     cluster::dedup_window_filter f(1000ms);
 
     // The later timestamp goes in first on purpose. Inserting "a" second
-    // leaves it in the index for evict_expired() to find: the sweep cursor
+    // leaves it in the index for the snapshot to filter: the sweep cursor
     // runs before the insert, so it cannot see an entry that does not exist
     // yet, whereas inserting "a" first and then advancing the watermark past
     // its window would have the cursor drop it and leave nothing to test.
@@ -584,13 +585,16 @@ TEST(DedupWindowFilter, EvictExpiredDropsStaleEntries) {
     f.filter(make_batch("a", "v", ts(1000)));
     EXPECT_EQ(f.map_size(), 2u);
 
-    // "a" (t=1000) is 4000ms behind t=5000 (> 1000ms window): evicted.
-    // "b" (t=5000) is current: retained.
-    f.evict_expired();
-    EXPECT_EQ(f.map_size(), 1u);
+    // "a" (t=1000) is 4000ms behind t=5000 (> 1000ms window), so only "b"
+    // (t=5000) is worth persisting. The index itself is untouched: filtering
+    // a snapshot must not move the entry count the capacity path reads.
+    const auto snapshot = f.snapshot();
+    ASSERT_EQ(snapshot.entries.size(), 1u);
+    EXPECT_EQ(snapshot.entries[0].timestamp, ts(5000));
+    EXPECT_EQ(f.map_size(), 2u);
 
-    // "a" is now unknown, so it is admitted again even within what would have
-    // been its original window relative to t=5000.
+    // "a" is stale rather than absent, so it is admitted again even within
+    // what would have been its original window relative to t=5000.
     auto r = f.filter(make_batch("a", "v2", ts(5200)));
     EXPECT_TRUE(r.has_value());
 }
@@ -862,7 +866,9 @@ TEST(DedupWindowFilter, FutureTimestampDoesNotPoisonEvictionCutoff) {
     ASSERT_TRUE(
       f.filter(make_batch("skewed", "2", shift(now, 1h))).has_value());
 
-    f.evict_expired();
+    // A new identity gives the sweep cursor its budget, which is what walked
+    // the whole index with a poisoned cutoff and emptied it.
+    ASSERT_TRUE(f.filter(make_batch("filler", "3", now)).has_value());
 
     EXPECT_FALSE(f.filter(make_batch("a", "duplicate", now)).has_value());
 }
@@ -914,9 +920,10 @@ TEST(DedupWindowFilter, RestoreClampsPoisonedSnapshotWatermark) {
     EXPECT_EQ(f.skew_clamped_records(), 0u);
 
     // The restored entry survives the first sweep instead of being wiped by a
-    // cutoff an hour in the future, and still deduplicates.
-    f.evict_expired();
-    ASSERT_EQ(f.map_size(), 1u);
+    // cutoff an hour in the future, and still deduplicates. A new identity is
+    // what gives the cursor its budget.
+    ASSERT_TRUE(f.filter(make_batch("filler", "x", before)).has_value());
+    ASSERT_EQ(f.map_size(), 2u);
     EXPECT_FALSE(f.filter(make_batch("a", "duplicate", before)).has_value());
 }
 
@@ -1823,21 +1830,25 @@ TEST(DedupWindowFilter, SnapshotRoundTripWithManyEntries) {
       restored.filter(make_batch("id-absent", "new", ts(1000))).has_value());
 }
 
-// --- Eviction correctness (as opposed to interval) ---
+// --- Expiry correctness ---
 
-TEST(DedupWindowFilter, EvictExpiredKeepsInWindowEntries) {
+TEST(DedupWindowFilter, SnapshotKeepsInWindowEntries) {
     cluster::dedup_window_filter f(1000ms);
     // "recent" first so that "old" survives its own insertion and is still
-    // there for evict_expired() to drop; see EvictExpiredDropsStaleEntries.
+    // there for the snapshot to filter; see SnapshotLeavesOutExpiredEntries.
     f.populate(iobuf::from("recent"), ts(5000));
     f.populate(iobuf::from("old"), ts(1000));
     ASSERT_EQ(f.map_size(), 2u);
 
-    // Cutoff is max_ts - window == 4000, so "old" goes and "recent" stays.
-    f.evict_expired();
-    EXPECT_EQ(f.map_size(), 1u);
-    EXPECT_FALSE(f.filter(make_batch("recent", "dup", ts(5500))).has_value());
-    EXPECT_TRUE(f.filter(make_batch("old", "again", ts(5500))).has_value());
+    // Cutoff is max_ts - window == 4000, so "old" is left out and "recent"
+    // is kept -- and a replica restoring this snapshot agrees.
+    cluster::dedup_window_filter restored(1000ms);
+    restored.restore(f.snapshot());
+    EXPECT_EQ(restored.map_size(), 1u);
+    EXPECT_FALSE(
+      restored.filter(make_batch("recent", "dup", ts(5500))).has_value());
+    EXPECT_TRUE(
+      restored.filter(make_batch("old", "again", ts(5500))).has_value());
 }
 
 // Only a partial drop rebuilds and recompresses the batch, which is the whole

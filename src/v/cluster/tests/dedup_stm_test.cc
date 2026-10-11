@@ -13,6 +13,7 @@
 #include "config/mock_property.h"
 #include "model/batch_builder.h"
 #include "raft/tests/raft_fixture.h"
+#include "serde/async.h"
 #include "storage/record_batch_builder.h"
 #include "test_utils/test.h"
 
@@ -39,6 +40,29 @@ struct dedup_stm_test_accessor {
 
     static ss::future<> apply_raft_snapshot(dedup_stm& stm, iobuf buffer) {
         co_await stm.apply_raft_snapshot(buffer);
+    }
+
+    /// Built twice rather than copied: the entry vector is move-only.
+    static dedup_stm::state_snapshot state_snapshot_with(size_t entries) {
+        dedup_stm::state_snapshot snapshot{
+          .window_ms = 300'000,
+          .generation = 7,
+          .max_timestamp = model::timestamp{1'699'000'000'000},
+          .inserts_since_evict = 4'096};
+        snapshot.entries.reserve(entries);
+        for (size_t i = 0; i < entries; ++i) {
+            snapshot.entries.push_back(
+              {.identity_hi = 0x0123'4567'89ab'cdefULL + i,
+               .identity_lo = ~uint64_t{i},
+               .timestamp = model::timestamp{static_cast<int64_t>(i)}});
+        }
+        return snapshot;
+    }
+
+    static ss::future<iobuf> write_async(dedup_stm::state_snapshot snapshot) {
+        iobuf out;
+        co_await serde::write_async(out, std::move(snapshot));
+        co_return std::move(out);
     }
 };
 
@@ -72,6 +96,25 @@ model::record_batch make_batch_with_header(
       model::record(
         {}, 0, 0, iobuf::from(key), iobuf::from(value), std::move(hdrs)));
     return std::move(builder).build_sync();
+}
+
+// The snapshot paths serialize with serde::write_async() so a saturated index
+// does not hold the reactor for the whole walk. That path is a hand-written
+// field walk, so nothing but a test keeps it in step with the serde_fields()
+// layout that every reader -- including a broker running an older build of
+// this branch -- expects. Sizes straddle the yield boundary so a batching bug
+// cannot hide between them.
+TEST_CORO(dedup_stm_snapshot, async_write_matches_the_serde_layout) {
+    for (const size_t count : {0UL, 1UL, 1023UL, 1024UL, 1025UL, 4097UL}) {
+        SCOPED_TRACE(count);
+        auto expected = serde::to_iobuf(
+          dedup_stm_test_accessor::state_snapshot_with(count));
+        auto actual = co_await dedup_stm_test_accessor::write_async(
+          dedup_stm_test_accessor::state_snapshot_with(count));
+        ASSERT_EQ_CORO(expected, actual);
+        ASSERT_EQ_CORO(
+          dedup_stm_test_accessor::snapshot_size(std::move(actual)), count);
+    }
 }
 
 struct dedup_stm_fixture : raft::stm_raft_fixture<dedup_stm> {

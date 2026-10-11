@@ -19,6 +19,7 @@
 #include "serde/rw/vector.h"
 #include "utils/available_promise.h"
 
+#include <seastar/core/future.hh>
 #include <seastar/core/shared_future.hh>
 #include <seastar/core/shared_ptr.hh>
 
@@ -143,6 +144,16 @@ private:
               inserts_since_evict,
               entries);
         }
+
+        /// Writes exactly the layout serde_fields() produces, yielding
+        /// between batches of entries. A saturated index holds millions of
+        /// them, and serializing the lot in one task stalls the reactor for
+        /// as long as it takes -- the snapshot is written from whichever
+        /// scheduling group appended the bytes that triggered it, so the
+        /// stall lands on the produce or Raft path. Only serde::write_async()
+        /// picks this up; the plain serde::write() path still walks
+        /// serde_fields(), and the two must stay byte-identical.
+        ss::future<> serde_async_write(iobuf& out);
     };
 
     ss::future<result<kafka_result>> do_replicate(

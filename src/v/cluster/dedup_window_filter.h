@@ -249,7 +249,28 @@ public:
     /// only sharpens eviction).
     void revert_request(const dedup_request_undo&);
 
+    /// \brief The index state worth persisting, in the map's array order.
+    ///
+    /// Entries already outside the window are left out: a lookup would treat
+    /// them as expired anyway, so persisting them would only grow the
+    /// snapshot and the cost of restoring it. They are filtered here rather
+    /// than erased from the index because an erase at snapshot time lands at
+    /// a different moment on every replica, and the index size it changes
+    /// feeds capacity decisions -- see sweep_step().
     dedup_index_snapshot snapshot() const;
+
+    /// \brief Invoke emit(identity, timestamp) for every entry snapshot()
+    /// would include, for callers that would otherwise copy the index twice:
+    /// once into a dedup_index_snapshot and again into their own wire type.
+    template<typename F>
+    void for_each_live_entry(F&& emit) const {
+        const int64_t cutoff = _max_ts.value() - _window.count();
+        for (const auto& [identity, timestamp] : _map) {
+            if (timestamp.value() >= cutoff) {
+                emit(identity, timestamp);
+            }
+        }
+    }
 
     /// \brief Install a snapshot, replacing any current index state.
     ///
@@ -265,11 +286,6 @@ public:
     /// by the STM apply path and by state restoration helpers. Participates
     /// in eviction accounting so follower maps stay bounded.
     void populate(const iobuf& identity, model::timestamp ts);
-
-    /// \brief Drop entries older than the window relative to the most recent
-    /// timestamp seen. Called opportunistically from filter() to bound memory;
-    /// exposed for testing.
-    void evict_expired();
 
     /// \brief Reset all index state.
     void clear();
@@ -297,6 +313,7 @@ public:
     size_t map_size() const { return _map.size(); }
     size_t max_entries() const { return _max_entries; }
     model::timestamp max_timestamp() const { return _max_ts; }
+    size_t inserts_since_evict() const { return _inserts_since_evict; }
 
     /// Records dropped as duplicates. The denominator that makes the two
     /// counters below readable.

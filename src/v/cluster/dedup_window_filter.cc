@@ -348,16 +348,6 @@ void dedup_window_filter::populate(const iobuf& key, model::timestamp ts) {
     _map.emplace(identity, ts);
 }
 
-void dedup_window_filter::evict_expired() {
-    // An entry is only meaningful while a future record could still be within
-    // _window of it. Once _max_ts has advanced beyond the window, the entry can
-    // never cause a drop again (the next lookup would treat it as expired), so
-    // it is safe to remove.
-    const int64_t cutoff = _max_ts.value() - _window.count();
-    std::erase_if(
-      _map, [cutoff](const auto& kv) { return kv.second.value() < cutoff; });
-}
-
 size_t dedup_window_filter::soft_limit() const {
     // A tenth below the ceiling, and at least one entry below it so a tiny
     // configured ceiling still leaves the cursor a margin to trim in.
@@ -467,9 +457,10 @@ dedup_index_snapshot dedup_window_filter::snapshot() const {
     dedup_index_snapshot result{
       .max_timestamp = _max_ts, .inserts_since_evict = _inserts_since_evict};
     result.entries.reserve(_map.size());
-    for (const auto& [identity, timestamp] : _map) {
-        result.entries.push_back({identity, timestamp});
-    }
+    for_each_live_entry(
+      [&result](dedup_identity_digest identity, model::timestamp timestamp) {
+          result.entries.push_back({identity, timestamp});
+      });
     return result;
 }
 
