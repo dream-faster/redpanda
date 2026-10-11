@@ -220,8 +220,8 @@ ss::future<> dedup_stm::state_snapshot::serde_async_write(iobuf& out) {
     serde::write(out, generation);
     serde::write(out, max_timestamp);
     serde::write(out, inserts_since_evict);
-    if (unlikely(
-          entries.size() > std::numeric_limits<serde::serde_size_t>::max())) {
+    using size_limit = std::numeric_limits<serde::serde_size_t>;
+    if (unlikely(entries.size() > size_limit::max())) {
         throw serde::serde_exception("dedup snapshot too big");
     }
     serde::write(out, static_cast<serde::serde_size_t>(entries.size()));
