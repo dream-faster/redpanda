@@ -48,9 +48,7 @@ struct dedup_stm_test_accessor {
         dedup_stm::state_snapshot result{
           .window_ms = state.window().count(),
           .generation = generation,
-          .max_timestamp = snapshot.max_timestamp,
-          .inserts_since_evict = static_cast<uint64_t>(
-            snapshot.inserts_since_evict)};
+          .max_timestamp = snapshot.max_timestamp};
         result.entries.reserve(snapshot.entries.size());
         for (const auto& entry : snapshot.entries) {
             result.entries.push_back(
@@ -136,11 +134,21 @@ void fill(dedup_window_filter& filter, size_t entries) {
     dedup_index_snapshot seed;
     seed.entries.reserve(entries);
     for (size_t i = 0; i < entries; ++i) {
-        // An odd multiplier is a bijection mod 2^64, so every identity is
-        // distinct and the index really does hold `entries` of them.
+        // Both halves are a multiplication by an odd constant, which is a
+        // bijection mod 2^64 -- so every identity is distinct and the index
+        // really does hold `entries` of them.
+        //
+        // `lo` matters more than it looks: dedup_identity_digest_hash returns
+        // it verbatim and declares is_avalanching, so the map does not re-mix
+        // it, and unordered_dense takes the bucket index from the hash's
+        // *high* bits. Anything whose high bits barely move across the range
+        // -- a counter, or ~counter -- puts every key in one bucket
+        // neighbourhood and turns these inserts quadratic. A real xxhash64
+        // digest is spread; the multiplier here is what keeps the synthetic
+        // one spread too.
         seed.entries.push_back(
           {.identity
-           = {.hi = 0x9e37'79b9'7f4a'7c15ULL * (i + 1), .lo = ~uint64_t{i}},
+           = {.hi = 0xbf58'476d'1ce4'e5b9ULL * (i + 1), .lo = 0x9e37'79b9'7f4a'7c15ULL * (i + 1)},
            .timestamp = model::timestamp{
              base_timestamp + static_cast<int64_t>(i % 1000)}});
     }
@@ -149,6 +157,7 @@ void fill(dedup_window_filter& filter, size_t entries) {
 }
 
 ss::future<> compare_at(size_t entries) {
+    std::cout << "\nfilling " << entries << " entries" << std::endl;
     dedup_window_filter filter(1h, entries);
     fill(filter, entries);
     ASSERT_EQ_CORO(filter.map_size(), entries);
