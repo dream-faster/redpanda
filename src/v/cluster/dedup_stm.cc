@@ -100,6 +100,16 @@ void dedup_stm::setup_metrics() {
             "arrival rate."),
           labels),
         sm::make_counter(
+          "capacity_emergency_sweeps",
+          [this] { return _state.capacity_sweeps(); },
+          sm::description(
+            "Number of times a new identity arrived with the dedup index "
+            "exactly at dedup_max_entries_per_partition, so the cursor had "
+            "to run a bounded extra sweep to find room. Non-zero alongside "
+            "records_unindexed means that sweep sometimes found nothing "
+            "freeable."),
+          labels),
+        sm::make_counter(
           "snapshot_entries_truncated",
           [this] { return _state.truncated_entries(); },
           sm::description(
@@ -195,9 +205,7 @@ dedup_stm::to_snapshot(const dedup_window_filter& state, int64_t generation) {
     state_snapshot result{
       .window_ms = state.window().count(),
       .generation = generation,
-      .max_timestamp = state.max_timestamp(),
-      .inserts_since_evict = static_cast<uint64_t>(
-        state.inserts_since_evict())};
+      .max_timestamp = state.max_timestamp()};
     // Filled from the index directly rather than from state.snapshot(): this
     // is the one pass that cannot yield, because it is what gives the
     // serializer a view of the index that the produce path cannot move
@@ -219,7 +227,7 @@ ss::future<> dedup_stm::state_snapshot::serde_async_write(iobuf& out) {
     serde::write(out, window_ms);
     serde::write(out, generation);
     serde::write(out, max_timestamp);
-    serde::write(out, inserts_since_evict);
+    serde::write(out, legacy_inserts_since_evict);
     using size_limit = std::numeric_limits<serde::serde_size_t>;
     if (unlikely(entries.size() > size_limit::max())) {
         throw serde::serde_exception("dedup snapshot too big");
@@ -239,9 +247,7 @@ void dedup_stm::restore_snapshot(
   int64_t& generation,
   const state_snapshot& snapshot) {
     state.set_window(std::chrono::milliseconds{snapshot.window_ms});
-    dedup_index_snapshot restored{
-      .max_timestamp = snapshot.max_timestamp,
-      .inserts_since_evict = static_cast<size_t>(snapshot.inserts_since_evict)};
+    dedup_index_snapshot restored{.max_timestamp = snapshot.max_timestamp};
     // No trimming here: restore() owns the entry-limit policy, and it keeps
     // the most recent identities rather than a prefix. Selecting the newest N
     // requires seeing all N, so this intermediate is sized by the snapshot
@@ -480,6 +486,34 @@ ss::future<result<kafka_result>> dedup_stm::do_replicate(
                   fence,
                   ex);
                 co_return errc::timeout;
+            }
+            // The wait is on an offset, not on an offset in a term:
+            // event_manager::wait() resolves as soon as the commit index
+            // reaches `fence`, whoever wrote the entry sitting there. A new
+            // leader that truncated this term's tail and replicated its own
+            // records advances the commit index just the same, so without
+            // this check the wait can resolve on records that *replaced* the
+            // introducing write -- and this request would report a write the
+            // log does not hold. Nothing else guards it: a request that
+            // replicates is covered by opts.expected_term, but a fully
+            // deduplicated one never replicates.
+            //
+            // Revalidating the term is what makes the wait mean what this
+            // branch needs, because within one unbroken term the entries at
+            // or below the `fence` read above are this leader's own and
+            // cannot have been truncated -- truncation requires a higher
+            // term. raft::replication_monitor would report truncation
+            // directly, but it is documented as raft-internal and points
+            // other subsystems back at event_manager.
+            if (!_raft->is_leader() || _raft->term() != _insync_term) {
+                vlog(
+                  clusterlog.debug,
+                  "{} dedup fence for {} resolved after losing term {}, "
+                  "failing the request for retry",
+                  _raft->ntp(),
+                  fence,
+                  _insync_term);
+                co_return errc::not_leader;
             }
         }
         co_return kafka_result{
