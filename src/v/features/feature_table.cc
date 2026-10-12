@@ -768,15 +768,16 @@ feature_table::get_configured_license() const {
 }
 
 bool feature_table::should_sanction() const {
-    if (_license) {
-        return _license->is_expired();
-    } else if (_builtin_trial_license) {
-        return _builtin_trial_license->is_expired();
-    }
-
+    // TEMPORARY: license gate disabled for local testing. Revert before commit.
+    // if (_license) {
+    //     return _license->is_expired();
+    // } else if (_builtin_trial_license) {
+    //     return _builtin_trial_license->is_expired();
+    // }
     // While we are yet to initialize _builtin_trial_license on cluster
     // creation, be permissive
-    return _builtin_trial_license_initialized;
+    // return _builtin_trial_license_initialized;
+    return false;
 }
 
 void feature_table::testing_activate_all() {
