@@ -133,7 +133,19 @@ private:
         int64_t window_ms{0};
         int64_t generation{0};
         model::timestamp max_timestamp{model::timestamp::min()};
-        uint64_t inserts_since_evict{0};
+        /// New-identity attempts since the last eviction sweep, back when
+        /// eviction ran on an interval counted in them. The cursor now sweeps
+        /// on every attempt, so nothing reads this -- and nothing should: the
+        /// leader counted an identity twice (once speculatively, once on
+        /// apply) where a follower counted it once, and revert_request() never
+        /// gave one back, so replicas never agreed on it anyway.
+        ///
+        /// Kept in its slot because serde envelopes are positional: dropping
+        /// it would change the bytes a broker already running this branch
+        /// wrote. Written as zero, and whatever a peer wrote is parsed and
+        /// dropped -- see cluster/legacy_wire.h for the same treatment of
+        /// removed topic_properties fields.
+        uint64_t legacy_inserts_since_evict{0};
         chunked_vector<wire_entry> entries;
 
         auto serde_fields() {
@@ -141,7 +153,7 @@ private:
               window_ms,
               generation,
               max_timestamp,
-              inserts_since_evict,
+              legacy_inserts_since_evict,
               entries);
         }
 

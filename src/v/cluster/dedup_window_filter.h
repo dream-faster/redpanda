@@ -138,7 +138,6 @@ struct dedup_filter_result {
 struct dedup_index_snapshot {
     chunked_vector<dedup_index_entry> entries;
     model::timestamp max_timestamp{model::timestamp::min()};
-    size_t inserts_since_evict{0};
 
     friend bool operator==(
       const dedup_index_snapshot&, const dedup_index_snapshot&) = default;
@@ -313,7 +312,6 @@ public:
     size_t map_size() const { return _map.size(); }
     size_t max_entries() const { return _max_entries; }
     model::timestamp max_timestamp() const { return _max_ts; }
-    size_t inserts_since_evict() const { return _inserts_since_evict; }
 
     /// Records dropped as duplicates. The denominator that makes the two
     /// counters below readable.
@@ -433,10 +431,6 @@ private:
       _map;
     // Highest record timestamp seen; used as the reference "now" for eviction.
     model::timestamp _max_ts{model::timestamp::min()};
-    // New-identity attempts, including ones the ceiling left unindexed. No
-    // longer gates anything -- the cursor sweeps on every attempt -- but it is
-    // a wire field of the STM snapshot, so it is kept and kept counting.
-    size_t _inserts_since_evict{0};
     // Cursor into _map.values(), the dense array the hash map keeps entries
     // in. Erasing moves the array's last entry into the freed slot, so an
     // erase at the cursor leaves an unvisited entry there.

@@ -48,7 +48,7 @@ struct dedup_stm_test_accessor {
           .window_ms = 300'000,
           .generation = 7,
           .max_timestamp = model::timestamp{1'699'000'000'000},
-          .inserts_since_evict = 4'096};
+          .legacy_inserts_since_evict = 4'096};
         snapshot.entries.reserve(entries);
         for (size_t i = 0; i < entries; ++i) {
             snapshot.entries.push_back(

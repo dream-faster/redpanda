@@ -1221,33 +1221,6 @@ TEST(DedupIdentityDigest, IsPinnedForSnapshotCompatibility) {
     EXPECT_EQ(d.lo, 0x68a86e30b386534dULL);
 }
 
-// --- Eviction accounting ---
-
-// _inserts_since_evict no longer gates anything -- the cursor sweeps on every
-// new-identity attempt -- but it is a wire field of the STM snapshot, so it
-// must keep counting for brokers on either side of a rolling upgrade to read
-// each other's snapshots.
-TEST(DedupWindowFilter, NewIdentityAttemptsAreStillCounted) {
-    cluster::dedup_window_filter f(1h, 2);
-
-    f.populate(iobuf::from("a"), ts(1000));
-    f.populate(iobuf::from("b"), ts(1000));
-    EXPECT_EQ(f.snapshot().inserts_since_evict, 2u);
-
-    // An identity already in the index is not an attempt.
-    f.populate(iobuf::from("a"), ts(1100));
-    EXPECT_EQ(f.snapshot().inserts_since_evict, 2u);
-
-    // One the ceiling leaves unindexed is: the cursor advanced for it, so the
-    // count has to reflect that or it would stall while saturated.
-    f.populate(iobuf::from("c"), ts(1000));
-    ASSERT_EQ(f.unindexed_records(), 1u);
-    EXPECT_EQ(f.snapshot().inserts_since_evict, 3u);
-
-    f.clear();
-    EXPECT_EQ(f.snapshot().inserts_since_evict, 0u);
-}
-
 // --- Record payload integrity across the sharing rewrite ---
 
 // filter_request() iterates records by sharing them out of the batch rather
@@ -1793,7 +1766,7 @@ TEST(DedupWindowFilter, PopulateRespectsTheEntryLimit) {
     EXPECT_FALSE(f.filter(make_batch("a", "dup", ts(2500))).has_value());
 }
 
-TEST(DedupWindowFilter, SnapshotCarriesEvictionState) {
+TEST(DedupWindowFilter, SnapshotCarriesTheWatermark) {
     cluster::dedup_window_filter f(1000ms);
     ASSERT_TRUE(f.filter(make_batch("a", "v", ts(4321))).has_value());
 
@@ -1803,8 +1776,7 @@ TEST(DedupWindowFilter, SnapshotCarriesEvictionState) {
     cluster::dedup_window_filter restored(1000ms);
     restored.restore(snapshot);
     EXPECT_EQ(restored.max_timestamp(), ts(4321));
-    EXPECT_EQ(
-      restored.snapshot().inserts_since_evict, snapshot.inserts_since_evict);
+    EXPECT_EQ(restored.snapshot(), snapshot);
 }
 
 TEST(DedupWindowFilter, SnapshotRoundTripWithManyEntries) {

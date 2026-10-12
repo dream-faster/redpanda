@@ -134,9 +134,6 @@ bool dedup_window_filter::is_duplicate(
         return false;
     }
     _max_ts = std::max(_max_ts, ts);
-    // Counted even when the ceiling leaves the identity unindexed, so the
-    // cursor keeps advancing while saturated.
-    ++_inserts_since_evict;
     // Before the insert, not after: a follower's populate() sweeps at the same
     // point, and capacity trimming is decision-affecting, so the two orders
     // must match or replicas drift. See populate().
@@ -339,7 +336,6 @@ void dedup_window_filter::populate(const iobuf& key, model::timestamp ts) {
         }
         return;
     }
-    ++_inserts_since_evict;
     sweep_step(sweep_budget);
     if (_map.size() >= _max_entries && !make_room_for_one()) {
         ++_unindexed_records;
@@ -454,8 +450,7 @@ bool dedup_window_filter::make_room_for_one() {
 }
 
 dedup_index_snapshot dedup_window_filter::snapshot() const {
-    dedup_index_snapshot result{
-      .max_timestamp = _max_ts, .inserts_since_evict = _inserts_since_evict};
+    dedup_index_snapshot result{.max_timestamp = _max_ts};
     result.entries.reserve(_map.size());
     for_each_live_entry(
       [&result](dedup_identity_digest identity, model::timestamp timestamp) {
@@ -501,7 +496,6 @@ void dedup_window_filter::restore(const dedup_index_snapshot& snapshot) {
     // watermark; clamping here lets such a partition heal on restart rather
     // than needing a dedup_generation bump. Not counted as record skew.
     _max_ts = std::min(snapshot.max_timestamp, broker_now());
-    _inserts_since_evict = snapshot.inserts_since_evict;
     // The cursor indexes the value array it was walking, and the histogram
     // describes that array's contents; neither survives a different map. Both
     // are reset rather than persisted: a pass is bounded work that the next
@@ -522,7 +516,6 @@ void dedup_window_filter::clear() {
     // immediately and the capacity is worth keeping there.
     _map = {};
     _max_ts = model::timestamp::min();
-    _inserts_since_evict = 0;
     _sweep_pos = 0;
     _capacity_cutoff = model::timestamp::min();
     begin_pass();
