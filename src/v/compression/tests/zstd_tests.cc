@@ -112,6 +112,36 @@ SEASTAR_THREAD_TEST_CASE(async_stream_zstd_test) {
     }
 }
 
+// A frame whose header carries no decompressed size leaves a reader to grow
+// its output buffer blindly, which is where oversized allocations under
+// memory pressure come from. Both compressors build on a static context,
+// which starts with the content-size flag off, so both have to turn it back
+// on: stream_zstd did, async_stream_zstd (the cloud-storage path) did not --
+// its pledged size was used for internal sizing and never reached the header.
+SEASTAR_THREAD_TEST_CASE(zstd_frames_declare_their_decompressed_size) {
+    compression::async_stream_zstd async_fn(default_decompression_size, 1);
+    compression::stream_zstd sync_fn;
+
+    auto declared_size = [](const iobuf& frame) {
+        const auto raw = iobuf_to_bytes(frame);
+        return ZSTD_getFrameContentSize(raw.data(), raw.size());
+    };
+
+    for (size_t i : sizes) {
+        iobuf buf = gen(i);
+        const auto expected = static_cast<unsigned long long>(i);
+
+        const auto from_async = declared_size(
+          async_fn.compress(buf.share(0, i)).get());
+        BOOST_CHECK_NE(from_async, ZSTD_CONTENTSIZE_UNKNOWN);
+        BOOST_CHECK_EQUAL(from_async, expected);
+
+        const auto from_sync = declared_size(sync_fn.compress(buf.share(0, i)));
+        BOOST_CHECK_NE(from_sync, ZSTD_CONTENTSIZE_UNKNOWN);
+        BOOST_CHECK_EQUAL(from_sync, expected);
+    }
+}
+
 SEASTAR_THREAD_TEST_CASE(interleaved_async_stream_zstd_test) {
     std::array<size_t, 5> test_sizes{
       50_MiB,

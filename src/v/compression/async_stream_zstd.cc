@@ -83,6 +83,17 @@ async_stream_zstd::static_cctx::static_cctx(int compression_level) {
 
     throw_if_error(ZSTD_CCtx_setParameter(
       _compress_ctx, ZSTD_c_compressionLevel, default_compression_level));
+    // ZSTD_initStaticCCtx() zeroes the context rather than running the
+    // parameter initialiser ZSTD_createCCtx() uses, so it starts with the
+    // content-size flag *off*. Without it the pledged size compress() sets is
+    // used for internal sizing but never written into the frame header, and
+    // the frames this path produces carry no decompressed size -- leaving a
+    // reader to grow its output buffer blindly, which is what oversized
+    // allocations under memory pressure are made of. Parameters survive the
+    // ZSTD_reset_session_only in compress(), so setting it once here holds
+    // for every frame. Same reasoning as stream_zstd::compressor().
+    throw_if_error(
+      ZSTD_CCtx_setParameter(_compress_ctx, ZSTD_c_contentSizeFlag, 1));
 }
 
 async_stream_zstd::static_cctx::static_cctx(static_cctx&& ctx) noexcept
