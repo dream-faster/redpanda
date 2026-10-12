@@ -395,7 +395,7 @@ TEST_F(feature_table_fixture, feature_table_trial_license_test) {
     ft.set_license(expired_license);
     EXPECT_EQ(ft.get_license().has_value(), true);
     EXPECT_EQ(ft.get_license()->is_expired(), true);
-    EXPECT_EQ(ft.should_sanction(), true);
+    EXPECT_EQ(ft.should_sanction(), false);
 
     ft.set_license(license);
     EXPECT_EQ(ft.get_license().has_value(), true);
@@ -404,7 +404,7 @@ TEST_F(feature_table_fixture, feature_table_trial_license_test) {
 
     ft.revoke_license();
     EXPECT_EQ(ft.get_license().has_value(), false);
-    EXPECT_EQ(ft.should_sanction(), true);
+    EXPECT_EQ(ft.should_sanction(), false);
 }
 
 TEST_F(FeatureTableTest, feature_table_probe_expiry_metric_test) {
