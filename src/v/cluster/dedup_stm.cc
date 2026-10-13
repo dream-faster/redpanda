@@ -150,7 +150,17 @@ ss::future<> dedup_stm::start() {
         co_await _kvstore.remove(
           storage::kvstore::key_space::stms, std::move(key));
     }
-    co_await raft::persisted_stm<>::start();
+    {
+        // persisted_stm::start() reads the whole snapshot file before the
+        // restore trims it to what fits; one partition at a time per shard
+        // keeps that transient to one snapshot however many partitions start
+        // together.
+        std::optional<ssx::semaphore_units> one_at_a_time;
+        if (auto budget = _state.shard_budget(); budget) {
+            one_at_a_time = co_await budget->restore_one_at_a_time.get_units(1);
+        }
+        co_await raft::persisted_stm<>::start();
+    }
     setup_metrics();
 }
 

@@ -17,6 +17,7 @@
 #include "hashing/xx.h"
 #include "model/record.h"
 #include "model/timestamp.h"
+#include "ssx/semaphore.h"
 
 #include <seastar/core/shared_ptr.hh>
 
@@ -297,6 +298,11 @@ struct dedup_shard_budget {
 
     size_t entries{0};
     const size_t max_entries;
+    /// Held while a partition's snapshot is read and restored at startup, so
+    /// at most one snapshot file is in memory per shard at a time. Partition
+    /// starts are not otherwise bounded, and a snapshot can be as large as
+    /// the index it holds.
+    mutable ssx::semaphore restore_one_at_a_time{1, "dedup/restore"};
     /// Every filter holding this budget. Filters register on construction
     /// and leave on destruction; they are neither copyable nor movable, so
     /// the pointers stay valid.
