@@ -19,6 +19,16 @@ use_repo(
 
 bazel_dep(name = "gazelle", version = "0.45.0")
 bazel_dep(name = "abseil-cpp", version = "20250814.1")
+single_version_override(
+    module_name = "abseil-cpp",
+    patch_strip = 1,
+    patches = [
+        # Keeps absl/strings/cord.h (and the crc and x86 intrinsics headers it
+        # pulls in) out of every user of absl's hash containers and btrees.
+        "//bazel/thirdparty:abseil-forward-declare-cord.patch",
+    ],
+)
+
 bazel_dep(name = "bazel_skylib", version = "1.8.2")
 bazel_dep(name = "crc32c", version = "1.1.0")
 bazel_dep(name = "fmt", version = "12.1.0")

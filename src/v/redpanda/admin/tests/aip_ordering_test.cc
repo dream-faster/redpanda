@@ -8,6 +8,7 @@
  * the Business Source License, use of this software will be governed by the
  * Apache License, Version 2.0
  */
+#include "absl/time/time.h"
 #include "redpanda/admin/aip_ordering.h"
 #include "redpanda/admin/tests/aip_test_message_helpers.h"
 #include "serde/protobuf/rpc.h"

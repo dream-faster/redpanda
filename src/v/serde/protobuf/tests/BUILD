@@ -152,6 +152,7 @@ redpanda_cc_gtest(
         "//src/v/serde/protobuf:json",
         "//src/v/test_utils:gtest",
         "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/time",
         "@fmt",
         "@googletest//:gtest",
         "@libprotobuf_mutator",

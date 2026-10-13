@@ -10,6 +10,7 @@
  */
 #include "kafka/server/connection_context.h"
 
+#include "absl/time/time.h"
 #include "base/likely.h"
 #include "base/units.h"
 #include "base/vlog.h"
