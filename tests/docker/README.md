@@ -17,7 +17,7 @@ Mutable:        true
 Reclaimable:    true
 Shared:         false
 Size:           4.328GB
-Description:    cached mount /dl-cache from exec /bin/sh -c /keycloak && rm /keycloak
+Description:    cached mount /dl-cache from exec /bin/sh -c /kafka-tools && rm /kafka-tools
 Usage count:    77
 Last used:      13 seconds ago
 Type:           exec.cachemount

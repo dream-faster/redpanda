@@ -21,12 +21,11 @@ from rptest.clients.types import TopicSpec
 from rptest.services.admin import Admin, PartitionDetails, Replica
 from rptest.services.cluster import cluster
 from rptest.services.kgo_verifier_services import KgoVerifierProducer
-from rptest.services.redpanda import RedpandaService, SISettings
+from rptest.services.redpanda import RedpandaService
 from rptest.tests.end_to_end import EndToEndTest
 from rptest.tests.partition_movement import PartitionMovementMixin
 from rptest.tests.redpanda_test import RedpandaTest
 from rptest.util import wait_until_result
-from rptest.utils.node_operations import NodeDecommissionWaiter
 
 
 class ControllerLeadershipTransferInjector:
@@ -635,13 +634,8 @@ class NodeWiseRecoveryTest(RedpandaTest):
     def __init__(self, test_context, *args, **kwargs):
         super(NodeWiseRecoveryTest, self).__init__(
             test_context,
-            si_settings=SISettings(
-                log_segment_size=1024 * 1024,
-                test_context=test_context,
-                fast_uploads=True,
-                retention_local_strict=True,
-            ),
             extra_rp_conf={
+                "log_segment_size": 1024 * 1024,
                 "partition_autobalancing_mode": "continuous",
                 "enable_leader_balancer": False,
             },
@@ -674,14 +668,6 @@ class NodeWiseRecoveryTest(RedpandaTest):
     def get_topic_partition_high_watermarks(self, topic):
         return {p.id: p.high_watermark for p in self.rpk.describe_topic(topic)}
 
-    def get_topic_partition_status(self, topic, partitions):
-        return {
-            p: self.admin.get_partition_state(
-                namespace="kafka", topic=topic, partition=p
-            )
-            for p in range(partitions)
-        }
-
     def produce_until_log_eviction(self, topic):
         msg_size = 512
 
@@ -712,66 +698,16 @@ class NodeWiseRecoveryTest(RedpandaTest):
         self.producer.clean()
         self.producer.free()
 
-    def wait_for_final_manifest_uploads(self, topic, fraction_uploaded: float = 0.8):
-        def all_uploaded():
-            for p in self.rpk.describe_topic(topic):
-                status = self.admin.get_partition_cloud_storage_status(
-                    topic=topic,
-                    partition=p.id,
-                    node=self.redpanda.get_node_by_id(p.leader),
-                )
-                if ("ms_since_last_manifest_upload" not in status) or status[
-                    "metadata_update_pending"
-                ]:
-                    self.logger.debug(
-                        f"Pending manifest update: {status['ms_since_last_manifest_upload']=} {status['metadata_update_pending']=}"
-                    )
-                    return False
-                if int(status["cloud_log_last_offset"]) < fraction_uploaded * int(
-                    status["local_log_last_offset"]
-                ):
-                    self.logger.debug(
-                        f"{topic}/{p.id}: {status['cloud_log_last_offset']=} vs {status['local_log_last_offset']=}"
-                    )
-                    return False
-            return True
-
-        wait_until(
-            all_uploaded,
-            timeout_sec=self.default_timeout_sec,
-            backoff_sec=1,
-            err_msg="Error waiting for partition manifests upload",
-        )
-
-    def wait_for_no_reconfigurations(self):
-        def no_pending_force_reconfigurations():
-            status = self.admin.get_partition_balancer_status()
-            return status["partitions_pending_force_recovery_count"] == 0
-
-        wait_until(
-            no_pending_force_reconfigurations,
-            timeout_sec=self.default_timeout_sec,
-            backoff_sec=3,
-            err_msg="reported force recovery count is non zero",
-            retry_on_exc=True,
-        )
-
-    def _bootstrap_settled(self, internal_topic_rf: int) -> bool:
+    def _bootstrap_settled(self) -> bool:
         """Predicate: cluster bootstrap has settled enough to start a recovery.
 
         Node-wise recovery cannot make progress on a partition that has an
         in-flight reconfiguration: the partition balancer planner classifies
         such a partition as moving/immutable and never force-reconfigures it,
         so a recovery issued while a move is in flight stalls until timeout.
-
-        The cloud-topics internal metastore topic
-        (kafka_internal/ct_l1_domain) reliably undergoes a replica-set change
-        during bootstrap -- it is born rf=1 and reconfigured up to
-        internal_topic_replication_factor (default 3) as nodes join. This
-        predicate is true once that topic has reached its target rf AND there
-        are no reconfigurations pending anywhere in the cluster.
+        This predicate is true once there are no reconfigurations pending
+        anywhere in the cluster.
         """
-        # No partition moves / reconfigurations in flight cluster-wide.
         reconfigurations = self.admin.list_reconfigurations()
         if reconfigurations:
             self.logger.debug(
@@ -779,51 +715,24 @@ class NodeWiseRecoveryTest(RedpandaTest):
                 f"in progress: {reconfigurations}"
             )
             return False
-
-        # Cloud-topics internal metastore topic has reached its target rf. If
-        # the rf=1->N move hasn't been issued yet the partitions are still rf=1,
-        # so the move is yet to come -- keep waiting.
-        namespace = RedpandaService.KAFKA_INTERNAL_NAMESPACE
-        topic = RedpandaService.CLOUD_TOPICS_METASTORE_TOPIC
-        try:
-            partitions = self.admin.get_partitions(topic=topic, namespace=namespace)
-        except requests.exceptions.HTTPError as e:
-            # Topic not created yet (eager creation races bootstrap).
-            self.logger.debug(
-                f"bootstrap not settled: {namespace}/{topic} not queryable yet: {e}"
-            )
-            return False
-
-        if not partitions:
-            return False
-
-        for p in partitions:
-            rf = len(p["replicas"])
-            if rf != internal_topic_rf:
-                self.logger.debug(
-                    f"bootstrap not settled: {namespace}/{topic}/{p['partition_id']} "
-                    f"rf={rf}, want {internal_topic_rf}"
-                )
-                return False
         return True
 
-    def wait_for_bootstrap_to_settle(self, internal_topic_rf: int = 3):
+    def wait_for_bootstrap_to_settle(self):
         """Wait until cluster bootstrap settles so node-wise recovery isn't
-        disrupted by an in-flight internal-topic reconfiguration. See
-        _bootstrap_settled for details."""
+        disrupted by an in-flight reconfiguration. See _bootstrap_settled for
+        details."""
         wait_until(
-            lambda: self._bootstrap_settled(internal_topic_rf=internal_topic_rf),
+            self._bootstrap_settled,
             timeout_sec=self.default_timeout_sec,
             backoff_sec=2,
-            err_msg="cluster bootstrap did not settle (cloud-topics internal "
-            "topic still reconfiguring or moves in progress)",
+            err_msg="cluster bootstrap did not settle (moves in progress)",
             retry_on_exc=True,
         )
 
     @cluster(num_nodes=6)
     @matrix(dead_node_count=[1, 2])
     def test_node_wise_recovery(self, dead_node_count):
-        # Wait for bootstrap-time internal-topic reconfigurations to settle
+        # Wait for bootstrap-time reconfigurations to settle
         # before inducing failures, otherwise an in-flight move stalls recovery.
         self.wait_for_bootstrap_to_settle()
 
@@ -833,33 +742,22 @@ class NodeWiseRecoveryTest(RedpandaTest):
         for i in range(0, num_topics):
             rf = 3 if i % 2 == 0 else 1
             parts = random.randint(1, 3)
-            with_ts = random.choice([True, False])
             spec = TopicSpec(
                 name=f"topic-{i}",
                 replication_factor=rf,
                 partition_count=parts,
-                redpanda_remote_read=with_ts,
-                redpanda_remote_write=with_ts,
+                retention_bytes=2 * 1024 * 1024,
             )
             topics.append(spec)
             self.client().create_topic(spec)
-            self.client().alter_topic_config(
-                spec.name,
-                TopicSpec.PROPERTY_RETENTION_LOCAL_TARGET_BYTES,
-                2 * 1024 * 1024,
-            )
 
         admin = self.redpanda._admin
 
         to_kill_nodes = random.sample(self.redpanda.started_nodes(), dead_node_count)
         to_kill_node_ids = [int(self.redpanda.node_id(n)) for n in to_kill_nodes]
-        expected_fraction_uploaded = 0.8
+        expected_fraction_retained = 0.8
         for t in topics:
             self.produce_until_log_eviction(t.name)
-        for t in topics:
-            self.wait_for_final_manifest_uploads(
-                t.name, fraction_uploaded=expected_fraction_uploaded
-            )
 
         partitions_lost_majority = admin.get_majority_lost_partitions_from_nodes(
             dead_brokers=to_kill_node_ids
@@ -1004,128 +902,11 @@ class NodeWiseRecoveryTest(RedpandaTest):
                 self.logger.info(
                     f"partition {t}/{partition_id} replicas initial high watermark: {initial_hw} final high watermark: {final_hw}"
                 )
-                if t.redpanda_remote_write or t.replication_factor == 3:
+                if t.replication_factor == 3:
                     assert (
-                        expected_fraction_uploaded * initial_hw
+                        expected_fraction_retained * initial_hw
                         <= final_hw
                         <= initial_hw
                     ), (
                         f"partition {t.name}/{partition_id}: {initial_hw=} vs {final_hw=}"
                     )
-
-    @cluster(num_nodes=6)
-    @matrix(wait_for_final_manifest_uploads=[False, True])
-    def test_recovery_local_data_missing(self, wait_for_final_manifest_uploads):
-        self.redpanda._disable_cloud_storage_diagnostics = True
-
-        # Wait for bootstrap-time internal-topic reconfigurations to settle
-        # before inducing failures, otherwise an in-flight move stalls recovery.
-        self.wait_for_bootstrap_to_settle()
-
-        topic = TopicSpec(
-            replication_factor=3,
-            partition_count=1,
-            redpanda_remote_read=True,
-            redpanda_remote_write=True,
-        )
-        local_retention = 50 * 1024 * 1024  # 50 MiB
-        self.client().create_topic(topic)
-        self.client().alter_topic_config(
-            topic.name, TopicSpec.PROPERTY_RETENTION_LOCAL_TARGET_BYTES, local_retention
-        )
-
-        admin = self.redpanda._admin
-        rpk = RpkTool(self.redpanda)
-        replicas = []
-        for p in rpk.describe_topic(topic.name, tolerant=True):
-            replicas = [int(r) for r in p.replicas]
-
-        self.logger.info(f"Test topic {topic.name} replicas: {replicas}")
-
-        # produce initial data
-        self.produce_until_log_eviction(topic.name)
-        if wait_for_final_manifest_uploads:
-            self.wait_for_final_manifest_uploads(topic.name)
-        else:
-            self.client().alter_topic_config(topic.name, "redpanda.remote.write", False)
-
-        # collect topic partition high watermarks before recovery
-        initial_status = self.get_topic_partition_status(topic.name, 1)
-        self.logger.info(f"Initial partition status: {initial_status}")
-
-        # stop first partition replica
-        node_to_stop_id = replicas[0]
-        node_to_stop = self.redpanda.get_node_by_id(node_to_stop_id)
-        self.logger.debug(f"Stopping node: {node_to_stop_id}")
-        self.redpanda.stop_node(node_to_stop)
-        msg_size = 512
-        total_bytes = 75 * 1024 * 1024  # 75 MiB
-        msg_cnt = total_bytes // msg_size
-        # produce more data while node 0 is stopped
-        KgoVerifierProducer.oneshot(
-            self.test_context, self.redpanda, topic.name, msg_size, msg_cnt
-        )
-
-        if wait_for_final_manifest_uploads:
-            self.wait_for_final_manifest_uploads(topic.name)
-
-        status_2nd_step = self.get_topic_partition_status(topic.name, 1)
-
-        # stop other two replicas
-        to_kill_node_ids = replicas[1:]
-        to_kill_nodes = [self.redpanda.get_node_by_id(i) for i in to_kill_node_ids]
-        self.logger.debug(f"Stopping nodes: {to_kill_node_ids}")
-        self.redpanda.for_nodes(to_kill_nodes, self.redpanda.stop_node)
-
-        # start the first replica back up, it is outdated now
-        self.redpanda.start_node(
-            node_to_stop, auto_assign_node_id=True, omit_seeds_on_idx_one=True
-        )
-
-        # start the remaining replicas with empty disks
-        for node in to_kill_nodes:
-            self.redpanda.clean_node(
-                node, preserve_logs=True, preserve_current_install=True
-            )
-            self.redpanda.start_node(
-                node, auto_assign_node_id=True, omit_seeds_on_idx_one=True
-            )
-
-        partitions_lost_majority = admin.get_majority_lost_partitions_from_nodes(
-            dead_brokers=to_kill_node_ids
-        )
-        self.logger.info(f"Partitions with majority loss: {partitions_lost_majority}")
-
-        self.logger.debug(f"recovering from: {to_kill_node_ids}")
-        # issue a node wise recovery
-        rpk.force_partition_recovery(from_nodes=to_kill_node_ids)
-        self.wait_for_no_reconfigurations()
-        # wait for quiescence
-        self.redpanda._admin.await_stable_leader(
-            topic=topic.name,
-            partition=0,
-            timeout_s=self.default_timeout_sec,
-            backoff_s=2,
-            hosts=self._alive_nodes(),
-        )
-
-        status_after = self.get_topic_partition_status(
-            topic.name, topic.partition_count
-        )
-
-        for to_decom in to_kill_node_ids:
-            self.admin.decommission_broker(id=to_decom)
-            waiter = NodeDecommissionWaiter(
-                self.redpanda, to_decom, self.logger, progress_timeout=60
-            )
-            waiter.wait_for_removal()
-
-        self.logger.info(f"Final partition status: {status_after}")
-        cloud_offset = max(
-            [r["next_cloud_offset"] for r in status_2nd_step[0]["replicas"]]
-        )
-
-        # recovered high watermark must be greater than the cloud offset
-        recovered_hw = min([r["high_watermark"] for r in status_after[0]["replicas"]])
-
-        assert recovered_hw >= cloud_offset

@@ -24,19 +24,6 @@ class TopicSpec:
     CLEANUP_DELETE = "delete"
     CLEANUP_COMPACT_DELETE = "compact,delete"
 
-    STORAGE_MODE_LOCAL = "local"
-    STORAGE_MODE_TIERED = "tiered"
-    STORAGE_MODE_CLOUD = "cloud"
-    STORAGE_MODE_UNSET = "unset"
-
-    # Tiered values of the read-only redpanda.storage.mode.impl property,
-    # whose vocabulary is the unambiguous
-    # [unset|local|tiered_v1|tiered_v2|cloud]. On creation the property (set
-    # alone or together with a matching redpanda.storage.mode) selects the
-    # storage mode exactly. Not valid as redpanda.storage.mode values.
-    STORAGE_MODE_IMPL_TIERED_V1 = "tiered_v1"
-    STORAGE_MODE_IMPL_TIERED_V2 = "tiered_v2"
-
     PROPERTY_COMPRESSSION = "compression.type"
     PROPERTY_CLEANUP_POLICY = "cleanup.policy"
     PROPERTY_COMPACTION_STRATEGY = "compaction.strategy"
@@ -46,42 +33,16 @@ class TopicSpec:
     PROPERTY_RETENTION_TIME = "retention.ms"
     PROPERTY_RETENTION_LOCAL_TARGET_BYTES = "retention.local.target.bytes"
     PROPERTY_RETENTION_LOCAL_TARGET_MS = "retention.local.target.ms"
-    PROPERTY_REMOTE_DELETE = "redpanda.remote.delete"
     PROPERTY_SEGMENT_MS = "segment.ms"
     PROPERTY_WRITE_CACHING = "write.caching"
     PROPERTY_FLUSH_MS = "flush.ms"
     PROPERTY_FLUSH_BYTES = "flush.bytes"
-    PROPERTY_ICEBERG_MODE = "redpanda.iceberg.mode"
     PROPERTY_DELETE_RETENTION_MS = "delete.retention.ms"
-    PROPERTY_ICEBERG_INVALID_RECORD_ACTION = "redpanda.iceberg.invalid.record.action"
-    PROPERTY_ICEBERG_TARGET_LAG_MS = "redpanda.iceberg.target.lag.ms"
-    PROPERTY_ICEBERG_PARTITION_SPEC = "redpanda.iceberg.partition.spec"
     PROPERTY_SCHEMA_REGISTRY_CONTEXT = "redpanda.schema.registry.context"
     PROPERTY_MIN_CLEANABLE_DIRTY_RATIO = "min.cleanable.dirty.ratio"
     PROPERTY_MIN_COMPACTION_LAG_MS = "min.compaction.lag.ms"
     PROPERTY_MAX_COMPACTION_LAG_MS = "max.compaction.lag.ms"
     PROPERTY_MAX_MESSAGE_BYTES = "max.message.bytes"
-    PROPERTY_REMOTE_READ = "redpanda.remote.read"
-    PROPERTY_REMOTE_WRITE = "redpanda.remote.write"
-    PROPERTY_STORAGE_MODE = "redpanda.storage.mode"
-    PROPERTY_STORAGE_MODE_IMPL = "redpanda.storage.mode.impl"
-
-    @staticmethod
-    def storage_mode_config(mode: str) -> dict[str, str]:
-        """Topic config dict selecting a storage mode. Tiered variants
-        (tiered_v1/tiered_v2) are spelled as redpanda.storage.mode=tiered plus
-        the redpanda.storage.mode.impl property; sending both keeps v26.1
-        brokers (which ignore the unknown impl property) on a tiered mode
-        rather than silently falling back to the cluster default."""
-        if mode in (
-            TopicSpec.STORAGE_MODE_IMPL_TIERED_V1,
-            TopicSpec.STORAGE_MODE_IMPL_TIERED_V2,
-        ):
-            return {
-                TopicSpec.PROPERTY_STORAGE_MODE: TopicSpec.STORAGE_MODE_TIERED,
-                TopicSpec.PROPERTY_STORAGE_MODE_IMPL: mode,
-            }
-        return {TopicSpec.PROPERTY_STORAGE_MODE: mode}
 
     class CompressionTypes(str, Enum):
         """
@@ -155,9 +116,6 @@ class TopicSpec:
         segment_bytes: int | None = None,
         retention_bytes: int | None = None,
         retention_ms: int | None = None,
-        redpanda_remote_read: bool | None = None,
-        redpanda_remote_write: bool | None = None,
-        redpanda_remote_delete: bool | None = None,
         segment_ms: int | None = None,
         max_message_bytes: int | None = None,
         record_key_schema_id_validation: bool | None = None,
@@ -177,8 +135,6 @@ class TopicSpec:
         min_cleanable_dirty_ratio: float | None = None,
         min_compaction_lag_ms: int | None = None,
         max_compaction_lag_ms: int | None = None,
-        redpanda_storage_mode: str | None = None,
-        redpanda_storage_mode_impl: str | None = None,
     ):
         self.name = name or f"topic-{self._random_topic_suffix()}"
         self.partition_count = partition_count
@@ -189,9 +145,6 @@ class TopicSpec:
         self.segment_bytes = segment_bytes
         self.retention_bytes = retention_bytes
         self.retention_ms = retention_ms
-        self.redpanda_remote_read = redpanda_remote_read
-        self.redpanda_remote_write = redpanda_remote_write
-        self.redpanda_remote_delete = redpanda_remote_delete
         self.segment_ms = segment_ms
         self.max_message_bytes = max_message_bytes
         self.record_key_schema_id_validation = record_key_schema_id_validation
@@ -217,11 +170,6 @@ class TopicSpec:
         self.min_cleanable_dirty_ratio = min_cleanable_dirty_ratio
         self.min_compaction_lag_ms = min_compaction_lag_ms
         self.max_compaction_lag_ms = max_compaction_lag_ms
-        self.redpanda_storage_mode = redpanda_storage_mode
-        # Read-only on the broker (reported by DescribeConfigs for every
-        # topic); accepted here so describe output can round-trip through
-        # TopicSpec.
-        self.redpanda_storage_mode_impl = redpanda_storage_mode_impl
 
     def __str__(self):
         return self.name

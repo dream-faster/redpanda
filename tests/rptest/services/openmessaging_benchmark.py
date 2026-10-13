@@ -20,10 +20,7 @@ from rptest.services.openmessaging_benchmark_configs import (
     OMBSampleConfigurations,
     ValidatorDict,
 )
-from rptest.services.redpanda import (
-    RedpandaService,
-    RedpandaServiceCloud,
-)
+from rptest.services.redpanda import RedpandaService
 from rptest.services.utils import (
     BadLogLines,
     NodeToLines,
@@ -197,7 +194,7 @@ class OpenMessagingBenchmark(Service):
     def __init__(
         self,
         ctx: TestContext,
-        redpanda: RedpandaService | RedpandaServiceCloud,
+        redpanda: RedpandaService,
         driver: str | dict[str, Any] = "SIMPLE_DRIVER",
         workload: str | WorkloadTuple = "SIMPLE_WORKLOAD",
         node: ClusterNode | None = None,
@@ -263,16 +260,7 @@ class OpenMessagingBenchmark(Service):
         node.account.create_file(OpenMessagingBenchmark.WORKLOAD_FILE, conf)
 
     def _create_benchmark_driver_file(self, node: ClusterNode):
-        # if testing redpanda cloud, override with default superuser
-        if isinstance(self.redpanda, RedpandaServiceCloud):
-            u, p, m = self.redpanda._superuser
-            self.driver["sasl_username"] = u
-            self.driver["sasl_password"] = p
-            self.driver["sasl_mechanism"] = m
-            self.driver["security_protocol"] = "SASL_SSL"
-            self.driver["redpanda_node"] = self.redpanda.brokers().split(":")[0]
-        else:
-            self.driver["redpanda_node"] = self.redpanda.nodes[0].account.hostname
+        self.driver["redpanda_node"] = self.redpanda.nodes[0].account.hostname
         conf = self.render("omb_driver.yaml", **self.driver)
         self.logger.info("Rendered driver config: \n %s", conf)
         node.account.create_file(OpenMessagingBenchmark.DRIVER_FILE, conf)
@@ -314,16 +302,12 @@ class OpenMessagingBenchmark(Service):
             f"Starting Open Messaging Benchmark with workers: {worker_nodes}"
         )
 
-        # This version is used for the charts, in the cloud we use the
-        # install pack version, otherwise the redpanda version
-        if isinstance(self.redpanda, RedpandaServiceCloud):
-            rp_version = self.redpanda.install_pack_version()
-        else:
-            try:
-                rp_version = self.redpanda.get_version(self.redpanda.nodes[0])
-            except AssertionError:
-                # In some builds (particularly in dev), version string may not be populated
-                rp_version = "unknown_version"
+        # This version is used for the charts
+        try:
+            rp_version = self.redpanda.get_version(self.redpanda.nodes[0])
+        except AssertionError:
+            # In some builds (particularly in dev), version string may not be populated
+            rp_version = "unknown_version"
 
         start_cmd = f"cd {OpenMessagingBenchmark.OPENMESSAGING_DIR}; \
                     bin/benchmark \

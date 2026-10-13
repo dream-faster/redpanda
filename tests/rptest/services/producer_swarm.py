@@ -14,7 +14,7 @@ from typing import Any, Optional
 from ducktape.tests.test import TestContext
 
 from rptest.services.client_swarm_base import ClientSwarmBase
-from rptest.services.redpanda import AnyRedpandaService
+from rptest.services.redpanda import RedpandaService
 from rptest.services.utils import LocalPayloadDirectory, assert_int, assert_int_or_none
 
 
@@ -26,7 +26,7 @@ class ProducerSwarm(ClientSwarmBase):
     def __init__(
         self,
         context: TestContext,
-        redpanda: AnyRedpandaService,
+        redpanda: RedpandaService,
         topic: str,
         producers: int,
         records_per_producer: int,

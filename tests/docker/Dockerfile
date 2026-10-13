@@ -212,21 +212,6 @@ RUN --mount=type=cache,target=/root/go/pkg/mod,id=go-mod-cache \
 
 #################################
 
-FROM base AS k8s
-
-COPY --chown=0:0 --chmod=0755 tests/docker/ducktape-deps/k8s /
-RUN /k8s && \
-    rm /k8s
-
-#################################
-
-FROM base AS keycloak
-
-COPY --chown=0:0 --chmod=0755 tests/docker/ducktape-deps/keycloak /
-RUN --mount=type=cache,id=dl-cache,target=/dl-cache /keycloak && rm /keycloak
-
-#################################
-
 FROM base AS ocsf
 COPY --chown=0:0 --chmod=0755 tests/docker/ducktape-deps/ocsf-server /
 RUN --mount=target=/running/ocsf-server,type=tmpfs --mount=type=cache,target=/var/cache/apt,sharing=locked,id=ocsf-cache-apt --mount=type=cache,target=/var/lib/apt,sharing=locked,id=ocsf-lib-apt \
@@ -279,18 +264,9 @@ COPY --chown=0:0 --chmod=0755 tests/docker/ducktape-deps/python-deps /
 RUN /python-deps
 ENV PATH="/opt/.ducktape-venv/bin:/opt/redpanda_installs/bin:$PATH"
 
-COPY --chown=0:0 --chmod=0755 tests/docker/ducktape-deps/teleport /
-RUN --mount=target=/running/teleport,type=tmpfs --mount=type=cache,target=/var/cache/apt,sharing=locked --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    /teleport && \
-    rm /teleport
-
 COPY --chown=0:0 --chmod=0755 tests/docker/ducktape-deps/arroyo /
 RUN /arroyo && \
     rm /arroyo
-
-COPY --chown=0:0 --chmod=0755 tests/docker/ducktape-deps/mitmproxy /
-RUN /mitmproxy && \
-    rm /mitmproxy
 
 RUN mkdir -p /opt/scripts/consumer_offsets_recovery
 COPY --chown=0:0 --chmod=0755 tools/consumer_offsets_recovery /opt/scripts/consumer_offsets_recovery
@@ -347,11 +323,9 @@ COPY --from=sarama-examples /opt/sarama /opt/sarama
 COPY --from=golang-test-clients /opt/redpanda-tests/go /opt/redpanda-tests/go
 COPY --from=client-swarm /usr/local/bin/client-swarm /usr/local/bin/
 COPY --from=franz-bench /opt/franz-go/examples/bench /opt/franz-go/examples/bench
-COPY --from=k8s /usr/local/bin/kubectl /usr/local/bin/helm /usr/local/bin/
 COPY --from=kaf /usr/local/bin/kaf /usr/local/bin/
 COPY --from=kcl /usr/local/bin/kcl /usr/local/bin/
 COPY --from=kgo-verifier /opt/kgo-verifier /opt/kgo-verifier
-COPY --from=keycloak /opt/keycloak/ /opt/keycloak/
 COPY --from=ocsf /opt/ocsf-schema/ /opt/ocsf-schema/
 COPY --from=ocsf /opt/ocsf-server/ /opt/ocsf-server/
 COPY --from=flink /opt/flink/ /opt/flink/

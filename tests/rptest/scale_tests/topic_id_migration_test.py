@@ -38,11 +38,6 @@ class TopicIdMigrationTest(RedpandaTest):
                 # Increase connections limit to well above what this test reaches
                 "kafka_connections_max": 100_000,
                 "kafka_connections_max_per_ip": 100_000,
-                # We don't scrub tiered storage in this test because it is slow
-                # (on purpose) and takes unreasonable amount of time for a CI
-                # job. We should figure out how to make it faster for this
-                # use-case.
-                "cloud_storage_enable_scrubbing": False,
                 # Minimis disk usage.
                 "log_segment_size": 1048576,
                 # Squeeze lots of partition replicas on to the cluster

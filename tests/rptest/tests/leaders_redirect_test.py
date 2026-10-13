@@ -70,7 +70,7 @@ class LeadersRedirectTest(RedpandaTest):
     def redirected_request_test(self):
         topic = self.topics[0]
         partition = 0
-        path = f"cloud_storage/manifest/{topic}/{partition}"
+        path = f"partitions/kafka/{topic}/{partition}/transactions"
         for node in self.redpanda.nodes:
             leader = self.admin.get_partition_leader(
                 namespace="kafka", topic=topic, partition=partition

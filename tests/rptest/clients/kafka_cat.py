@@ -79,24 +79,17 @@ class KafkaCat:
         for retry in reversed(range(10)):
             cfg = self._redpanda.kafka_client_security()
             if cfg.sasl_enabled:
-                if cfg.mechanism == "GSSAPI":
-                    cmd += [
-                        "-X",
-                        "sasl.kerberos.service.name=redpanda",
-                        "-Xsasl.kerberos.kinit.cmd=kinit client -t /var/lib/redpanda/client.keytab",
-                    ]
-                else:
-                    creds = cfg.simple_credentials()
-                    assert creds
-                    cmd += [
-                        "-X",
-                        f"security.protocol={cfg.security_protocol}",
-                        f"-Xsasl.mechanism={creds.mechanism}",
-                        "-X",
-                        f"sasl.username={creds.username}",
-                        "-X",
-                        f"sasl.password={creds.password}",
-                    ]
+                creds = cfg.simple_credentials()
+                assert creds
+                cmd += [
+                    "-X",
+                    f"security.protocol={cfg.security_protocol}",
+                    f"-Xsasl.mechanism={creds.mechanism}",
+                    "-X",
+                    f"sasl.username={creds.username}",
+                    "-X",
+                    f"sasl.password={creds.password}",
+                ]
             try:
                 res = subprocess.check_output(
                     ["kcat", "-b", self._redpanda.brokers()] + cmd,

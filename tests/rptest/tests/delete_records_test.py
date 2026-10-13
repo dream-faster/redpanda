@@ -16,7 +16,7 @@ from typing import Callable, NamedTuple
 
 import confluent_kafka as ck
 import ducktape
-from ducktape.mark import matrix, parametrize
+from ducktape.mark import matrix
 from ducktape.mark.resource import cluster as ducktape_cluster
 from ducktape.tests.test import Test
 from ducktape.utils.util import wait_until
@@ -35,11 +35,9 @@ from rptest.services.kgo_verifier_services import (
     KgoVerifierConsumerGroupConsumer,
     KgoVerifierProducer,
 )
-from rptest.services.redpanda import SISettings
 from rptest.tests.partition_movement import PartitionMovementMixin
 from rptest.tests.redpanda_test import RedpandaTest
 from rptest.util import expect_exception, produce_until_segments, wait_until_result
-from rptest.utils.si_utils import NTP, BucketView
 
 TEST_TOPIC_NAME = "test-topic-1"
 TEST_COMPACTED_TOPIC_NAME = "test-topic-2-compact"
@@ -97,25 +95,7 @@ class DeleteRecordsTest(RedpandaTest, PartitionMovementMixin):
         # test run.
         pass
 
-    def _start(
-        self, cloud_storage_enabled, start_with_data=True, apply_retention_settings=True
-    ):
-        # Tests will invoke this method to start redpanda with the correctly
-        # applied test settings
-        if cloud_storage_enabled:
-            si_settings = SISettings(
-                self._ctx,
-                log_segment_size=self.log_segment_size,
-                cloud_storage_housekeeping_interval_ms=2000,
-                fast_uploads=True,
-            )
-            extra_rp_conf = dict(
-                log_compaction_interval_ms=2000,
-                compacted_log_segment_size=self.log_segment_size,
-            )
-            self.redpanda.set_extra_rp_conf(extra_rp_conf)
-            self.redpanda.set_si_settings(si_settings)
-
+    def _start(self, start_with_data=True):
         self.redpanda.start()
         self._create_initial_topics()
 
@@ -134,24 +114,7 @@ class DeleteRecordsTest(RedpandaTest, PartitionMovementMixin):
         assert len(local_snapshot) > 0, "empty snapshot"
         self.redpanda.logger.info(f"Snapshot: {local_snapshot}")
 
-        if cloud_storage_enabled and apply_retention_settings:
-            self._apply_local_retention_settings()
-
         return local_snapshot
-
-    def _apply_local_retention_settings(self):
-        # Will evict local segments every 2 segments, the rational here is to
-        # stress the TS path of delete-records where the data only exists in cloud
-        # and not locally
-        self.local_retention = self.log_segment_size * 2
-        self.redpanda.logger.info(
-            f"Turning on aggressive local retention, log_segment_size: {self.log_segment_size} retention.local.target.bytes: {self.local_retention}"
-        )
-        self.rpk.alter_topic_config(
-            TEST_TOPIC_NAME,
-            TopicSpec.PROPERTY_RETENTION_LOCAL_TARGET_BYTES,
-            self.local_retention,
-        )
 
     def get_topic_info(self, topic_name):
         def describe_topic():
@@ -279,8 +242,7 @@ class DeleteRecordsTest(RedpandaTest, PartitionMovementMixin):
         )
 
     @cluster(num_nodes=3)
-    @parametrize(cloud_storage_enabled=False)
-    def test_delete_records_topic_start_delta(self, cloud_storage_enabled):
+    def test_delete_records_topic_start_delta(self):
         """
         Test that delete-records moves forward the segment offset delta
 
@@ -292,7 +254,7 @@ class DeleteRecordsTest(RedpandaTest, PartitionMovementMixin):
         records_size = 512
         truncate_offset_start = 100
 
-        self._start(cloud_storage_enabled, start_with_data=False)
+        self._start(start_with_data=False)
 
         # Produce some data, wait for it all to arrive
         kafka_tools = KafkaCliTools(self.redpanda)
@@ -328,7 +290,6 @@ class DeleteRecordsTest(RedpandaTest, PartitionMovementMixin):
     # occurs at the moment a failure is injected.
     @cluster(num_nodes=3, check_for_storage_usage_inconsistencies=False)
     @matrix(
-        cloud_storage_enabled=[False],
         truncate_point=[
             "at_segment_boundary",
             "random_offset",
@@ -337,9 +298,7 @@ class DeleteRecordsTest(RedpandaTest, PartitionMovementMixin):
             "start_offset",
         ],
     )
-    def test_delete_records_segment_deletion(
-        self, cloud_storage_enabled: bool, truncate_point: str
-    ):
+    def test_delete_records_segment_deletion(self, truncate_point: str):
         """
         Test that prefix truncation actually deletes data
 
@@ -347,9 +306,7 @@ class DeleteRecordsTest(RedpandaTest, PartitionMovementMixin):
         can be asserted that all of those segments will be deleted once the
         log_eviction_stm processes the deletion event
         """
-        local_snapshot = self._start(
-            cloud_storage_enabled, apply_retention_settings=False
-        )
+        local_snapshot = self._start()
 
         def get_segment_boundaries_via_local_storage(node):
             def to_final_indicies(seg):
@@ -364,13 +321,6 @@ class DeleteRecordsTest(RedpandaTest, PartitionMovementMixin):
             boundaries = sorted([to_final_indicies(seg) for seg in node])
             boundaries = [idx for idx in boundaries if idx >= 0]
             self.redpanda.logger.debug(f"Local boundaries: {boundaries}")
-            return boundaries
-
-        def get_segment_boundaries_via_cloud_manifest(manifest):
-            boundaries = sorted(
-                [int(idx.split("-")[0]) for idx in manifest["segments"].keys()]
-            )
-            self.redpanda.logger.debug(f"Cloud boundaries: {boundaries}")
             return boundaries
 
         # Tests for 4 different types of scenarios
@@ -414,10 +364,6 @@ class DeleteRecordsTest(RedpandaTest, PartitionMovementMixin):
         (truncate_offset, rp_truncate_offset, high_watermark) = obtain_test_parameters(
             local_snapshot
         )
-
-        # Apply local retention settings after the truncation offset has been translated, otherwise
-        # the state within the offset translator may be truncated away
-        self._apply_local_retention_settings()
 
         # Make delete-records call, assert response looks ok
         try:
@@ -486,28 +432,8 @@ class DeleteRecordsTest(RedpandaTest, PartitionMovementMixin):
                         rp_truncate_offset,
                     )
 
-        if cloud_storage_enabled:
-
-            def are_all_cloud_segments_removed():
-                bv = BucketView(self.redpanda)
-                cloud_manifest = bv.get_partition_manifest(
-                    NTP("kafka", TEST_TOPIC_NAME, 0)
-                )
-                return all_segments_removed(
-                    get_segment_boundaries_via_cloud_manifest(cloud_manifest),
-                    rp_truncate_offset,
-                )
-
-            wait_until(
-                are_all_cloud_segments_removed,
-                timeout_sec=30,
-                backoff_sec=5,
-                err_msg=f"Failed while waiting on all cloud segments below lwm: {low_watermark} to be removed",
-            )
-
     @cluster(num_nodes=3)
-    @parametrize(cloud_storage_enabled=False)
-    def test_delete_records_bounds_checking(self, cloud_storage_enabled):
+    def test_delete_records_bounds_checking(self):
         """
         Ensure that the delete-records handler returns the appropriate error
         code when a user attempts to truncate at an offset that is not within
@@ -515,7 +441,7 @@ class DeleteRecordsTest(RedpandaTest, PartitionMovementMixin):
         """
         out_of_range_prefix = "OFFSET_OUT_OF_RANGE"
 
-        self._start(cloud_storage_enabled)
+        self._start()
 
         num_records = self.get_topic_info(TEST_TOPIC_NAME).high_watermark
 
@@ -543,15 +469,12 @@ class DeleteRecordsTest(RedpandaTest, PartitionMovementMixin):
         bad_truncation(num_records + 1)
 
     @cluster(num_nodes=3)
-    @parametrize(cloud_storage_enabled=False)
-    def test_delete_records_empty_or_missing_topic_or_partition(
-        self, cloud_storage_enabled
-    ):
+    def test_delete_records_empty_or_missing_topic_or_partition(self):
         missing_topic = "foo_bar"
         out_of_range_prefix = "OFFSET_OUT_OF_RANGE"
         unknown_topic_or_partition = "UNKNOWN_TOPIC_OR_PARTITION"
 
-        self._start(cloud_storage_enabled, start_with_data=False)
+        self._start(start_with_data=False)
 
         # Assert failure condition on unknown topic
         with expect_exception(
@@ -578,12 +501,11 @@ class DeleteRecordsTest(RedpandaTest, PartitionMovementMixin):
         assert topic_info.high_watermark == 1
 
     @cluster(num_nodes=3)
-    @parametrize(cloud_storage_enabled=False)
-    def test_delete_records_compacted_topic(self, cloud_storage_enabled):
+    def test_delete_records_compacted_topic(self):
         """
         Tests that it is not allowed to delete records from a topic with cleanup.policy=compact
         """
-        self._start(cloud_storage_enabled, start_with_data=False)
+        self._start(start_with_data=False)
 
         with expect_exception(
             RpkException,
@@ -594,8 +516,7 @@ class DeleteRecordsTest(RedpandaTest, PartitionMovementMixin):
             self.rpk.trim_prefix(TEST_COMPACTED_TOPIC_NAME, 0, [0])
 
     @cluster(num_nodes=3)
-    @parametrize(cloud_storage_enabled=False)
-    def test_delete_records_topic_policy_change(self, cloud_storage_enabled):
+    def test_delete_records_topic_policy_change(self):
         """
         Tests that it is allowed to delete records from a topic that was created
         initially with the `cleanup.policy=compact` and then updated to
@@ -606,7 +527,7 @@ class DeleteRecordsTest(RedpandaTest, PartitionMovementMixin):
         truncate_offset = 100
         topic = TEST_DELETE_POLICY_CHANGE_TOPIC_NAME
 
-        self._start(cloud_storage_enabled, start_with_data=False)
+        self._start(start_with_data=False)
 
         self.rpk.alter_topic_config(
             topic, TopicSpec.PROPERTY_CLEANUP_POLICY, TopicSpec.CLEANUP_COMPACT_DELETE
@@ -639,13 +560,12 @@ class DeleteRecordsTest(RedpandaTest, PartitionMovementMixin):
         )
 
     @cluster(num_nodes=3)
-    @parametrize(cloud_storage_enabled=False)
-    def test_delete_records_with_transactions(self, cloud_storage_enabled):
+    def test_delete_records_with_transactions(self):
         """
         Tests that the log_eviction_stm is respecting the
         max_removable_local_log_offset
         """
-        self._start(cloud_storage_enabled)
+        self._start()
 
         payload = "".join(random.choice(string.ascii_letters) for _ in range(512))
         producer = ck.Producer(
@@ -697,7 +617,6 @@ class DeleteRecordsTest(RedpandaTest, PartitionMovementMixin):
 
     @cluster(num_nodes=5)
     @matrix(
-        cloud_storage_enabled=[False],
         truncate_point=[
             "random_offset",
             "one_below_high_watermark",
@@ -705,14 +624,12 @@ class DeleteRecordsTest(RedpandaTest, PartitionMovementMixin):
             "start_offset",
         ],
     )
-    def test_delete_records_concurrent_truncations(
-        self, cloud_storage_enabled, truncate_point
-    ):
+    def test_delete_records_concurrent_truncations(self, truncate_point):
         """
         This tests verifies that issuing DeleteRecords requests with concurrent
         producers and consumers has no effect on correctness
         """
-        self._start(cloud_storage_enabled)
+        self._start()
 
         # Should complete producing within 20s
         producer = KgoVerifierProducer(

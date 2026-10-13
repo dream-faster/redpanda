@@ -104,19 +104,15 @@ class MetricCheck(object):
         if len(samples) == 0:
             # Announce
             dump = "No metrics extracted"
-            # handle cloud cluster separately
-            if getattr(self.redpanda, "_cloud_cluster", None) is None:
-                metrics_endpoint = (
-                    "/metrics"
-                    if self._metrics_endpoint == MetricsEndpoint.METRICS
-                    else "/public_metrics"
-                )
-                url = f"http://{self.node.account.hostname}:9644{metrics_endpoint}"
-                import requests
+            metrics_endpoint = (
+                "/metrics"
+                if self._metrics_endpoint == MetricsEndpoint.METRICS
+                else "/public_metrics"
+            )
+            url = f"http://{self.node.account.hostname}:9644{metrics_endpoint}"
+            import requests
 
-                dump = requests.get(url).text
-            else:
-                dump = self.redpanda._cloud_cluster.get_public_metrics()
+            dump = requests.get(url).text
             self.logger.warn(f"Metrics dump: {dump}")
             raise RuntimeError("Failed to capture metrics!")
 

@@ -8,15 +8,12 @@ from abc import ABC, abstractmethod
 from typing import Any, Generator, Iterable, TypedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from rptest.clients.kubectl import KubectlTool
-
 from ducktape.tests.test import TestContext
 from ducktape.cluster.cluster import ClusterNode
 
-from rptest.services.cloud_broker import CloudBroker
 from rptest.services.redpanda_types import CompiledLogAllowList
 
-VersionedNodes = Iterable[tuple[str | None, ClusterNode | CloudBroker]]
+VersionedNodes = Iterable[tuple[str | None, ClusterNode]]
 
 
 class VersionAndLines(TypedDict):
@@ -24,7 +21,7 @@ class VersionAndLines(TypedDict):
     lines: list[str]
 
 
-NodeToLines = dict[ClusterNode | CloudBroker, VersionAndLines]
+NodeToLines = dict[ClusterNode, VersionAndLines]
 
 
 def assert_int(v: Any) -> int:
@@ -212,8 +209,8 @@ class LogSearch(ABC):
         overall_sw.start()
 
         def scan_one(
-            version: str | None, node: ClusterNode | CloudBroker
-        ) -> tuple[ClusterNode | CloudBroker, VersionAndLines]:
+            version: str | None, node: ClusterNode
+        ) -> tuple[ClusterNode, VersionAndLines]:
             node_sw = Stopwatch()
             node_sw.start()
             hostname = self._get_hostname(node)
@@ -343,97 +340,6 @@ class LogSearchLocal(LogSearch):
 
     def _get_hostname(self, host: ClusterNode) -> str:
         return host.account.hostname
-
-
-class LogSearchCloud(LogSearch):
-    def __init__(
-        self,
-        test_context: TestContext,
-        allow_list: CompiledLogAllowList,
-        logger: Logger,
-        kubectl: KubectlTool,
-        test_start_time: float,
-    ) -> None:
-        super().__init__(test_context, allow_list, logger)
-
-        # Prepare capture functions
-        self.kubectl = kubectl
-        self.test_start_time = test_start_time
-        # Cloudv2 agents run on very small instances that can easily be
-        # overwhelmed by too many concurrent ssh sessions.
-        self._max_workers = 10
-
-    def _capture_log(self, node: CloudBroker, expr: str) -> Generator[str, None, None]:
-        """Capture log and check test timing.
-        If logline produced before test start, ignore it
-        """
-
-        def parse_k8s_time(logline: str, tz: str) -> time.struct_time:
-            k8s_time_format = "%Y-%m-%dT%H:%M:%S.%f %z"
-            # containerd has nanoseconds format (9 digits)
-            # python supports only 6
-            logline_time = logline.split()[0]
-            # find '.' (dot) and cut at 6th digit
-            logline_time = f"{logline_time[: logline_time.index('.') + 7]} {tz}"
-            return time.strptime(logline_time, k8s_time_format)
-
-        # Load log, output is in binary form
-        loglines: list[str] = []
-        tz: str = "+00:00"
-        try:
-            # get time zone in +00:00 format
-            # nodeshell return type is not well-typed, cast result to list[str]
-            tz_result = node.nodeshell("date +'%:z'")
-            # Assume UTC if output is empty
-            # But this should never happen
-            if isinstance(tz_result, list) and len(tz_result) > 0:
-                tz = str(tz_result[0])
-            # Find all log files for target pod
-            # Return type without capture is always str, so ignore type
-            logfiles_result = node.nodeshell("find /var/log/pods -type f")
-            logfiles = (
-                [str(f) for f in logfiles_result]
-                if isinstance(logfiles_result, list)
-                else []
-            )
-            for logfile in logfiles:
-                if node.name in logfile and "redpanda-configurator" not in logfile:
-                    self.logger.info(f"Inspecting '{logfile}'")
-                    lines_result = node.nodeshell(
-                        f"cat {logfile} | grep {expr} || [[ $? == 1 ]]"
-                    )
-                    lines = (
-                        [str(line) for line in lines_result]
-                        if isinstance(lines_result, list)
-                        else []
-                    )
-                    loglines += lines
-        except Exception as e:
-            self.logger.warning(f"Error getting logs for {node.name}: {e}")
-        else:
-            _size = len(loglines)
-            self.logger.debug(f"Received {_size}B of data from {node.name}")
-
-        # check log lines for proper timing.
-        # Log lines will have two timing objects:
-        # first - when K8s received the log, second - when RP actually generated that log line.
-        # These two will differ as containerd/k8s buffers data. So since there is little
-        # chance that errors would generate exactly at the start of the test, we safely using
-        # time from K8s as it will be consistent no matter which service it comes from
-
-        # Example logline
-        # '2024-04-11T17:05:13.758476896Z stderr F WARN  2024-04-11 17:05:13,755 [shard 0:main] seastar_memory - oversized allocation: 217088 bytes. This is non-fatal, but could lead to latency and/or fragmentation issues. Please report: at 0x80ddafb 0x7de622b 0x7df04bf /opt/redpanda/lib/libgnutls.so.30+0xc5ca3 /opt/redpanda/lib/libgnutls.so.30+0x12a9e3 /opt/redpanda/lib/libgnutls.so.30+0x813df 0x80906ef 0x7f66333'
-
-        # Iterate lines and return generator
-        for line in loglines:
-            logline_time = parse_k8s_time(line, tz)
-            test_start_time = time.gmtime(self.test_start_time)
-            if logline_time < test_start_time:
-                continue
-            yield line
-
-    def _get_hostname(self, host: CloudBroker) -> str:
-        return host.hostname
 
 
 class LocalPayloadDirectory:

@@ -145,12 +145,6 @@ class KcatConsumer(BackgroundThreadService):
                 "-X",
                 f"sasl.password={cfg['sasl_plain_password']}",
             ]
-            if cfg["sasl_mechanism"] == "GSSAPI":
-                self._cmd += [
-                    "-X",
-                    "sasl.kerberos.service.name=redpanda",
-                    "-Xsasl.kerberos.kinit.cmd=kinit client -t /var/lib/redpanda/client.keytab",
-                ]
 
         self._cmd += trailopts
 

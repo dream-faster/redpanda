@@ -26,15 +26,12 @@ from rptest.utils.functional import flat_map, flatten
 
 
 class UsageWindow:
-    def __init__(
-        self, begin, end, is_open, bytes_sent, bytes_received, bytes_in_cloud_storage
-    ):
+    def __init__(self, begin, end, is_open, bytes_sent, bytes_received):
         self.begin = begin
         self.end = end
         self.is_open = is_open
         self.bytes_sent = bytes_sent
         self.bytes_received = bytes_received
-        self.bytes_in_cloud_storage = bytes_in_cloud_storage
 
     @property
     def is_closed(self):
@@ -47,7 +44,6 @@ class UsageWindow:
             "is_open": self.is_open,
             "bytes_sent": self.bytes_sent,
             "bytes_received": self.bytes_received,
-            "bytes_in_cloud_storage": self.bytes_in_cloud_storage,
         }
         return str(r)
 
@@ -60,7 +56,6 @@ def parse_usage_response(usage_response):
             e["open"],
             e["kafka_bytes_sent_count"],
             e["kafka_bytes_received_count"],
-            e["cloud_storage_bytes_gauge"],
         )
 
     return [parse_usage_window(e) for e in usage_response]
@@ -98,14 +93,6 @@ def assert_usage_consistency(node, a, b):
             assert compare(a_value, x, fn), (
                 f"Failed to compare historical values, node: {node} a: {str(a_value)} b:{str(x)}"
             )
-
-            # Can only assert on value of cloud storage if the windows are closed, since across
-            # the time of an open window, leadership may change and the value of the cs_bytes field
-            # depends on if the broker is the controller leader or not
-            if a_value.is_closed and x.is_closed:
-                assert a_value.bytes_in_cloud_storage == x.bytes_in_cloud_storage, (
-                    f"Failed bytes_in_cs compare node: {node} a: {str(a_value)} b:{str(x)}"
-                )
 
 
 class UsageTest(RedpandaTest):

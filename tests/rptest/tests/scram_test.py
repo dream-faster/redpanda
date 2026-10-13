@@ -1050,7 +1050,6 @@ class SaslPlainConfigTest(BaseScramTest):
                 ), f"Invalid message in response: {response['sasl_mechansisms']}"
 
         validate_sasl_plain_mech(["PLAIN"])
-        validate_sasl_plain_mech(["PLAIN", "GSSAPI"])
 
     @cluster(num_nodes=3, log_allow_list=[re.compile("SASL/PLAIN is enabled")])
     @parametrize(enable_tls=True)

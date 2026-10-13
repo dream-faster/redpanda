@@ -279,7 +279,7 @@ def check_consistently(
 
 
 def segments_count(redpanda, topic, partition_idx):
-    storage = redpanda.storage(scan_cache=False)
+    storage = redpanda.storage()
     topic_partitions = storage.partitions("kafka", topic)
 
     return map(
@@ -363,9 +363,9 @@ def wait_for_removal_of_n_segments(
     """
 
     def segments_removed():
-        current_snapshot = redpanda.storage(
-            nodes=redpanda.nodes, scan_cache=False
-        ).segments_by_node("kafka", topic, partition_idx)
+        current_snapshot = redpanda.storage(nodes=redpanda.nodes).segments_by_node(
+            "kafka", topic, partition_idx
+        )
 
         redpanda.logger.debug(
             f"Current segment snapshot for topic {topic}: {pprint.pformat(current_snapshot, indent=1)}"
@@ -405,8 +405,8 @@ def wait_for_local_storage_truncate(
     nodes: Optional[list[ClusterNode]] = None,
 ):
     """
-    For use in tiered storage tests: wait until the locally retained data
-    size for this partition is as close to the target threshold on all nodes.
+    Wait until the locally retained data size for this partition is as
+    close to the target threshold on all nodes.
     Size-based retention will not reclaim more than the target threshold, and
     since we reclaim with segment granularity, we can check that we the as close
     as possible property by examining the remaining segments.
@@ -422,7 +422,7 @@ def wait_for_local_storage_truncate(
     sizes: list[int] = []
 
     def is_truncated():
-        storage = redpanda.storage(sizes=True, scan_cache=False)
+        storage = redpanda.storage(sizes=True)
         nonlocal sizes
         sizes = []
         for node_partition in storage.partitions("kafka", topic):

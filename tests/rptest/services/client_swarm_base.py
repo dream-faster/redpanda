@@ -16,7 +16,7 @@ import requests
 from ducktape.services.service import Service
 from ducktape.tests.test import TestContext
 
-from rptest.services.redpanda import AnyRedpandaService, RedpandaServiceCloud
+from rptest.services.redpanda import RedpandaService
 
 
 class ClientSwarmBase(Service, ABC):
@@ -33,7 +33,7 @@ class ClientSwarmBase(Service, ABC):
     def __init__(
         self,
         context: TestContext,
-        redpanda: AnyRedpandaService,
+        redpanda: RedpandaService,
         topic: str,
         log_level: str = "DEBUG",
         properties: dict[str, Any] = {},
@@ -47,15 +47,6 @@ class ClientSwarmBase(Service, ABC):
         self._node: Optional[ClusterNode] = None
         self._remote_port = 8080
         self._remote_addr = "0.0.0.0"
-
-        if isinstance(redpanda, RedpandaServiceCloud):
-            ksc = redpanda.kafka_client_security()
-            sc = ksc.simple_credentials()
-            assert sc
-            properties["security.protocol"] = ksc.security_protocol.name.lower()
-            properties["sasl.mechanism"] = sc.mechanism
-            properties["sasl.username"] = sc.username
-            properties["sasl.password"] = sc.password
 
     def clean_node(self, node):
         self._redpanda.logger.debug(f"{self.__class__.__name__}.clean_node")

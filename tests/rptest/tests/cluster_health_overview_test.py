@@ -118,7 +118,6 @@ _HEALTH_METRICS: list[_HealthMetric] = [
         _MetricKind.INFORMATIONAL,
         predictor=lambda h: len(h["all_nodes"]),
     ),
-    _HealthMetric("bytes_in_cloud_storage", _MetricKind.INFORMATIONAL),
 ]
 
 _INPUT_STATUS_METRICS = [
@@ -532,5 +531,4 @@ class ClusterHealthMetricsTest(ClusterHealthOverviewTestBase):
         # cluster_size matches broker count.
         assert public_metrics["cluster_size"][0] == len(self.redpanda.nodes)
         assert public_metrics["nodes_in_recovery_mode"][0] == 0
-        assert public_metrics["bytes_in_cloud_storage"][0] >= 0
         return True

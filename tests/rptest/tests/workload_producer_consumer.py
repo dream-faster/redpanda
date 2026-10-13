@@ -17,7 +17,6 @@ from rptest.services.kgo_verifier_services import (
 )
 from rptest.services.workload_protocol import PWorkload
 from rptest.tests.prealloc_nodes import PreallocNodesTest
-from rptest.utils.si_utils import BucketView, quiesce_uploads
 
 
 class ProducerConsumerWorkload(PWorkload):
@@ -28,7 +27,7 @@ class ProducerConsumerWorkload(PWorkload):
     def __init__(self, ctx: PreallocNodesTest) -> None:
         self.ctx = ctx
         self.rpk = RpkTool(self.ctx.redpanda)
-        self.last_uploaded_kafka_offset = 0
+        self.last_high_watermark = 0
 
         is_debug = self.ctx.debug_mode
 
@@ -42,10 +41,7 @@ class ProducerConsumerWorkload(PWorkload):
             name=f"topic-{self.__class__.__name__}-{str(uuid.uuid4())}",
             partition_count=1 if is_debug else 3,
             replication_factor=1 if is_debug else 3,
-            redpanda_remote_write=True,
-            redpanda_remote_read=True,
             segment_bytes=1024 * 1024,
-            retention_bytes=1024,  # this low value will indirectly speed up the upload of segments
         )
 
         self._producer = KgoVerifierProducer(
@@ -66,17 +62,7 @@ class ProducerConsumerWorkload(PWorkload):
         )
 
     def begin(self):
-        self.rpk.cluster_config_set("cloud_storage_enabled", "true")
-        # ensure cloud storage is enabled
-        assert self.rpk.cluster_config_get("cloud_storage_enabled") == "true"
-
         self.ctx.client().create_topic(self.topic)
-        # double check the topic is configured correctly
-        topic_cfg = self.ctx.client().describe_topic_configs(self.topic.name)
-        assert (
-            topic_cfg["redpanda.remote.read"].value == "true"
-            and topic_cfg["redpanda.remote.write"].value == "true"
-        )
 
         self._producer.start(clean=False)
         self._producer.wait_for_offset_map()
@@ -99,40 +85,14 @@ class ProducerConsumerWorkload(PWorkload):
 
     def on_cluster_upgraded(self, version: tuple[int, int, int]) -> int:
         """
-        query remote storage and compute uploaded_kafka_offset, to check that progress is made
+        check that the high watermark of partition 0 advances, i.e. that
+        produce progress is made on the active redpanda version
         """
-        major_version = version[0:2]
-        quiesce_uploads(self.ctx.redpanda, [self.topic.name], 120)
+        partition_zero = next(self.rpk.describe_topic(self.topic.name))
+        high_watermark = partition_zero.high_watermark
 
-        # get the manifest for a topic and do some checking
-        topic_description = self.rpk.describe_topic(self.topic.name)
-        partition_zero = next(topic_description)
-
-        bucket = BucketView(self.ctx.redpanda)
-        manifest = bucket.manifest_for_ntp(self.topic.name, partition_zero.id)
-
-        if major_version < (23, 2):
-            assert manifest["version"] <= 1, (
-                f"Manifest version {manifest['version']} is not <= 1"
-            )
-        else:
-            # 23.2 starts to use the new manifest. wait until it gets uploaded
-            if manifest["version"] < 2:
-                return PWorkload.NOT_DONE
-
-        if not ("segments" in manifest and len(manifest["segments"]) > 0):
-            # no segments uploaded yet
-            return PWorkload.NOT_DONE
-
-        # retrieve highest committed kafka offset and check that progress is made
-        top_segment = max(
-            manifest["segments"].values(), key=lambda seg: seg["base_offset"]
-        )
-        uploaded_raft_offset = top_segment["committed_offset"]
-        uploaded_kafka_offset = uploaded_raft_offset - top_segment["delta_offset_end"]
-
-        if uploaded_kafka_offset > self.last_uploaded_kafka_offset:
-            self.last_uploaded_kafka_offset = uploaded_kafka_offset
+        if high_watermark > self.last_high_watermark:
+            self.last_high_watermark = high_watermark
             return PWorkload.DONE
 
         return PWorkload.NOT_DONE

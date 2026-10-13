@@ -88,8 +88,6 @@ class IdempotencySnapshotDelivery(PreallocNodesTest):
             replication_factor=3,
             segment_bytes=segment_bytes,
             retention_bytes=2 * segment_bytes,
-            redpanda_remote_read=True,
-            redpanda_remote_write=True,
         )
 
         # create topic with small segments and short retention

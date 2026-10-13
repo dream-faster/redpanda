@@ -16,9 +16,7 @@ from ducktape.cluster.cluster import ClusterNode
 from ducktape.errors import TimeoutError
 from ducktape.utils.util import wait_until
 
-from rptest.clients.kubectl import KubectlTool
 from rptest.services import tc_netem
-from rptest.services.redpanda import RedpandaServiceCloud
 
 
 class FailureSpec:
@@ -385,27 +383,6 @@ class FailureInjector(FailureInjectorBase):
         self._netem(node, op=op)
 
 
-class FailureInjectorCloud(FailureInjectorBase):
-    def __init__(self, redpanda):
-        super(FailureInjectorCloud, self).__init__(redpanda)
-        remote_uri = f"redpanda@{redpanda._cloud_cluster.cluster_id}-agent"
-        self._kubectl = KubectlTool(
-            redpanda,
-            remote_uri=remote_uri,
-            cluster_id=redpanda._cloud_cluster.cluster_id,
-        )
-
-    def _isolate(self, node):
-        self.redpanda.logger.info("isolating node with privilaged pod")
-        cmd = "apt update;apt install -y iptables;iptables -A OUTPUT -p tcp --destination-port 33145 -j DROP"
-        self._kubectl.exec_privileged(cmd)
-        cmd = "apt update;apt install -y iptables;iptables -A INPUT -p tcp --destination-port 33145 -j DROP"
-        self._kubectl.exec_privileged(cmd)
-
-
 def make_failure_injector(redpanda):
     """Factory function for instatiating the appropriate FailureInjector subclass."""
-    if RedpandaServiceCloud.GLOBAL_CLOUD_CLUSTER_CONFIG in redpanda.context.globals:
-        return FailureInjectorCloud(redpanda)
-    else:
-        return FailureInjector(redpanda)
+    return FailureInjector(redpanda)

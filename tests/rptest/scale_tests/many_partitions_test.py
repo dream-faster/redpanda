@@ -25,21 +25,14 @@ from rptest.services.kgo_verifier_services import (
     KgoVerifierMultiProducer,
     KgoVerifierMultiRandomConsumer,
     KgoVerifierParams,
-    KgoVerifierProducer,
 )
 from ducktape.tests.test import TestContext
 from rptest.services.openmessaging_benchmark import OpenMessagingBenchmark
 from rptest.services.openmessaging_benchmark_configs import OMBSampleConfigurations
-from rptest.clients.types import TopicSpec
-from rptest.services.redpanda import (
-    RESTART_LOG_ALLOW_LIST,
-    LoggingConfig,
-    SISettings,
-)
+from rptest.services.redpanda import RESTART_LOG_ALLOW_LIST, LoggingConfig
 from rptest.services.rpk_consumer import RpkConsumer
 from rptest.tests.prealloc_nodes import PreallocNodesTest
 from rptest.utils.scale_parameters import ScaleParameters
-from rptest.utils.si_utils import nodes_report_cloud_segments
 
 # An unreasonably large fetch request: we submit requests like this in the
 # expectation that the server will properly clamp the amount of data it
@@ -61,17 +54,12 @@ DEFAULT_PARTITIONS_MEMORY_ALLOCATION_PERCENT = int(
     ScaleParameters.DEFAULT_PARTITIONS_MEMORY_ALLOCATION_PERCENT * 2
 )
 
-# Large volume of data to write. If tiered storage is enabled this is the
-# amount of data to retain total. Otherwise, this can be used as a large volume
-# of data to write.
+# Large volume of data to write.
 STRESS_DATA_SIZE = 1024 * 1024 * 1024 * 100
 
-# When running with tiered storage or cloud topics, it's been observed that
-# shutdown can take on the order of a few minutes.  Cloud topics housekeeping
-# (metastore sync, epoch advancement) can further extend this at high partition
-# counts.
+# At high partition counts, it's been observed that shutdown can take on the
+# order of a few minutes.
 STOP_TIMEOUT = 60 * 5
-CLOUD_TOPICS_STOP_TIMEOUT = 60 * 10
 
 
 class ManyPartitionsTest(PreallocNodesTest):
@@ -97,7 +85,6 @@ class ManyPartitionsTest(PreallocNodesTest):
             *args,
             num_brokers=9,
             node_prealloc_count=3,
-            disable_cloud_storage_diagnostics=True,
             extra_rp_conf={
                 # Disable leader balancer initially, to enable us to check for
                 # stable leadership during initial elections and post-restart
@@ -124,20 +111,7 @@ class ManyPartitionsTest(PreallocNodesTest):
                 # not expect to hit them.
                 "kafka_connection_rate_limit": 10000,
                 "kafka_connections_max": 50000,
-                # In testing tiered storage, we care about creating as many
-                # cloud segments as possible. To that end, bounding the segment
-                # size isn't productive.
-                "cloud_storage_segment_size_min": 1,
                 "log_segment_size_min": 1024,
-                # Disable segment merging: when we create many small segments
-                # to pad out tiered storage metadata, we don't want them to
-                # get merged together.
-                "cloud_storage_enable_segment_merging": False,
-                # We don't scrub tiered storage in this test because it is slow
-                # (on purpose) and takes unreasonable amount of time for a CI
-                # job. We should figure out how to make it faster for this
-                # use-case.
-                "cloud_storage_enable_scrubbing": False,
             },
             # Configure logging the same way a user would when they have
             # very many partitions: set logs with per-partition messages
@@ -437,88 +411,10 @@ class ManyPartitionsTest(PreallocNodesTest):
                     f"Open files after {i} restarts on {node_name}: {file_count}"
                 )
 
-    def _tiered_storage_warmup(self, scale: ScaleParameters, topic_name: str):
-        """
-        When testing tiered storage, we want a realistic amount of metadata in the
-        system: it takes too long to actually play in a day or week's worth of data,
-        so set a very small segment size, then play in enough data to create a realistic
-        number of segments.
-        """
-
-        warmup_segment_size = scale.segment_size
-        # Because segments are rolled after a write we need to size messages
-        # such that actual segment size is as close as possible to the desired
-        # size. In default configuration we run with `log_segment_size_jitter_percent=5`
-        # We use a message size of 0.53 * segment_size to ensure that with two
-        # messages we are always just about above the max possible segment size (2*0.53 > 1.05).
-        # We want decently sized messages to not make this warmup phase slower than needed.
-        warmup_message_size = math.ceil(scale.segment_size * 0.53)
-        target_cloud_segments = 24 * 7 * scale.partition_limit
-
-        # Enough data to generate the desired number of segments plus few more
-        # per partition that will be kept open (and not uploaded).
-        warmup_total_size = (1.1 * target_cloud_segments) * warmup_segment_size
-
-        # Uploads of tiny segments usually progress at a few thousand
-        # per second.  This is dominated by the S3 PUT latency combined
-        # with limited parallelism of connections.
-        expect_upload_rate = 1000
-
-        expect_runtime_bandwidth = (2 * warmup_total_size) / scale.expect_bandwidth
-        expect_runtime_upload = (2 * target_cloud_segments) / expect_upload_rate
-        expect_runtime = max(expect_runtime_upload, expect_runtime_bandwidth)
-
-        try:
-            self.logger.info(
-                f"Tiered storage warmup: overriding segment size to {warmup_segment_size}"
-            )
-            # FIXME: this only works if we have one topic globally.  When we add admin API for
-            # manifest stats, use that instead.
-            self.logger.info(
-                f"Tiered storage warmup: waiting {expect_runtime}s for {target_cloud_segments} to be created"
-            )
-            msg_count = math.ceil(warmup_total_size / warmup_message_size)
-            producer: KgoVerifierProducer | None = None
-            try:
-                producer = KgoVerifierProducer(
-                    self.test_context,
-                    self.redpanda,
-                    topic_name,
-                    warmup_message_size,
-                    msg_count,
-                    custom_node=[self.preallocated_nodes[0]],
-                )
-                producer.start()
-                wait_until(
-                    lambda: nodes_report_cloud_segments(
-                        self.redpanda, target_cloud_segments
-                    ),
-                    timeout_sec=expect_runtime,
-                    backoff_sec=5,
-                    err_msg="Waiting for cloud segments upload",
-                )
-            finally:
-                if producer:
-                    producer.stop()
-                self.free_preallocated_nodes()
-        finally:
-            self.logger.info(
-                f"Tiered storage warmup: restoring segment size to {scale.segment_size}"
-            )
-            self.rpk.alter_topic_config(
-                topic_name, "segment.bytes", str(scale.segment_size_after_warmup)
-            )
-            self.rpk.alter_topic_config(
-                topic_name,
-                "retention.local.target.bytes",
-                str(scale.local_retention_after_warmup),
-            )
-
     def _write_and_random_read(
         self,
         scale: ScaleParameters,
         topic_names: list[str],
-        skip_rand_reads: bool = False,
     ):
         """
         This is a relatively low intensity test, that covers random
@@ -644,50 +540,33 @@ class ManyPartitionsTest(PreallocNodesTest):
             err_msg="Waiting for producer checkpoints",
         )
 
-        if not skip_rand_reads:
-            rand_ios = 100
-            rand_parallel = 100
-            if self.redpanda.dedicated_nodes:
-                rand_parallel = 10
-                rand_ios = 10
+        rand_ios = 100
+        rand_parallel = 100
+        if self.redpanda.dedicated_nodes:
+            rand_parallel = 10
+            rand_ios = 10
 
-            rand_consumer = KgoVerifierMultiRandomConsumer(
-                self.test_context,
-                self.redpanda,
-                stress_params,
-                rand_read_msgs=rand_ios,
-                parallel=rand_parallel,
-                custom_node=[self.preallocated_nodes[1]],
-            )
-            rand_consumer.start(clean=False)
-            rand_consumer.wait()
+        rand_consumer = KgoVerifierMultiRandomConsumer(
+            self.test_context,
+            self.redpanda,
+            stress_params,
+            rand_read_msgs=rand_ios,
+            parallel=rand_parallel,
+            custom_node=[self.preallocated_nodes[1]],
+        )
+        rand_consumer.start(clean=False)
+        rand_consumer.wait()
 
         fast_producer.stop()
         self.logger.info("Write+randread stress test complete, verifying sequentially")
 
-        max_msgs = None
         expect_transmit_time = 600  # empirically derived
-
-        # When tiered storage is enabled, don't consume the entire topic, as
-        # that could entail millions of segments from the cloud. At least
-        # ensure we read enough to download a few segments per partition.
-        if scale.tiered_storage_enabled:
-            max_msgs = 50 * scale.partition_limit
-            expect_transmit_time = max(
-                60,
-                int(1.5 * max_msgs * stress_msg_size / scale.expect_single_bandwidth),
-            )
-            # Add extra 10 minutes in case S3 decides to scale during the test.
-            # It was observed for the bucket to go down between 5 and 10
-            # minutes during these events.
-            expect_transmit_time += 600
 
         verify_params = [
             KgoVerifierParams(
                 topic=tn,
                 msg_size=0,
                 msg_count=0,
-                seq_max_msgs=max_msgs,
             )
             for tn in topic_names
         ]
@@ -703,16 +582,14 @@ class ManyPartitionsTest(PreallocNodesTest):
         verifier.wait(timeout_sec=expect_transmit_time)
         for i, v in enumerate(verifier.consumers):
             assert v.consumer_status.validator.invalid_reads == 0
-            if not scale.tiered_storage_enabled:
-                assert (
-                    v.consumer_status.validator.valid_reads
-                    >= fast_producer.producers[i].produce_status.acked
-                    + msg_count_per_topic
-                ), (
-                    f"topic {topic_names[i]}: "
-                    f"{v.consumer_status.validator.valid_reads} >= "
-                    f"{fast_producer.producers[i].produce_status.acked} + {msg_count_per_topic}"
-                )
+            assert (
+                v.consumer_status.validator.valid_reads
+                >= fast_producer.producers[i].produce_status.acked + msg_count_per_topic
+            ), (
+                f"topic {topic_names[i]}: "
+                f"{v.consumer_status.validator.valid_reads} >= "
+                f"{fast_producer.producers[i].produce_status.acked} + {msg_count_per_topic}"
+            )
 
         self.free_preallocated_nodes()
 
@@ -862,8 +739,6 @@ class ManyPartitionsTest(PreallocNodesTest):
         compacted: bool,
         mib_per_partition: float,
         topic_partitions_per_shard: int,
-        tiered_storage_enabled: bool = False,
-        cloud_topics_enabled: bool = False,
     ):
         """
         Validate that redpanda works with partition counts close to its resource
@@ -895,10 +770,6 @@ class ManyPartitionsTest(PreallocNodesTest):
         # Scale tests are not run on debug builds
         assert not self.debug_mode
 
-        self._stop_timeout = (
-            CLOUD_TOPICS_STOP_TIMEOUT if cloud_topics_enabled else STOP_TIMEOUT
-        )
-
         replication_factor = 3
 
         scale = ScaleParameters(
@@ -906,29 +777,15 @@ class ManyPartitionsTest(PreallocNodesTest):
             replication_factor,
             mib_per_partition,
             topic_partitions_per_shard,
-            tiered_storage_enabled=tiered_storage_enabled,
             partition_memory_reserve_percentage=DEFAULT_PARTITIONS_MEMORY_ALLOCATION_PERCENT,
         )
 
-        # When cloud topics are enabled but tiered storage is not, we still
-        # need SISettings for the object store backend that cloud topics use.
-        if cloud_topics_enabled and not tiered_storage_enabled:
-            cloud_si_settings = SISettings(
-                self.test_context,
-                cloud_storage_enable_remote_read=False,
-                cloud_storage_enable_remote_write=False,
-                fast_uploads=True,
-            )
-            self.redpanda.set_si_settings(cloud_si_settings)
-
-        # By default run with one huge topic for maximum metadata stress. It is
+        # Run with one huge topic for maximum metadata stress. It is
         # more stressful for redpanda when clients request the metadata for
         # many partitions at once, and the simplest way to get traffic
         # generators to do that without the clients supporting writing to
-        # arrays of topics is to put all the partitions into one topic. When
-        # cloud topics are enabled, split into two topics (regular + cloud) to
-        # exercise mixed-mode operation.
-        n_topics = 2 if cloud_topics_enabled else 1
+        # arrays of topics is to put all the partitions into one topic.
+        n_topics = 1
 
         # Partitions per topic
         n_partitions = int(scale.partition_limit / n_topics)
@@ -936,27 +793,20 @@ class ManyPartitionsTest(PreallocNodesTest):
         self.logger.info(
             f"Running partition scale test with {n_partitions} partitions on {n_topics} topics"
         )
-        if scale.si_settings:
-            self.redpanda.set_si_settings(scale.si_settings)
 
         # Enable large node-wide throughput limits to verify they work at scale
         # To avoid affecting the result of the test with the limit, set them
         # somewhat above expect_bandwidth value per node.
-        #
-        # We skip setting them on tiered storage where `expect_bandwidth` is
-        # calculated for the worst case scenario and we don't want to limit the
-        # best case one.
-        if not scale.tiered_storage_enabled:
-            self.redpanda.add_extra_rp_conf(
-                {
-                    "kafka_throughput_limit_node_in_bps": int(
-                        scale.expect_bandwidth / len(self.redpanda.nodes) * 3
-                    ),
-                    "kafka_throughput_limit_node_out_bps": int(
-                        scale.expect_bandwidth / len(self.redpanda.nodes) * 3
-                    ),
-                }
-            )
+        self.redpanda.add_extra_rp_conf(
+            {
+                "kafka_throughput_limit_node_in_bps": int(
+                    scale.expect_bandwidth / len(self.redpanda.nodes) * 3
+                ),
+                "kafka_throughput_limit_node_out_bps": int(
+                    scale.expect_bandwidth / len(self.redpanda.nodes) * 3
+                ),
+            }
+        )
 
         self.redpanda.add_extra_rp_conf(
             {
@@ -966,68 +816,21 @@ class ManyPartitionsTest(PreallocNodesTest):
             }
         )
 
-        # CORE-15812: a cloud-topic partition read is latency-bound on a
-        # per-object metastore lookup + footer read + object-store GET. At the
-        # default fetch_max_read_concurrency=1 a fetch reads its partitions
-        # serially, so at this scale (thousands of small partitions) the
-        # per-read round-trips cannot keep up and the consumer-group consumer
-        # times out. A little concurrency pipelines the per-partition reads and
-        # hides the latency.
-        if cloud_topics_enabled:
-            self.redpanda.add_extra_rp_conf({"fetch_max_read_concurrency": 4})
-
         self.redpanda.start()
 
         self.logger.info("Entering topic creation")
-        regular_topic_names: list[str] = []
-        cloud_topic_names: list[str] = []
+        topic_names = [f"scale_{i:06d}" for i in range(0, n_topics)]
 
-        if cloud_topics_enabled:
-            regular_topic_names = ["scale_000000"]
-            cloud_topic_names = ["cloud_000001"]
-        else:
-            regular_topic_names = [f"scale_{i:06d}" for i in range(0, n_topics)]
-
-        topic_names = regular_topic_names + cloud_topic_names
-
-        for tn in regular_topic_names:
+        for tn in topic_names:
             self.logger.info(f"Creating topic {tn} with {n_partitions} partitions")
             config: dict[str, Any] = {
                 "segment.bytes": scale.segment_size,
                 "retention.bytes": scale.retention_bytes,
+                "cleanup.policy": "compact" if compacted else "delete",
             }
-            if scale.local_retention_bytes:
-                config["retention.local.target.bytes"] = scale.local_retention_bytes
-
-            if compacted:
-                if tiered_storage_enabled:
-                    config["cleanup.policy"] = "compact,delete"
-                else:
-                    config["cleanup.policy"] = "compact"
-            else:
-                config["cleanup.policy"] = "delete"
 
             self.rpk.create_topic(
                 tn, partitions=n_partitions, replicas=replication_factor, config=config
-            )
-
-        for tn in cloud_topic_names:
-            self.logger.info(
-                f"Creating cloud topic {tn} with {n_partitions} partitions"
-            )
-            # Cloud topics manage retention via the object store; local
-            # retention is not applicable.
-            cloud_config: dict[str, Any] = {
-                "segment.bytes": scale.segment_size,
-                "retention.bytes": scale.retention_bytes,
-                TopicSpec.PROPERTY_STORAGE_MODE: TopicSpec.STORAGE_MODE_CLOUD,
-                "cleanup.policy": "compact,delete" if compacted else "delete",
-            }
-            self.rpk.create_topic(
-                tn,
-                partitions=n_partitions,
-                replicas=replication_factor,
-                config=cloud_config,
             )
 
         self.logger.info("Awaiting elections...")
@@ -1044,23 +847,8 @@ class ManyPartitionsTest(PreallocNodesTest):
                 f"Open files after initial elections on {node_name}: {file_count}"
             )
 
-        if scale.tiered_storage_enabled and not cloud_topics_enabled:
-            # Skip warmup when cloud topics are also enabled: the goal of the
-            # combo test is mixed-mode coexistence under load, not re-proving
-            # tiered storage handles millions of segments (already covered by
-            # test_many_partitions_tiered_storage).  Skipping saves ~25 min.
-            self.logger.info("Entering tiered storage warmup")
-            for tn in regular_topic_names:
-                self._tiered_storage_warmup(scale, tn)
-
         self.logger.info("Entering initial traffic test, writes + random reads")
-        # When both tiered storage and cloud topics are enabled, skip random
-        # reads entirely: cloud topic random reads hit object store with high
-        # latency at this partition scale, and each path is already covered by
-        # its dedicated test.  The sequential consumer group verify still
-        # validates both read paths.
-        skip_rand_reads = cloud_topics_enabled and scale.tiered_storage_enabled
-        self._write_and_random_read(scale, topic_names, skip_rand_reads)
+        self._write_and_random_read(scale, topic_names)
 
         # Start kgo-repeater
 
@@ -1081,8 +869,6 @@ class ManyPartitionsTest(PreallocNodesTest):
         repeater_msg_size = 16384
         rate_limit_bps = int(scale.expect_bandwidth)
         max_buffered_records = 64
-        if scale.tiered_storage_enabled:
-            max_buffered_records = 1
         with repeater_traffic(
             context=self._ctx,
             redpanda=self.redpanda,
@@ -1096,9 +882,7 @@ class ManyPartitionsTest(PreallocNodesTest):
             **repeater_kwargs,
         ) as repeater:
             repeater_await_bytes = 1e9
-            if scale.tiered_storage_enabled or not self.redpanda.dedicated_nodes:
-                # Be much more lenient when tiered storage is enabled, since
-                # the repeater incurs reads.
+            if not self.redpanda.dedicated_nodes:
                 repeater_await_bytes = 1e8
             repeater_await_msgs = int(repeater_await_bytes / repeater_msg_size)
 
@@ -1142,11 +926,6 @@ class ManyPartitionsTest(PreallocNodesTest):
 
             soak_time_seconds = 60
             soak_await_bytes = soak_time_seconds * scale.expect_bandwidth
-            if cloud_topics_enabled and tiered_storage_enabled:
-                # Cloud topics and tiered storage compete for things like
-                # cloud storage clients and overall bucket request limits,
-                # so dial back the soak time.
-                soak_await_bytes = int(soak_await_bytes * 0.5)
             soak_await_msgs = int(soak_await_bytes / repeater_msg_size)
             # Add some leeway to avoid flakiness
             soak_timeout = int(soak_time_seconds * 1.25)

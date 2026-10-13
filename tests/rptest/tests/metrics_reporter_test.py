@@ -142,13 +142,8 @@ class MetricsReporterTest(RedpandaTest):
         # cluster uuid and create timestamp should stay the same across requests
         assert_fields_are_the_same(metadata, "cluster_uuid")
         assert_fields_are_the_same(metadata, "cluster_created_ts")
-        # Configuration should be the same across requests
-        assert_fields_are_the_same(metadata, "has_kafka_gssapi")
-        assert_fields_are_the_same(metadata, "has_oidc")
         # cluster config should be the same
         assert_fields_are_the_same(metadata, "config")
-        # No transforms are deployed
-        assert_fields_are_the_same(metadata, "data_transforms_count")
         # license violation status should not change across requests
         assert_fields_are_the_same(metadata, "has_valid_license")
         assert_fields_are_the_same(metadata, "has_enterprise_features")
@@ -160,11 +155,7 @@ class MetricsReporterTest(RedpandaTest):
         last = metadata.pop()
         assert last["topic_count"] == total_topics
         assert last["local_topic_count"] == total_topics
-        assert last["cloud_topic_count"] == 0
         assert last["partition_count"] == total_partitions
-        assert last["has_kafka_gssapi"] is False
-        assert last["has_oidc"] is False
-        assert last["data_transforms_count"] == 0
         assert last["active_logical_version"] == features["cluster_version"]
         assert last["original_logical_version"] == features["original_cluster_version"]
         assert last["has_valid_license"]

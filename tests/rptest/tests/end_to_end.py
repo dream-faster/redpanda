@@ -60,9 +60,7 @@ class EndToEndTest(Test):
 
     topic: str | None
 
-    def __init__(
-        self, test_context, extra_rp_conf=None, extra_node_conf=None, si_settings=None
-    ):
+    def __init__(self, test_context, extra_rp_conf=None, extra_node_conf=None):
         super(EndToEndTest, self).__init__(test_context=test_context)
         if extra_rp_conf is None:
             self._extra_rp_conf = {}
@@ -74,7 +72,6 @@ class EndToEndTest(Test):
         self.records_consumed = []
         self.last_consumed_offsets = {}
         self.redpanda: Optional[RedpandaService] = None
-        self.si_settings = si_settings
         self.topic = None
         self._client = None
 
@@ -83,18 +80,11 @@ class EndToEndTest(Test):
         num_nodes=1,
         num_started_nodes=None,
         extra_rp_conf=None,
-        si_settings=None,
         environment=None,
         install_opts: Optional[InstallOptions] = None,
         new_bootstrap=False,
         max_num_seeds=3,
     ):
-        if si_settings is not None:
-            self.si_settings = si_settings
-
-        if self.si_settings:
-            self.si_settings.load_context(self.logger, self.test_context)
-
         if extra_rp_conf is not None:
             # merge both configurations, the extra_rp_conf passed in
             # paramter takes the precedence
@@ -106,7 +96,6 @@ class EndToEndTest(Test):
             num_nodes,
             extra_rp_conf=self._extra_rp_conf,
             extra_node_conf=self._extra_node_conf,
-            si_settings=self.si_settings,
             environment=environment,
         )
         if new_bootstrap:

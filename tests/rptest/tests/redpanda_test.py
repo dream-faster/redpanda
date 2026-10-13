@@ -12,18 +12,13 @@ from abc import ABC, abstractmethod
 from typing import Any, Callable, Mapping, Sequence
 
 from ducktape.tests.test import Test, TestContext
-from ducktape.utils.util import wait_until
 
 from rptest.clients.default import DefaultClient
 from rptest.clients.kafka_cli_tools import KafkaCliTools
 from rptest.clients.rpk import RpkTool
 from rptest.clients.types import TopicSpec
 from rptest.services.redpanda import (
-    CloudStorageType,
     RedpandaService,
-    RedpandaServiceCloud,
-    SISettings,
-    make_redpanda_mixed_service,
     make_redpanda_service,
 )
 from rptest.services.redpanda_installer import (
@@ -91,7 +86,7 @@ class RedpandaTestBase(ABC, Test):
     # TODO: TD helper to get a typed redpanda but this can be removed by making this
     # class generic on the type of service
     @property
-    def __redpanda(self) -> RedpandaService | RedpandaServiceCloud:
+    def __redpanda(self) -> RedpandaService:
         return getattr(self, "redpanda")
 
 
@@ -105,7 +100,6 @@ class RedpandaTest(RedpandaTestBase):
         test_context: TestContext,
         num_brokers: int | None = None,
         extra_rp_conf: dict[str, Any] | None = None,
-        si_settings: SISettings | None = None,
         **kwargs: Any,
     ):
         """
@@ -118,7 +112,6 @@ class RedpandaTest(RedpandaTestBase):
             test_context,
             num_brokers,
             extra_rp_conf=extra_rp_conf,
-            si_settings=si_settings,
             **kwargs,
         )
         self._client = DefaultClient(self.redpanda)
@@ -128,35 +121,6 @@ class RedpandaTest(RedpandaTestBase):
         Hook for `skip_debug_mode` decorator
         """
         self.redpanda.set_skip_if_no_redpanda_log(True)
-
-    @property
-    def si_settings(self):
-        """Shortcut to self.redpanda.si_settings"""
-        return self.redpanda.si_settings
-
-    @property
-    def azure_blob_storage(self):
-        return self.si_settings.cloud_storage_type == CloudStorageType.ABS
-
-    @property
-    def cloud_storage_client(self):
-        """
-        Provides access to the cloud storage client for interacting with remote storage.
-
-        This property performs a runtime check to ensure the client is properly initialized
-        before access. The client will not be available if RedpandaService was created
-        without si_settings or if cloud storage was not properly configured.
-
-        Returns:
-            The initialized cloud storage client instance.
-
-        Raises:
-            RuntimeError: When the cloud storage client is not initialized.
-        """
-        if not self.redpanda._cloud_storage_client:
-            raise RuntimeError("cloud storage client is not initialized.")
-
-        return self.redpanda._cloud_storage_client
 
     def client(self):
         return self._client
@@ -344,54 +308,3 @@ class RedpandaTest(RedpandaTestBase):
 
             # We are fully upgraded, yield to whatever the test wants to do in this version
             yield current_version
-
-
-class RedpandaMixedTest(RedpandaTestBase):
-    """
-    Base class for tests which can run either against vanilla infrastructure or
-    against the cloud.
-    """
-
-    def __init__(self, test_context: TestContext, *, min_brokers: int | None = None):
-        """
-        :param min_brokers: the minimum number of brokers the test requires. The
-        test must be OK with more brokers than the given number (which will occur
-        in cloud tests, as the number of brokers is already set at cloud cluster
-        creation time). None indicates that the test does not care how many brokers
-        are created (there will always be at least 1!).
-        """
-        super().__init__(test_context=test_context)
-        self.redpanda = make_redpanda_mixed_service(
-            test_context, min_brokers=min_brokers
-        )
-
-        self._client = DefaultClient(self.redpanda)
-
-    def setup(self):
-        super().setup()
-        if cloud := self.as_cloud():
-            wait_until(
-                lambda: cloud.cluster_healthy(),
-                timeout_sec=20,
-                backoff_sec=5,
-                err_msg="cluster unhealthy before start of test",
-            )
-
-    def as_cloud(self):
-        """A convenience method which returns self.redpanda if it is a RedpandaServiceCloud
-        or None otherwise."""
-        return (
-            self.redpanda if isinstance(self.redpanda, RedpandaServiceCloud) else None
-        )
-
-    def as_noncloud(self):
-        """A convenience method which returns self.redpanda if it is a RedpandaService
-        or None otherwise."""
-        return self.redpanda if isinstance(self.redpanda, RedpandaService) else None
-
-    def client(self):
-        return self._client
-
-    def tearDown(self):
-        if cloud := self.as_cloud():
-            cloud.clean_cluster()
