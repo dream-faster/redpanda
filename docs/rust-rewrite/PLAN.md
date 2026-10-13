@@ -3,6 +3,10 @@
 Companion to `INVENTORY.md`, which has the feature map and line counts this
 plan is sized from.
 
+`NATIVE.md` proposes a simpler alternative: a Rust-native redesign that keeps
+the Kafka protocol and data guarantees but not Redpanda's internal
+architecture or full operator surface. This document is the parity option.
+
 ## Summary
 
 - **What is being rewritten.** The slim broker in this tree: a distributed
