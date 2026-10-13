@@ -66,6 +66,16 @@ single_version_override(
     ],
 )
 
+# Use the host's make and pkg-config (bazel/install-deps.sh installs both)
+# instead of bootstrapping them from source on every cold build: that
+# bootstrap was ~130s at the head of the critical path, before OpenSSL could
+# start. The root module's registrations take precedence over the built
+# toolchains rules_foreign_cc registers.
+register_toolchains(
+    "@rules_foreign_cc//toolchains:preinstalled_make_toolchain",
+    "@rules_foreign_cc//toolchains:preinstalled_pkgconfig_toolchain",
+)
+
 bazel_dep(name = "rules_go", version = "0.59.0")
 bazel_dep(name = "rules_pkg", version = "1.0.1")
 bazel_dep(name = "rules_proto", version = "7.1.0")

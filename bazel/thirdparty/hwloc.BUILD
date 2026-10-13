@@ -17,8 +17,8 @@ filegroup(
 configure_make(
     name = "hwloc",
     args = ["-j$HWLOC_BUILD_JOBS"],
-    autoreconf = True,
-    autoreconf_options = ["-ivf"],
+    # The release tarball ships a generated configure script, so there is
+    # no need to regenerate it with autoreconf.
     configure_in_place = True,
     configure_options = [
         "--disable-libudev",
