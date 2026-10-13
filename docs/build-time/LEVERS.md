@@ -393,7 +393,7 @@ patch.
    ~6% CPU, halves the critical path.
 3. **Bigger runner or remote execution** (3a): 2–3× wall time, no code.
 4. **Feature bundle A (audit + Kafka client) and the small ones E–I,
-   K:** ~8% per-file / ~6% unity, low risk.
+   K:** ~8% per-file / ~7% unity, low risk.
 5. **The six header fixes** in 3d: 8–12% under unity, each small.
 6. **Bundle B + Seastar patches 1–3:** ~10% plus dropping protobuf and Go
    from the build.
