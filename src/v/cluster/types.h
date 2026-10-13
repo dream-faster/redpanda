@@ -27,6 +27,7 @@
 #include "cluster/topic_configuration.h"
 #include "cluster/tx_errc.h"
 #include "cluster/version.h"
+#include "config/leaders_preference.h"
 #include "container/chunked_hash_map.h"
 #include "container/chunked_vector.h"
 #include "container/contiguous_range_map.h"

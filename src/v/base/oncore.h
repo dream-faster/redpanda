@@ -13,7 +13,7 @@
 #include "base/source_location.h"
 #include "base/vassert.h"
 
-#include <seastar/core/smp.hh>
+#include <seastar/core/shard_id.hh>
 
 #ifndef NDEBUG
 #define expression_in_debug_mode(x) x

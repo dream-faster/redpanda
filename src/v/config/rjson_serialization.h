@@ -14,11 +14,9 @@
 #include "base/format_to.h"
 #include "base/seastarx.h"
 #include "config/data_directory_path.h"
-#include "config/endpoint_tls_config.h"
 #include "config/leaders_preference.h"
 #include "config/node_overrides.h"
 #include "config/seed_server.h"
-#include "config/tls_config.h"
 #include "config/types.h"
 #include "json/json.h"
 #include "json/stringbuffer.h"
@@ -26,6 +24,12 @@
 #include "model/metadata.h"
 
 #include <seastar/core/sstring.hh>
+
+namespace config {
+struct key_cert;
+class tls_config;
+struct endpoint_tls_config;
+} // namespace config
 
 /*
  * this type is only used for config/tests but the rjson_serialize overload

@@ -21,6 +21,7 @@
 #include "version/version.h"
 
 #include <seastar/core/abort_source.hh>
+#include <seastar/core/coroutine.hh>
 #include <seastar/core/shard_id.hh>
 
 #include <chrono>

@@ -14,6 +14,7 @@
 #include "metrics/prometheus_sanitize.h"
 #include "resource_mgmt/memory_groups.h"
 
+#include <seastar/core/coroutine.hh>
 #include <seastar/core/loop.hh>
 
 #include <boost/iterator/counting_iterator.hpp>

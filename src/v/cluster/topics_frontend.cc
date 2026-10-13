@@ -27,6 +27,7 @@
 #include "cluster/partition_manager.h"
 #include "cluster/scheduling/constraints.h"
 #include "cluster/scheduling/partition_allocator.h"
+#include "cluster/scheduling/types.h"
 #include "cluster/shard_balancer.h"
 #include "cluster/shard_table.h"
 #include "cluster/topic_configuration.h"
@@ -46,7 +47,6 @@
 #include "rpc/connection_cache.h"
 #include "rpc/errc.h"
 #include "rpc/types.h"
-#include "scheduling/types.h"
 #include "ssx/future-util.h"
 #include "ssx/sformat.h"
 

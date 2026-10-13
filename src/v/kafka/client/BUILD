@@ -137,6 +137,7 @@ redpanda_cc_library(
     hdrs = ["transport.h"],
     visibility = ["//visibility:public"],
     deps = [
+        "@abseil-cpp//absl/container:btree",
         ":logger",
         "//src/v/base",
         "//src/v/bytes:iobuf",

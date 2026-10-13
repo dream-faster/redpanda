@@ -24,6 +24,8 @@
 #include <seastar/core/chunked_fifo.hh>
 #include <seastar/core/sstring.hh>
 
+#include <boost/lexical_cast.hpp>
+
 #include <chrono>
 #include <cstddef>
 #include <cstdint>

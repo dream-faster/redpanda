@@ -21,7 +21,6 @@
 #include "kafka/protocol/wire.h"
 #include "kafka/server/connection_context.h"
 #include "kafka/server/fetch_session_cache.h"
-#include "kafka/server/group_router.h"
 #include "kafka/server/handlers/handler_interface.h"
 #include "kafka/server/logger.h"
 #include "kafka/server/response.h"
@@ -253,9 +252,7 @@ public:
         return ss::make_ready_future<response_ptr>(std::move(resp));
     }
 
-    group_initializer& group_initializer() {
-        return _conn->server().group_router().group_initializer();
-    }
+    kafka::group_initializer& group_initializer();
 
     coordinator_ntp_mapper& coordinator_mapper() {
         return _conn->server().coordinator_mapper();

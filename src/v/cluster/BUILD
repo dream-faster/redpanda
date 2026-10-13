@@ -217,6 +217,7 @@ redpanda_cc_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
+        "//src/v/config",
         ":legacy_wire",
         "//src/v/base",
         "//src/v/model",
@@ -530,6 +531,8 @@ redpanda_cc_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
+        "//src/v/config",
+        "@boost//:lexical_cast",
         ":data_policy",
         ":legacy_wire",
         ":errc",
@@ -788,6 +791,7 @@ redpanda_cc_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
+        "@seastar",
         ":client_quota_serde",
         ":security_types",
         ":types",
@@ -815,6 +819,7 @@ redpanda_cc_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
+        "//src/v/config",
         ":commands",
         "//src/v/metrics",
         "//src/v/utils:token_bucket",

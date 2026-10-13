@@ -10,7 +10,6 @@
  */
 #pragma once
 
-#include "absl/container/btree_map.h"
 #include "base/format_to.h"
 #include "bytes/bytes.h"
 #include "model/fundamental.h"
@@ -21,6 +20,7 @@
 #include <boost/numeric/conversion/cast.hpp>
 
 #include <concepts>
+#include <map>
 
 namespace kafka {
 
@@ -103,7 +103,7 @@ enum class describe_configs_source : int8_t {
 using tag_id = named_type<uint32_t, struct tag_id_type>;
 
 using tagged_fields
-  = named_type<absl::btree_map<tag_id, bytes>, struct tagged_fields_type>;
+  = named_type<std::map<tag_id, bytes>, struct tagged_fields_type>;
 
 /// Used to signify if a kafka request will never be interpreted as flexible.
 /// Consumed by our generator and flexible method helpers.

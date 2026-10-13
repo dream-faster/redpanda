@@ -16,7 +16,6 @@
 #include "config/base_property.h"
 #include "config/logger.h"
 #include "config/rjson_serialization.h"
-#include "config/tls_config.h"
 #include "config/types.h"
 #include "container/intrusive_list_helpers.h"
 #include "json/stringbuffer.h"
@@ -26,6 +25,7 @@
 #include "utils/to_string.h"
 
 #include <seastar/util/noncopyable_function.hh>
+#include <seastar/util/variant_utils.hh>
 
 #include <algorithm>
 #include <chrono>

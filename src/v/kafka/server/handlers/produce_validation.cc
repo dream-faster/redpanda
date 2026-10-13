@@ -15,6 +15,8 @@
 #include "model/record_utils.h"
 #include "ssx/sformat.h"
 
+#include <seastar/core/coroutine.hh>
+
 namespace {
 static constexpr auto validate_rate_interval = std::chrono::minutes(1);
 }

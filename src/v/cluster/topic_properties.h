@@ -11,6 +11,7 @@
 
 #include "base/format_to.h"
 #include "cluster/legacy_wire.h"
+#include "config/leaders_preference.h"
 #include "model/compression.h"
 #include "model/fundamental.h"
 #include "model/metadata.h"

@@ -246,6 +246,7 @@ redpanda_cc_library(
         "log_reader.cc",
         "log_replayer.cc",
         "node.cc",
+        "ntp_config.cc",
         "offset_to_filepos.cc",
         "offset_translator.cc",
         "offset_translator_state.cc",
