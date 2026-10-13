@@ -9,6 +9,8 @@
  * by the Apache License, Version 2.0
  */
 
+#pragma once
+
 #include "absl/strings/str_join.h"
 #include "absl/strings/str_split.h"
 #include "absl/time/time.h"

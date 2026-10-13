@@ -9,6 +9,8 @@
  * by the Apache License, Version 2.0
  */
 
+#pragma once
+
 #include "absl/container/btree_map.h"
 #include "absl/container/flat_hash_map.h"
 #include "cluster/fwd.h"

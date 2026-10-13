@@ -9,6 +9,8 @@
  * by the Apache License, Version 2.0
  */
 
+#pragma once
+
 #include "absl/functional/function_ref.h"
 #include "base/seastarx.h"
 #include "serde/parquet/schema.h"

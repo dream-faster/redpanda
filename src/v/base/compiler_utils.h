@@ -13,6 +13,8 @@
 // REDPANDA_END_IGNORE_DEPRECATIONS after the region you want to ignore
 // Use of this macro is ideally paired with a comment/JIRA reference
 // indicating the plan for removing the ignored deprecations.
+#pragma once
+
 #define REDPANDA_BEGIN_IGNORE_DEPRECATIONS                                     \
     _Pragma("GCC diagnostic push")                                             \
       _Pragma("GCC diagnostic ignored \"-Wdeprecated-declarations\"")
