@@ -11,9 +11,7 @@
 #include "cluster/utils/partition_change_notifier_impl.h"
 #include "config/configuration.h"
 #include "config/node_config.h"
-#include "debug_bundle/debug_bundle_service.h"
 #include "kafka/data/rpc/client.h"
-#include "kafka/server/usage_manager.h"
 #include "redpanda/admin/kafka_connections_service.h"
 #include "redpanda/application.h"
 #include "resource_mgmt/memory_groups.h"
@@ -25,16 +23,7 @@
 void application::wire_up_runtime_services(
   model::node_id node_id, ::stop_signal& app_signal) {
     wire_up_redpanda_services(node_id, app_signal);
-    syschecks::systemd_message("Creating kafka usage manager frontend").get();
-    construct_service(
-      usage_manager,
-      std::ref(controller->get_health_monitor()),
-      std::ref(storage))
-      .get();
-
     construct_single_service(_monitor_unsafe, std::ref(feature_table));
-
-    construct_service(_debug_bundle_service, &storage.local().kvs()).get();
 
     auto data_dir = config::node().data_directory().as_sstring();
     construct_single_service(

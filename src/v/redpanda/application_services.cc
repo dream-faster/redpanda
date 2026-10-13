@@ -212,22 +212,6 @@ void application::wire_up_redpanda_services(
     }
 
     construct_single_service_sharded(
-      self_test_backend,
-      node_id,
-      std::ref(local_monitor),
-      std::ref(_connection_cache),
-      scheduling_groups::instance().self_test_sg())
-      .get();
-
-    construct_single_service_sharded(
-      self_test_frontend,
-      node_id,
-      std::ref(controller->get_members_table()),
-      std::ref(self_test_backend),
-      std::ref(_connection_cache))
-      .get();
-
-    construct_single_service_sharded(
       node_status_backend,
       node_id,
       std::ref(controller->get_members_table()),
@@ -589,7 +573,6 @@ void application::wire_up_redpanda_services(
         std::ref(quota_mgr),
         std::ref(snc_quota_mgr),
         std::ref(group_router),
-        std::ref(usage_manager),
         std::ref(shard_table),
         std::ref(partition_manager),
         std::ref(id_allocator_frontend),

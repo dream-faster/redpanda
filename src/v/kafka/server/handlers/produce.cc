@@ -638,26 +638,7 @@ produce_handler::handle(request_context ctx, ss::smp_service_group ssg) {
           ctx.respond(request.make_full_disk_response(ctx.header().version)));
     }
 
-    // Account for special internal topic bytes for usage
     produce_response resp;
-    for (const auto& topic : request.data.topics) {
-        const bool bytes_to_exclude = std::find(
-                                        usage_excluded_topics.cbegin(),
-                                        usage_excluded_topics.cend(),
-                                        topic.name())
-                                      != usage_excluded_topics.cend();
-        if (bytes_to_exclude) {
-            for (const auto& part : topic.partitions) {
-                if (part.records) {
-                    const auto& records = part.records;
-                    if (records->adapter.batch) {
-                        resp.internal_topic_bytes
-                          += records->adapter.batch->size_bytes();
-                    }
-                }
-            }
-        }
-    }
 
     // determine if the request has transactional / idempotent batches
     for (auto& topic : request.data.topics) {

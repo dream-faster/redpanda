@@ -19,13 +19,10 @@
 #include "cluster/node/local_monitor.h"
 #include "cluster/node_status_backend.h"
 #include "cluster/node_status_table.h"
-#include "cluster/self_test_backend.h"
-#include "cluster/self_test_frontend.h"
 #include "cluster/tx_coordinator_mapper.h"
 #include "config/node_config.h"
 #include "crash_tracker/service.h"
 #include "crypto/ossl_context_service.h"
-#include "debug_bundle/fwd.h"
 #include "features/feature_table_snapshot.h"
 #include "features/fwd.h"
 #include "finjector/stress_fiber.h"
@@ -113,8 +110,6 @@ public:
     ss::sharded<cluster::partition_manager> partition_manager;
     ss::sharded<cluster::tx::producer_state_manager> producer_manager;
     ss::sharded<cluster::rm_partition_frontend> rm_partition_frontend;
-    ss::sharded<cluster::self_test_backend> self_test_backend;
-    ss::sharded<cluster::self_test_frontend> self_test_frontend;
     ss::sharded<cluster::shard_table> shard_table;
     // only one instance on core 0
     ss::sharded<cluster::tx_topic_manager> tx_topic_manager;
@@ -129,7 +124,6 @@ public:
     ss::sharded<kafka::snc_quota_manager> snc_quota_mgr;
     ss::sharded<kafka::rm_group_frontend> rm_group_frontend;
     ss::sharded<kafka::group_initializer> group_initializer;
-    ss::sharded<kafka::usage_manager> usage_manager;
 
     ss::sharded<security::audit::audit_log_manager> audit_mgr;
 
@@ -319,7 +313,6 @@ private:
     std::unique_ptr<kafka::rm_group_proxy_impl> _rm_group_proxy;
 
     ss::sharded<resources::cpu_profiler> _cpu_profiler;
-    ss::sharded<debug_bundle::service> _debug_bundle_service;
 
     std::unique_ptr<cluster::node_isolation_watcher> _node_isolation_watcher;
 

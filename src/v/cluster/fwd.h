@@ -58,8 +58,6 @@ class partition_balancer_state;
 class node_status_backend;
 class node_status_table;
 class ephemeral_credential_frontend;
-class self_test_backend;
-class self_test_frontend;
 class node_isolation_watcher;
 struct controller_snapshot;
 struct controller_join_snapshot;

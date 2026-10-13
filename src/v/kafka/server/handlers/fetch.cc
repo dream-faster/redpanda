@@ -1703,21 +1703,10 @@ void update_session_partition(
 ss::future<response_ptr> op_context::send_response() && {
     auto fetched_data_size = uint64_t{0};
     for (const auto& topic : response.data.responses) {
-        const bool bytes_to_exclude = std::find(
-                                        usage_excluded_topics.cbegin(),
-                                        usage_excluded_topics.cend(),
-                                        topic.topic)
-                                      != usage_excluded_topics.cend();
-
         for (const auto& part : topic.partitions) {
             if (part.records) {
                 auto part_size = part.records->size_bytes();
                 fetched_data_size += part_size;
-
-                /// Account for special internal topic bytes for usage
-                if (bytes_to_exclude) {
-                    response.internal_topic_bytes += part_size;
-                }
             }
         }
     }
@@ -1756,7 +1745,6 @@ ss::future<response_ptr> op_context::send_response() && {
     fetch_response final_response;
     final_response.data.error_code = response.data.error_code;
     final_response.data.session_id = response.data.session_id;
-    final_response.internal_topic_bytes = response.internal_topic_bytes;
 
     for (auto it = response.begin(true); it != response.end(); ++it) {
         update_session(it);

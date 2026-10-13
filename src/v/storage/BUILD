@@ -173,7 +173,6 @@ redpanda_cc_library(
     ],
     visibility = [
         "//src/v/cluster/tests:__pkg__",
-        "//src/v/debug_bundle/tests:__pkg__",
         "//src/v/storage/tests:__pkg__",
     ],
     deps = [

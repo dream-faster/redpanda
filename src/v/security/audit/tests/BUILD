@@ -26,7 +26,6 @@ redpanda_cc_gtest(
         "//src/v/cluster:feature_backend",
         "//src/v/cluster:leader_balancer_strategy",
         "//src/v/cluster:node_status_backend",
-        "//src/v/cluster:self_test",
         "//src/v/cluster:topic_metrics_watcher",
         "//src/v/cluster:types",
         "//src/v/kafka/client/test:fixture",

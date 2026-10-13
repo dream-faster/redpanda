@@ -36,7 +36,6 @@
 #include "cluster/partition_balancer_backend.h"
 #include "cluster/partition_balancer_rpc_service.h"
 #include "cluster/partition_manager.h"
-#include "cluster/self_test_frontend.h"
 #include "cluster/shard_table.h"
 #include "cluster/topics_frontend.h"
 #include "cluster/tx_gateway_frontend.h"
@@ -276,8 +275,6 @@ admin_server::admin_server(
   ss::sharded<cluster::metadata_cache>& metadata_cache,
   ss::sharded<rpc::connection_cache>& connection_cache,
   ss::sharded<cluster::node_status_table>& node_status_table,
-  ss::sharded<cluster::self_test_frontend>& self_test_frontend,
-  ss::sharded<kafka::usage_manager>& usage_manager,
   ss::sharded<storage::node>& storage_node,
   ss::sharded<memory_sampling>& memory_sampling_service,
   ss::sharded<resources::cpu_profiler>& cpu_profiler,
@@ -285,7 +282,6 @@ admin_server::admin_server(
   std::unique_ptr<cluster::tx_manager_migrator>& tx_manager_migrator,
   ss::sharded<kafka::server>& kafka_server,
   ss::sharded<cluster::tx_gateway_frontend>& tx_gateway_frontend,
-  ss::sharded<debug_bundle::service>& debug_bundle_service,
   ss::sharded<admin::kafka_connections_service>& kafka_connections_service)
   : _log_level_timer([this] { log_level_timer_handler(); })
   , _server("admin")
@@ -302,8 +298,6 @@ admin_server::admin_server(
       config::shard_local_cfg().superusers.bind(),
       _controller)
   , _node_status_table(node_status_table)
-  , _self_test_frontend(self_test_frontend)
-  , _usage_manager(usage_manager)
   , _storage_node(storage_node)
   , _memory_sampling_service(memory_sampling_service)
   , _cpu_profiler(cpu_profiler)
@@ -311,7 +305,6 @@ admin_server::admin_server(
   , _tx_manager_migrator(tx_manager_migrator)
   , _kafka_server(kafka_server)
   , _tx_gateway_frontend(tx_gateway_frontend)
-  , _debug_bundle_service(debug_bundle_service)
   , _kafka_connections_service(kafka_connections_service)
   , _default_blocked_reactor_notify(
       ss::engine().get_blocked_reactor_notify_ms())
@@ -508,8 +501,6 @@ ss::future<> admin_server::start() {
       std::make_unique<admin::broker_service_impl>(
         std::move(client), &_services));
 
-    co_await _debug_bundle_file_handler.start();
-
     _blocked_reactor_notify_reset_timer.set_callback([this] {
         return ss::smp::invoke_on_all([ms = _default_blocked_reactor_notify] {
             ss::engine().update_blocked_reactor_notify_ms(ms);
@@ -534,7 +525,6 @@ ss::future<> admin_server::stop() {
     vlog(adminlog.debug, "admin_server::stop() - memory semaphore broken");
     co_await _server.stop();
     vlog(adminlog.debug, "admin_server::stop() - _server stopped");
-    co_await _debug_bundle_file_handler.stop();
 }
 
 void admin_server::configure_admin_routes() {
@@ -573,7 +563,6 @@ void admin_server::configure_admin_routes() {
     rb->register_api_file(_server._routes, "cluster");
     rb->register_function(_server._routes, insert_comma);
     rb->register_function(_server._routes, insert_comma);
-    rb->register_api_file(_server._routes, "debug_bundle");
     register_config_routes();
     register_cluster_config_routes();
     register_raft_routes();
@@ -586,10 +575,7 @@ void admin_server::configure_admin_routes() {
     register_hbadger_routes();
     register_transaction_routes();
     register_debug_routes();
-    register_usage_routes();
-    register_self_test_routes();
     register_cluster_routes();
-    register_debug_bundle_routes();
     /**
      * Special REST apis active only in recovery mode
      */
@@ -2967,194 +2953,6 @@ void admin_server::register_hbadger_routes() {
                    [m, p] { finjector::shard_local_badger().unset(m, p); })
             .then(
               [] { return ss::json::json_return_type(ss::json::json_void()); });
-      });
-}
-
-namespace {
-json::validator make_self_test_start_validator() {
-    const std::string_view schema = R"(
-{
-    "type": "object",
-    "properties": {
-        "nodes": {
-            "type": "array",
-            "items": {
-                "type": "number"
-            }
-        },
-        "tests": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "type": {
-                        "type": "string"
-                    }
-                },
-                "required": ["type"]
-            }
-        }
-    },
-    "required": [],
-    "additionalProperties": false
-}
-)";
-    return json::validator(schema);
-}
-} // namespace
-
-ss::future<ss::json::json_return_type>
-admin_server::self_test_start_handler(std::unique_ptr<ss::http::request> req) {
-    static thread_local json::validator self_test_start_validator(
-      make_self_test_start_validator());
-    if (need_redirect_to_leader(model::controller_ntp, _metadata_cache)) {
-        vlog(adminlog.debug, "Need to redirect self_test_start request");
-        throw co_await redirect_to_leader(*req, model::controller_ntp);
-    }
-    auto doc = co_await parse_json_body(req.get());
-    apply_validator(self_test_start_validator, doc);
-    std::vector<model::node_id> ids;
-    cluster::start_test_request r;
-    if (!doc.IsNull()) {
-        if (doc.HasMember("nodes")) {
-            const auto& node_ids = doc["nodes"].GetArray();
-            for (const auto& element : node_ids) {
-                ids.emplace_back(element.GetInt());
-            }
-        } else {
-            /// If not provided, default is to start the test on all nodes
-            ids = _controller->get_members_table().local().node_ids();
-        }
-        if (doc.HasMember("tests")) {
-            const auto& params = doc["tests"].GetArray();
-            for (const auto& element : params) {
-                const auto& obj = element.GetObject();
-                const ss::sstring test_type(obj["type"].GetString());
-                rapidjson::StringBuffer buffer;
-                rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
-                element.Accept(writer);
-                r.unparsed_checks.push_back(
-                  cluster::unparsed_check{
-                    .test_type = test_type,
-                    .test_json = ss::sstring{
-                      buffer.GetString(), buffer.GetSize()}});
-            }
-            cluster::parse_self_test_checks(r);
-        } else {
-            /// Default test run is to start 1 disk and 1 network test with
-            /// default arguments
-            r.dtos.push_back(cluster::diskcheck_opts{});
-            r.ntos.push_back(cluster::netcheck_opts{});
-        }
-    }
-    try {
-        auto tid = co_await _self_test_frontend.invoke_on(
-          cluster::self_test_frontend::shard,
-          [r, ids](auto& self_test_frontend) {
-              return self_test_frontend.start_test(r, ids);
-          });
-        vlog(adminlog.info, "Request to start self test succeeded: {}", tid);
-        co_return ss::json::json_return_type(ss::sstring(tid));
-    } catch (const std::exception& ex) {
-        throw ss::httpd::base_exception(
-          fmt::format("Failed to start self test, reason: {}", ex),
-          ss::http::reply::status_type::service_unavailable);
-    }
-}
-
-ss::future<ss::json::json_return_type>
-admin_server::self_test_stop_handler(std::unique_ptr<ss::http::request> req) {
-    if (need_redirect_to_leader(model::controller_ntp, _metadata_cache)) {
-        vlog(adminlog.info, "Need to redirect self_test_stop request");
-        throw co_await redirect_to_leader(*req, model::controller_ntp);
-    }
-    auto r = co_await _self_test_frontend.invoke_on(
-      cluster::self_test_frontend::shard,
-      [](auto& self_test_frontend) { return self_test_frontend.stop_test(); });
-    if (!r.finished()) {
-        throw ss::httpd::base_exception(
-          fmt::format(
-            "Failed to stop one or more self_test jobs: {}",
-            r.active_participant_ids()),
-          ss::http::reply::status_type::service_unavailable);
-    }
-    vlog(adminlog.info, "Request to stop self test succeeded");
-    co_return ss::json::json_void();
-}
-
-namespace {
-ss::httpd::debug_json::self_test_result
-self_test_result_to_json(const cluster::self_test_result& str) {
-    ss::httpd::debug_json::self_test_result r;
-    r.test_id = ss::sstring(str.test_id);
-    r.name = str.name;
-    r.info = str.info;
-    r.test_type = str.test_type;
-    r.start_time = str.start_time;
-    r.end_time = str.end_time;
-    r.duration = std::chrono::duration_cast<std::chrono::milliseconds>(
-                   str.duration)
-                   .count();
-    r.timeouts = str.timeouts;
-    if (str.warning) {
-        r.warning = *str.warning;
-    }
-    if (str.error) {
-        r.error = *str.error;
-        return r;
-    }
-    r.p50 = str.p50;
-    r.p90 = str.p90;
-    r.p99 = str.p99;
-    r.p999 = str.p999;
-    r.max_latency = str.max;
-    r.rps = str.rps;
-    r.bps = str.bps;
-    return r;
-}
-} // namespace
-
-ss::future<ss::json::json_return_type>
-admin_server::self_test_get_results_handler(
-  std::unique_ptr<ss::http::request>) {
-    namespace dbg_ns = ss::httpd::debug_json;
-    std::vector<dbg_ns::self_test_node_report> reports;
-    auto status = co_await _self_test_frontend.invoke_on(
-      cluster::self_test_frontend::shard,
-      [](auto& self_test_frontend) { return self_test_frontend.status(); });
-    reports.reserve(status.results().size());
-    for (const auto& [id, participant] : status.results()) {
-        dbg_ns::self_test_node_report nr;
-        nr.node_id = id;
-        nr.status = cluster::self_test_status_as_string(participant.status());
-        nr.stage = cluster::self_test_stage_as_string(participant.stage());
-        if (participant.response) {
-            for (const auto& r : participant.response->results) {
-                nr.results.push(self_test_result_to_json(r));
-            }
-        }
-        reports.push_back(nr);
-    }
-    co_return ss::json::json_return_type(reports);
-}
-
-void admin_server::register_self_test_routes() {
-    register_route<superuser>(
-      ss::httpd::debug_json::self_test_start,
-      [this](std::unique_ptr<ss::http::request> req) {
-          return self_test_start_handler(std::move(req));
-      });
-
-    register_route<superuser>(
-      ss::httpd::debug_json::self_test_stop,
-      [this](std::unique_ptr<ss::http::request> req) {
-          return self_test_stop_handler(std::move(req));
-      });
-
-    register_route<user>(
-      ss::httpd::debug_json::self_test_status,
-      [this](std::unique_ptr<ss::http::request> req) {
-          return self_test_get_results_handler(std::move(req));
       });
 }
 

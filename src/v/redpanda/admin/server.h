@@ -18,11 +18,9 @@
 #include "cluster/tx_gateway_frontend.h"
 #include "cluster/types.h"
 #include "config/endpoint_tls_config.h"
-#include "debug_bundle/fwd.h"
 #include "finjector/stress_fiber.h"
 #include "kafka/server/fwd.h"
 #include "model/metadata.h"
-#include "redpanda/admin/debug_bundle.h"
 #include "redpanda/admin/kafka_connections_service.h"
 #include "resource_mgmt/cpu_profiler.h"
 #include "resource_mgmt/memory_sampling.h"
@@ -69,8 +67,6 @@ public:
       ss::sharded<cluster::metadata_cache>&,
       ss::sharded<rpc::connection_cache>&,
       ss::sharded<cluster::node_status_table>&,
-      ss::sharded<cluster::self_test_frontend>&,
-      ss::sharded<kafka::usage_manager>&,
       ss::sharded<storage::node>&,
       ss::sharded<memory_sampling>&,
       ss::sharded<resources::cpu_profiler>&,
@@ -78,7 +74,6 @@ public:
       std::unique_ptr<cluster::tx_manager_migrator>&,
       ss::sharded<kafka::server>&,
       ss::sharded<cluster::tx_gateway_frontend>&,
-      ss::sharded<debug_bundle::service>&,
       ss::sharded<admin::kafka_connections_service>&);
 
     // Add a ConnectRPC service to the admin server.
@@ -429,12 +424,9 @@ private:
     void register_hbadger_routes();
     void register_transaction_routes();
     void register_debug_routes();
-    void register_usage_routes();
-    void register_self_test_routes();
     void register_cluster_routes();
     void register_cluster_partitions_routes();
     void register_recovery_mode_routes();
-    void register_debug_bundle_routes();
 
     ss::future<ss::json::json_return_type> patch_cluster_config_handler(
       std::unique_ptr<ss::http::request>, const request_auth_result&);
@@ -578,14 +570,6 @@ private:
     ss::future<ss::json::json_return_type>
       get_cluster_partitions_topic_handler(std::unique_ptr<ss::http::request>);
 
-    /// Self test routes
-    ss::future<ss::json::json_return_type>
-      self_test_start_handler(std::unique_ptr<ss::http::request>);
-    ss::future<ss::json::json_return_type>
-      self_test_stop_handler(std::unique_ptr<ss::http::request>);
-    ss::future<ss::json::json_return_type>
-      self_test_get_results_handler(std::unique_ptr<ss::http::request>);
-
     ss::future<ss::json::json_return_type>
       get_partition_state_handler(std::unique_ptr<ss::http::request>);
     ss::future<ss::json::json_return_type>
@@ -608,18 +592,6 @@ private:
     ss::future<ss::json::json_return_type> get_node_uuid_handler();
     ss::future<ss::json::json_return_type>
       override_node_uuid_handler(std::unique_ptr<ss::http::request>);
-
-    // Debug Bundle routes
-    ss::future<std::unique_ptr<ss::http::reply>> post_debug_bundle(
-      std::unique_ptr<ss::http::request>, std::unique_ptr<ss::http::reply>);
-    ss::future<std::unique_ptr<ss::http::reply>> get_debug_bundle(
-      std::unique_ptr<ss::http::request>, std::unique_ptr<ss::http::reply>);
-    ss::future<std::unique_ptr<ss::http::reply>> delete_debug_bundle(
-      std::unique_ptr<ss::http::request>, std::unique_ptr<ss::http::reply>);
-    ss::future<std::unique_ptr<ss::http::reply>> get_debug_bundle_file(
-      std::unique_ptr<ss::http::request>, std::unique_ptr<ss::http::reply>);
-    ss::future<std::unique_ptr<ss::http::reply>> delete_debug_bundle_file(
-      std::unique_ptr<ss::http::request>, std::unique_ptr<ss::http::reply>);
 
     // Shard store message routes
     ss::future<std::unique_ptr<ss::http::reply>> put_ctracker_va(
@@ -673,8 +645,6 @@ private:
     request_authenticator _auth;
     bool _ready{false};
     ss::sharded<cluster::node_status_table>& _node_status_table;
-    ss::sharded<cluster::self_test_frontend>& _self_test_frontend;
-    ss::sharded<kafka::usage_manager>& _usage_manager;
     ss::sharded<storage::node>& _storage_node;
     ss::sharded<memory_sampling>& _memory_sampling_service;
     ss::sharded<resources::cpu_profiler>& _cpu_profiler;
@@ -682,8 +652,6 @@ private:
     std::unique_ptr<cluster::tx_manager_migrator>& _tx_manager_migrator;
     ss::sharded<kafka::server>& _kafka_server;
     ss::sharded<cluster::tx_gateway_frontend>& _tx_gateway_frontend;
-    ss::sharded<debug_bundle::service>& _debug_bundle_service;
-    ss::sharded<debug_bundle::file_handler> _debug_bundle_file_handler;
 
     std::vector<std::unique_ptr<serde::pb::rpc::base_service>> _services;
 

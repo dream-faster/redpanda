@@ -58,7 +58,6 @@
 #include "kafka/server/quota_manager.h"
 #include "kafka/server/request_context.h"
 #include "kafka/server/response.h"
-#include "kafka/server/usage_manager.h"
 #include "model/record.h"
 #include "net/connection.h"
 #include "random/generators.h"
@@ -136,7 +135,6 @@ server::server(
   ss::sharded<quota_manager>& quota,
   ss::sharded<snc_quota_manager>& snc_quota_mgr,
   ss::sharded<kafka::group_router>& router,
-  ss::sharded<kafka::usage_manager>& usage_manager,
   ss::sharded<cluster::shard_table>& tbl,
   ss::sharded<cluster::partition_manager>& pm,
   ss::sharded<cluster::id_allocator_frontend>& id_allocator_frontend,
@@ -163,7 +161,6 @@ server::server(
   , _quota_mgr(quota)
   , _snc_quota_mgr(snc_quota_mgr)
   , _group_router(router)
-  , _usage_manager(usage_manager)
   , _shard_table(tbl)
   , _partition_manager(pm)
   , _fetch_pid_controller(fetch_sg)

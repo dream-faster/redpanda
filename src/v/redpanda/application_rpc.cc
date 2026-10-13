@@ -15,7 +15,6 @@
 #include "cluster/node_status_rpc_handler.h"
 #include "cluster/partition_balancer_rpc_handler.h"
 #include "cluster/partition_manager.h"
-#include "cluster/self_test_rpc_handler.h"
 #include "cluster/service.h"
 #include "cluster/tx_gateway.h"
 #include "config/configuration.h"
@@ -104,12 +103,6 @@ void application::add_runtime_rpc_services(
         scheduling_groups::instance().raft_heartbeats(),
         smp_service_groups.cluster_smp_sg(),
         std::ref(node_status_backend)));
-
-    runtime_services.push_back(
-      std::make_unique<cluster::self_test_rpc_handler>(
-        scheduling_groups::instance().raft_heartbeats(),
-        smp_service_groups.cluster_smp_sg(),
-        std::ref(self_test_backend)));
 
     runtime_services.push_back(
       std::make_unique<cluster::partition_balancer_rpc_handler>(
