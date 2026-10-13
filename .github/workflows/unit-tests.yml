@@ -1,0 +1,129 @@
+---
+name: unit-tests
+on:
+  workflow_dispatch:
+  workflow_call:
+
+# github.workflow is the caller's name when this runs as a reusable workflow,
+# so a standalone dispatch and a docker-build run land in different groups.
+concurrency:
+  group: unit-tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubicloud-standard-4
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+
+      # Same runner shape and output base layout as docker-build: the test
+      # targets compile all of core, so they need the same disk and swap
+      # headroom as the image build.
+      - name: Prepare build environment
+        run: |
+          echo "=== disk before cleanup ==="
+          df -h
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          sudo docker image prune --all --force || true
+          sudo fallocate -l 16G /mnt/swapfile
+          sudo chmod 600 /mnt/swapfile
+          sudo mkswap /mnt/swapfile
+          sudo swapon /mnt/swapfile
+          sudo mkdir -p /mnt/bazel-output /mnt/bazel-repo-cache /mnt/bazel-disk-cache
+          sudo chown "$(id -u):$(id -g)" /mnt/bazel-output /mnt/bazel-repo-cache \
+            /mnt/bazel-disk-cache
+          echo "=== disk after cleanup ==="
+          df -h
+          free -h
+
+      - name: Install Bazelisk
+        run: |
+          mkdir -p ~/bin
+          wget -O ~/bin/bazel https://github.com/bazelbuild/bazelisk/releases/latest/download/bazelisk-linux-amd64
+          chmod +x ~/bin/bazel
+          echo "$HOME/bin" >> $GITHUB_PATH
+
+      - name: Install system dependencies
+        run: sudo ./bazel/install-deps.sh
+
+      # The caches below are shared with docker-build: same paths, same key
+      # scheme, same host toolchain and the same --config=release, so the core
+      # objects either workflow compiles are cache hits for the other. Keep the
+      # two in step when changing either.
+      - name: Restore bazelisk cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/bazelisk
+          key: bazelisk-${{ runner.os }}-${{ hashFiles('.bazelversion') }}
+
+      - name: Restore Bazel repository cache
+        uses: actions/cache@v4
+        with:
+          path: /mnt/bazel-repo-cache
+          key: bazel-release-repo-${{ runner.os }}-${{ hashFiles('.bazelversion', 'MODULE.bazel', 'MODULE.bazel.lock') }}
+          restore-keys: |
+            bazel-release-repo-${{ runner.os }}-
+
+      # Cache keys are immutable and both workflows run at once, so each saves
+      # under its own name. Restore prefers this workflow's newest entry (it
+      # holds the test objects too) and falls back to docker-build's, which
+      # still covers the bulk of the compile.
+      - name: Restore Bazel disk cache
+        id: disk-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: /mnt/bazel-disk-cache
+          key: bazel-release-disk-${{ runner.os }}-unit-tests-${{ github.ref_name }}-${{ github.sha }}
+          restore-keys: |
+            bazel-release-disk-${{ runner.os }}-unit-tests-${{ github.ref_name }}-
+            bazel-release-disk-${{ runner.os }}-image-${{ github.ref_name }}-
+            bazel-release-disk-${{ runner.os }}-unit-tests-
+            bazel-release-disk-${{ runner.os }}-
+
+      - name: Run unit tests
+        run: |
+          unset CI
+          # Same --config as docker-build, on purpose: a different --config is
+          # a different Bazel configuration and so a different set of cache
+          # keys, which would make the shared disk cache useless.
+          bazel \
+            --output_base=/mnt/bazel-output \
+            test \
+            --config=release \
+            --repository_cache=/mnt/bazel-repo-cache \
+            --disk_cache=/mnt/bazel-disk-cache \
+            --spawn_strategy=sandboxed,local \
+            --verbose_failures \
+            --lockfile_mode=update \
+            --test_output=errors \
+            '--local_resources=memory=HOST_RAM*.8' \
+            //src/v/cluster/tests:legacy_wire_test \
+            //src/v/cluster/tests:topic_table_test \
+            //src/v/cluster/tests:dedup_window_filter_test \
+            //src/v/cluster/tests:dedup_stm_test \
+            //src/v/kafka/server/tests:validator_tests \
+            //src/v/compression/tests:zstd_test
+
+      # Bazel bumps the mtime of every disk cache entry it reads, so entries
+      # untouched for a few days are the ones no recent build has needed.
+      - name: Trim the disk cache
+        if: ${{ !cancelled() && steps.disk-cache.outcome == 'success' && steps.disk-cache.outputs.cache-hit != 'true' }}
+        run: |
+          SIZE=$(du -sm /mnt/bazel-disk-cache | cut -f1)
+          echo "disk cache: ${SIZE}MB"
+          if [[ "$SIZE" -gt 12000 ]]; then
+            find /mnt/bazel-disk-cache -type f -mtime +3 -delete || true
+            echo "trimmed to $(du -sm /mnt/bazel-disk-cache | cut -f1)MB"
+          fi
+
+      # Saved on failure too: a failing test still leaves hours of compile
+      # output that the next run should not redo.
+      - name: Save Bazel disk cache
+        if: ${{ !cancelled() && steps.disk-cache.outcome == 'success' && steps.disk-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: /mnt/bazel-disk-cache
+          key: ${{ steps.disk-cache.outputs.cache-primary-key }}
