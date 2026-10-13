@@ -9,7 +9,7 @@
  * by the Apache License, Version 2.0
  */
 
-#include "feature_table_snapshot.h"
+#include "features/feature_table_snapshot.h"
 
 #include "base/vlog.h"
 #include "features/feature_table.h"

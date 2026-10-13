@@ -11,11 +11,11 @@
 
 #include "security/authorizer.h"
 
-#include "acl_store.h"
 #include "config/configuration.h"
 #include "kafka/protocol/types.h"
 #include "metrics/metrics.h"
 #include "metrics/prometheus_sanitize.h"
+#include "security/acl_store.h"
 #include "security/role.h"
 #include "security/role_store.h"
 

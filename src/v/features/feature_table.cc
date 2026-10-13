@@ -9,7 +9,7 @@
  * by the Apache License, Version 2.0
  */
 
-#include "feature_table.h"
+#include "features/feature_table.h"
 
 #include "base/format_to.h"
 #include "cluster/feature_update_action.h"

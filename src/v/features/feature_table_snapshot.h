@@ -12,7 +12,7 @@
 #pragma once
 
 #include "cluster/version.h"
-#include "feature_state.h"
+#include "features/feature_state.h"
 #include "model/fundamental.h"
 #include "security/license.h"
 #include "serde/rw/envelope.h"

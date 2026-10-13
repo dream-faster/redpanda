@@ -9,10 +9,10 @@
  * by the Apache License, Version 2.0
  */
 
-#include "record_batcher.h"
+#include "kafka/data/record_batcher.h"
 
 #include "absl/algorithm/container.h"
-#include "logger.h"
+#include "kafka/data/logger.h"
 #include "model/record.h"
 #include "storage/record_batch_builder.h"
 #include "utils/human.h"

@@ -14,8 +14,8 @@
 #include "base/outcome.h"
 #include "base/vassert.h"
 #include "base/vlog.h"
+#include "crypto/ssl_utils.h"
 #include "internal.h"
-#include "ssl_utils.h"
 #include "ssx/thread_worker.h"
 
 #include <seastar/core/future.hh>

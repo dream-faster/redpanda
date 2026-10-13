@@ -10,8 +10,8 @@
  */
 #pragma once
 #include "base/seastarx.h"
+#include "base/source_location.h"
 #include "base/vassert.h"
-#include "source_location.h"
 
 #include <seastar/core/smp.hh>
 

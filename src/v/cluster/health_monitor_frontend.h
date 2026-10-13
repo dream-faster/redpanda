@@ -9,11 +9,11 @@
  * by the Apache License, Version 2.0
  */
 #pragma once
+#include "cluster/controller_stm.h"
 #include "cluster/fwd.h"
 #include "cluster/health_monitor_types.h"
 #include "cluster/node_status_table.h"
 #include "config/property.h"
-#include "controller_stm.h"
 #include "model/metadata.h"
 #include "model/timeout_clock.h"
 #include "storage/disk.h"

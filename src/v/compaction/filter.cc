@@ -7,7 +7,7 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0
 
-#include "filter.h"
+#include "compaction/filter.h"
 
 #include "base/vassert.h"
 #include "compaction/utils.h"

@@ -9,7 +9,7 @@
  * by the Apache License, Version 2.0
  */
 
-#include "tls_config.h"
+#include "config/tls_config.h"
 
 #include "config/configuration.h"
 #include "config/convert.h"

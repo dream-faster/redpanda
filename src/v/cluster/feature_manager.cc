@@ -9,7 +9,7 @@
  * by the Apache License, Version 2.0
  */
 
-#include "feature_manager.h"
+#include "cluster/feature_manager.h"
 
 #include "base/outcome.h"
 #include "cluster/commands.h"

@@ -10,8 +10,8 @@
  */
 #pragma once
 
-#include "config_store.h"
-#include "property.h"
+#include "config/config_store.h"
+#include "config/property.h"
 
 namespace config {
 

@@ -7,7 +7,7 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0
 
-#include "batch_cache.h"
+#include "storage/batch_cache.h"
 
 #include "base/vassert.h"
 #include "bytes/iobuf_parser.h"

@@ -1695,6 +1695,8 @@ redpanda_cc_library(
         "//src/v/ssx:work_queue",
         "//src/v/utils:backoff_policy",
     ],
+    # Its namespace-scope `using namespace tx;` would leak into later files.
+    unity_exclude = ["rm_stm.cc"],
     visibility = ["//visibility:public"],
     deps = [
         ":bootstrap_rpc",

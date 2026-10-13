@@ -12,7 +12,7 @@
 #pragma once
 
 #include "bytes/bytes.h"
-#include "ssl_utils.h"
+#include "crypto/ssl_utils.h"
 
 namespace crypto::internal {
 inline bytes_view string_view_to_bytes_view(std::string_view v) {

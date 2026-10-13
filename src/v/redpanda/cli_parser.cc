@@ -9,7 +9,7 @@
  * by the Apache License, Version 2.0
  */
 
-#include "cli_parser.h"
+#include "redpanda/cli_parser.h"
 
 #include "base/vlog.h"
 

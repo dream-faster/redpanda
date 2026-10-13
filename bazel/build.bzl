@@ -14,14 +14,18 @@ load(":internal.bzl", "antithesis_deps", "redpanda_copts", "unity_source")
 # enough to amortize the headers every file in a library shares.
 _UNITY_CHUNK_SIZE = 6
 
-def _unity_srcs(name, srcs, unity):
+def _unity_srcs(name, srcs, unity, unity_exclude):
     """Returns (srcs, textual_hdrs) for a library, honoring --//bazel:unity_build.
 
     The library's own .cc files become textual headers so that each unity
     file may include them (and they may include their neighbours' private
     headers) without tripping layering_check.
     """
-    cc_srcs = [s for s in srcs if s.endswith(".cc") and ":" not in s]
+    cc_srcs = [
+        s
+        for s in srcs
+        if s.endswith(".cc") and ":" not in s and s not in unity_exclude
+    ]
     if not unity or len(cc_srcs) < 2:
         return srcs, []
     other_srcs = [s for s in srcs if s not in cc_srcs]
@@ -62,16 +66,19 @@ def redpanda_cc_library(
         copts = [],
         deps = [],
         tags = [],
-        unity = True):
+        unity = True,
+        unity_exclude = []):
     """
     Define a Redpanda C++ library.
 
     Set `unity = False` for a library whose sources cannot share a
-    translation unit (e.g. clashing file-local names).
+    translation unit, or list the offending files in `unity_exclude` to
+    compile them on their own (e.g. a file with a namespace-scope
+    using-directive, which would leak into the files after it).
     """
     if include_prefix == None:
         include_prefix = native.package_name().removeprefix("src/v/")
-    srcs, textual_hdrs = _unity_srcs(name, srcs, unity)
+    srcs, textual_hdrs = _unity_srcs(name, srcs, unity, unity_exclude)
     cc_library(
         name = name,
         srcs = srcs,

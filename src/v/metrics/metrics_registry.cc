@@ -1,4 +1,4 @@
-#include "metrics_registry.h"
+#include "metrics/metrics_registry.h"
 
 #include "base/vassert.h"
 #include "config/configuration.h"

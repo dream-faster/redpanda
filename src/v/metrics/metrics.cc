@@ -8,7 +8,7 @@
  * the Business Source License, use of this software will be governed
  * by the Apache License, Version 2.0
  */
-#include "metrics.h"
+#include "metrics/metrics.h"
 
 #include "base/vassert.h"
 #include "config/configuration.h"

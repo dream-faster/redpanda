@@ -9,7 +9,7 @@
  * by the Apache License, Version 2.0
  */
 
-#include "metadata.h"
+#include "serde/parquet/metadata.h"
 
 #include "serde/thrift/compact.h"
 #include "utils/vint.h"

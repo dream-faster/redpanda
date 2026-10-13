@@ -31,6 +31,7 @@
 #include "cluster/shard_table.h"
 #include "cluster/topic_configuration.h"
 #include "cluster/topic_properties.h"
+#include "cluster/topic_rules.h"
 #include "cluster/types.h"
 #include "config/configuration.h"
 #include "config/leaders_preference.h"
@@ -49,7 +50,6 @@
 #include "scheduling/types.h"
 #include "ssx/future-util.h"
 #include "ssx/sformat.h"
-#include "topic_rules.h"
 
 #include <seastar/core/future.hh>
 #include <seastar/core/loop.hh>

@@ -9,7 +9,7 @@
  * by the Apache License, Version 2.0
  */
 
-#include "feature_barrier.h"
+#include "cluster/feature_barrier.h"
 
 #include "base/vassert.h"
 #include "base/vlog.h"

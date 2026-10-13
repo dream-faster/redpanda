@@ -7,7 +7,7 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0
 
-#include "log_reader_config.h"
+#include "kafka/data/log_reader_config.h"
 
 #include "base/format_to.h"
 #include "utils/to_string.h"

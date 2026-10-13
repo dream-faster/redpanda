@@ -9,7 +9,7 @@
  * by the Apache License, Version 2.0
  */
 
-#include "partition_proxy.h"
+#include "kafka/data/partition_proxy.h"
 
 #include "cluster/partition_manager.h"
 #include "kafka/data/replicated_partition.h"
