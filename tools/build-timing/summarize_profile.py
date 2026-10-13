@@ -63,13 +63,15 @@ def main():
     us = 1e6
     print(f"profile span: {(t_max - t_min) / us:.0f}s")
     total = sum(a[0] for a in actions)
-    print(f"actions: {len(actions)}, summed action time: {total / us:.0f}s "
-          f"({total / us / 3600:.2f} CPU-ish hours)")
+    print(
+        f"actions: {len(actions)}, summed action time: {total / us:.0f}s "
+        f"({total / us / 3600:.2f} CPU-ish hours)"
+    )
 
     if critical:
         ctot = sum(c[0] for c in critical)
         print(f"\n== critical path: {ctot / us:.0f}s ==")
-        for dur, name in sorted(critical, reverse=True)[:args.top]:
+        for dur, name in sorted(critical, reverse=True)[: args.top]:
             print(f"{dur / us:8.1f}s  {name}")
 
     by_mn = collections.Counter()
@@ -92,7 +94,7 @@ def main():
         print(f"{v / us:9.0f}s {100 * v / total:5.1f}% {n_pkg[k]:6d}  {k}")
 
     print("\n== slowest actions ==")
-    for dur, name, mn in sorted(actions, reverse=True)[:args.top * 2]:
+    for dur, name, mn in sorted(actions, reverse=True)[: args.top * 2]:
         print(f"{dur / us:8.1f}s  {mn:14s} {name}")
 
 

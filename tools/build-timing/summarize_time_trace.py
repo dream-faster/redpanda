@@ -63,9 +63,13 @@ def source_spans(events):
 
 def outermost(events, names):
     spans = sorted(
-        ((e["ts"], e["ts"] + e.get("dur", 0), e) for e in events
-         if e.get("name") in names and e.get("ph") == "X"),
-        key=lambda s: (s[0], -s[1]))
+        (
+            (e["ts"], e["ts"] + e.get("dur", 0), e)
+            for e in events
+            if e.get("name") in names and e.get("ph") == "X"
+        ),
+        key=lambda s: (s[0], -s[1]),
+    )
     end = -1
     for start, stop, e in spans:
         if start >= end:
@@ -110,8 +114,7 @@ def main():
                 hdr_n[h] += 1
                 edge[(parent, h)] += dur
                 edge_n[(parent, h)] += 1
-            for e in outermost(events,
-                               ("InstantiateClass", "InstantiateFunction")):
+            for e in outermost(events, ("InstantiateClass", "InstantiateFunction")):
                 d = (e.get("args") or {}).get("detail", "")[:240]
                 inst[d] += e.get("dur", 0)
                 inst_n[d] += 1
@@ -136,7 +139,7 @@ def main():
 
     print("\n== src/v headers ==")
     rp = [(h, v) for h, v in hdr.items() if h.startswith("src/v/")]
-    for h, v in sorted(rp, key=lambda x: -x[1])[:args.top]:
+    for h, v in sorted(rp, key=lambda x: -x[1])[: args.top]:
         print(f"{v / us:8.0f}s {hdr_n[h]:5d}  {h}")
 
     print("\n== include edges (includer -> header) ==")
@@ -148,19 +151,26 @@ def main():
         print(f"{v / us:8.0f}s {inst_n[k]:6d}  {k}")
 
     print("\n== slowest TUs ==")
-    for dur, path in sorted(tus, reverse=True)[:args.top // 2]:
+    for dur, path in sorted(tus, reverse=True)[: args.top // 2]:
         print(f"{dur / us:8.1f}s  {path}")
 
     if args.json:
         with open(args.json, "w") as fh:
-            json.dump({
-                "headers": {h: [v, hdr_n[h]] for h, v in hdr.items()},
-                "edges": [[a, b, v, edge_n[(a, b)]]
-                          for (a, b), v in edge.items() if v > 100000],
-                "instantiations": {k: [v, inst_n[k]]
-                                   for k, v in inst.most_common(2000)},
-                "tus": tus,
-            }, fh)
+            json.dump(
+                {
+                    "headers": {h: [v, hdr_n[h]] for h, v in hdr.items()},
+                    "edges": [
+                        [a, b, v, edge_n[(a, b)]]
+                        for (a, b), v in edge.items()
+                        if v > 100000
+                    ],
+                    "instantiations": {
+                        k: [v, inst_n[k]] for k, v in inst.most_common(2000)
+                    },
+                    "tus": tus,
+                },
+                fh,
+            )
     return 0
 
 
