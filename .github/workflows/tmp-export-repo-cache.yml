@@ -21,7 +21,6 @@ jobs:
       - name: Fetch
         run: |
           unset CI
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
           T="//src/v/redpanda:redpanda //bazel/packaging:image
              //src/v/cluster/tests:legacy_wire_test //src/v/cluster/tests:topic_table_test
              //src/v/cluster/tests:dedup_window_filter_test //src/v/cluster/tests:dedup_stm_test
