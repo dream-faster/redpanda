@@ -73,7 +73,6 @@
 #include "redpanda/admin/api-doc/raft.json.hh"
 #include "redpanda/admin/api-doc/status.json.hh"
 #include "redpanda/admin/cluster_config_schema_util.h"
-#include "redpanda/admin/services/broker.h"
 #include "redpanda/admin/util.h"
 #include "resource_mgmt/memory_sampling.h"
 #include "rpc/errc.h"
@@ -82,7 +81,6 @@
 #include "security/audit/schemas/iam.h"
 #include "security/audit/schemas/types.h"
 #include "security/audit/types.h"
-#include "serde/protobuf/rpc.h"
 #include "ssx/future-util.h"
 #include "ssx/sformat.h"
 #include "strings/string_switch.h"
@@ -281,8 +279,7 @@ admin_server::admin_server(
   ss::sharded<security::audit::audit_log_manager>& audit_mgr,
   std::unique_ptr<cluster::tx_manager_migrator>& tx_manager_migrator,
   ss::sharded<kafka::server>& kafka_server,
-  ss::sharded<cluster::tx_gateway_frontend>& tx_gateway_frontend,
-  ss::sharded<admin::kafka_connections_service>& kafka_connections_service)
+  ss::sharded<cluster::tx_gateway_frontend>& tx_gateway_frontend)
   : _log_level_timer([this] { log_level_timer_handler(); })
   , _server("admin")
   , _cfg(std::move(cfg))
@@ -305,7 +302,6 @@ admin_server::admin_server(
   , _tx_manager_migrator(tx_manager_migrator)
   , _kafka_server(kafka_server)
   , _tx_gateway_frontend(tx_gateway_frontend)
-  , _kafka_connections_service(kafka_connections_service)
   , _default_blocked_reactor_notify(
       ss::engine().get_blocked_reactor_notify_ms())
   , _memory_semaphore(_cfg.max_memory_usage_bytes, "admin/server-mem") {
@@ -318,189 +314,7 @@ admin_server::admin_server(
       });
 }
 
-namespace {
-class rpc_handler : public ss::httpd::handler_base {
-public:
-    rpc_handler(
-      ss::noncopyable_function<request_auth_result(const ss::http::request&)>
-        authenticate_request,
-      serde::pb::rpc::route_descriptor descriptor)
-      : _authenticate_request(std::move(authenticate_request))
-      , _descriptor(std::move(descriptor)) {}
-
-    ss::future<std::unique_ptr<ss::http::reply>> handle(
-      const ss::sstring&,
-      std::unique_ptr<ss::http::request> req,
-      std::unique_ptr<ss::http::reply> rep) override {
-        try {
-            auto auth_result = check_authentication(*req);
-            auto ctx = make_context(*req);
-            ctx.set_value(std::move(auth_result));
-            auto is_proto = ctx.content_type
-                            == serde::pb::rpc::content_type::proto;
-            iobuf request_payload = co_await extract_payload(std::move(req));
-            iobuf reply_payload = co_await _descriptor.handler(
-              std::move(ctx), std::move(request_payload));
-            // Write the content type as binary, as seastar doesn't have an
-            // application type for `application/proto`. We'll overwrite the
-            // correct content-type in the next line.
-            rep->write_body(
-              "bin",
-              [payload = std::move(reply_payload)](
-                ss::output_stream<char>& writer) mutable {
-                  return write_iobuf_to_output_stream(
-                    payload.share(0, payload.size_bytes()), writer);
-              });
-            rep->set_content_type(
-              is_proto ? "application/proto" : "application/json");
-        } catch (const serde::pb::rpc::base_exception& e) {
-            rep = e.handle(std::move(rep));
-        } catch (...) {
-            vlog(
-              adminlog.warn,
-              "Unhandled exception in RPC handler for {}/{}: {}",
-              _descriptor.service_name,
-              _descriptor.method_name,
-              std::current_exception());
-            rep = serde::pb::rpc::internal_exception().handle(std::move(rep));
-        }
-        co_return rep;
-    }
-
-private:
-    request_auth_result check_authentication(const ss::http::request& req) {
-        try {
-            return _authenticate_request(req);
-        } catch (const ss::httpd::base_exception& e) {
-            switch (e.status()) {
-            case seastar::http::reply::status_type::unauthorized:
-                throw serde::pb::rpc::unauthenticated_exception(e.str());
-            case seastar::http::reply::status_type::forbidden:
-                throw serde::pb::rpc::permission_denied_exception(e.str());
-            case seastar::http::reply::status_type::service_unavailable:
-                throw serde::pb::rpc::unavailable_exception(e.str());
-            default:
-                throw serde::pb::rpc::internal_exception(e.str());
-            }
-        } catch (...) {
-            throw serde::pb::rpc::internal_exception();
-        }
-    }
-    serde::pb::rpc::context make_context(const ss::http::request& req) {
-        serde::pb::rpc::context ctx;
-        auto ct = req.get_header("Content-Type");
-        if (ct != "application/proto" && ct != "application/json") {
-            throw serde::pb::rpc::unimplemented_exception(
-              ss::format(
-                "Only application/proto and application/json Content-Type is "
-                "supported, got: {}",
-                ct));
-        }
-        ctx.content_type = ct == "application/proto"
-                             ? serde::pb::rpc::content_type::proto
-                             : serde::pb::rpc::content_type::json;
-        ctx.service_name = _descriptor.service_name;
-        ctx.method_name = _descriptor.method_name;
-        return ctx;
-    }
-    ss::future<iobuf> extract_payload(std::unique_ptr<ss::http::request> req) {
-        constexpr auto max_request_size = 10_MiB;
-        if (req->content_length > max_request_size) {
-            throw serde::pb::rpc::invalid_argument_exception(
-              "request too large");
-        }
-        // Despite the name, this does not read exactly, but up to.
-        auto payload = co_await read_iobuf_exactly(
-          *req->content_stream, max_request_size);
-        if (!req->content_stream->eof()) {
-            throw serde::pb::rpc::invalid_argument_exception(
-              "request too large");
-        }
-        co_return payload;
-    }
-
-    ss::noncopyable_function<request_auth_result(const ss::http::request&)>
-      _authenticate_request;
-    serde::pb::rpc::route_descriptor _descriptor;
-};
-} // namespace
-
-void admin_server::add_service(
-  std::unique_ptr<serde::pb::rpc::base_service> service) {
-    vlog(adminlog.debug, "Registering RPC service: {}", service->name());
-    for (auto& route : service->all_routes()) {
-        vlog(adminlog.debug, "Registering RPC route: {}", route.path);
-        ss::httpd::path_description path{
-          route.path,
-          ss::httpd::operation_type::POST,
-          route.path,
-          /*path_parameters=*/{},
-          /*mandatory_params=*/{},
-        };
-        ss::noncopyable_function<request_auth_result(const ss::http::request&)>
-          auth_handler;
-        switch (route.authz_level) {
-        case serde::pb::rpc::authz_level::unauthenticated:
-            auth_handler = [this](const ss::http::request& req) {
-                auto auth_result = apply_auth<publik>(req);
-                log_request(req, auth_result);
-                return auth_result;
-            };
-            break;
-        case serde::pb::rpc::authz_level::user:
-            auth_handler = [this](const ss::http::request& req) {
-                auto auth_result = apply_auth<user>(req);
-                log_request(req, auth_result);
-                return auth_result;
-            };
-            break;
-        case serde::pb::rpc::authz_level::superuser:
-            auth_handler = [this](const ss::http::request& req) {
-                auto auth_result = apply_auth<superuser>(req);
-                log_request(req, auth_result);
-                return auth_result;
-            };
-            break;
-        }
-        path.set(
-          _server._routes,
-          new rpc_handler(std::move(auth_handler), std::move(route)));
-    }
-    _services.push_back(std::move(service));
-}
-
-ss::future<iobuf>
-admin_server::handle_rpc_request(serde::pb::rpc::context ctx, iobuf buf) {
-    auto it = std::ranges::find(
-      _services,
-      ctx.service_name,
-      [](const std::unique_ptr<serde::pb::rpc::base_service>& service) {
-          return service->name();
-      });
-    if (it == _services.end()) {
-        throw serde::pb::rpc::unimplemented_exception(
-          fmt::format("Service {} not found", ctx.service_name));
-    }
-    for (const auto& route : (*it)->all_routes()) {
-        if (route.method_name == ctx.method_name) {
-            return route.handler(std::move(ctx), std::move(buf));
-        }
-    }
-    throw serde::pb::rpc::unimplemented_exception(
-      fmt::format("Method {}.{} not found", ctx.service_name, ctx.method_name));
-}
-
 ss::future<> admin_server::start() {
-    // NOTE: This isn't normally where services should be registered
-    // but this service is special as it has some reflection based methods.
-    admin::proxy::client client(
-      _controller->self(), &_connection_cache, [this] {
-          return _controller->get_members_table().local().node_ids();
-      });
-    add_service(
-      std::make_unique<admin::broker_service_impl>(
-        std::move(client), &_services));
-
     _blocked_reactor_notify_reset_timer.set_callback([this] {
         return ss::smp::invoke_on_all([ms = _default_blocked_reactor_notify] {
             ss::engine().update_blocked_reactor_notify_ms(ms);

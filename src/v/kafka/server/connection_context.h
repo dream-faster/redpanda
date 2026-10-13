@@ -22,7 +22,6 @@
 #include "kafka/server/response.h"
 #include "net/connection.h"
 #include "net/server_probe.h"
-#include "proto/redpanda/core/admin/v2/kafka_connections.proto.h"
 #include "security/acl.h"
 #include "security/authorizer.h"
 #include "security/mtls.h"
@@ -50,9 +49,6 @@
 #include <vector>
 
 namespace kafka {
-
-using closed_connections_t
-  = std::deque<ss::lw_shared_ptr<const proto::admin::kafka_connection>>;
 
 class kafka_api_version_not_supported_exception : public std::runtime_error {
 public:
@@ -194,7 +190,6 @@ struct connection_attributes {
         void record_begin_request(api_key key);
         void record_end_request();
 
-        proto::admin::in_flight_requests to_proto(clock::time_point now) const;
         clock::duration get_idle_duration(clock::time_point now) const {
             return _idle_since ? (now - *_idle_since) : clock::duration::zero();
         }
@@ -239,7 +234,6 @@ public:
     connection_context(
       std::optional<std::reference_wrapper<
         boost::intrusive::list<connection_context>>> hook,
-      std::optional<std::reference_wrapper<closed_connections_t>> closed_list,
       server& s,
       ss::lw_shared_ptr<net::connection> conn,
       std::optional<security::sasl_server> sasl,
@@ -291,8 +285,6 @@ public:
     }
 
     bool tls_enabled() const { return conn->tls_enabled(); }
-
-    proto::admin::kafka_connection to_proto() const;
 
     connection_attributes& attributes() { return _attributes; }
 
@@ -386,8 +378,6 @@ private:
     // Returns handler specific connection override if available.
     std::optional<ss::scheduling_group>
       get_scheduling_group_override(api_key) const;
-
-    proto::admin::kafka_connection to_closed_proto() const;
 
     class ctx_log {
     public:
@@ -571,7 +561,6 @@ private:
     std::optional<
       std::reference_wrapper<boost::intrusive::list<connection_context>>>
       _hook;
-    std::optional<std::reference_wrapper<closed_connections_t>> _closed_list;
     class server& _server;
     ss::lw_shared_ptr<net::connection> conn;
 

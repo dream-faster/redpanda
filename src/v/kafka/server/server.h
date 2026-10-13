@@ -231,8 +231,6 @@ public:
     chunked_vector<ss::lw_shared_ptr<const connection_context>>
     list_connections() const;
 
-    closed_connections_t list_closed_connections() const;
-
 private:
     void setup_metrics();
 
@@ -279,7 +277,6 @@ private:
     ssx::singleton_thread_worker& _thread_worker;
     std::unique_ptr<replica_selector> _replica_selector;
     boost::intrusive::list<connection_context> _connections;
-    closed_connections_t _closed_connections{};
 };
 
 } // namespace kafka

@@ -9,13 +9,7 @@
 
 #include "cluster/controller.h"
 #include "config/node_config.h"
-#include "redpanda/admin/proxy/client.h"
 #include "redpanda/admin/server.h"
-#include "redpanda/admin/services/cluster.h"
-#include "redpanda/admin/services/features.h"
-#include "redpanda/admin/services/internal/breakglass.h"
-#include "redpanda/admin/services/internal/debug.h"
-#include "redpanda/admin/services/security.h"
 #include "redpanda/application.h"
 #include "resource_mgmt/memory_groups.h"
 #include "resource_mgmt/scheduling_groups_probe.h"
@@ -32,7 +26,7 @@ admin_server_cfg_from_global_cfg(scheduling_groups& sgs) {
     };
 }
 
-void application::configure_admin_server(model::node_id node_id) {
+void application::configure_admin_server() {
     if (config::node().admin().empty()) {
         return;
     }
@@ -55,32 +49,6 @@ void application::configure_admin_server(model::node_id node_id) {
       std::ref(audit_mgr),
       std::ref(_tx_manager_migrator),
       std::ref(_kafka_server.ref()),
-      std::ref(tx_gateway_frontend),
-      std::ref(_kafka_connections_service))
-      .get();
-    _admin
-      .invoke_on_all([this, node_id](admin_server& s) {
-          auto create_client = [node_id, this]() {
-              return admin::proxy::client(node_id, &_connection_cache, [this] {
-                  return controller->get_members_table().local().node_ids();
-              });
-          };
-          // Add RPC services
-          s.add_service(
-            std::make_unique<admin::debug_service_impl>(
-              create_client(), stress_fiber_manager));
-          s.add_service(
-            std::make_unique<admin::cluster_service_impl>(
-              create_client(), std::ref(_kafka_connections_service)));
-          s.add_service(
-            std::make_unique<admin::features_service_impl>(
-              create_client(), controller.get(), std::ref(metadata_cache)));
-          s.add_service(
-            std::make_unique<admin::internal::breakglass_service_impl>(
-              controller.get()));
-          s.add_service(
-            std::make_unique<admin::security_service_impl>(
-              create_client(), controller.get(), std::ref(metadata_cache)));
-      })
+      std::ref(tx_gateway_frontend))
       .get();
 }

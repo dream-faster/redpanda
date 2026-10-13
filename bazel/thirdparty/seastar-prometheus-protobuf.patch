@@ -1,0 +1,60 @@
+--- a/src/core/prometheus.cc
++++ b/src/core/prometheus.cc
+@@ -21,9 +21,11 @@
+ 
+ #include <fmt/core.h>
+ #include <fmt/compile.h>
++#ifdef SEASTAR_PROMETHEUS_PROTOBUF
+ #include <google/protobuf/io/coded_stream.h>
+ #include <google/protobuf/io/zero_copy_stream_impl_lite.h>
+ #include "proto/metrics2.pb.h"
++#endif
+ 
+ #include <seastar/core/future.hh>
+ #include <seastar/core/iostream.hh>
+@@ -95,7 +97,9 @@
+ };
+ 
+ namespace prometheus {
++#ifdef SEASTAR_PROMETHEUS_PROTOBUF
+ namespace pm = io::prometheus::client;
++#endif
+ 
+ namespace mi = metrics::impl;
+ 
+@@ -226,6 +230,7 @@
+ }
+ 
+ using buf_t = fmt_buf;
++#ifdef SEASTAR_PROMETHEUS_PROTOBUF
+ /**
+  * Taken from an answer in stackoverflow:
+  * http://stackoverflow.com/questions/2340730/are-there-c-equivalents-for-the-protocol-buffers-delimited-i-o-functions-in-ja
+@@ -377,6 +382,7 @@
+         break;
+     }
+ }
++#endif
+ 
+ static inline bool is_internal(const sstring& name) {
+     if (auto cstr = name.c_str(); cstr[0] == '_' && cstr[1] == '_') [[unlikely]] {
+@@ -977,6 +983,7 @@
+     });
+ }
+ 
++#ifdef SEASTAR_PROMETHEUS_PROTOBUF
+ future<> write_context::write_protobuf_representation() {
+     return do_for_each(m, [this](metric_family& metric_family) mutable {
+         if (!args.family_filter(metric_family.name())) {
+@@ -1015,6 +1022,11 @@
+         return out.write(s);
+     });
+ }
++#else
++future<> write_context::write_protobuf_representation() {
++    return write_text_representation();
++}
++#endif
+ 
+ bool is_accept_protobuf(const std::string& accept) {
+     std::vector<std::string> strs;

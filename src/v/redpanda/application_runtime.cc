@@ -12,7 +12,6 @@
 #include "config/configuration.h"
 #include "config/node_config.h"
 #include "kafka/data/rpc/client.h"
-#include "redpanda/admin/kafka_connections_service.h"
 #include "redpanda/application.h"
 #include "resource_mgmt/memory_groups.h"
 #include "resource_mgmt/scheduling_groups_probe.h"
@@ -33,8 +32,5 @@ void application::wire_up_runtime_services(
     construct_single_service(_instance_metrics, std::ref(_as.local()));
     _instance_metrics->start();
 
-    construct_service(_kafka_connections_service, std::ref(_kafka_server.ref()))
-      .get();
-
-    configure_admin_server(node_id);
+    configure_admin_server();
 }

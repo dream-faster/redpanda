@@ -255,7 +255,6 @@
         "rptest/tests/raft_availability_test.py",
         "rptest/tests/raft_periodic_flush_test.py",
         "rptest/tests/rbac_test.py",
-        "rptest/tests/rbac_test_v2.py",
         "rptest/tests/rbac_upgrade_test.py",
         "rptest/tests/recovery_mode_test.py",
         "rptest/tests/redpanda_multi_region_test.py",

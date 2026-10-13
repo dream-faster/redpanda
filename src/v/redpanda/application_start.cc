@@ -30,7 +30,6 @@
 #include "migrations/migrators.h"
 #include "raft/group_manager.h"
 #include "raft/service.h"
-#include "redpanda/admin/kafka_connections_service.h"
 #include "redpanda/admin/server.h"
 #include "redpanda/application.h"
 #include "resource_mgmt/scheduling_groups_probe.h"
@@ -145,12 +144,6 @@ void application::start_runtime_services(::stop_signal& app_signal) {
     }
 
     if (!config::node().admin().empty()) {
-        _kafka_connections_service
-          .invoke_on_all([this](admin::kafka_connections_service& kcs) {
-              return kcs.start(_admin.local().memory_semaphore());
-          })
-          .get();
-
         _admin.invoke_on_all(&admin_server::start).get();
     }
 

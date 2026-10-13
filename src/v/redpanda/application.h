@@ -39,7 +39,6 @@
 #include "metrics/instance_metrics.h"
 #include "metrics/metrics.h"
 #include "net/conn_quota.h"
-#include "redpanda/admin/kafka_connections_service.h"
 #include "redpanda/monitor_unsafe.h"
 #include "resource_mgmt/cpu_profiler.h"
 #include "resource_mgmt/memory_sampling.h"
@@ -200,7 +199,7 @@ private:
     // Constructs services across shards meant for Redpanda runtime.
     void
     wire_up_runtime_services(model::node_id node_id, ::stop_signal& app_signal);
-    void configure_admin_server(model::node_id);
+    void configure_admin_server();
     void wire_up_redpanda_services(model::node_id, ::stop_signal& app_signal);
 
     // Marks the shard_local_cfg as ready (or not ready) per the provided flag.
@@ -336,8 +335,6 @@ private:
     std::unique_ptr<metrics::host_metrics_watcher> _host_metrics_watcher;
 
     std::unique_ptr<instance_info::instance_metrics> _instance_metrics;
-
-    ss::sharded<admin::kafka_connections_service> _kafka_connections_service;
 
     ss::sharded<ss::abort_source> _as;
 };
