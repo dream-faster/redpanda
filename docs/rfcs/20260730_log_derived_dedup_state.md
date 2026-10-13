@@ -354,18 +354,36 @@ Best-effort boundaries (all bounded by one dedup window, all documented):
 2. If `ntp_config.dedup_generation() != _generation`: `clear()` and adopt the
    new generation.
 3. `set_window(config window)`.
-4. Decompress if compressed; for each record with a key:
-   `populate(key, first_timestamp + timestamp_delta)`. `populate()` never lets
-   the index exceed its hard per-partition entry limit; when a bounded step
-   cannot free a slot, the identity remains unindexed.
+4. On the leader, skip the batch if this STM filtered it: `filter_request()`
+   already indexed its identities with these timestamps, and `populate()` is
+   max-wins, so applying it again would only cost the parse. The leader
+   records the batch's crc and record count before handing it to Raft (the
+   crc covers the records, attributes, timestamps and count, not the base
+   offset Raft assigns), and `do_apply()` consumes that record. It is dropped
+   when the request fails and its entries are reverted, cleared with the
+   index on a generation change, and bounded, so a batch Raft never reports
+   on ages out and is simply indexed again. A crc collision between two
+   batches in flight on one partition leaves the other's identities
+   unindexed on this replica alone: a 2^-32 chance of a bounded coverage
+   loss of the kind the index already tolerates.
+5. Decompress if compressed; `for_each_dedup_identity()` walks the records
+   reading only what dedup needs -- the key, or in header mode the first
+   occurrence of the configured header, digested straight from the batch's
+   buffer, and the timestamp -- and skips the rest of each record by its
+   length. Nothing is copied or shared per record. For each identity:
+   `populate(digest, first_timestamp + timestamp_delta)`. `populate()` never
+   lets the index exceed its hard per-partition entry limit; when a bounded
+   step cannot free a slot, the identity remains unindexed.
 
 `populate()` advances the same sweep cursor the leader's classification path
 does, at the same point relative to its insert, so follower maps stay bounded
-by the same mechanism and reach the same contents (see B10).
+by the same mechanism and reach the same contents (see B10). With the leader
+skipping its own batches, each replica now sweeps once per record, where the
+leader used to sweep twice.
 
 The STM manager already reads every committed batch once and dispatches it to
 all registered STMs (`rm_stm` consumes `raft_data` batches this way), so this
-adds record iteration + decompression per replica but **no additional log
+adds the identity walk + decompression per replica but **no additional log
 read**.
 
 ## Leader/produce path
@@ -378,9 +396,12 @@ read**.
 2. Adopt generation and window as in apply.
 3. `auto res = _state.filter_request(std::move(batch))` — classification and
    insertion are synchronous (single reactor task), so concurrent produces
-   serialize naturally per shard with no lock. `res` carries the filtered
-   batch (or `nullopt` if everything was a duplicate) and this request's undo
-   list: `{key, applied_timestamp, previous_timestamp}` per admitted key.
+   serialize naturally per shard with no lock. The identities come from the
+   same `for_each_dedup_identity()` walk the apply path uses; what survives
+   the pass is 32 bytes per record, not the records. `res` carries the
+   filtered batch (or `nullopt` if everything was a duplicate) and this
+   request's undo list: `{key, applied_timestamp, previous_timestamp}` per
+   admitted key.
 4. If the request observed any duplicate, wait on the append-order fence
    (`_append_tail`, G4) with the sync timeout, so everything below is ordered
    after the appends that introduced the observed keys.
@@ -421,10 +442,26 @@ the key an earlier build left in the kvstore; that snapshot is not migrated,
 and the index rebuilds from the log within one window.
 
 The payload (`state_snapshot` version 2) carries the entries as one packed blob
-of 24-byte records (digest hi, digest lo, timestamp; little-endian), written in
-a single pass straight from the index. A snapshot therefore costs one
-serialized copy of the live entries. Earlier versions are refused on compat
-version, and the index is rebuilt from the log, in both upgrade directions.
+of 24-byte records (digest hi, digest lo, timestamp; little-endian), written
+straight from the index. A snapshot therefore costs one serialized copy of the
+live entries. Earlier versions are refused on compat version, and the index is
+rebuilt from the log, in both upgrade directions.
+
+The write yields. `for_each_live_entry_async()` walks the map's value array in
+chunks of 4096 entries with a preemption check between them, while the produce
+path keeps mutating the index (the apply lock is held for a local snapshot,
+but the leader's `filter_request()` runs without it). Rather than forbid that,
+the walk is made exact under it: an insert appends to the array and is
+emitted or not, which a convergent snapshot tolerates; an erase moves the
+array's last entry into the hole, and when the hole is behind the walk's
+cursor that entry would never be reached, so every erase records it for each
+walk in progress and the walk emits those at the end. A clear or restore under
+the walk invalidates it and the serializer starts over. The restore keeps the
+newer timestamp when a snapshot carries an identity twice, which an index that
+erased and re-admitted it during the walk can produce. The longest stretch
+the snapshot write holds the reactor is therefore one chunk, however large the
+index; the one-pass write it replaced held it for hundreds of milliseconds at
+the shard limit, on every segment roll.
 
 Startup is where a memory shortfall does the most damage, because a broker
 that cannot start cannot shed load either. Three paths were bounded:
@@ -439,6 +476,11 @@ that cannot start cannot shed load either. Three paths were bounded:
   batch (a re-encoded second copy) and walked with a copying iterator; the
   batch checksum is accumulated record by record over the same encoding
   (`model::crc_extend_record()`), so integrity checking is unchanged.
+- **Snapshot load** is serialized per shard: `persisted_stm::start()` reads
+  the whole snapshot file before the restore trims it, and partition starts
+  are not otherwise bounded, so `dedup_stm::start()` holds a one-unit
+  semaphore in the shard budget around it and at most one snapshot file is in
+  memory per shard at a time.
 - **Snapshot restore** is bounded by the shard budget's headroom as well as by
   the partition ceiling, keeping the newest identities. It reads the packed
   entries in place, in passes, so it costs at most 8 bytes an entry beyond the
@@ -561,16 +603,26 @@ STM (`dedup_stm_test.cc`, single-node raft fixture as today):
 # Performance expectations
 
 - Leader produce path: unchanged vs. non-dedup topics except the synchronous
-  filter pass (decompress + hash ops, ~100–200 ns/record). No serialization
-  point: the current branch's mutex capped plain produce at one in-flight
-  batch per partition per Raft commit RTT; this design has no such ceiling.
+  filter pass (decompress if compressed, one identity walk over the batch's
+  buffer, a digest and a map insert per record). No serialization point: the
+  current branch's mutex capped plain produce at one in-flight batch per
+  partition per Raft commit RTT; this design has no such ceiling. The leader
+  does not apply its own batches a second time.
 - Replication traffic: no metadata amplification (the current branch adds
   ~tens of bytes per admitted record, permanently uncompactable); dropped
   duplicates reduce traffic.
-- Apply path: each replica pays decompress + record parse + map insert,
-  ~3–7% of a core per 100k records/s of dedup-enabled ingest. This is the
-  price of the design and is proportional to ingest on dedup topics only.
-- Snapshots: O(active keys), same as before.
+- Apply path: each follower pays decompress + identity walk + map insert.
+  This is the price of the design and is proportional to ingest on dedup
+  topics only. Compressed batches are the expensive case: the walk cannot
+  read identities out of a compressed batch, so every replica decompresses
+  every committed batch of a dedup topic.
+- Snapshots: O(active keys), 24 bytes an entry, written in chunks with the
+  reactor yielded between them.
+- Measured: `//src/v/cluster/tests:dedup_window_filter_rpbench` (per-record
+  cost of each path, run in the `unit-tests` workflow) and
+  `tests/dedup_acceptance/test_bench.py` (end-to-end records/s and broker CPU
+  per million records against a topic without dedup; results in
+  `tests/dedup_acceptance/BENCHMARK.md`).
 - The dominant cost at scale remains the index cardinality itself (window ×
   unique-key rate), which is inherent to the feature and unchanged by either
   design; bounding it (map size cap, eviction ring) is follow-up work.
