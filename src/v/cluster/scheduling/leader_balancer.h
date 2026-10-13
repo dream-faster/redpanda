@@ -17,8 +17,8 @@
 #include "cluster/scheduling/leader_balancer_strategy.h"
 #include "cluster/scheduling/leader_balancer_types.h"
 #include "cluster/types.h"
+#include "config/leaders_preference.h"
 #include "config/property.h"
-#include "features/enterprise_features.h"
 #include "raft/notification.h"
 
 #include <seastar/core/gate.hh>
@@ -209,8 +209,7 @@ private:
     config::binding<size_t> _transfer_limit_per_shard;
 
     config::binding<bool> _enable_rack_awareness;
-    features::sanctioning_binding<config::property<config::leaders_preference>>
-      _default_preference;
+    config::binding<config::leaders_preference> _default_preference;
 
     std::chrono::milliseconds _metadata_dissemination_interval;
 

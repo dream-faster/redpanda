@@ -981,17 +981,11 @@ class PartitionBalancerTest(PartitionBalancerService):
         self.run_validation(consumer_timeout_sec=CONSUMER_TIMEOUT)
 
     @cluster(num_nodes=7, log_allow_list=CHAOS_LOG_ALLOW_LIST)
-    @matrix(disable_license=[True, False])
-    def test_partition_autobalancer_without_license(self, disable_license):
+    def test_partition_autobalancer_drains_dead_node(self):
         def partitions_in_node(node_id):
             return self.node2partition_count().get(node_id, 0)
 
-        if disable_license:
-            environment = dict(__REDPANDA_DISABLE_BUILTIN_TRIAL_LICENSE="1")
-        else:
-            environment = dict()
-
-        self.start_redpanda(num_nodes=5, environment=environment)
+        self.start_redpanda(num_nodes=5)
 
         self.topic = TopicSpec(partition_count=20)
         self.client().create_topic(self.topic)
@@ -1022,8 +1016,6 @@ class PartitionBalancerTest(PartitionBalancerService):
             s = status["status"]
             assert s == "ready", f"Expected status == 'ready' but got '{s}' instead"
 
-            # This fork does not enforce licenses: continuous balancing works
-            # with or without one.
             unavailable = status["violations"].get("unavailable_nodes", [])
             assert kill_id in unavailable, (
                 f'Expected node with id "{kill_id}" in unavailable. unavailable: {unavailable}'

@@ -14,7 +14,6 @@
 #include "base/outcome.h"
 #include "cluster/fwd.h"
 #include "cluster/types.h"
-#include "features/enterprise_features.h"
 #include "features/fwd.h"
 #include "http/client.h"
 #include "model/fundamental.h"
@@ -117,12 +116,6 @@ public:
 
         static constexpr int64_t max_size_for_rp_env = 80;
         ss::sstring redpanda_environment;
-        ss::sstring id_hash;
-
-        bool has_enterprise_features{false};
-        bool has_valid_license{false};
-
-        std::optional<features::enterprise_feature_report> enterprise_features;
 
         ss::sstring host_name;
         ss::sstring domain_name;
@@ -154,7 +147,6 @@ public:
       ss::sharded<features::feature_table>&,
       ss::sharded<security::role_store>& role_store,
       ss::sharded<security::authorizer>& authorizer,
-      ss::sharded<feature_manager>*,
       ss::sharded<storage::api>*,
       ss::sharded<ss::abort_source>&);
 
@@ -190,7 +182,6 @@ private:
     ss::sharded<features::feature_table>& _feature_table;
     ss::sharded<security::role_store>& _role_store;
     ss::sharded<security::authorizer>& _authorizer;
-    ss::sharded<feature_manager>* _feature_manager;
     ss::sharded<storage::api>* _storage;
     ss::sharded<ss::abort_source>& _as;
     prefix_logger _logger;

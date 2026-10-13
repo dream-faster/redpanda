@@ -12,12 +12,9 @@
 #pragma once
 
 #include "cluster/fwd.h"
-#include "features/feature_table.h"
 #include "model/fundamental.h"
 
 namespace admin::utils {
-
-void check_license(const features::feature_table& ft);
 
 /**
  * @brief Used to indicate if a request should be redirected to a partition

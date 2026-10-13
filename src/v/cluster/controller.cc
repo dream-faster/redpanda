@@ -96,7 +96,6 @@ controller::controller(
   ss::sharded<raft::group_manager>& raft_manager,
   ss::sharded<features::feature_table>& feature_table,
   ss::sharded<node_status_table>& node_status_table,
-  ss::sharded<cluster::metadata_cache>& metadata_cache,
   ss::scheduling_group scheduling_group)
   : _config_preload(std::move(config_preload))
   , _connections(ccache)
@@ -110,7 +109,6 @@ controller::controller(
   , _raft_manager(raft_manager)
   , _feature_table(feature_table)
   , _node_status_table(node_status_table)
-  , _metadata_cache(metadata_cache)
   , _probe(*this)
   , _cfr_m(std::make_unique<controller_forced_reconfiguration_manager>(this))
   , _scheduling_group(scheduling_group) {}
@@ -310,8 +308,6 @@ ss::future<> controller::start(
       std::ref(_partition_manager),
       std::ref(_shard_table),
       std::ref(_shard_balancer),
-      ss::sharded_parameter(
-        [this] { return std::ref(_metadata_cache.local()); }),
       ss::sharded_parameter([] {
           return config::shard_local_cfg()
             .storage_space_alert_free_threshold_percent.bind();
@@ -502,8 +498,6 @@ ss::future<> controller::start(
       std::ref(_hm_backend),
       std::ref(_feature_table),
       std::ref(_connections),
-      std::ref(_roles),
-      std::ref(_tp_state),
       _raft0->group());
 
     co_await _health_manager.start_single(
@@ -574,7 +568,6 @@ ss::future<> controller::start(
       std::ref(_feature_table),
       std::ref(_roles),
       std::ref(_authorizer),
-      std::addressof(_feature_manager),
       std::addressof(_storage),
       std::ref(_as));
     co_await _metrics_reporter.invoke_on(0, &metrics_reporter::start);
@@ -590,7 +583,6 @@ ss::future<> controller::start(
     co_await _partition_balancer.start_single(
       _raft0,
       std::ref(_stm),
-      std::ref(_feature_table),
       std::ref(_partition_balancer_state),
       std::ref(_hm_backend),
       std::ref(_partition_allocator),

@@ -165,8 +165,6 @@ class RedpandaUpgradeTest(PreallocNodesTest):
             MinimalWorkload(self),
             ProducerConsumerWorkload(self),
             SetLogSegmentMsMinConfig(self),
-            # NOTE: due to issue/13180 the next workload is temporarily disabled
-            # LicenseWorkload(self),
         ]
 
         # setup self as context for the workloads

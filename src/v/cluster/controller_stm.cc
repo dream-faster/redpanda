@@ -166,10 +166,6 @@ ss::future<> controller_stm::apply_snapshot(
     }
 
     _metrics_reporter_cluster_info = snapshot.metrics_reporter.cluster_info;
-    co_await _feature_table.invoke_on_all([&](features::feature_table& ft) {
-        ft.set_builtin_trial_license(
-          _metrics_reporter_cluster_info.creation_timestamp);
-    });
 }
 
 ss::future<ssx::semaphore_units> controller_stm::lock_apply() {

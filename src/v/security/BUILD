@@ -32,25 +32,17 @@ redpanda_cc_library(
 
 redpanda_cc_library(
     name = "license",
-    srcs = [
-        "license.cc",
-    ],
     hdrs = [
         "license.h",
     ],
     visibility = ["//visibility:public"],
     deps = [
         "//src/v/base",
-        "//src/v/crypto",
-        "//src/v/hashing:secure",
-        "//src/v/json",
         "//src/v/serde",
         "//src/v/serde:chrono",
         "//src/v/serde:enum",
-        "//src/v/serde:named_type",
         "//src/v/serde:sstring",
-        "//src/v/utils:base64",
-        "@fmt",
+        "//src/v/serde:vector",
         "@seastar",
     ],
 )

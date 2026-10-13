@@ -1689,7 +1689,6 @@ redpanda_cc_library(
     ],
     implementation_deps = [
         ":topic_memory_per_partition_default",
-        "//src/v/features:enterprise_feature_messages",
         "//src/v/resource_mgmt:memory_groups",
         "//src/v/ssx:abort_source",
         "//src/v/ssx:work_queue",
@@ -1789,7 +1788,6 @@ redpanda_cc_library(
         "//src/v/container:intrusive",
         "//src/v/crash_tracker",
         "//src/v/features",
-        "//src/v/features:enterprise_features",
         "//src/v/finjector",
         "//src/v/hashing:crc32c",
         "//src/v/hashing:murmur",

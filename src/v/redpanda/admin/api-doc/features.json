@@ -27,7 +27,7 @@
             "operations":[
                 {
                     "method": "GET",
-                    "summary": "Get currently loaded license information",
+                    "summary": "Always reports that no license is loaded: this build does not use licenses",
                     "type": "license_response",
                     "nickname": "get_license",
                     "produces": [
@@ -42,19 +42,13 @@
             "operations": [
                 {
                     "method": "PUT",
-                    "summary": "Upload a new license to redpanda",
+                    "summary": "Accepts and ignores a license: this build does not use licenses",
                     "nickname": "put_license",
                     "type": "void",
                     "produces": ["application/json"],
                     "responses": {
                         "200": {
                             "description": "OK"
-                        },
-                        "400": {
-                            "description": "Invalid or malformed license",
-                            "schema": {
-                                "type": "json"
-                            }
                         }
                     }
                 }
@@ -96,7 +90,7 @@
             "operations": [
                 {
                     "method": "GET",
-                    "summary": "Report license status and enterprise features in use",
+                    "summary": "Always reports no license and no enterprise features: this build does not use licenses",
                     "nickname": "get_enterprise",
                     "type": "enterprise_response",
                     "produces": [

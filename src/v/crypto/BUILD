@@ -7,11 +7,8 @@ redpanda_cc_library(
         "digest.cc",
         "hmac.cc",
         "internal.h",
-        "key.cc",
-        "key.h",
         "ossl_context_service.cc",
         "random.cc",
-        "signature.cc",
         "ssl_utils.cc",
     ],
     hdrs = [

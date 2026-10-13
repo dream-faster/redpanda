@@ -23,9 +23,6 @@
 #include "config/configuration.h"
 #include "config/node_config.h"
 #include "config/property.h"
-#include "features/enterprise_feature_messages.h"
-#include "features/enterprise_features.h"
-#include "features/feature_table.h"
 #include "model/metadata.h"
 #include "ssx/minimum_interval_timer.h"
 #include "utils/stable_iterator_adaptor.h"
@@ -48,7 +45,6 @@ static constexpr std::chrono::seconds add_move_cmd_timeout = 10s;
 partition_balancer_backend::partition_balancer_backend(
   consensus_ptr raft0,
   ss::sharded<controller_stm>& controller_stm,
-  ss::sharded<features::feature_table>& feature_table,
   ss::sharded<partition_balancer_state>& state,
   ss::sharded<health_monitor_backend>& health_monitor,
   ss::sharded<partition_allocator>& partition_allocator,
@@ -69,16 +65,12 @@ partition_balancer_backend::partition_balancer_backend(
   config::binding<std::chrono::milliseconds> health_monitor_max_metadata_age)
   : _raft0(std::move(raft0))
   , _controller_stm(controller_stm.local())
-  , _feature_table(feature_table.local())
   , _state(state.local())
   , _health_monitor(health_monitor.local())
   , _partition_allocator(partition_allocator.local())
   , _topics_frontend(topics_frontend.local())
   , _members_frontend(members_frontend.local())
-  , _mode(
-      features::make_sanctioning_binding<
-        features::license_required_feature::
-          partition_auto_balancing_continuous>())
+  , _mode(config::shard_local_cfg().partition_autobalancing_mode.bind())
   , _availability_timeout(std::move(availability_timeout))
   , _autodecommission_timeout(std::move(autodecommission_timeout))
   , _max_disk_usage_percent(std::move(max_disk_usage_percent))
@@ -408,18 +400,7 @@ ss::future<> partition_balancer_backend::do_tick() {
     // status requests by default 700ms
     const auto node_responsiveness_timeout = _node_status_interval() * 7;
 
-    const bool should_sanction = _feature_table.should_sanction();
-
-    const auto [mode, is_sanctioned] = _mode(should_sanction);
-    if (is_sanctioned) {
-        vlog(
-          clusterlog.warn,
-          "{}",
-          features::enterprise_error_message::
-            partition_autobalancing_continuous(),
-          _mode(false).first,
-          mode);
-    }
+    const auto mode = _mode();
 
     const bool space_management_enabled = config::shard_local_cfg().space_management_enable()
      && (

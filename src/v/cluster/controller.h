@@ -52,7 +52,6 @@ public:
       ss::sharded<raft::group_manager>&,
       ss::sharded<features::feature_table>&,
       ss::sharded<node_status_table>&,
-      ss::sharded<cluster::metadata_cache>&,
       ss::scheduling_group);
 
     ~controller();
@@ -310,7 +309,6 @@ private:
     ss::gate _gate;
     consensus_ptr _raft0;
     ss::sharded<node_status_table>& _node_status_table;
-    ss::sharded<cluster::metadata_cache>& _metadata_cache;
     controller_probe _probe;
     ss::sharded<bootstrap_backend> _bootstrap_backend; // single instance
     ss::sharded<topic_metrics_watcher> _topic_metrics_watcher;

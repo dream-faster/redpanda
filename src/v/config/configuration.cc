@@ -1669,7 +1669,6 @@ configuration::configuration()
       1_MiB)
   , delete_topic_enable(
       *this,
-      false,
       "delete_topic_enable",
       "Enable or disable topic deletion via the Kafka DeleteTopics API. When "
       "set to false, all topic deletion requests are rejected with error code "
@@ -1824,7 +1823,6 @@ configuration::configuration()
       true)
   , audit_enabled(
       *this,
-      true, /* restricted values */
       "audit_enabled",
       "Enables or disables audit logging. When you set this to true, Redpanda "
       "checks for an existing topic named `_redpanda.audit_log`. If none is "
@@ -2197,15 +2195,12 @@ configuration::configuration()
 
   , partition_autobalancing_mode(
       *this,
-      model::partition_autobalancing_mode::continuous,
-      model::partition_autobalancing_mode::node_add,
       "partition_autobalancing_mode",
       "Mode of partition balancing for a cluster. * `node_add`: partition "
       "balancing happens when a node is added. * `continuous`: partition "
       "balancing happens automatically to maintain optimal performance and "
       "availability, based on continuous monitoring for node changes (same as "
-      "`node_add`) and also high disk usage. This option requires an "
-      "Enterprise license, and it is customized by "
+      "`node_add`) and also high disk usage. This option is customized by "
       "`partition_autobalancing_node_availability_timeout_sec` and "
       "`partition_autobalancing_max_disk_usage_percent` properties. * `off`: "
       "partition balancing is disabled. This option is not recommended for "
@@ -2350,9 +2345,6 @@ configuration::configuration()
       {.min = 1, .max = 2048})
   , default_leaders_preference(
       *this,
-      [](const config::leaders_preference& v) {
-          return v != config::leaders_preference{};
-      },
       "default_leaders_preference",
       "Default settings for preferred location of topic partition leaders. "
       "It can be either \"none\" (no preference), "
@@ -2373,8 +2365,6 @@ configuration::configuration()
       true)
   , core_balancing_continuous(
       *this,
-      true,
-      false,
       "core_balancing_continuous",
       "If set to `true`, move partitions between cores in runtime to maintain "
       "balanced partition distribution.",
@@ -2532,14 +2522,12 @@ configuration::configuration()
       true)
   , features_auto_finalization(
       *this,
-      false, /* restricted value: license required to disable */
       "features_auto_finalization",
       "Whether the cluster active logical version is advanced automatically "
       "once all nodes have been upgraded (true), or only in response to an "
       "explicit request via the Admin API (false). When false, the cluster "
       "remains able to downgrade to the previous version until finalization "
-      "is requested. Setting this to false is an Enterprise feature and "
-      "requires a valid license. Note: if upgrade was performed with this "
+      "is requested. Note: if upgrade was performed with this "
       "set to false and the cluster is ready to finalize, flipping this to "
       "true does not reliably trigger finalization. Leave this set to false "
       "and use the Admin API to finalize; once the upgrade is complete this "

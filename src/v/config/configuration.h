@@ -326,7 +326,7 @@ struct configuration final : public config_store {
       controller_backend_housekeeping_interval_ms;
     property<uint32_t> kafka_request_max_bytes;
     property<uint32_t> kafka_batch_max_bytes;
-    enterprise<property<bool>> delete_topic_enable;
+    property<bool> delete_topic_enable;
     property<std::vector<ss::sstring>> kafka_nodelete_topics;
     property<std::vector<ss::sstring>> kafka_noproduce_topics;
     property<std::optional<uint32_t>> kafka_topics_max;
@@ -351,7 +351,7 @@ struct configuration final : public config_store {
     property<bool> kafka_enable_describe_log_dirs_remote_storage;
 
     // Audit logging
-    enterprise<property<bool>> audit_enabled;
+    property<bool> audit_enabled;
     property<int32_t> audit_log_num_partitions;
     property<std::optional<int16_t>> audit_log_replication_factor;
     property<size_t> audit_client_max_buffer_size;
@@ -415,7 +415,7 @@ struct configuration final : public config_store {
     property<bool> lz4_decompress_reusable_buffers_disabled;
     property<bool> enable_auto_rebalance_on_node_add;
 
-    enterprise<enum_property<model::partition_autobalancing_mode>>
+    enum_property<model::partition_autobalancing_mode>
       partition_autobalancing_mode;
     property<std::chrono::seconds>
       partition_autobalancing_node_availability_timeout_sec;
@@ -438,10 +438,10 @@ struct configuration final : public config_store {
     property<std::chrono::milliseconds> leader_balancer_mute_timeout;
     property<std::chrono::milliseconds> leader_balancer_node_mute_timeout;
     bounded_property<size_t> leader_balancer_transfer_limit_per_shard;
-    enterprise<property<config::leaders_preference>> default_leaders_preference;
+    property<config::leaders_preference> default_leaders_preference;
 
     property<bool> core_balancing_on_core_count_change;
-    enterprise<property<bool>> core_balancing_continuous;
+    property<bool> core_balancing_continuous;
     property<std::chrono::milliseconds> core_balancing_debounce_timeout;
 
     property<int> internal_topic_replication_factor;
@@ -468,7 +468,7 @@ struct configuration final : public config_store {
     property<ss::sstring> metrics_reporter_url;
 
     property<bool> features_auto_enable;
-    enterprise<property<bool>> features_auto_finalization;
+    property<bool> features_auto_finalization;
 
     // enables rack aware replica assignment
     property<bool> enable_rack_awareness;

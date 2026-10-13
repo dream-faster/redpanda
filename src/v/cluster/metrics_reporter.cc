@@ -16,14 +16,12 @@
 #include "bytes/iobuf.h"
 #include "cluster/config_frontend.h"
 #include "cluster/controller_stm.h"
-#include "cluster/feature_manager.h"
 #include "cluster/health_monitor_frontend.h"
 #include "cluster/health_monitor_types.h"
 #include "cluster/logger.h"
 #include "cluster/members_table.h"
 #include "cluster/topic_table.h"
 #include "config/configuration.h"
-#include "features/enterprise_features.h"
 #include "features/feature_table.h"
 #include "hashing/secure.h"
 #include "json/stringbuffer.h"
@@ -175,7 +173,6 @@ metrics_reporter::metrics_reporter(
   ss::sharded<features::feature_table>& feature_table,
   ss::sharded<security::role_store>& role_store,
   ss::sharded<security::authorizer>& authorizer,
-  ss::sharded<feature_manager>* fm,
   ss::sharded<storage::api>* storage,
   ss::sharded<ss::abort_source>& as)
   : _raft0(std::move(raft0))
@@ -188,7 +185,6 @@ metrics_reporter::metrics_reporter(
   , _feature_table(feature_table)
   , _role_store(role_store)
   , _authorizer(authorizer)
-  , _feature_manager(fm)
   , _storage(storage)
   , _as(as)
   , _logger(logger, "metrics-reporter") {}
@@ -344,12 +340,6 @@ metrics_reporter::build_metrics_snapshot() {
     snapshot.original_logical_version
       = _feature_table.local().get_original_version();
 
-    auto feature_report = co_await _feature_manager->invoke_on(
-      cluster::feature_manager::backend_shard,
-      [](const cluster::feature_manager& fm) {
-          return fm.report_enterprise_features();
-      });
-
     snapshot.rbac_role_count = _role_store.local().size();
 
     // Count unique groups from both role members and ACL principals
@@ -386,17 +376,6 @@ metrics_reporter::build_metrics_snapshot() {
         snapshot.redpanda_environment = ss::sstring(env_value).substr(
           0, metrics_snapshot::max_size_for_rp_env);
     }
-
-    auto license = _feature_table.local().get_license();
-    if (license.has_value()) {
-        snapshot.id_hash = license->checksum;
-    }
-
-    snapshot.has_valid_license = license.has_value()
-                                 && !license.value().is_expired();
-    snapshot.has_enterprise_features = feature_report.any();
-
-    snapshot.enterprise_features.emplace(std::move(feature_report));
 
     snapshot.host_name = get_hostname();
     snapshot.domain_name = get_domainname();
@@ -455,9 +434,6 @@ ss::future<> metrics_reporter::try_initialize_cluster_info() {
     auto& first_cfg = batches.front();
 
     _cluster_info.creation_timestamp = first_cfg.header().first_timestamp;
-    co_await _feature_table.invoke_on_all([&](features::feature_table& ft) {
-        ft.set_builtin_trial_license(_cluster_info.creation_timestamp);
-    });
 
     auto data_bytes = iobuf_to_bytes(first_cfg.data());
     hash_sha256 sha256;
@@ -690,24 +666,6 @@ void rjson_serialize(
 
     w.Key("redpanda_environment");
     w.String(snapshot.redpanda_environment);
-
-    w.Key("id_hash");
-    w.String(snapshot.id_hash);
-
-    w.Key("has_valid_license");
-    w.Bool(snapshot.has_valid_license);
-
-    w.Key("has_enterprise_features");
-    w.Bool(snapshot.has_enterprise_features);
-
-    if (snapshot.enterprise_features.has_value()) {
-        w.Key("enterprise_features");
-        w.StartArray();
-        for (const auto& f : snapshot.enterprise_features.value().enabled()) {
-            w.String(fmt::format("{}", f));
-        }
-        w.EndArray();
-    }
 
     w.Key("hostname");
     w.String(snapshot.host_name);

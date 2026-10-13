@@ -7,7 +7,6 @@
 # the Business Source License, use of this software will be governed
 # by the Apache License, Version 2.0
 
-import hashlib
 import json
 import random
 
@@ -22,7 +21,6 @@ from rptest.services.cluster import cluster
 from rptest.services.http_server import HttpServer
 from rptest.services.redpanda import RESTART_LOG_ALLOW_LIST
 from rptest.tests.redpanda_test import RedpandaTest
-from rptest.utils.rpenv import sample_license
 
 
 class MetricsReporterServer:
@@ -81,17 +79,7 @@ class MetricsReporterTest(RedpandaTest):
         Test that redpanda nodes send well formed messages to the metrics endpoint
         """
 
-        # Load and put a license at start. This is to check the SHA-256 checksum
         admin = Admin(self.redpanda)
-        license = sample_license()
-        if license is None:
-            self.logger.info("Skipping test, REDPANDA_SAMPLE_LICENSE env var not found")
-            return
-
-        assert admin.put_license(license).status_code == 200, "PUT License failed"
-
-        # blow away the metrics state so we can test the has_license flag later
-        self.metrics.clear_requests()
 
         total_topics = 5
         total_partitions = 0
@@ -144,10 +132,6 @@ class MetricsReporterTest(RedpandaTest):
         assert_fields_are_the_same(metadata, "cluster_created_ts")
         # cluster config should be the same
         assert_fields_are_the_same(metadata, "config")
-        # license violation status should not change across requests
-        assert_fields_are_the_same(metadata, "has_valid_license")
-        assert_fields_are_the_same(metadata, "has_enterprise_features")
-        assert_fields_are_the_same(metadata, "enterprise_features")
         assert_fields_are_the_same(metadata, "hostname")
         assert_fields_are_the_same(metadata, "domainname")
         assert_fields_are_the_same(metadata, "fqdns")
@@ -158,12 +142,9 @@ class MetricsReporterTest(RedpandaTest):
         assert last["partition_count"] == total_partitions
         assert last["active_logical_version"] == features["cluster_version"]
         assert last["original_logical_version"] == features["original_cluster_version"]
-        assert last["has_valid_license"]
-        # NOTE: value will vary depending on FIPS mode. we're confident that
-        # the source of the value is sound, so assert on presence instead.
-        assert "has_enterprise_features" in last
-        assert "enterprise_features" in last
-        assert type(last["enterprise_features"]) is list
+        assert "has_valid_license" not in last
+        assert "enterprise_features" not in last
+        assert "id_hash" not in last
         assert "hostname" in last
         assert "domainname" in last
         assert "fqdns" in last
@@ -206,11 +187,6 @@ class MetricsReporterTest(RedpandaTest):
         assert "metrics_reporter_tick_interval" not in last["config"]
         assert last["config"]["log_message_timestamp_type"] == "CreateTime"
         assert last["redpanda_environment"] == "test"
-
-        raw_id_hash = hashlib.sha256(license.encode()).hexdigest()
-        last_post_restart = metadata.pop()
-        assert last_post_restart["id_hash"] == last["id_hash"]
-        assert last_post_restart["id_hash"] == raw_id_hash
 
 
 class MultiNodeMetricsReporterTest(MetricsReporterTest):

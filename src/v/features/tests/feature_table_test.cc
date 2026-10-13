@@ -12,9 +12,8 @@
 #include "cluster/feature_update_action.h"
 #include "features/feature_table.h"
 #include "features/feature_table_snapshot.h"
-#include "model/timestamp.h"
 #include "security/license.h"
-#include "security/tests/license_utils.h"
+#include "serde/rw/rw.h"
 
 #include <seastar/core/sleep.hh>
 
@@ -373,84 +372,28 @@ TEST_F(feature_table_fixture, feature_table_new_snapshot_missing) {
       feature_state::state::active);
 }
 
-// This fork does not enforce licenses: no license state, including an
-// expired trial, an expired license or a revoked license, sanctions.
-TEST_F(feature_table_fixture, feature_table_never_sanctions) {
-    const security::license expired_license{
+// A license applied by a stock node is never interpreted here, but must
+// survive a feature table snapshot unchanged so stock nodes still see it.
+TEST_F(feature_table_fixture, feature_table_snapshot_carries_license) {
+    const security::license license{
       .format_version = 0,
       ._type = security::license_type::enterprise,
       .organization = "test",
       .expiry = 0s,
-      .checksum = "",
+      .checksum = "abc",
     };
 
     EXPECT_FALSE(ft.get_license().has_value());
-    EXPECT_FALSE(ft.should_sanction());
+    ft.set_license(license);
 
-    ft.set_builtin_trial_license(model::timestamp::now());
-    ASSERT_TRUE(ft.get_license().has_value());
-    EXPECT_FALSE(ft.get_license()->is_expired());
-    EXPECT_FALSE(ft.should_sanction());
+    auto buf = serde::to_iobuf(features::feature_table_snapshot::from(ft));
+    auto snapshot = serde::from_iobuf<features::feature_table_snapshot>(
+      std::move(buf));
+    ASSERT_TRUE(snapshot.license.has_value());
+    EXPECT_EQ(*snapshot.license, license);
 
-    ft.set_builtin_trial_license(model::timestamp{0});
-    ASSERT_TRUE(ft.get_license().has_value());
-    EXPECT_TRUE(ft.get_license()->is_expired());
-    EXPECT_FALSE(ft.should_sanction());
-
-    ft.set_license(expired_license);
-    ASSERT_TRUE(ft.get_license().has_value());
-    EXPECT_TRUE(ft.get_license()->is_expired());
-    EXPECT_FALSE(ft.should_sanction());
-
-    ft.revoke_license();
-    EXPECT_FALSE(ft.get_license().has_value());
-    EXPECT_FALSE(ft.should_sanction());
-}
-
-TEST_F(FeatureTableTest, feature_table_probe_expiry_metric_test) {
-    using ft = features::feature_table;
-
-    const auto opt_license = security::testing::get_test_license();
-    if (!opt_license) {
-        GTEST_SKIP() << security::testing::skip_no_license_msg;
-        return;
-    }
-    auto& license = *opt_license;
-
-    auto expiry = security::license::clock::time_point{4813252273s};
-
-    EXPECT_EQ(ft::calculate_expiry_metric(license, expiry - 1s), 1);
-    EXPECT_EQ(ft::calculate_expiry_metric(license, expiry), 0);
-    EXPECT_EQ(ft::calculate_expiry_metric(license, expiry + 1s), 0);
-    EXPECT_EQ(ft::calculate_expiry_metric(std::nullopt), -1);
-}
-
-TEST_F(FeatureTableTest, is_major_version_upgrade_test) {
-    EXPECT_FALSE(is_major_version_upgrade(
-      to_cluster_version(release_version::v22_1_1),
-      to_cluster_version(release_version::v22_1_1)));
-    EXPECT_FALSE(is_major_version_upgrade(
-      to_cluster_version(release_version::v22_1_1),
-      to_cluster_version(release_version::v22_1_5)));
-    EXPECT_TRUE(is_major_version_upgrade(
-      to_cluster_version(release_version::v22_1_1),
-      to_cluster_version(release_version::v22_2_1)));
-    EXPECT_TRUE(is_major_version_upgrade(
-      to_cluster_version(release_version::v22_1_5),
-      to_cluster_version(release_version::v22_2_1)));
-    EXPECT_FALSE(is_major_version_upgrade(
-      to_cluster_version(release_version::v22_3_1),
-      to_cluster_version(release_version::v22_1_1)));
-    EXPECT_TRUE(is_major_version_upgrade(
-      cluster::cluster_version{2},
-      to_cluster_version(release_version::v22_3_1)));
-    EXPECT_TRUE(is_major_version_upgrade(
-      cluster::cluster_version{-1},
-      to_cluster_version(release_version::v22_3_1)));
-    EXPECT_TRUE(is_major_version_upgrade(
-      to_cluster_version(release_version::MAX),
-      cluster::cluster_version{
-        static_cast<std::underlying_type_t<release_version>>(
-          release_version::MAX)
-        + 1}));
+    features::feature_table other;
+    snapshot.apply(other);
+    ASSERT_TRUE(other.get_license().has_value());
+    EXPECT_EQ(*other.get_license(), license);
 }

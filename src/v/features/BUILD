@@ -1,20 +1,6 @@
 load("//bazel:build.bzl", "redpanda_cc_library")
 
 redpanda_cc_library(
-    name = "enterprise_feature_messages",
-    hdrs = [
-        "enterprise_feature_messages.h",
-    ],
-    visibility = ["//visibility:public"],
-    deps = [
-        "//src/v/base",
-        "//src/v/ssx:sformat",
-        "@fmt",
-        "@seastar",
-    ],
-)
-
-redpanda_cc_library(
     name = "features",
     srcs = [
         "feature_table.cc",
@@ -27,9 +13,6 @@ redpanda_cc_library(
         "feature_table_snapshot.h",
         "fwd.h",
         "logger.h",
-    ],
-    implementation_deps = [
-        "//src/v/metrics",
     ],
     visibility = ["//visibility:public"],
     deps = [
@@ -48,22 +31,5 @@ redpanda_cc_library(
         "//src/v/utils:waiter_queue",
         "//src/v/version",
         "@seastar",
-    ],
-)
-
-redpanda_cc_library(
-    name = "enterprise_features",
-    srcs = [
-        "enterprise_features.cc",
-    ],
-    hdrs = [
-        "enterprise_features.h",
-    ],
-    visibility = ["//visibility:public"],
-    deps = [
-        "//src/v/base",
-        "//src/v/config",
-        "@abseil-cpp//absl/container:flat_hash_set",
-        "@boost//:range",
     ],
 )

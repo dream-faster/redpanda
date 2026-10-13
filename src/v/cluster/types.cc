@@ -514,7 +514,10 @@ set_topic_partitions_disabled_cmd_data::format_to(fmt::iterator it) const {
 }
 fmt::iterator
 feature_update_license_update_cmd_data::format_to(fmt::iterator it) const {
-    return fmt::format_to(it, "{{redpanda_license {}}}", redpanda_license);
+    return fmt::format_to(
+      it,
+      "{{redpanda_license: {{organization: {}}}}}",
+      redpanda_license.organization);
 }
 fmt::iterator config_status_request::format_to(fmt::iterator it) const {
     return fmt::format_to(it, "{{status: {}}}", status);
