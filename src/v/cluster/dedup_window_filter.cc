@@ -609,7 +609,15 @@ void dedup_window_filter::replace_oldest_visited(model::timestamp incoming) {
     // CapacityEvictionFailsOpenWhenNoSliceCanBeFreed), and only an entry
     // strictly older than the incoming one is replaced, so an index whose
     // entries all share the incoming timestamp keeps them.
-    const auto begin = std::min(_sweep_pos, _map.size());
+    if (_sweep_pos >= _map.size()) {
+        // The step ended with the cursor at the end, so there is nothing ahead
+        // of it in this pass. Wrap as the next step would, and look at the
+        // start of the next pass instead: on a small index that is every
+        // entry, and an empty window would replace nothing.
+        _sweep_pos = 0;
+        finish_pass();
+    }
+    const auto begin = _sweep_pos;
     const auto end = std::min(begin + capacity_emergency_budget, _map.size());
     std::optional<size_t> oldest;
     for (size_t i = begin; i < end; ++i) {
