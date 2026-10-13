@@ -8,6 +8,8 @@
  * https://github.com/vectorizedio/redpanda/blob/master/licenses/rcl.md
  */
 
+#pragma once
+
 #include "utils/delta_for.h"
 
 #include <cstdint>

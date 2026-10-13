@@ -7,6 +7,8 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0
 
+#pragma once
+
 #include "kafka/server/tests/produce_consume_utils.h"
 #include "redpanda/tests/fixture.h"
 #include "storage/disk_log_impl.h"
