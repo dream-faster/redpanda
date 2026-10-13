@@ -3,27 +3,36 @@
 # runs. The repository cache (downloads only) is still restored. Run it on
 # two refs and diff the summaries to see what a change did to build time.
 #
-# Besides workflow_dispatch, a push whose head commit message contains
-# "[build-timing: <mode> ...]" runs one job per mode on that commit (useful
-# before this file reaches the default branch). <mode> is "release" or
-# "fastbuild", optionally followed by "+trace" (-ftime-trace), "+unity"
-# (--//bazel:unity_build) and "+baseline" (first build the default branch on
-# the same runner, for a like-for-like comparison), e.g. "release+baseline".
+# Run it from the Actions tab ("Run workflow"). With "baseline" set, the
+# default branch is built first on the same runner, for a like-for-like
+# comparison: runner speed varies 10-20% between jobs.
 name: build-timing
 on:
-  push:
   workflow_dispatch:
     inputs:
       config:
-        description: 'Bazel --config (empty for fastbuild)'
-        required: false
+        description: 'Bazel --config'
+        required: true
         default: 'release'
-        type: string
+        type: choice
+        options:
+          - release
+          - fastbuild
       targets:
         description: 'Targets to build'
         required: false
         default: '//src/v/redpanda:redpanda'
         type: string
+      unity:
+        description: 'Build with --config=unity'
+        required: false
+        default: false
+        type: boolean
+      baseline:
+        description: 'First build the default branch on the same runner'
+        required: false
+        default: false
+        type: boolean
       time_trace:
         description: 'Also collect clang -ftime-trace and summarize headers'
         required: false
@@ -39,30 +48,7 @@ env:
   TOOLCHAIN_IMAGE: ghcr.io/${{ github.repository }}/bazel-toolchain
 
 jobs:
-  plan:
-    runs-on: ubuntu-latest
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      contains(github.event.head_commit.message, '[build-timing:')
-    outputs:
-      modes: ${{ steps.modes.outputs.modes }}
-    steps:
-      - name: Pick modes
-        id: modes
-        env:
-          MESSAGE: ${{ github.event.head_commit.message }}
-        run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            echo 'modes=["dispatch"]' >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          MODES=$(grep -o '\[build-timing:[^]]*\]' <<<"$MESSAGE" | head -n1 \
-                    | sed 's/\[build-timing://; s/\]//')
-          JSON=$(for m in $MODES; do echo "$m"; done | jq -R . | jq -cs .)
-          echo "modes=$JSON" | tee -a "$GITHUB_OUTPUT"
-
   toolchain:
-    needs: plan
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -111,12 +97,8 @@ jobs:
           cache-to: type=gha,mode=max
 
   timing:
-    needs: [plan, toolchain]
+    needs: toolchain
     runs-on: ubicloud-standard-8
-    strategy:
-      fail-fast: false
-      matrix:
-        mode: ${{ fromJSON(needs.plan.outputs.modes) }}
     permissions:
       contents: read
       packages: read
@@ -140,32 +122,15 @@ jobs:
         id: cfg
         run: |
           CONFIG="${{ inputs.config }}"
-          TARGETS="${{ inputs.targets }}"
-          TRACE="${{ inputs.time_trace }}"
+          if [[ "$CONFIG" == fastbuild ]]; then CONFIG=; fi
           FLAGS=""
-          BASELINE=false
-          if [[ "${{ matrix.mode }}" != "dispatch" ]]; then
-            # <config>[+trace][+unity][+baseline], e.g. fastbuild+unity+trace
-            IFS=+ read -r -a PARTS <<<"${{ matrix.mode }}"
-            CONFIG=${PARTS[0]}
-            if [[ "$CONFIG" == fastbuild ]]; then CONFIG=; fi
-            TRACE=false
-            for p in "${PARTS[@]:1}"; do
-              case "$p" in
-                trace) TRACE=true ;;
-                unity) FLAGS="$FLAGS --//bazel:unity_build" ;;
-                baseline) BASELINE=true ;;
-                *) echo "unknown mode part: $p"; exit 1 ;;
-              esac
-            done
-            TARGETS=//src/v/redpanda:redpanda
-          fi
+          if [[ "${{ inputs.unity }}" == "true" ]]; then FLAGS="--config=unity"; fi
           {
             echo "config=$CONFIG"
-            echo "targets=$TARGETS"
-            echo "time_trace=$TRACE"
+            echo "targets=${{ inputs.targets }}"
+            echo "time_trace=${{ inputs.time_trace }}"
             echo "flags=$FLAGS"
-            echo "baseline=$BASELINE"
+            echo "baseline=${{ inputs.baseline }}"
           } | tee -a "$GITHUB_OUTPUT"
 
       - name: Prepare build environment
@@ -294,5 +259,5 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: build-timing-${{ matrix.mode }}-${{ github.run_id }}
+          name: build-timing-${{ github.run_id }}
           path: /mnt/timing/
