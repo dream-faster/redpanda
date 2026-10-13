@@ -63,7 +63,7 @@ void controller_stm::snapshot_timer_callback() {
 bool controller_stm::ready_to_snapshot() const {
     // cluster info is initialized manually from the first 2 batches of
     // controller log so we have to wait until it is initialized by
-    // metrics_reporter before making a snapshot.
+    // cluster_info_initializer before making a snapshot.
     return _metrics_reporter_cluster_info.is_initialized();
 }
 

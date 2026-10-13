@@ -461,11 +461,12 @@ struct configuration final : public config_store {
     property<bool> memory_abort_on_alloc_failure;
     property<bool> sampled_memory_profile;
 
-    // metrics reporter
-    property<bool> enable_metrics_reporter;
-    property<std::chrono::milliseconds> metrics_reporter_tick_interval;
-    property<std::chrono::milliseconds> metrics_reporter_report_interval;
-    property<ss::sstring> metrics_reporter_url;
+    // This build sends no telemetry. These stay registered, and ignored,
+    // so that existing configs and the Helm chart can still set them.
+    deprecated_property enable_metrics_reporter;
+    deprecated_property metrics_reporter_tick_interval;
+    deprecated_property metrics_reporter_report_interval;
+    deprecated_property metrics_reporter_url;
 
     property<bool> features_auto_enable;
     property<bool> features_auto_finalization;

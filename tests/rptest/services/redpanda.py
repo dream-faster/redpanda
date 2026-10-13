@@ -1136,7 +1136,6 @@ class RedpandaService(Service, RedpandaServiceABC):
     CLUSTER_CONFIG_DEFAULTS: dict[str, Any] = {
         "join_retry_timeout_ms": 200,
         "default_topic_partitions": 4,
-        "enable_metrics_reporter": False,
         "superusers": [RedpandaServiceConstants.SUPERUSER_CREDENTIALS[0]],
         # Disable segment size jitter to make tests more deterministic if they rely on
         # inspecting storage internals (e.g. number of segments after writing a certain

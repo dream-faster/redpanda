@@ -48,7 +48,7 @@ class rm_group_proxy;
 class health_manager;
 class health_monitor_frontend;
 class health_monitor_backend;
-class metrics_reporter;
+class cluster_info_initializer;
 class feature_frontend;
 class feature_backend;
 class feature_manager;

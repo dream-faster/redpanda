@@ -12,9 +12,9 @@
 #pragma once
 
 #include "base/outcome.h"
+#include "cluster/cluster_info_initializer.h"
 #include "cluster/controller_probe.h"
 #include "cluster/controller_stm.h"
-#include "cluster/crash_reporter.h"
 #include "cluster/fwd.h"
 #include "cluster/node_status_table.h"
 #include "cluster/scheduling/leader_balancer.h"
@@ -145,17 +145,6 @@ public:
     }
 
     ss::sharded<client_quota::store>& get_quota_store() { return _quota_store; }
-
-    /// Register a callback to contribute telemetry data during metrics
-    /// collection. This allows higher-layer subsystems to populate fields
-    /// in the metrics snapshot without creating build cycles.
-    /// Returns an ID that can be used to unregister the contributor.
-    metrics_reporter::metrics_contributor_id
-      register_metrics_contributor(metrics_reporter::metrics_contributor_fn);
-
-    /// Unregister a previously registered metrics contributor.
-    void
-      unregister_metrics_contributor(metrics_reporter::metrics_contributor_id);
 
     bool is_raft0_leader() const {
         vassert(
@@ -296,8 +285,7 @@ private:
     ss::sharded<health_monitor_frontend> _hm_frontend; // instance per core
     ss::sharded<health_monitor_backend> _hm_backend;   // single instance
     ss::sharded<health_manager> _health_manager;
-    ss::sharded<metrics_reporter> _metrics_reporter;
-    ss::sharded<crash_reporter> _crash_reporter;          // single instance
+    ss::sharded<cluster_info_initializer> _cluster_info_initializer;
     ss::sharded<feature_manager> _feature_manager;        // single instance
     ss::sharded<feature_backend> _feature_backend;        // instance per core
     ss::sharded<features::feature_table>& _feature_table; // instance per core

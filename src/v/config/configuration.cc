@@ -2478,36 +2478,10 @@ configuration::configuration()
        .needs_restart = needs_restart::no,
        .visibility = visibility::tunable},
       true)
-  , enable_metrics_reporter(
-      *this,
-      "enable_metrics_reporter",
-      "Enable the cluster metrics reporter. If `true`, the metrics reporter "
-      "collects and exports to Redpanda Data a set of customer usage metrics "
-      "at the interval set by `metrics_reporter_report_interval`. The cluster "
-      "metrics of the metrics reporter are different from the monitoring "
-      "metrics. * The metrics reporter exports customer usage metrics for "
-      "consumption by Redpanda Data.* Monitoring metrics are exported for "
-      "consumption by Redpanda users.",
-      {.needs_restart = needs_restart::no, .visibility = visibility::user},
-      true)
-  , metrics_reporter_tick_interval(
-      *this,
-      "metrics_reporter_tick_interval",
-      "Cluster metrics reporter tick interval.",
-      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
-      1min)
-  , metrics_reporter_report_interval(
-      *this,
-      "metrics_reporter_report_interval",
-      "Cluster metrics reporter report interval.",
-      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
-      24h)
-  , metrics_reporter_url(
-      *this,
-      "metrics_reporter_url",
-      "URL of the cluster metrics reporter.",
-      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
-      "https://m.rp.vectorized.io/v2")
+  , enable_metrics_reporter(*this, "enable_metrics_reporter")
+  , metrics_reporter_tick_interval(*this, "metrics_reporter_tick_interval")
+  , metrics_reporter_report_interval(*this, "metrics_reporter_report_interval")
+  , metrics_reporter_url(*this, "metrics_reporter_url")
   , features_auto_enable(
       *this,
       "features_auto_enable",

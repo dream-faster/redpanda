@@ -476,31 +476,31 @@ class ClusterConfigTest(RedpandaTest, ClusterConfigHelpersMixin):
         # Initially set both values together
         patch_result = self.admin.patch_cluster_config(
             upsert={
-                "metrics_reporter_url": "user",
+                "kafka_noproduce_topics": ["user"],
                 "cluster_id": "pass",
             }
         )
         wait_for_version_sync(self.admin, self.redpanda, patch_result["config_version"])
-        self._check_value_everywhere("metrics_reporter_url", "user")
+        self._check_value_everywhere("kafka_noproduce_topics", ["user"])
         self._check_value_everywhere("cluster_id", "pass")
 
         # Check initially set values survive a restart
         self.redpanda.restart_nodes(self.redpanda.nodes)
-        self._check_value_everywhere("metrics_reporter_url", "user")
+        self._check_value_everywhere("kafka_noproduce_topics", ["user"])
         self._check_value_everywhere("cluster_id", "pass")
 
         # Set just one of the values
         patch_result = self.admin.patch_cluster_config(
-            upsert={"metrics_reporter_url": "user2"}
+            upsert={"kafka_noproduce_topics": ["user2"]}
         )
         wait_for_version_sync(self.admin, self.redpanda, patch_result["config_version"])
-        self._check_value_everywhere("metrics_reporter_url", "user2")
+        self._check_value_everywhere("kafka_noproduce_topics", ["user2"])
         self._check_value_everywhere("cluster_id", "pass")
 
         # Check that the recently set value persists, AND the originally
         # set value of another property is not corrupted.
         self.redpanda.restart_nodes(self.redpanda.nodes)
-        self._check_value_everywhere("metrics_reporter_url", "user2")
+        self._check_value_everywhere("kafka_noproduce_topics", ["user2"])
         self._check_value_everywhere("cluster_id", "pass")
 
     @cluster(num_nodes=3)
@@ -1084,25 +1084,24 @@ class ClusterConfigTest(RedpandaTest, ClusterConfigHelpersMixin):
         Test import/export of string fields, make sure they don't end
         up with extraneous quotes
         """
-        # metrics_reporter_url is a tunable, so it only shows up with --all
         original = next(
             line
             for line in self._export(all=True).splitlines()
-            if line.startswith("metrics_reporter_url:")
+            if line.startswith("cluster_id:")
         )
         version_a, _ = self._export_import_modify_one(
-            original, "metrics_reporter_url: foobar", all=True
+            original, "cluster_id: foobar", all=True
         )
         wait_for_version_sync(self.admin, self.redpanda, version_a)
-        self._check_value_everywhere("metrics_reporter_url", "foobar")
+        self._check_value_everywhere("cluster_id", "foobar")
 
         version_b, _ = self._export_import_modify_one(
-            "metrics_reporter_url: foobar",
-            'metrics_reporter_url: "foobaz"',
+            "cluster_id: foobar",
+            'cluster_id: "foobaz"',
             all=True,
         )
         wait_for_version_sync(self.admin, self.redpanda, version_b)
-        self._check_value_everywhere("metrics_reporter_url", "foobaz")
+        self._check_value_everywhere("cluster_id", "foobaz")
 
     @cluster(num_nodes=3)
     def test_rpk_status(self):

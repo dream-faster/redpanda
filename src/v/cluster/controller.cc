@@ -37,7 +37,6 @@
 #include "cluster/members_frontend.h"
 #include "cluster/members_manager.h"
 #include "cluster/members_table.h"
-#include "cluster/metrics_reporter.h"
 #include "cluster/node_status_table.h"
 #include "cluster/partition_balancer_backend.h"
 #include "cluster/partition_balancer_state.h"
@@ -558,27 +557,10 @@ ss::future<> controller::start(
       &feature_manager::start,
       std::vector{seed_nodes});
 
-    co_await _metrics_reporter.start_single(
-      _raft0,
-      std::ref(_stm),
-      std::ref(_members_table),
-      std::ref(_tp_state),
-      std::ref(_hm_frontend),
-      std::ref(_config_frontend),
-      std::ref(_feature_table),
-      std::ref(_roles),
-      std::ref(_authorizer),
-      std::addressof(_storage),
-      std::ref(_as));
-    co_await _metrics_reporter.invoke_on(0, &metrics_reporter::start);
-
-    co_await _crash_reporter.start_single(
-      std::ref(_storage.local().kvs()),
-      std::ref(_stm),
-      std::ref(_as),
-      std::ref(_metrics_reporter));
-    co_await _crash_reporter.invoke_on(
-      crash_reporter::shard, &crash_reporter::start);
+    co_await _cluster_info_initializer.start_single(
+      _raft0, std::ref(_stm), std::ref(_config_frontend), std::ref(_as));
+    co_await _cluster_info_initializer.invoke_on(
+      0, &cluster_info_initializer::start);
 
     co_await _partition_balancer.start_single(
       _raft0,
@@ -625,24 +607,6 @@ ss::future<> controller::set_ready() {
     return _raft_manager.invoke_on_all(&raft::group_manager::set_ready);
 }
 
-metrics_reporter::metrics_contributor_id
-controller::register_metrics_contributor(
-  metrics_reporter::metrics_contributor_fn fn) {
-    vassert(
-      ss::this_shard_id() == 0,
-      "Only shard 0 can register metrics contributors");
-    return _metrics_reporter.local().register_metrics_contributor(
-      std::move(fn));
-}
-
-void controller::unregister_metrics_contributor(
-  metrics_reporter::metrics_contributor_id id) {
-    vassert(
-      ss::this_shard_id() == 0,
-      "Only shard 0 can unregister metrics contributors");
-    _metrics_reporter.local().unregister_metrics_contributor(id);
-}
-
 ss::future<> controller::shutdown_input() {
     vlog(clusterlog.debug, "Shutting down controller inputs");
     if (_raft0) {
@@ -678,8 +642,7 @@ ss::future<> controller::stop() {
 
     co_await _topic_metrics_watcher.stop();
     co_await _partition_balancer.stop();
-    co_await _crash_reporter.stop();
-    co_await _metrics_reporter.stop();
+    co_await _cluster_info_initializer.stop();
     co_await _feature_manager.stop();
     co_await _hm_frontend.stop();
     co_await _hm_backend.stop();

@@ -31,7 +31,6 @@ from rptest.services.admin import (
 from rptest.services.cluster import cluster
 from rptest.services.redpanda import SaslCredentials, SecurityConfig
 from rptest.tests.admin_api_auth_test import create_user_and_wait
-from rptest.tests.metrics_reporter_test import MetricsReporterServer
 from rptest.tests.redpanda_test import RedpandaTest
 from rptest.util import expect_exception, expect_http_error, wait_until_result
 
@@ -645,42 +644,6 @@ class RBACTest(RBACTestBase):
         assert res.status_code == 200, f"Unexpected status {res.status_code}"
         roles = RolesList.from_response(res)
         assert len(roles) == 0, f"Unexpected roles: {str(roles)}"
-
-
-class RBACTelemetryTest(RBACTestBase):
-    def __init__(self, test_ctx, **kwargs):
-        self.metrics = MetricsReporterServer(test_ctx)
-        super().__init__(test_ctx, extra_rp_conf={**self.metrics.rp_conf()}, **kwargs)
-
-    def setUp(self):
-        self.metrics.start()
-        super().setUp()
-
-    @cluster(num_nodes=2)
-    def test_telemetry(self):
-        def wait_for_new_report():
-            report_count = len(self.metrics.requests())
-            wait_until(
-                lambda: len(self.metrics.requests()) > report_count,
-                timeout_sec=20,
-                backoff_sec=1,
-            )
-            self.logger.debug(f"New report: {self.metrics.reports()[-1]}")
-            return self.metrics.reports()[-1]
-
-        assert wait_for_new_report()["rbac_role_count"] == 0
-
-        names = ["a", "b", "c", "d", "e", "f"]
-
-        for n in names:
-            self.superuser_admin.create_role(role=n)
-
-        wait_until(
-            lambda: wait_for_new_report()["rbac_role_count"] == len(names),
-            timeout_sec=20,
-            backoff_sec=1,
-        )
-        self.metrics.stop()
 
 
 class RBACEndToEndTest(RBACTestBase):
