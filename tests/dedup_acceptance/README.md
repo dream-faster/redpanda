@@ -23,6 +23,10 @@ pytest --image <image-under-test> [--old-image <earlier-dedup-build>] [--require
   those skips into failures; CI sets it, so a missing feature cannot pass as
   a skip.
 * `--keep-clusters` keeps a failed test's data directories (under `/tmp`).
+* `DEDUP_STRESS_SCALE` (default 1) multiplies the stress tests' record counts
+  and chaos rounds. Every stress test also asserts that no allocation failed
+  (`vectorized_memory_malloc_failed`) and that no shard's available memory
+  fell below a floor (`vectorized_memory_available_memory_low_water_mark`).
 
 Brokers run on the host network, so docker must allow `--network host`. A
 node's ports are `port_base + 10 * node_id + {2: kafka, 4: admin, 5: rpc}`.
@@ -35,4 +39,5 @@ node's ports are `port_base + 10 * node_id + {2: kafka, 4: admin, 5: rpc}`.
 | `test_durability.py` | leadership on every replica; graceful leader restart; leader crash; whole-cluster restart and crash; follower catch-up from the log and from a raft snapshot after prefix truncation; replica moved to a new node, with and without truncation; replicas moved between cores; segment churn with many local snapshots; recovery bounded by the window; topic recreated under the same name; partition count increase |
 | `test_capacity.py` | per-partition ceiling keeps the newest identities; per-shard limit across partitions, across topics, and per shard; default limit derived from shard memory; lowering the limit takes effect on restart, with restores bounded by it; dedup snapshots are files and the kvstore stays small |
 | `test_startup.py` | a full shard restarts (clean and killed) in 512 MiB; restart with half the memory the indices were built with; 24 partitions restoring at once; a three-node cluster with full shards restarting together; rolling restarts under live traffic absorb every retry |
+| `test_stress.py` | four producers racing over overlapping keys on eight replicated partitions; snapshot storm (1 MiB segments) on a shard past its budget in 768 MiB; chaos -- random kills, restarts, frozen nodes and leadership moves under retrying producers, with no acknowledged record lost and no identity written twice; 32 partitions at twelve times the shard limit; crash/restart loop with a full index in 512 MiB; a frozen follower catching up hundreds of thousands of identities at once; key-mode, header-mode, plain, idempotent and transactional workloads together on one shard; topic churn returning the budget; 4 KiB identities costing no more than small ones; idle partitions holding the budget while another gets busy |
 | `test_upgrade.py` | upgrade drops the legacy kvstore dedup snapshots and rebuilds the index from the log; upgrade into less memory; rolling upgrade of three nodes with leadership on old and new builds; raft snapshots between versions in both directions; downgrade and upgrade again |

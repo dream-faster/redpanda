@@ -45,6 +45,7 @@ def pytest_configure(config):
     )
     config.addinivalue_line("markers", "upgrade: needs --old-image")
     config.addinivalue_line("markers", "slow: takes minutes rather than seconds")
+    config.addinivalue_line("markers", "stress: sustained or adversarial load")
 
 
 @pytest.hookimpl(hookwrapper=True)

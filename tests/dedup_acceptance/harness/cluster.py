@@ -161,6 +161,15 @@ class Node:
             self.spec.memory = memory
         self.start()
 
+    def pause(self) -> None:
+        """Freeze every process in the node (SIGSTOP via the cgroup freezer):
+        to its peers it looks like a node that stopped answering mid-flight,
+        not one that shut down."""
+        _run("docker", "pause", self.container)
+
+    def unpause(self) -> None:
+        _run("docker", "unpause", self.container)
+
     def is_running(self) -> bool:
         out = _run(
             "docker", "inspect", "-f", "{{.State.Running}}", self.container, check=False
