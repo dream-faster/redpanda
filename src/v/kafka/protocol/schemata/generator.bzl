@@ -64,12 +64,15 @@ def generate_kafka_messages(name = "generate_kafka_messages"):
     """
     Generate Kafka message implementations.
 
-    For each message a library is generated for the request and response types
-    of the message.
+    All generated requests and responses are compiled as one library, so
+    that unity builds can batch them; each message's request and response
+    keep their own target name as an alias of it.
 
     Args:
       name: unused
     """
+    srcs = []
+    hdrs = []
     for message in MESSAGES:
         for ttype in ["request", "response"]:
             name = message + "_" + ttype
@@ -92,18 +95,26 @@ def generate_kafka_messages(name = "generate_kafka_messages"):
                 ],
                 toolchains = ["@rules_python//python:current_py_toolchain"],
             )
+            srcs.append(source)
+            hdrs.append(header)
 
-            redpanda_cc_library(
+            native.alias(
                 name = name,
-                srcs = [source],
-                hdrs = [header],
+                actual = ":messages",
                 visibility = ["//visibility:public"],
-                deps = [
-                    "//src/v/base",
-                    "//src/v/container:chunked_vector",
-                    "//src/v/kafka/protocol",
-                    "//src/v/model",
-                    "//src/v/utils:to_string",
-                    "@fmt",
-                ],
             )
+
+    redpanda_cc_library(
+        name = "messages",
+        srcs = srcs,
+        hdrs = hdrs,
+        visibility = ["//visibility:public"],
+        deps = [
+            "//src/v/base",
+            "//src/v/container:chunked_vector",
+            "//src/v/kafka/protocol",
+            "//src/v/model",
+            "//src/v/utils:to_string",
+            "@fmt",
+        ],
+    )
