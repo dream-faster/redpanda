@@ -23,47 +23,12 @@
 
 namespace cluster {
 
-dedup_identity_lookup dedup_identity_for_record(
-  model::record& r,
-  const std::optional<ss::sstring>& key_header,
-  const iobuf** out) {
-    if (key_header) {
-        for (auto& h : r.headers()) {
-            if (h.key() != std::string_view{*key_header}) {
-                continue;
-            }
-            // A header value can be null, which is not the same as empty: the
-            // iobuf behind it is empty either way, so digesting it would give
-            // every record with a null-valued header the identity of the empty
-            // buffer and silently deduplicate them against each other.
-            // Treated like an absent header instead -- the client asked for
-            // header-keyed dedup and supplied no identity -- so the request is
-            // rejected rather than losing records.
-            if (h.value_size() < 0) {
-                return dedup_identity_lookup::missing_header;
-            }
-            *out = &h.value();
-            return dedup_identity_lookup::identity;
-        }
-        return dedup_identity_lookup::missing_header;
-    }
-    if (!r.has_key()) {
-        return dedup_identity_lookup::no_identity;
-    }
-    *out = &r.key();
-    return dedup_identity_lookup::identity;
-}
-
 dedup_identity_digest dedup_digest_of(const iobuf& identity) {
-    // Arbitrary distinct constants; they only need to differ from each other
-    // and stay fixed, since the digest is persisted in snapshots.
-    incremental_xxhash64 hi{0x9E3779B97F4A7C15ULL};
-    incremental_xxhash64 lo{0xC2B2AE3D27D4EB4FULL};
+    dedup_digester digester;
     for (const auto& frag : identity) {
-        hi.update(frag.get(), frag.size());
-        lo.update(frag.get(), frag.size());
+        digester.update(frag.get(), frag.size());
     }
-    return {.hi = hi.digest(), .lo = lo.digest()};
+    return digester.digest();
 }
 
 dedup_window_filter::dedup_window_filter(
@@ -289,11 +254,10 @@ dedup_window_filter::filter_request(model::record_batch batch) {
     const auto base_ts = header.first_timestamp;
     const int32_t total = readable.record_count();
 
-    // Walk the records by sharing them rather than copying.
-    // record_batch::for_each_record() yields records through
-    // record_batch_copy_iterator, which deep-copies every key, value, and
-    // header of every record; record_batch_iterator refcounts them instead.
-    // That matters because this runs on every plain produce.
+    // Only the identities and timestamps are read from the records, straight
+    // from the batch's buffer (see for_each_dedup_identity()): nothing is
+    // copied or shared per record, which matters because this runs on every
+    // plain produce.
     //
     // Classification is deferred until the whole batch has been inspected:
     // in header mode one record missing the configured header rejects the
@@ -311,27 +275,28 @@ dedup_window_filter::filter_request(model::record_batch batch) {
     chunked_vector<classified> records;
     records.reserve(static_cast<size_t>(total));
 
-    {
-        auto it = model::record_batch_iterator::create(readable.share());
-        while (it.has_next()) {
-            auto r = it.next();
-            const iobuf* identity = nullptr;
-            const auto lookup = dedup_identity_for_record(
-              r, _key_header, &identity);
-            if (lookup == dedup_identity_lookup::missing_header) {
-                // Nothing has been mutated yet, so the whole request can be
-                // rejected without unwinding anything.
-                return {.missing_required_header = true};
-            }
-            classified c{
-              .timestamp = clamp_to_broker_time(
-                model::timestamp{base_ts.value() + r.timestamp_delta()})};
-            if (lookup == dedup_identity_lookup::identity) {
-                c.identity = dedup_digest_of(*identity);
-                c.has_identity = true;
-            }
-            records.push_back(c);
-        }
+    bool missing_header = false;
+    for_each_dedup_identity(
+      readable,
+      _key_header,
+      [this, &records, &missing_header](
+        dedup_identity_lookup lookup,
+        dedup_identity_digest digest,
+        model::timestamp ts) {
+          if (lookup == dedup_identity_lookup::missing_header) {
+              missing_header = true;
+              return false;
+          }
+          records.push_back(
+            {.identity = digest,
+             .timestamp = clamp_to_broker_time(ts),
+             .has_identity = lookup == dedup_identity_lookup::identity});
+          return true;
+      });
+    if (missing_header) {
+        // Nothing has been mutated yet, so the whole request can be rejected
+        // without unwinding anything.
+        return {.missing_required_header = true};
     }
 
     // Classify in record order, so two records sharing an identity within
@@ -430,9 +395,13 @@ void dedup_window_filter::revert_request(const dedup_request_undo& undo) {
 }
 
 void dedup_window_filter::populate(const iobuf& key, model::timestamp ts) {
+    populate(dedup_digest_of(key), ts);
+}
+
+void dedup_window_filter::populate(
+  dedup_identity_digest identity, model::timestamp ts) {
     ts = clamp_to_broker_time(ts);
     _max_ts = std::max(_max_ts, ts);
-    auto identity = dedup_digest_of(key);
 
     // Followers apply the same capacity rule as the leader does in
     // is_duplicate(), and they must apply it at the same point. Expiry timing

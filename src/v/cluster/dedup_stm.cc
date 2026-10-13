@@ -343,28 +343,22 @@ ss::future<> dedup_stm::do_apply(const model::record_batch& batch) {
         decompressed = model::decompress_batch_sync(batch);
     }
     const model::record_batch& readable = decompressed ? *decompressed : batch;
-    const auto base_ts = readable.header().first_timestamp;
-    const auto& key_header = _state.key_header();
-    // Still the copying iterator, unlike filter_request()'s sharing passes,
-    // and this is the busier path -- it runs on every replica for every
-    // committed data batch. It cannot share: do_apply() takes the batch by
-    // const reference and both record_batch::share() and iobuf::share() are
-    // non-const, so sharing here needs a change to model/bytes rather than
-    // to dedup.
-    readable.for_each_record([this, base_ts, &key_header](model::record r) {
-        const iobuf* identity = nullptr;
-        // The header identity source can change after this batch was
-        // already validated and committed under an older config, so a
-        // record here may lack the *current* header; skip indexing that
-        // record rather than rejecting an already committed batch.
-        if (
-          dedup_identity_for_record(r, key_header, &identity)
-          == dedup_identity_lookup::identity) {
-            _state.populate(
-              *identity,
-              model::timestamp{base_ts.value() + r.timestamp_delta()});
-        }
-    });
+    // The header identity source can change after this batch was already
+    // validated and committed under an older config, so a record here may
+    // lack the *current* header; it is left unindexed rather than rejecting
+    // an already committed batch.
+    for_each_dedup_identity(
+      readable,
+      _state.key_header(),
+      [this](
+        dedup_identity_lookup lookup,
+        dedup_identity_digest digest,
+        model::timestamp ts) {
+          if (lookup == dedup_identity_lookup::identity) {
+              _state.populate(digest, ts);
+          }
+          return true;
+      });
 }
 
 kafka::offset dedup_stm::from_log_offset(model::offset offset) const {

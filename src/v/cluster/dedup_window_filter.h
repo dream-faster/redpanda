@@ -10,21 +10,27 @@
 #pragma once
 
 #include "bytes/iobuf.h"
+#include "bytes/iobuf_parser.h"
 #include "cluster/dedup_index_limits.h"
 #include "container/chunked_hash_map.h"
 #include "container/chunked_vector.h"
+#include "hashing/xx.h"
 #include "model/record.h"
 #include "model/timestamp.h"
 
 #include <seastar/core/shared_ptr.hh>
+
+#include <fmt/format.h>
 
 #include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <optional>
+#include <stdexcept>
 #include <vector>
 
 namespace cluster {
@@ -73,6 +79,26 @@ struct dedup_identity_digest_hash {
 /// contiguous iobuf holding the same bytes digest identically.
 dedup_identity_digest dedup_digest_of(const iobuf& identity);
 
+/// \brief Streaming form of dedup_digest_of(): feed the identity's bytes in
+/// any pieces, then take the digest. Yields exactly what dedup_digest_of()
+/// yields for the same bytes.
+class dedup_digester {
+public:
+    void update(const char* data, size_t size) {
+        _hi.update(data, size);
+        _lo.update(data, size);
+    }
+    dedup_identity_digest digest() {
+        return {.hi = _hi.digest(), .lo = _lo.digest()};
+    }
+
+private:
+    // Arbitrary distinct constants; they only need to differ from each other
+    // and stay fixed, since the digest is persisted in snapshots.
+    incremental_xxhash64 _hi{0x9E3779B97F4A7C15ULL};
+    incremental_xxhash64 _lo{0xC2B2AE3D27D4EB4FULL};
+};
+
 struct dedup_index_entry {
     dedup_identity_digest identity;
     model::timestamp timestamp;
@@ -82,9 +108,9 @@ struct dedup_index_entry {
 };
 
 /// Outcome of extracting the dedup identity for one record under a given
-/// identity source (see dedup_identity_for_record()).
+/// identity source (see for_each_dedup_identity()).
 enum class dedup_identity_lookup {
-    /// The record has an identity; the output parameter was populated.
+    /// The record has an identity; its digest was computed.
     identity,
     /// Key mode (key_header unset) and the record has no Kafka key: dedup
     /// cannot apply to this record. Matches the original, backward-compatible
@@ -98,18 +124,123 @@ enum class dedup_identity_lookup {
     missing_header,
 };
 
-/// \brief Extract the dedup identity for one record.
+/// \brief Walk a batch's records reading only what dedup needs.
 ///
-/// With key_header unset, the identity is the record's Kafka key (the
-/// original behavior). With key_header set, the identity is the value of the
-/// record's first header whose key equals *key_header (first-match is
-/// deterministic when a record carries repeated header keys); the Kafka key
-/// is never consulted in this mode. On dedup_identity_lookup::identity, *out
-/// points into r and is valid only as long as r is.
-dedup_identity_lookup dedup_identity_for_record(
-  model::record& r,
+/// For each record, in order, calls emit(lookup, digest, timestamp) with the
+/// identity digested straight from the batch's buffer -- the Kafka key, or
+/// in header mode the value of the first header named *key_header -- and the
+/// record's timestamp. Nothing is copied or shared: values, other headers
+/// and, in header mode, the key are skipped over. This is the whole of what
+/// the produce and apply paths look at per record, and it replaced parsing
+/// each record into a model::record (an iobuf per key, value and header) on
+/// both.
+///
+/// emit returns whether to go on; the walk stops at the first false. The
+/// digest is meaningful only for dedup_identity_lookup::identity.
+///
+/// The decoding mirrors model::parse_one_record_from_buffer(): batches reach
+/// here already validated, but a malformed one still throws rather than
+/// reading past its end.
+template<typename F>
+void for_each_dedup_identity(
+  const model::record_batch& readable,
   const std::optional<ss::sstring>& key_header,
-  const iobuf** out);
+  F&& emit) {
+    const auto base_ts = readable.header().first_timestamp.value();
+    iobuf_const_parser parser(readable.data());
+    auto digest_bytes = [&parser](int64_t len) {
+        dedup_digester digester;
+        const auto consumed = parser.consume(
+          static_cast<size_t>(len), [&digester](const char* data, size_t n) {
+              digester.update(data, n);
+              return ss::stop_iteration::no;
+          });
+        if (consumed != static_cast<size_t>(len)) [[unlikely]] {
+            throw std::out_of_range(
+              fmt::format(
+                "dedup identity of {} bytes, but only {} in the record",
+                len,
+                consumed));
+        }
+        return digester.digest();
+    };
+    auto skip_bytes = [&parser](int64_t len) {
+        if (len > 0) {
+            parser.skip(static_cast<size_t>(len));
+        }
+    };
+    // Reads a length and checks it against what is left before it is used.
+    auto read_length = [&parser]() {
+        auto [len, _] = parser.read_varlong();
+        if (len > static_cast<int64_t>(parser.bytes_left())) [[unlikely]] {
+            throw std::out_of_range(
+              fmt::format(
+                "dedup: field of {} bytes, but only {} left in the batch",
+                len,
+                parser.bytes_left()));
+        }
+        return len;
+    };
+    for (int32_t i = 0; i < readable.record_count(); ++i) {
+        read_length();  // record size
+        parser.skip(1); // attributes
+        auto [ts_delta, _tv] = parser.read_varlong();
+        parser.read_varlong(); // offset delta
+        const auto key_len = read_length();
+        auto lookup = dedup_identity_lookup::no_identity;
+        dedup_identity_digest digest;
+        if (key_header) {
+            skip_bytes(key_len);
+        } else if (key_len >= 0) {
+            // An empty key is an identity, a null one (-1) is not.
+            lookup = dedup_identity_lookup::identity;
+            digest = digest_bytes(key_len);
+        }
+        skip_bytes(read_length()); // value
+        const auto header_count = read_length();
+        if (key_header) {
+            lookup = dedup_identity_lookup::missing_header;
+        }
+        // The first occurrence of the configured header is the identity,
+        // whatever follows it, as the model::record based lookup had it.
+        bool header_seen = false;
+        for (int64_t h = 0; h < header_count; ++h) {
+            const auto hkey_len = read_length();
+            bool matches = false;
+            if (
+              key_header && !header_seen
+              && hkey_len == static_cast<int64_t>(key_header->size())) {
+                const char* want = key_header->data();
+                matches = true;
+                parser.consume(
+                  static_cast<size_t>(hkey_len),
+                  [&want, &matches](const char* data, size_t n) {
+                      matches = matches && std::memcmp(want, data, n) == 0;
+                      want += n;
+                      return ss::stop_iteration::no;
+                  });
+            } else {
+                skip_bytes(hkey_len);
+            }
+            const auto hval_len = read_length();
+            if (matches) {
+                header_seen = true;
+                // A null value is not an identity: treated like an absent
+                // header, so the request is rejected rather than every
+                // such record deduplicating against the empty buffer.
+                if (hval_len >= 0) {
+                    lookup = dedup_identity_lookup::identity;
+                    digest = digest_bytes(hval_len);
+                }
+            } else {
+                skip_bytes(hval_len);
+            }
+        }
+        if (!emit(lookup, digest, model::timestamp{base_ts + ts_delta})) {
+            return;
+        }
+    }
+}
 
 /// Per-request record of the index mutations performed while classifying one
 /// produce request, sufficient to undo exactly this request's insertions if
@@ -462,6 +593,8 @@ public:
     /// by the STM apply path and by state restoration helpers. Participates
     /// in eviction accounting so follower maps stay bounded.
     void populate(const iobuf& identity, model::timestamp ts);
+    /// The same, for an identity already digested (for_each_dedup_identity()).
+    void populate(dedup_identity_digest identity, model::timestamp ts);
 
     /// \brief Reset all index state.
     void clear();

@@ -1223,6 +1223,240 @@ TEST(DedupIdentityDigest, IsPinnedForSnapshotCompatibility) {
     EXPECT_EQ(d.lo, 0x68a86e30b386534dULL);
 }
 
+// --- Reading identities straight from the batch buffer ---
+//
+// for_each_dedup_identity() decodes the record layout itself instead of
+// parsing each record into a model::record. Its reference is that parse: the
+// two must agree on which records have an identity, on the identity's digest
+// and on the timestamp, under both identity sources and for every edge of the
+// format (null and empty keys, missing, repeated and null-valued headers).
+
+namespace {
+
+struct walked {
+    cluster::dedup_identity_lookup lookup;
+    cluster::dedup_identity_digest digest;
+    model::timestamp timestamp;
+
+    friend bool operator==(const walked&, const walked&) = default;
+};
+
+std::vector<walked> walk(
+  const model::record_batch& b, const std::optional<ss::sstring>& key_header) {
+    std::vector<walked> out;
+    cluster::for_each_dedup_identity(
+      b,
+      key_header,
+      [&out](
+        cluster::dedup_identity_lookup lookup,
+        cluster::dedup_identity_digest digest,
+        model::timestamp ts) {
+          out.push_back({lookup, digest, ts});
+          return true;
+      });
+    return out;
+}
+
+// The model::record based lookup the walk replaced, kept here as the oracle.
+std::vector<walked> parse(
+  const model::record_batch& b, const std::optional<ss::sstring>& key_header) {
+    std::vector<walked> out;
+    const auto base_ts = b.header().first_timestamp.value();
+    b.copy().for_each_record([&](model::record r) {
+        walked w{
+          .lookup = cluster::dedup_identity_lookup::no_identity,
+          .digest = {},
+          .timestamp = model::timestamp{base_ts + r.timestamp_delta()}};
+        if (key_header) {
+            w.lookup = cluster::dedup_identity_lookup::missing_header;
+            for (auto& h : r.headers()) {
+                if (iobuf_string(h.key()) == *key_header) {
+                    if (h.value_size() >= 0) {
+                        w.lookup = cluster::dedup_identity_lookup::identity;
+                        w.digest = cluster::dedup_digest_of(h.value());
+                    }
+                    break;
+                }
+            }
+        } else if (r.has_key()) {
+            w.lookup = cluster::dedup_identity_lookup::identity;
+            w.digest = cluster::dedup_digest_of(r.key());
+        }
+        out.push_back(w);
+    });
+    return out;
+}
+
+// A record whose headers may carry a null value, which record_spec cannot
+// express.
+model::record_batch make_batch_with_nullable_headers(
+  std::optional<std::string_view> key,
+  std::vector<std::pair<std::string_view, std::optional<std::string_view>>>
+    headers,
+  model::timestamp base_ts) {
+    model::batch_builder builder;
+    builder.set_batch_type(model::record_batch_type::raft_data);
+    builder.set_batch_timestamp(model::timestamp_type::create_time, base_ts);
+    chunked_vector<model::record_header> hdrs;
+    for (const auto& [hk, hv] : headers) {
+        hdrs.emplace_back(
+          iobuf::from(hk),
+          hv ? std::make_optional(iobuf::from(*hv)) : std::nullopt);
+    }
+    builder.add_record(
+      model::record(
+        {},
+        0,
+        0,
+        key ? std::make_optional(iobuf::from(*key)) : std::nullopt,
+        iobuf::from("value"),
+        std::move(hdrs)));
+    return std::move(builder).build_sync();
+}
+
+} // namespace
+
+TEST(DedupIdentityWalk, MatchesRecordParsingInKeyMode) {
+    const std::string big(100'000, 'k');
+    auto batch = make_batch_of(
+      {
+        {.key = "plain", .value = "v", .timestamp_delta = 0},
+        {.key = std::nullopt, .value = "null key", .timestamp_delta = 7},
+        {.key = "", .value = "empty key", .timestamp_delta = 11},
+        {.key = ss::sstring(big), .value = "", .timestamp_delta = 13},
+        {.key = "with headers",
+         .value = "v",
+         .timestamp_delta = 17,
+         .headers = {{"h1", "x"}, {"", ""}, {"h3", ss::sstring(5000, 'y')}}},
+      },
+      ts(1000));
+    const auto expected = parse(batch, std::nullopt);
+    ASSERT_EQ(expected.size(), 5u);
+    EXPECT_EQ(walk(batch, std::nullopt), expected);
+
+    // The identities a record parse yields are what the walk yields.
+    EXPECT_EQ(expected[0].lookup, cluster::dedup_identity_lookup::identity);
+    EXPECT_EQ(
+      expected[0].digest, cluster::dedup_digest_of(iobuf::from("plain")));
+    EXPECT_EQ(expected[1].lookup, cluster::dedup_identity_lookup::no_identity);
+    EXPECT_EQ(expected[2].lookup, cluster::dedup_identity_lookup::identity);
+    EXPECT_EQ(expected[2].digest, cluster::dedup_digest_of(iobuf{}));
+    EXPECT_EQ(expected[3].digest, cluster::dedup_digest_of(iobuf::from(big)));
+    EXPECT_EQ(expected[4].timestamp, ts(1017));
+}
+
+TEST(DedupIdentityWalk, MatchesRecordParsingInHeaderMode) {
+    const std::optional<ss::sstring> header{"dedup-id"};
+    auto batch = make_batch_of(
+      {
+        {.key = "k", .value = "v", .headers = {{"dedup-id", "first"}}},
+        {.key = std::nullopt, .value = "v", .headers = {}},
+        {.key = "k",
+         .value = "v",
+         .timestamp_delta = 3,
+         .headers = {{"other", "x"}, {"dedup-id", "second"}}},
+        {.key = "k",
+         .value = "v",
+         .headers = {{"dedup-id", "wins"}, {"dedup-id", "ignored"}}},
+        {.key = "k", .value = "v", .headers = {{"dedup-i", "prefix"}}},
+        {.key = "k", .value = "v", .headers = {{"dedup-idx", "longer"}}},
+        {.key = "k", .value = "v", .headers = {{"dedup-id", ""}}},
+      },
+      ts(1000));
+    const auto expected = parse(batch, header);
+    ASSERT_EQ(expected.size(), 7u);
+    EXPECT_EQ(walk(batch, header), expected);
+
+    using lookup = cluster::dedup_identity_lookup;
+    EXPECT_EQ(expected[0].lookup, lookup::identity);
+    EXPECT_EQ(
+      expected[0].digest, cluster::dedup_digest_of(iobuf::from("first")));
+    EXPECT_EQ(expected[1].lookup, lookup::missing_header);
+    EXPECT_EQ(expected[2].lookup, lookup::identity);
+    EXPECT_EQ(expected[2].timestamp, ts(1003));
+    EXPECT_EQ(
+      expected[3].digest, cluster::dedup_digest_of(iobuf::from("wins")));
+    EXPECT_EQ(expected[4].lookup, lookup::missing_header);
+    EXPECT_EQ(expected[5].lookup, lookup::missing_header);
+    EXPECT_EQ(expected[6].lookup, lookup::identity);
+    EXPECT_EQ(expected[6].digest, cluster::dedup_digest_of(iobuf{}));
+}
+
+// A header carrying a null value is not an identity, and a later header of
+// the same name does not get a second chance: the first occurrence decides.
+TEST(DedupIdentityWalk, NullHeaderValueIsNotAnIdentity) {
+    const std::optional<ss::sstring> header{"dedup-id"};
+    auto null_only = make_batch_with_nullable_headers(
+      "k", {{"dedup-id", std::nullopt}}, ts(1000));
+    auto null_then_value = make_batch_with_nullable_headers(
+      "k", {{"dedup-id", std::nullopt}, {"dedup-id", "late"}}, ts(1000));
+
+    for (const auto* b : {&null_only, &null_then_value}) {
+        const auto expected = parse(*b, header);
+        ASSERT_EQ(expected.size(), 1u);
+        EXPECT_EQ(
+          expected[0].lookup, cluster::dedup_identity_lookup::missing_header);
+        EXPECT_EQ(walk(*b, header), expected);
+    }
+    // In key mode the same records are keyed as usual; the headers are
+    // skipped over, null values included.
+    EXPECT_EQ(
+      walk(null_then_value, std::nullopt),
+      parse(null_then_value, std::nullopt));
+}
+
+TEST(DedupIdentityWalk, StopsWhenAskedTo) {
+    auto batch = make_multi_batch(
+      {{"a", "1"}, {"b", "2"}, {"c", "3"}, {"d", "4"}}, ts(1000));
+    int seen = 0;
+    cluster::for_each_dedup_identity(
+      batch,
+      std::nullopt,
+      [&seen](
+        cluster::dedup_identity_lookup,
+        cluster::dedup_identity_digest,
+        model::timestamp) { return ++seen < 2; });
+    EXPECT_EQ(seen, 2);
+}
+
+// Batches reach the walk validated, but a buffer shorter than its record
+// count claims must still fail loudly rather than be read past its end.
+TEST(DedupIdentityWalk, RejectsATruncatedBatch) {
+    auto batch = make_multi_batch(
+      {{"key-one", "value-one"}, {"key-two", "value-two"}}, ts(1000));
+    auto header = batch.header();
+    auto data = batch.data().copy();
+    // Leaves less than one record, so the first record's size overruns.
+    data.trim_back(data.size_bytes() - 10);
+    model::record_batch truncated(
+      header, std::move(data), model::record_batch::tag_ctor_ng{});
+    EXPECT_THROW(walk(truncated, std::nullopt), std::out_of_range);
+    EXPECT_THROW(
+      walk(truncated, std::optional<ss::sstring>{"h"}), std::out_of_range);
+}
+
+// Identities that reach the index as digests (the apply path) land in the
+// same entries as identities that reach it as bytes.
+TEST(DedupWindowFilter, PopulateByDigestMatchesPopulateByKey) {
+    cluster::dedup_window_filter by_key(1000ms);
+    cluster::dedup_window_filter by_digest(1000ms);
+    by_key.populate(iobuf::from("same"), ts(1000));
+    by_digest.populate(cluster::dedup_digest_of(iobuf::from("same")), ts(1000));
+
+    EXPECT_FALSE(
+      by_key.filter(make_batch("same", "dup", ts(1500))).has_value());
+    EXPECT_FALSE(
+      by_digest.filter(make_batch("same", "dup", ts(1500))).has_value());
+    EXPECT_TRUE(
+      by_digest.filter(make_batch("other", "v", ts(1500))).has_value());
+    // The same max-wins idempotence: a later timestamp moves the entry, an
+    // older one does not.
+    by_digest.populate(cluster::dedup_digest_of(iobuf::from("same")), ts(2500));
+    by_digest.populate(cluster::dedup_digest_of(iobuf::from("same")), ts(1200));
+    EXPECT_FALSE(
+      by_digest.filter(make_batch("same", "dup", ts(3400))).has_value());
+}
+
 // --- Record payload integrity across the sharing rewrite ---
 
 // filter_request() iterates records by sharing them out of the batch rather
