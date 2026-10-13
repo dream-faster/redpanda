@@ -157,7 +157,8 @@ ss::future<> dedup_stm::start() {
         // together.
         std::optional<ssx::semaphore_units> one_at_a_time;
         if (auto budget = _state.shard_budget(); budget) {
-            one_at_a_time = co_await budget->restore_one_at_a_time.get_units(1);
+            one_at_a_time = co_await ss::get_units(
+              budget->restore_one_at_a_time, 1);
         }
         co_await raft::persisted_stm<>::start();
     }
