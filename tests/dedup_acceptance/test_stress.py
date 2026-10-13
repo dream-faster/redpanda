@@ -219,7 +219,9 @@ def test_chaos_loses_nothing_and_duplicates_nothing(make_cluster, pytestconfig):
         while not stop.is_set():
             k = f"c-{i}".encode()
             try:
-                p.produce(t, key=k, value=b"v", partition=i % partitions, on_delivery=cb)
+                p.produce(
+                    t, key=k, value=b"v", partition=i % partitions, on_delivery=cb
+                )
             except BufferError:
                 # The cluster is down or electing: the client's queue is full
                 # of records waiting for a leader. Back off, keep the key.
