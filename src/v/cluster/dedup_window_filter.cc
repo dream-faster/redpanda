@@ -144,11 +144,19 @@ bool dedup_window_filter::over_own_soft_limit() const {
 }
 
 bool dedup_window_filter::among_the_largest() const {
-    // Within one entry of the largest counts as the largest, so two indices of
-    // equal size each trim themselves rather than each waiting on the other.
+    // Within the shard's soft margin of the largest counts as the largest.
+    // With an exact rule, an index tied with an idle one could trim itself
+    // only while level with it, so it never built headroom below the shard
+    // limit: every pass that ran out of entries old enough to trim left it at
+    // the limit, admitting new identities unindexed until the cursor wrapped.
+    // The margin lets it trim down into the soft zone the way an index nearing
+    // its own ceiling does, while an index well below the largest still takes
+    // room from it rather than shrinking itself.
     auto* largest = _shard_budget->largest();
+    const auto margin = std::max<size_t>(
+      1, _shard_budget->max_entries / capacity_soft_margin_divisor);
     return largest == nullptr || largest == this
-           || largest->_map.size() <= _map.size() + 1;
+           || largest->_map.size() <= _map.size() + margin;
 }
 
 bool dedup_window_filter::shard_pressure_trims_this() const {
@@ -623,10 +631,8 @@ size_t dedup_window_filter::begin_restore(size_t count) {
     return keep;
 }
 
-void dedup_window_filter::finish_restore(
-  model::timestamp max_timestamp, size_t truncated) {
-    _truncated_entries += truncated;
-    sync_shard_budget();
+void dedup_window_filter::begin_restore_pass(
+  model::timestamp max_timestamp, int64_t oldest) {
     // A snapshot written by a broker without the clamp can carry a poisoned
     // watermark; clamping here lets such a partition heal on restart rather
     // than needing a dedup_generation bump. Not counted as record skew.
@@ -634,24 +640,25 @@ void dedup_window_filter::finish_restore(
     // The cursor indexes the value array it was walking, and the histogram
     // describes that array's contents; neither survives a different map, and
     // neither is persisted, which would put a wire field in the snapshot that
-    // every replica would have to agree on. The cutoff is recomputed from the
+    // every replica would have to agree on. The cutoff is measured over the
     // restored entries instead of waiting for the cursor: until a pass
     // completes nothing is old enough to trim, so a restore that filled the
     // shard would leave every partition on it admitting new identities
     // unindexed for a whole pass -- hundreds of thousands of records on a
-    // large index. begin_pass() runs after _max_ts is set because the frame
-    // it freezes is read from it, and after the oldest restored entry is known
-    // because the frame starts there.
+    // large index. The frame starts at the oldest restored entry.
     _sweep_pos = 0;
-    _pass_oldest = no_pass_oldest;
-    for (const auto& entry : _map) {
-        _pass_oldest = std::min(_pass_oldest, entry.second.value());
-    }
+    _pass_oldest = oldest;
     begin_pass();
-    for (const auto& entry : _map) {
-        count_in_pass(entry.second);
-    }
+}
+
+int64_t dedup_window_filter::finish_restore_pass() {
     finish_pass();
+    return _capacity_cutoff.value();
+}
+
+void dedup_window_filter::finish_restore(size_t truncated) {
+    _truncated_entries += truncated;
+    sync_shard_budget();
 }
 
 void dedup_window_filter::clear() {

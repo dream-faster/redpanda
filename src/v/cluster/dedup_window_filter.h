@@ -339,20 +339,27 @@ public:
     ///
     /// \p for_each_entry(emit) must call emit(identity, timestamp) once per
     /// entry, \p count times in all, and produce the same entries each time
-    /// it is called: it runs once when every entry fits, and twice when they
-    /// must be trimmed -- the first pass only to find the timestamp cutoff.
-    /// That keeps the transient cost of a restore at 8 bytes per entry, and
-    /// only when trimming, rather than a full copy of the entries.
+    /// it is called. It runs four times: once to find the oldest kept entry,
+    /// once to measure the capacity cutoff, and once each to insert the
+    /// entries older than that cutoff and the rest -- plus once more first,
+    /// only to find the trim point, when they do not all fit. Passes over the
+    /// snapshot keep the transient cost at 8 bytes per entry, and only when
+    /// trimming, rather than a full copy of the entries.
+    ///
+    /// The entries old enough to trim are inserted first. The sweep cursor
+    /// starts at the front of the index, so after a restart that filled the
+    /// shard they are the first it finds; inserted in snapshot order, they
+    /// can sit anywhere, and every new identity at the limit is admitted
+    /// unindexed until the cursor reaches them.
     template<typename ForEach>
     void restore_from(
       size_t count, model::timestamp max_timestamp, ForEach&& for_each_entry) {
         const auto keep = begin_restore(count);
-        if (keep == count) {
-            for_each_entry(
-              [this](dedup_identity_digest identity, model::timestamp ts) {
-                  _map.emplace(identity, ts);
-              });
-        } else if (keep > 0) {
+        // Kept: every entry newer than `keep_from`, and the first
+        // `at_keep_from` entries exactly at it.
+        int64_t keep_from = std::numeric_limits<int64_t>::min();
+        size_t at_keep_from = 0;
+        if (keep > 0 && keep < count) {
             // Keep the most recent identities. The index is a dense hash map
             // whose iteration is insertion order, so snapshots run roughly
             // oldest first; taking a prefix would drop exactly the entries
@@ -366,27 +373,77 @@ public:
             const auto smallest_kept
               = stamps.begin() + static_cast<std::ptrdiff_t>(count - keep);
             std::nth_element(stamps.begin(), smallest_kept, stamps.end());
-            const int64_t cutoff = *smallest_kept;
-            const auto newer = static_cast<size_t>(
-              std::count_if(stamps.begin(), stamps.end(), [cutoff](int64_t ts) {
-                  return ts > cutoff;
+            keep_from = *smallest_kept;
+            const auto newer = static_cast<size_t>(std::count_if(
+              stamps.begin(), stamps.end(), [keep_from](int64_t ts) {
+                  return ts > keep_from;
               }));
             stamps = chunked_vector<int64_t>{};
-            // Everything newer than the cutoff fits by construction; entries
+            // Everything newer than keep_from fits by construction; entries
             // exactly at it fill what is left, first come first kept.
-            size_t at_cutoff = keep - newer;
+            at_keep_from = keep - newer;
+        }
+
+        int64_t oldest = no_pass_oldest;
+        int64_t trim_below = std::numeric_limits<int64_t>::min();
+        if (keep > 0) {
+            const bool trimming = keep < count;
+            auto kept_newer = [trimming, keep_from](int64_t ts) {
+                return !trimming || ts > keep_from;
+            };
+            for_each_entry([&oldest, &kept_newer](
+                             dedup_identity_digest, model::timestamp ts) {
+                if (kept_newer(ts.value())) {
+                    oldest = std::min(oldest, ts.value());
+                }
+            });
+            if (trimming && at_keep_from > 0) {
+                oldest = std::min(oldest, keep_from);
+            }
+            begin_restore_pass(max_timestamp, oldest);
             for_each_entry(
-              [this, cutoff, &at_cutoff](
-                dedup_identity_digest identity, model::timestamp ts) {
-                  if (ts.value() > cutoff) {
-                      _map.emplace(identity, ts);
-                  } else if (ts.value() == cutoff && at_cutoff > 0) {
-                      _map.emplace(identity, ts);
-                      --at_cutoff;
+              [this, &kept_newer](dedup_identity_digest, model::timestamp ts) {
+                  if (kept_newer(ts.value())) {
+                      count_in_pass(ts);
                   }
               });
+            if (trimming) {
+                for (size_t i = 0; i < at_keep_from; ++i) {
+                    count_in_pass(model::timestamp{keep_from});
+                }
+            }
+            trim_below = finish_restore_pass();
+
+            size_t ties_left = at_keep_from;
+            auto insert_part = [&](bool older_part) {
+                for_each_entry(
+                  [this,
+                   trimming,
+                   keep_from,
+                   trim_below,
+                   older_part,
+                   &ties_left](
+                    dedup_identity_digest identity, model::timestamp ts) {
+                      if ((ts.value() < trim_below) != older_part) {
+                          return;
+                      }
+                      if (!trimming || ts.value() > keep_from) {
+                          _map.emplace(identity, ts);
+                      } else if (ts.value() == keep_from && ties_left > 0) {
+                          _map.emplace(identity, ts);
+                          --ties_left;
+                      }
+                  });
+            };
+            if (trim_below > oldest) {
+                insert_part(true);
+            }
+            insert_part(false);
+        } else {
+            begin_restore_pass(max_timestamp, oldest);
+            finish_restore_pass();
         }
-        finish_restore(max_timestamp, count - keep);
+        finish_restore(count - keep);
     }
 
     /// \brief Record an identity admitted into the log.
@@ -520,19 +577,23 @@ private:
     /// Clear the index for a restore of \p count entries and return how many
     /// of them it may keep.
     size_t begin_restore(size_t count);
-    /// Account for the restored entries, reset the cursor and compute the
-    /// capacity cutoff from what was restored.
-    void finish_restore(model::timestamp max_timestamp, size_t truncated);
+    /// Set the watermark from a snapshot and start a pass over the entries it
+    /// keeps, whose oldest timestamp is \p oldest.
+    void begin_restore_pass(model::timestamp max_timestamp, int64_t oldest);
+    /// Turn the restore pass into the capacity cutoff, and return it.
+    int64_t finish_restore_pass();
+    /// Account for the restored entries.
+    void finish_restore(size_t truncated);
 
     /// Whether this index is within capacity_soft_margin_divisor of its own
     /// ceiling, so its cursor drops entries below the capacity cutoff.
     bool over_own_soft_limit() const;
     /// Whether the shard is within capacity_soft_margin_divisor of its limit
-    /// and this is the largest index on it, which is then the one whose
-    /// cursor trims.
+    /// and this is among the largest indices on it, which are then the ones
+    /// whose cursors trim.
     bool shard_pressure_trims_this() const;
-    /// Whether no index on the shard is more than one entry larger than this
-    /// one. Requires a shard budget.
+    /// Whether no index on the shard is larger than this one by more than the
+    /// shard's soft margin. Requires a shard budget.
     bool among_the_largest() const;
 
     // Entries the cursor visits per new-identity attempt. This matches the

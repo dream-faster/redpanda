@@ -2231,30 +2231,84 @@ TEST(DedupShardBudget, ARestoredFullShardIndexesNewIdentitiesAtOnce) {
     }
 }
 
-// Two partitions of equal size filling the shard: neither is larger, so each
-// trims itself instead of each waiting for the other to give up room. The
-// first few identities at the limit can go unindexed while the cursor reaches
-// the oldest entries -- at most one pass of bounded steps -- and after that
-// every one is indexed.
-TEST(DedupShardBudget, EqualIndicesAtTheShardLimitKeepIndexing) {
+// Two partitions filling the shard, one idle at half of it and one still
+// receiving new identities. Neither is far larger, so the busy one trims
+// itself rather than waiting for the idle one to give up room -- and it trims
+// down into the shard's soft zone, as it would below its own ceiling, so its
+// cursor always has headroom to find the next entries old enough to drop.
+TEST(DedupShardBudget, TiedIndicesAtTheShardLimitKeepIndexing) {
     constexpr size_t shard_limit = 2'000;
     auto budget = make_budget(shard_limit);
     cluster::dedup_window_filter a(1'000s, 100'000, budget);
     cluster::dedup_window_filter b(1'000s, 100'000, budget);
     populate_n(a, "a", shard_limit / 2, 1000, 10);
     populate_n(b, "b", shard_limit / 2, 1000, 10);
-    // b starts trimming itself as soon as it draws level with a, so the
-    // shard settles a few entries short of the limit.
-    ASSERT_GE(budget->entries, shard_limit - 10);
-    ASSERT_NEAR(
-      static_cast<double>(a.map_size()), static_cast<double>(b.map_size()), 10);
+    ASSERT_GE(budget->entries, shard_limit * 9 / 10);
+    ASSERT_LE(budget->entries, shard_limit);
+    ASSERT_EQ(b.unindexed_records(), 0u);
 
-    populate_n(b, "b-new", 200, 1000 + 10 * shard_limit);
-    const auto transient = b.unindexed_records();
-    EXPECT_LE(transient, shard_limit / 2 / 64);
-    populate_n(b, "b-newer", 200, 1000 + 20 * shard_limit);
-    EXPECT_EQ(b.unindexed_records(), transient);
+    populate_n(b, "b-new", 400, 1000 + 10 * shard_limit);
+    EXPECT_EQ(b.unindexed_records(), 0u);
     EXPECT_LE(budget->entries, shard_limit);
+    EXPECT_FALSE(
+      b.filter(
+         make_batch("b-new-399", "dup", ts(1000 + 10 * shard_limit + 399)))
+        .has_value());
+}
+
+// Four partitions filled past the shard's budget, one after another, so the
+// earlier ones were trimmed while full and their oldest survivors are
+// scattered through their indices. After a restart restores them into a full
+// shard, every new identity on every partition is indexed: the restore puts
+// the entries old enough to trim at the front, where the cursor starts.
+TEST(DedupShardBudget, PartitionsRestoredIntoAFullShardKeepIndexing) {
+    constexpr size_t shard_limit = 40'000;
+    constexpr size_t per_partition = shard_limit * 2 / 5;
+    constexpr auto window = std::chrono::milliseconds{3'600'000};
+    constexpr size_t no_ceiling = 1'000'000'000;
+    auto budget = make_budget(shard_limit);
+    std::vector<cluster::dedup_index_snapshot> snaps;
+    int64_t clock = 1'000'000;
+    {
+        std::vector<std::unique_ptr<cluster::dedup_window_filter>> filters;
+        for (int p = 0; p < 4; ++p) {
+            filters.push_back(
+              std::make_unique<cluster::dedup_window_filter>(
+                window, no_ceiling, budget));
+        }
+        for (size_t p = 0; p < filters.size(); ++p) {
+            for (size_t i = 0; i < per_partition; ++i) {
+                filters[p]->populate(
+                  iobuf::from(fmt::format("p{}-{}", p, i)),
+                  ts(clock + static_cast<int64_t>(i / 50)));
+            }
+            clock += static_cast<int64_t>(per_partition / 50);
+        }
+        ASSERT_GE(budget->entries, shard_limit * 9 / 10);
+        for (auto& f : filters) {
+            snaps.push_back(f->snapshot());
+        }
+    }
+    ASSERT_EQ(budget->entries, 0u);
+
+    std::vector<std::unique_ptr<cluster::dedup_window_filter>> restored;
+    for (const auto& snap : snaps) {
+        restored.push_back(
+          std::make_unique<cluster::dedup_window_filter>(
+            window, no_ceiling, budget));
+        restored.back()->restore(snap);
+    }
+    ASSERT_GE(budget->entries, shard_limit * 9 / 10);
+
+    for (size_t p = 0; p < restored.size(); ++p) {
+        for (int64_t i = 0; i < 1'000; ++i) {
+            restored[p]->populate(
+              iobuf::from(fmt::format("probe{}-{}", p, i)),
+              ts(clock + 1'000 + i));
+        }
+        EXPECT_EQ(restored[p]->unindexed_records(), 0u) << "partition " << p;
+        EXPECT_LE(budget->entries, shard_limit);
+    }
 }
 
 // An index written in a burst covers a sliver of a long window. The capacity
@@ -2277,6 +2331,7 @@ TEST(DedupShardBudget, RestoredPartitionsSharingAFullShardKeepIndexing) {
     constexpr size_t shard_limit = 4'000;
     auto budget = make_budget(shard_limit);
     std::vector<cluster::dedup_index_snapshot> snaps;
+    size_t held = 0;
     {
         cluster::dedup_window_filter a(1'000s, 100'000, budget);
         cluster::dedup_window_filter b(1'000s, 100'000, budget);
@@ -2284,13 +2339,15 @@ TEST(DedupShardBudget, RestoredPartitionsSharingAFullShardKeepIndexing) {
         populate_n(b, "b", shard_limit / 2, 1000, 10);
         snaps.push_back(a.snapshot());
         snaps.push_back(b.snapshot());
+        held = budget->entries;
     }
     ASSERT_EQ(budget->entries, 0u);
+    ASSERT_GE(held, shard_limit * 4 / 5);
     cluster::dedup_window_filter a(1'000s, 100'000, budget);
     cluster::dedup_window_filter b(1'000s, 100'000, budget);
     a.restore(snaps[0]);
     b.restore(snaps[1]);
-    ASSERT_EQ(budget->entries, shard_limit);
+    ASSERT_EQ(budget->entries, held);
 
     for (auto* f : {&a, &b}) {
         populate_n(*f, fmt::format("new-{}", f == &a ? "a" : "b"), 300, 50'000);
