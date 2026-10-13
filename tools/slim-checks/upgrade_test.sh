@@ -200,18 +200,27 @@ rpk 0 topic create after-snapshot -p 3 -r 3 >/dev/null || fail "create after-sna
 for i in $(seq 1 50); do echo "s-$i"; done | rpk_in 0 topic produce after-snapshot -p 0 >/dev/null
 
 # Dedup index state only exists when the node being replaced already runs
-# dedup, so probe for the property instead of assuming it: upstream stock
-# rejects it, a predecessor built from this branch accepts it. Pass that
-# image as the baseline (docker-build's stock_image input) to exercise this.
+# dedup, so probe for the property instead of assuming it: a predecessor
+# built from this branch stores it, while upstream stock either rejects it
+# or, like v26.2.4, creates the topic and silently drops the property, so
+# check that it stuck. Pass a dedup build as the baseline (docker-build's
+# stock_image input) to exercise this.
 #
 # --acks=1 is deliberate. rpk's default --acks=-1 keeps franz-go's idempotent
 # producer, and the dedup filter bypasses idempotent and transactional produce
 # by design, so duplicates would sail through and the leg would assert nothing.
 # Only --acks=0 and --acks=1 disable idempotency, and --acks=0 gives no ack to
 # order the counts against.
+dedup_window_stuck() {
+  for _ in $(seq 1 5); do
+    expect_config 0 deduped redpanda.dedup.window.ms 3600000 >/dev/null && return 0
+    sleep 1
+  done
+  return 1
+}
 DEDUP=false
 if rpk 0 topic create deduped -p 1 -r 3 \
-  -c redpanda.dedup.window.ms=3600000 >/dev/null 2>&1; then
+  -c redpanda.dedup.window.ms=3600000 >/dev/null 2>&1 && dedup_window_stuck; then
   DEDUP=true
   printf 'k1:v1\nk2:v2\nk1:v3\n' |
     rpk_in 0 topic produce deduped --acks=1 -f '%k:%v\n' -p 0 >/dev/null ||
