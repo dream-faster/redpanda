@@ -499,6 +499,8 @@ private:
     /// Turn a completed pass's histogram into the next capacity cutoff and
     /// start the following pass.
     void finish_pass();
+    /// Add \p stamp to the histogram of the pass in progress.
+    void count_in_pass(model::timestamp stamp);
 
     /// Erase the entry the cursor is on. The map moves its last entry into
     /// the freed slot, so the caller must re-examine the same index rather
@@ -517,7 +519,8 @@ private:
     /// Clear the index for a restore of \p count entries and return how many
     /// of them it may keep.
     size_t begin_restore(size_t count);
-    /// Account for the restored entries and reset the sweep state.
+    /// Account for the restored entries, reset the cursor and compute the
+    /// capacity cutoff from what was restored.
     void finish_restore(model::timestamp max_timestamp, size_t truncated);
 
     /// Whether this index is within capacity_soft_margin_divisor of its own
@@ -527,6 +530,9 @@ private:
     /// and this is the largest index on it, which is then the one whose
     /// cursor trims.
     bool shard_pressure_trims_this() const;
+    /// Whether no index on the shard is more than one entry larger than this
+    /// one. Requires a shard budget.
+    bool among_the_largest() const;
 
     // Entries the cursor visits per new-identity attempt. This matches the
     // throughput of the periodic full passes it replaced -- those swept the

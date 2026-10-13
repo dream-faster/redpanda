@@ -2205,6 +2205,76 @@ TEST(DedupShardBudget, RestoreWithoutABudgetKeepsUpToTheCeiling) {
     EXPECT_EQ(f.truncated_entries(), 40u);
 }
 
+// A restart that fills the shard from snapshots must not leave dedup off until
+// the cursor has walked the whole restored index: restore computes the
+// capacity cutoff from what it restored, so the very first new identities
+// already find something old enough to trim.
+TEST(DedupShardBudget, ARestoredFullShardIndexesNewIdentitiesAtOnce) {
+    constexpr size_t shard_limit = 5'000;
+    auto budget = make_budget(shard_limit);
+    cluster::dedup_window_filter source(1'000s, 100'000);
+    populate_n(source, "old", shard_limit, 1000, 10);
+    const auto snap = source.snapshot();
+
+    cluster::dedup_window_filter f(1'000s, 100'000, budget);
+    f.restore(snap);
+    ASSERT_EQ(budget->entries, shard_limit);
+
+    populate_n(f, "new", 200, 1000 + 10 * shard_limit);
+    EXPECT_EQ(f.unindexed_records(), 0u);
+    EXPECT_LE(budget->entries, shard_limit);
+    for (size_t i = 0; i < 200; ++i) {
+        EXPECT_FALSE(
+          f.filter(make_batch(fmt::format("new-{}", i), "dup", ts(60'000)))
+            .has_value())
+          << i;
+    }
+}
+
+// Two partitions of equal size filling the shard: neither is larger, so each
+// trims itself instead of each waiting for the other to give up room.
+TEST(DedupShardBudget, EqualIndicesAtTheShardLimitKeepIndexing) {
+    constexpr size_t shard_limit = 2'000;
+    auto budget = make_budget(shard_limit);
+    cluster::dedup_window_filter a(1'000s, 100'000, budget);
+    cluster::dedup_window_filter b(1'000s, 100'000, budget);
+    populate_n(a, "a", shard_limit / 2, 1000, 10);
+    populate_n(b, "b", shard_limit / 2, 1000, 10);
+    ASSERT_EQ(budget->entries, shard_limit);
+    ASSERT_EQ(a.map_size(), b.map_size());
+
+    populate_n(b, "b-new", 200, 1000 + 10 * shard_limit);
+    EXPECT_EQ(b.unindexed_records(), 0u);
+    EXPECT_LE(budget->entries, shard_limit);
+}
+
+// The same after a restart, where both restore as far as the shard allows.
+TEST(DedupShardBudget, RestoredPartitionsSharingAFullShardKeepIndexing) {
+    constexpr size_t shard_limit = 4'000;
+    auto budget = make_budget(shard_limit);
+    std::vector<cluster::dedup_index_snapshot> snaps;
+    {
+        cluster::dedup_window_filter a(1'000s, 100'000, budget);
+        cluster::dedup_window_filter b(1'000s, 100'000, budget);
+        populate_n(a, "a", shard_limit / 2, 1000, 10);
+        populate_n(b, "b", shard_limit / 2, 1000, 10);
+        snaps.push_back(a.snapshot());
+        snaps.push_back(b.snapshot());
+    }
+    ASSERT_EQ(budget->entries, 0u);
+    cluster::dedup_window_filter a(1'000s, 100'000, budget);
+    cluster::dedup_window_filter b(1'000s, 100'000, budget);
+    a.restore(snaps[0]);
+    b.restore(snaps[1]);
+    ASSERT_EQ(budget->entries, shard_limit);
+
+    for (auto* f : {&a, &b}) {
+        populate_n(*f, fmt::format("new-{}", f == &a ? "a" : "b"), 300, 50'000);
+        EXPECT_EQ(f->unindexed_records(), 0u);
+        EXPECT_LE(budget->entries, shard_limit);
+    }
+}
+
 // The leader's and the follower's paths must still agree with each other when
 // the shard budget is what is doing the trimming, given the same shard state.
 TEST(DedupShardBudget, LeaderAndFollowerPathsAgreeUnderShardPressure) {

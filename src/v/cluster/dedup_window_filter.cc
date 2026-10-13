@@ -143,6 +143,14 @@ bool dedup_window_filter::over_own_soft_limit() const {
            >= soft_limit_of(_max_entries, capacity_soft_margin_divisor);
 }
 
+bool dedup_window_filter::among_the_largest() const {
+    // Within one entry of the largest counts as the largest, so two indices of
+    // equal size each trim themselves rather than each waiting on the other.
+    auto* largest = _shard_budget->largest();
+    return largest == nullptr || largest == this
+           || largest->_map.size() <= _map.size() + 1;
+}
+
 bool dedup_window_filter::shard_pressure_trims_this() const {
     // Only the largest index trims itself under shard pressure. If every
     // inserting partition trimmed itself instead, a small busy one would keep
@@ -150,7 +158,7 @@ bool dedup_window_filter::shard_pressure_trims_this() const {
     return _shard_budget
            && _shard_budget->entries >= soft_limit_of(
                 _shard_budget->max_entries, capacity_soft_margin_divisor)
-           && _shard_budget->largest() == this;
+           && among_the_largest();
 }
 
 namespace {
@@ -507,14 +515,18 @@ void dedup_window_filter::sweep_step(size_t budget) {
             ++_capacity_evicted_entries;
             continue;
         }
-        // restore() can clamp _max_ts below an entry's own timestamp, and the
-        // frame is a pass old, so an offset outside the window is reachable.
-        const auto offset = std::clamp<int64_t>(
-          stamp.value() - _pass_lo, 0, _pass_span);
-        ++_pass_counts[static_cast<size_t>(offset / _pass_width)];
-        ++_pass_visited;
+        count_in_pass(stamp);
         ++_sweep_pos;
     }
+}
+
+void dedup_window_filter::count_in_pass(model::timestamp stamp) {
+    // restore() can clamp _max_ts below an entry's own timestamp, and the
+    // frame is a pass old, so an offset outside the window is reachable.
+    const auto offset = std::clamp<int64_t>(
+      stamp.value() - _pass_lo, 0, _pass_span);
+    ++_pass_counts[static_cast<size_t>(offset / _pass_width)];
+    ++_pass_visited;
 }
 
 bool dedup_window_filter::make_room_for_one() {
@@ -536,12 +548,12 @@ bool dedup_window_filter::take_room_from_largest() {
         // full, the room this index needs can only come from itself.
         return false;
     }
-    auto* largest = _shard_budget->largest();
-    if (
-      largest == nullptr || largest == this
-      || largest->_map.size() <= _map.size() + 1) {
+    if (among_the_largest()) {
+        // The room has to come from this index itself, which is then the one
+        // shard pressure trims.
         return false;
     }
+    auto* largest = _shard_budget->largest();
     // The largest index's own cursor decides what goes, so it loses its
     // oldest entries as it would at its own ceiling -- once its next pass has
     // found them. That is a change to another partition's index driven by
@@ -607,14 +619,21 @@ void dedup_window_filter::finish_restore(
     // than needing a dedup_generation bump. Not counted as record skew.
     _max_ts = std::min(max_timestamp, broker_now());
     // The cursor indexes the value array it was walking, and the histogram
-    // describes that array's contents; neither survives a different map. Both
-    // are reset rather than persisted: a pass is bounded work that the next
-    // few hundred records redo, and persisting them would put a wire field in
-    // the snapshot that every replica would have to agree on. begin_pass()
-    // runs last because the frame it freezes is read from _max_ts.
+    // describes that array's contents; neither survives a different map, and
+    // neither is persisted, which would put a wire field in the snapshot that
+    // every replica would have to agree on. The cutoff is recomputed from the
+    // restored entries instead of waiting for the cursor: until a pass
+    // completes nothing is old enough to trim, so a restore that filled the
+    // shard would leave every partition on it admitting new identities
+    // unindexed for a whole pass -- hundreds of thousands of records on a
+    // large index. begin_pass() runs after _max_ts is set because the frame
+    // it freezes is read from it.
     _sweep_pos = 0;
-    _capacity_cutoff = model::timestamp::min();
     begin_pass();
+    for (const auto& entry : _map) {
+        count_in_pass(entry.second);
+    }
+    finish_pass();
 }
 
 void dedup_window_filter::clear() {
