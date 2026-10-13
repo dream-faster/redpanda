@@ -169,7 +169,7 @@ struct dedup_shard_budget {
     /// Every filter holding this budget. Filters register on construction
     /// and leave on destruction; they are neither copyable nor movable, so
     /// the pointers stay valid.
-    std::vector<dedup_window_filter*> filters;
+    chunked_vector<dedup_window_filter*> filters;
 
     /// The filter holding the most entries. Rescanned only every
     /// largest_refresh_interval lookups: it is consulted on every insert under
@@ -339,12 +339,12 @@ public:
     ///
     /// \p for_each_entry(emit) must call emit(identity, timestamp) once per
     /// entry, \p count times in all, and produce the same entries each time
-    /// it is called. It runs four times: once to find the oldest kept entry,
-    /// once to measure the capacity cutoff, and once each to insert the
-    /// entries older than that cutoff and the rest -- plus once more first,
-    /// only to find the trim point, when they do not all fit. Passes over the
-    /// snapshot keep the transient cost at 8 bytes per entry, and only when
-    /// trimming, rather than a full copy of the entries.
+    /// it is called. It runs four times: once to find the oldest entry -- or,
+    /// when they do not all fit, to find the trim point, which gives the
+    /// oldest kept entry too -- once to measure the capacity cutoff, and once
+    /// each to insert the entries older than that cutoff and the rest. Passes
+    /// over the snapshot keep the transient cost at 8 bytes per entry, and only
+    /// when trimming, rather than a full copy of the entries.
     ///
     /// The entries old enough to trim are inserted first. The sweep cursor
     /// starts at the front of the index, so after a restart that filled the
@@ -359,6 +359,7 @@ public:
         // `at_keep_from` entries exactly at it.
         int64_t keep_from = std::numeric_limits<int64_t>::min();
         size_t at_keep_from = 0;
+        int64_t oldest_newer_than = no_pass_oldest;
         if (keep > 0 && keep < count) {
             // Keep the most recent identities. The index is a dense hash map
             // whose iteration is insertion order, so snapshots run roughly
@@ -378,6 +379,11 @@ public:
               stamps.begin(), stamps.end(), [keep_from](int64_t ts) {
                   return ts > keep_from;
               }));
+            for (const auto ts : stamps) {
+                if (ts > keep_from) {
+                    oldest_newer_than = std::min(oldest_newer_than, ts);
+                }
+            }
             stamps = chunked_vector<int64_t>{};
             // Everything newer than keep_from fits by construction; entries
             // exactly at it fill what is left, first come first kept.
@@ -385,20 +391,23 @@ public:
         }
 
         int64_t oldest = no_pass_oldest;
+        if (keep > 0 && keep < count) {
+            // The oldest kept entry follows from the trim point, so the pass
+            // that would find it is not needed: with ties kept it is the trim
+            // point itself, and otherwise every kept entry is newer than it.
+            oldest = at_keep_from > 0 ? keep_from : oldest_newer_than;
+        }
         int64_t trim_below = std::numeric_limits<int64_t>::min();
         if (keep > 0) {
             const bool trimming = keep < count;
             auto kept_newer = [trimming, keep_from](int64_t ts) {
                 return !trimming || ts > keep_from;
             };
-            for_each_entry([&oldest, &kept_newer](
-                             dedup_identity_digest, model::timestamp ts) {
-                if (kept_newer(ts.value())) {
-                    oldest = std::min(oldest, ts.value());
-                }
-            });
-            if (trimming && at_keep_from > 0) {
-                oldest = std::min(oldest, keep_from);
+            if (!trimming) {
+                for_each_entry(
+                  [&oldest](dedup_identity_digest, model::timestamp ts) {
+                      oldest = std::min(oldest, ts.value());
+                  });
             }
             begin_restore_pass(max_timestamp, oldest);
             for_each_entry(
@@ -593,13 +602,14 @@ private:
     /// Whether this index is within capacity_soft_margin_divisor of its own
     /// ceiling, so its cursor drops entries below the capacity cutoff.
     bool over_own_soft_limit() const;
-    /// Whether the shard is within capacity_soft_margin_divisor of its limit
-    /// and this is among the largest indices on it, which are then the ones
-    /// whose cursors trim.
-    bool shard_pressure_trims_this() const;
-    /// Whether no index on the shard is larger than this one by more than the
-    /// shard's soft margin. Requires a shard budget.
+    /// Whether the shard is within capacity_soft_margin_divisor of its limit.
+    bool over_shard_soft_limit() const;
+    /// Whether no index on the shard is larger than this one by more than a
+    /// tenth of its size; those are the indices whose cursors trim under shard
+    /// pressure. Requires a shard budget.
     bool among_the_largest() const;
+    /// Clear the shard budget's largest-index cache if it names this index.
+    void stop_being_largest();
 
     // Entries the cursor visits per new-identity attempt. This matches the
     // throughput of the periodic full passes it replaced -- those swept the

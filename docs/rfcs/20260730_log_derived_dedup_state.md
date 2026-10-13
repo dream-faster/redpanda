@@ -441,16 +441,23 @@ that cannot start cannot shed load either. Three paths were bounded:
   (`model::crc_extend_record()`), so integrity checking is unchanged.
 - **Snapshot restore** is bounded by the shard budget's headroom as well as by
   the partition ceiling, keeping the newest identities. It reads the packed
-  entries in place (twice when trimming, the first pass only to find the
-  timestamp cutoff), so it costs at most 8 bytes an entry beyond the index.
+  entries in place, in passes, so it costs at most 8 bytes an entry beyond the
+  index (and only when trimming). It measures the capacity cutoff over what it
+  restores and inserts the entries below it first, where the sweep cursor
+  starts, so a restart into a full shard can trim at once.
 - **Log replay** was already bounded: every insert goes through the same
   capacity checks as the produce path.
 
-A partition that cannot make room in its own index at the shard limit takes
-one bounded cursor step on the largest index on the shard instead. Without it,
-partitions that filled the budget and then went idle -- and so never trim
-themselves -- would leave a newly busy partition without coverage for as long
-as they sat there.
+Under shard pressure the indices within a tenth of the largest one's size trim
+themselves; a smaller partition at the shard limit takes one bounded cursor
+step on the largest index instead. Without it, partitions that filled the
+budget and then went idle -- and so never trim themselves -- would leave a
+newly busy partition without coverage for as long as they sat there. When a
+bounded step at the shard limit finds nothing below the cutoff, it replaces the
+oldest entry just ahead of the cursor if that is older than the incoming
+identity, so a pass whose trimmable entries were used up early (by log replay
+after a restart, say) keeps indexing new identities instead of admitting them
+unindexed until the cursor wraps.
 
 The original design notes follow.
 

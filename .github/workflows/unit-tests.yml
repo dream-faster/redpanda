@@ -108,6 +108,7 @@ jobs:
             //src/v/cluster/tests:topic_table_test \
             //src/v/cluster/tests:dedup_window_filter_test \
             //src/v/cluster/tests:dedup_stm_test \
+            //src/v/cluster/tests:dedup_snapshot_stall_test \
             //src/v/storage/tests:kvstore_test \
             //src/v/model/tests:record_batch_test \
             //src/v/kafka/server/tests:validator_tests \

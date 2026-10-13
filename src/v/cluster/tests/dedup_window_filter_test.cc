@@ -2380,6 +2380,57 @@ TEST(DedupShardBudget, AfterReplayIntoASmallerShardNewIdentitiesAreIndexed) {
     }
 }
 
+// Many small idle indices filling the shard between them, none larger than a
+// tenth of the shard: a partition that starts receiving new identities must
+// still take room from them and grow, rather than count as one of the largest
+// because they are all small and so only ever trim its own few entries.
+TEST(DedupShardBudget, ManySmallIdleIndicesCannotStarveABusyOne) {
+    constexpr size_t shard_limit = 20'000;
+    constexpr size_t idle_count = 20;
+    constexpr auto window = std::chrono::milliseconds{3'600'000};
+    constexpr size_t no_ceiling = 1'000'000'000;
+    auto budget = make_budget(shard_limit);
+    std::vector<std::unique_ptr<cluster::dedup_window_filter>> idle;
+    for (size_t j = 0; j < idle_count; ++j) {
+        idle.push_back(
+          std::make_unique<cluster::dedup_window_filter>(
+            window, no_ceiling, budget));
+        populate_n(
+          *idle.back(),
+          fmt::format("idle{}", j),
+          shard_limit / idle_count,
+          1000 + static_cast<int64_t>(j) * 1000);
+    }
+    ASSERT_GE(budget->entries, shard_limit * 9 / 10);
+
+    cluster::dedup_window_filter busy(window, no_ceiling, budget);
+    populate_n(busy, "busy", 2'000, 1'000'000);
+    EXPECT_LE(budget->entries, shard_limit);
+    EXPECT_GT(busy.map_size(), shard_limit / idle_count / 2);
+    EXPECT_FALSE(
+      busy.filter(make_batch("busy-1999", "dup", ts(1'000'000 + 1'999)))
+        .has_value());
+}
+
+// An index that is emptied stops being the shard's largest at once, rather
+// than being offered as the one to take room from until the next refresh.
+TEST(DedupShardBudget, AnEmptiedIndexIsNoLongerTheLargest) {
+    auto budget = make_budget(1'000);
+    cluster::dedup_window_filter big(1'000s, 10'000, budget);
+    cluster::dedup_window_filter small(1'000s, 10'000, budget);
+    populate_n(big, "big", 500, 1000, 10);
+    populate_n(small, "small", 50, 1000, 10);
+    ASSERT_EQ(budget->largest(), &big);
+
+    big.clear();
+    EXPECT_EQ(budget->largest(), &small);
+
+    populate_n(big, "big-again", 500, 10'000, 10);
+    budget->largest_cache = &big;
+    big.restore(cluster::dedup_index_snapshot{});
+    EXPECT_EQ(budget->largest(), &small);
+}
+
 // An index written in a burst covers a sliver of a long window. The capacity
 // cutoff is measured against the timestamps the index holds rather than the
 // whole window, so it still marks the oldest quarter instead of nothing.

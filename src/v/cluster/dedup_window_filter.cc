@@ -115,9 +115,25 @@ dedup_window_filter* dedup_shard_budget::largest() {
 }
 
 void dedup_shard_budget::forget(dedup_window_filter* f) {
-    std::erase(filters, f);
+    // Order is irrelevant, so the last filter takes the leaving one's place.
+    for (size_t i = 0; i < filters.size(); ++i) {
+        if (filters[i] == f) {
+            filters[i] = filters.back();
+            filters.pop_back();
+            break;
+        }
+    }
     if (largest_cache == f) {
         largest_cache = nullptr;
+    }
+}
+
+void dedup_window_filter::stop_being_largest() {
+    // An emptied index must not keep answering largest() until the next
+    // refresh: room would be taken from an index with nothing to give, and
+    // every other index would compare itself against an empty one.
+    if (_shard_budget && _shard_budget->largest_cache == this) {
+        _shard_budget->largest_cache = nullptr;
     }
 }
 
@@ -144,29 +160,29 @@ bool dedup_window_filter::over_own_soft_limit() const {
 }
 
 bool dedup_window_filter::among_the_largest() const {
-    // Within the shard's soft margin of the largest counts as the largest.
-    // With an exact rule, an index tied with an idle one could trim itself
-    // only while level with it, so it never built headroom below the shard
-    // limit: every pass that ran out of entries old enough to trim left it at
-    // the limit, admitting new identities unindexed until the cursor wrapped.
-    // The margin lets it trim down into the soft zone the way an index nearing
-    // its own ceiling does, while an index well below the largest still takes
-    // room from it rather than shrinking itself.
+    // Within a tenth of the largest index's size counts as the largest. With
+    // an exact rule, an index tied with an idle one could trim itself only
+    // while level with it, so it never built headroom below the shard limit:
+    // every pass that ran out of entries old enough to trim left it at the
+    // limit. The margin lets it trim down into the soft zone the way an index
+    // nearing its own ceiling does. It is relative to the largest index, not
+    // to the shard: with many small idle indices filling the shard, a margin
+    // of a tenth of the shard would count a new, nearly empty index as one of
+    // the largest, so it would only ever trim itself and never grow.
     auto* largest = _shard_budget->largest();
+    if (largest == nullptr || largest == this) {
+        return true;
+    }
+    const auto largest_size = largest->_map.size();
     const auto margin = std::max<size_t>(
-      1, _shard_budget->max_entries / capacity_soft_margin_divisor);
-    return largest == nullptr || largest == this
-           || largest->_map.size() <= _map.size() + margin;
+      1, largest_size / capacity_soft_margin_divisor);
+    return largest_size <= _map.size() + margin;
 }
 
-bool dedup_window_filter::shard_pressure_trims_this() const {
-    // Only the largest index trims itself under shard pressure. If every
-    // inserting partition trimmed itself instead, a small busy one would keep
-    // shrinking while an idle one that filled the budget kept it all.
+bool dedup_window_filter::over_shard_soft_limit() const {
     return _shard_budget
            && _shard_budget->entries >= soft_limit_of(
-                _shard_budget->max_entries, capacity_soft_margin_divisor)
-           && among_the_largest();
+                _shard_budget->max_entries, capacity_soft_margin_divisor);
 }
 
 namespace {
@@ -501,7 +517,14 @@ void dedup_window_filter::finish_pass() {
 
 void dedup_window_filter::sweep_step(size_t budget) {
     const int64_t expiry_cutoff = _max_ts.value() - _window.count();
-    const bool shard_trim = shard_pressure_trims_this();
+    // Only the largest indices trim themselves under shard pressure. If every
+    // inserting partition trimmed itself instead, a small busy one would keep
+    // shrinking while an idle one that filled the budget kept it all. Whether
+    // this is one of them is decided once per step; whether the shard is
+    // still over its soft limit is checked per entry, as the own soft limit
+    // is, so the step stops trimming once its own erases have brought the
+    // shard back under it.
+    const bool largest_here = _shard_budget && among_the_largest();
 
     for (size_t step = 0; step < budget; ++step) {
         if (_map.empty()) {
@@ -528,7 +551,7 @@ void dedup_window_filter::sweep_step(size_t budget) {
         }
         if (
           stamp.value() < _capacity_cutoff.value()
-          && (shard_trim || over_own_soft_limit())) {
+          && ((largest_here && over_shard_soft_limit()) || over_own_soft_limit())) {
             // Inside the window, so this is coverage genuinely lost. Doing it
             // here, a few entries at a time from the soft limit upwards, is
             // what replaced dropping a quarter of the index in one step once
@@ -575,16 +598,19 @@ void dedup_window_filter::replace_oldest_visited(model::timestamp incoming) {
     // restart drives it hardest -- so it can use them all up well before the
     // pass ends, and until it wraps nothing it walks is below the cutoff:
     // every new identity on the shard would be admitted unindexed while the
-    // index keeps older ones. Replacing the oldest entry the step just walked
-    // past keeps the newer identity instead, at no extra bound on the work.
+    // index keeps older ones. Replacing the oldest of the entries just ahead
+    // of the cursor keeps the newer identity instead, at a bounded extra cost.
+    // Ahead, not behind: an erase moves the map's last entry into the freed
+    // slot, and behind the cursor that entry would go unvisited -- unexpired
+    // and uncounted -- for the rest of the pass.
     //
     // Only for the shard budget. At its own ceiling an index still admits
     // unindexed what it cannot make room for (see
     // CapacityEvictionFailsOpenWhenNoSliceCanBeFreed), and only an entry
     // strictly older than the incoming one is replaced, so an index whose
     // entries all share the incoming timestamp keeps them.
-    const auto end = std::min(_sweep_pos, _map.size());
-    const auto begin = end - std::min(end, capacity_emergency_budget);
+    const auto begin = std::min(_sweep_pos, _map.size());
+    const auto end = std::min(begin + capacity_emergency_budget, _map.size());
     std::optional<size_t> oldest;
     for (size_t i = begin; i < end; ++i) {
         if (
@@ -648,6 +674,7 @@ size_t dedup_window_filter::begin_restore(size_t count) {
     // the index held does not inherit its bucket array.
     _map = {};
     sync_shard_budget();
+    stop_being_largest();
     // Bounded by the shard's headroom as well as by this partition's ceiling.
     // Restores run at startup, before anything else on the shard has settled,
     // and a restore that ignored the shard limit is exactly how a broker
@@ -707,6 +734,7 @@ void dedup_window_filter::clear() {
     // immediately and the capacity is worth keeping there.
     _map = {};
     sync_shard_budget();
+    stop_being_largest();
     _max_ts = model::timestamp::min();
     _sweep_pos = 0;
     _capacity_cutoff = model::timestamp::min();

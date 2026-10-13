@@ -221,6 +221,11 @@ std::optional<iobuf> kvstore::get(key_space ks, bytes_view key) {
     return std::nullopt;
 }
 
+bool kvstore::contains(key_space ks, bytes_view key) {
+    vassert(_recovered, "kvstore::contains called before recover()");
+    return _db.contains(make_spaced_key(ks, key));
+}
+
 ss::future<> kvstore::put(key_space ks, bytes key, iobuf value) {
     _probe.entry_written();
     return put(ks, std::move(key), std::make_optional<iobuf>(std::move(value)));
@@ -653,10 +658,16 @@ void kvstore::restore_snapshot_record(
     // would pin whole fragments of that buffer, including the bytes of every
     // discarded value next to it, for as long as the entry lives.
     auto value = r.value().copy();
-    _probe.add_cached_bytes(key.size() + value.size_bytes());
+    const auto entry_bytes = key.size() + value.size_bytes();
     auto res = _db.emplace(std::move(key), std::move(value));
-    vassert(
-      res.second, "Snapshot contained duplicate key {}", res.first->first);
+    if (!res.second) {
+        // Records go into _db as they stream in, before the batch crc can be
+        // checked at its end, so a duplicate here may well be corruption:
+        // fail the recovery the way a crc mismatch does rather than abort.
+        throw std::runtime_error(
+          fmt::format("Snapshot contained duplicate key {}", res.first->first));
+    }
+    _probe.add_cached_bytes(entry_bytes);
     vlog(
       lg.trace,
       "Load snapshot: restoring key={} value={}",

@@ -140,6 +140,8 @@ public:
     ss::future<> stop();
 
     std::optional<iobuf> get(key_space ks, bytes_view key);
+    /// Whether \p key is present, without copying its value.
+    bool contains(key_space ks, bytes_view key);
     ss::future<> put(key_space ks, bytes key, iobuf value);
     ss::future<> remove(key_space ks, bytes key);
 

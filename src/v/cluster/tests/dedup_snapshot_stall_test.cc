@@ -197,6 +197,20 @@ ss::future<> compare_at(size_t entries) {
         legacy_m.stall = co_await probe.stop();
     }
 
+    // The indivisible part of the snapshot before this format: a copy of
+    // every live entry into a vector, which the serializer then walked with
+    // yields.
+    measurement copy_m;
+    {
+        stall_probe probe;
+        probe.start();
+        const auto start = clock::now();
+        const auto copy = filter.snapshot();
+        copy_m.total = clock::now() - start;
+        copy_m.stall = co_await probe.stop();
+        ASSERT_EQ_CORO(copy.entries.size(), entries);
+    }
+
     measurement packed_m;
     iobuf packed;
     {
@@ -215,6 +229,8 @@ ss::future<> compare_at(size_t entries) {
               << "  version 2  " << packed.size_bytes()
               << " bytes   worst stall " << us(packed_m.stall) << "us   total "
               << us(packed_m.total) << "us\n"
+              << "  plain copy of the entries   worst stall "
+              << us(copy_m.stall) << "us   total " << us(copy_m.total) << "us\n"
               << std::flush;
 
     // The serialized copy is the snapshot's whole memory cost: 24 bytes per
@@ -229,6 +245,9 @@ ss::future<> compare_at(size_t entries) {
     // Not by the factor observed, so a loaded runner cannot turn a real
     // improvement into a red build.
     ASSERT_LT_CORO(us(packed_m.stall), us(legacy_m.stall));
+    // Nor may it stall much longer than the copy the yielding serializer used
+    // to start from, which was the indivisible part of the snapshot before.
+    ASSERT_LT_CORO(us(packed_m.stall), 2 * us(copy_m.stall) + 1'000);
 }
 
 } // namespace

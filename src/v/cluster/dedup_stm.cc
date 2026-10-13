@@ -9,6 +9,7 @@
 
 #include "cluster/dedup_stm.h"
 
+#include "base/units.h"
 #include "bytes/iobuf_parser.h"
 #include "cluster/logger.h"
 #include "cluster/snapshot.h"
@@ -138,13 +139,17 @@ ss::future<> dedup_stm::start() {
     // Earlier builds kept the snapshot in the kvstore, which holds it in
     // memory until it is removed. It is not migrated: the index rebuilds from
     // the log, bounded to one window by get_initial_recovery_start_offset().
-    // Unconditional because kvstore::get() would copy the value just to
-    // learn whether it exists; removing an absent key is a no-op.
-    co_await _kvstore.remove(
-      storage::kvstore::key_space::stms,
-      bytes::from_string(
-        raft::kvstore_backed_stm_snapshot::snapshot_key(
-          dedup_stm_snapshot, _raft->ntp())));
+    // kvstore recovery already discards these keys (see
+    // kvstore_config::discarded_stm_snapshots), so this only matters for a
+    // kvstore recovered without that, and must not cost every partition start
+    // a kvstore write and flush when the key is absent.
+    auto key = bytes::from_string(
+      raft::kvstore_backed_stm_snapshot::snapshot_key(
+        dedup_stm_snapshot, _raft->ntp()));
+    if (_kvstore.contains(storage::kvstore::key_space::stms, key)) {
+        co_await _kvstore.remove(
+          storage::kvstore::key_space::stms, std::move(key));
+    }
     co_await raft::persisted_stm<>::start();
     setup_metrics();
 }
@@ -210,18 +215,31 @@ dedup_stm::get_initial_recovery_start_offset() {
 
 iobuf dedup_stm::serialize_snapshot(
   const dedup_window_filter& state, int64_t generation) {
+    // One pass over the live index, which cannot yield: the produce path
+    // mutates the index without the apply lock. Entries are staged in a fixed
+    // local buffer and appended a chunk at a time, so the pass costs a memcpy
+    // per entry rather than an iobuf append per entry.
+    constexpr size_t chunk_entries = 16_KiB / packed_entry_size;
+    std::array<char, chunk_entries * packed_entry_size> chunk{};
+    size_t staged = 0;
     iobuf entries;
     state.for_each_live_entry(
-      [&entries](dedup_identity_digest identity, model::timestamp timestamp) {
-          std::array<char, packed_entry_size> packed{};
+      [&](dedup_identity_digest identity, model::timestamp timestamp) {
+          char* out = chunk.data() + staged * packed_entry_size;
           const auto hi = ss::cpu_to_le(identity.hi);
           const auto lo = ss::cpu_to_le(identity.lo);
           const auto ts = ss::cpu_to_le(timestamp.value());
-          std::memcpy(packed.data(), &hi, sizeof(hi));
-          std::memcpy(packed.data() + sizeof(hi), &lo, sizeof(lo));
-          std::memcpy(packed.data() + sizeof(hi) + sizeof(lo), &ts, sizeof(ts));
-          entries.append(packed.data(), packed.size());
+          std::memcpy(out, &hi, sizeof(hi));
+          std::memcpy(out + sizeof(hi), &lo, sizeof(lo));
+          std::memcpy(out + sizeof(hi) + sizeof(lo), &ts, sizeof(ts));
+          if (++staged == chunk_entries) {
+              entries.append(chunk.data(), staged * packed_entry_size);
+              staged = 0;
+          }
       });
+    if (staged > 0) {
+        entries.append(chunk.data(), staged * packed_entry_size);
+    }
     // serde moves the entry fragments into the output rather than copying
     // them, so this is still the only serialized copy.
     return serde::to_iobuf(

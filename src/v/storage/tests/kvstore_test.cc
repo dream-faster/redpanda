@@ -94,6 +94,26 @@ TEST_F(kvstore_test_fixture, key_space) {
     kvs->stop().get();
 }
 
+TEST_F(kvstore_test_fixture, contains_reports_presence_per_key_space) {
+    set_configuration("disable_metrics", true);
+
+    auto kvs = make_kvstore();
+    kvs->start().get();
+
+    const auto key = tests::random_bytes(8);
+    EXPECT_FALSE(kvs->contains(storage::kvstore::key_space::testing, key));
+
+    kvs->put(storage::kvstore::key_space::testing, key, bytes_to_iobuf(key))
+      .get();
+    EXPECT_TRUE(kvs->contains(storage::kvstore::key_space::testing, key));
+    EXPECT_FALSE(kvs->contains(storage::kvstore::key_space::consensus, key));
+
+    kvs->remove(storage::kvstore::key_space::testing, key).get();
+    EXPECT_FALSE(kvs->contains(storage::kvstore::key_space::testing, key));
+
+    kvs->stop().get();
+}
+
 TEST_F(kvstore_test_fixture, kvstore_empty) {
     set_configuration("disable_metrics", true);
 
