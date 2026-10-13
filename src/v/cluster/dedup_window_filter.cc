@@ -450,10 +450,22 @@ void dedup_window_filter::begin_pass() {
     // [0, span], and dividing rather than scaling avoids the overflow a
     // multiplying form would risk -- redpanda.dedup.window.ms has no
     // upper-bound validator.
-    _pass_span = std::max<int64_t>(_window.count(), 0);
-    _pass_lo = _max_ts.value() - _pass_span;
+    //
+    // The frame starts at the oldest entry the previous pass saw, when that is
+    // inside the window, rather than at the window's edge: nothing older can
+    // have been added since, and an index written in a burst covers a sliver
+    // of a long window. Measured against the whole window it would fall into
+    // a handful of buckets, and whole buckets are all the cutoff can take, so
+    // it would mark far less than a quarter -- or nothing -- for trimming.
+    const int64_t window_lo = _max_ts.value()
+                              - std::max<int64_t>(_window.count(), 0);
+    _pass_lo = _pass_oldest == no_pass_oldest
+                 ? window_lo
+                 : std::max(window_lo, std::min(_pass_oldest, _max_ts.value()));
+    _pass_span = _max_ts.value() - _pass_lo;
     _pass_width = _pass_span / static_cast<int64_t>(capacity_evict_buckets - 1)
                   + 1;
+    _pass_oldest = no_pass_oldest;
 }
 
 void dedup_window_filter::finish_pass() {
@@ -527,6 +539,7 @@ void dedup_window_filter::count_in_pass(model::timestamp stamp) {
       stamp.value() - _pass_lo, 0, _pass_span);
     ++_pass_counts[static_cast<size_t>(offset / _pass_width)];
     ++_pass_visited;
+    _pass_oldest = std::min(_pass_oldest, stamp.value());
 }
 
 bool dedup_window_filter::make_room_for_one() {
@@ -627,8 +640,13 @@ void dedup_window_filter::finish_restore(
     // shard would leave every partition on it admitting new identities
     // unindexed for a whole pass -- hundreds of thousands of records on a
     // large index. begin_pass() runs after _max_ts is set because the frame
-    // it freezes is read from it.
+    // it freezes is read from it, and after the oldest restored entry is known
+    // because the frame starts there.
     _sweep_pos = 0;
+    _pass_oldest = no_pass_oldest;
+    for (const auto& entry : _map) {
+        _pass_oldest = std::min(_pass_oldest, entry.second.value());
+    }
     begin_pass();
     for (const auto& entry : _map) {
         count_in_pass(entry.second);
@@ -648,6 +666,7 @@ void dedup_window_filter::clear() {
     _max_ts = model::timestamp::min();
     _sweep_pos = 0;
     _capacity_cutoff = model::timestamp::min();
+    _pass_oldest = no_pass_oldest;
     begin_pass();
 }
 

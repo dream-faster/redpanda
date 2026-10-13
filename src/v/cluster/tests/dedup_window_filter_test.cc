@@ -2232,7 +2232,10 @@ TEST(DedupShardBudget, ARestoredFullShardIndexesNewIdentitiesAtOnce) {
 }
 
 // Two partitions of equal size filling the shard: neither is larger, so each
-// trims itself instead of each waiting for the other to give up room.
+// trims itself instead of each waiting for the other to give up room. The
+// first few identities at the limit can go unindexed while the cursor reaches
+// the oldest entries -- at most one pass of bounded steps -- and after that
+// every one is indexed.
 TEST(DedupShardBudget, EqualIndicesAtTheShardLimitKeepIndexing) {
     constexpr size_t shard_limit = 2'000;
     auto budget = make_budget(shard_limit);
@@ -2244,8 +2247,26 @@ TEST(DedupShardBudget, EqualIndicesAtTheShardLimitKeepIndexing) {
     ASSERT_EQ(a.map_size(), b.map_size());
 
     populate_n(b, "b-new", 200, 1000 + 10 * shard_limit);
-    EXPECT_EQ(b.unindexed_records(), 0u);
+    const auto transient = b.unindexed_records();
+    EXPECT_LE(transient, shard_limit / 2 / 64);
+    populate_n(b, "b-newer", 200, 1000 + 20 * shard_limit);
+    EXPECT_EQ(b.unindexed_records(), transient);
     EXPECT_LE(budget->entries, shard_limit);
+}
+
+// An index written in a burst covers a sliver of a long window. The capacity
+// cutoff is measured against the timestamps the index holds rather than the
+// whole window, so it still marks the oldest quarter instead of nothing.
+TEST(DedupWindowFilter, CapacityCutoffResolvesABurstInALongWindow) {
+    constexpr size_t cap = 1'000;
+    cluster::dedup_window_filter f(24h, cap);
+    // 1000 identities over one second of a 24 hour window: all of them fall
+    // in one bucket of a window-wide frame.
+    populate_n(f, "burst", cap, 1'000'000, 1);
+    populate_n(f, "more", 400, 1'001'000, 1);
+    EXPECT_LE(f.unindexed_records(), cap / 64);
+    EXPECT_GT(f.capacity_evicted_entries(), 0u);
+    EXPECT_LE(f.map_size(), cap);
 }
 
 // The same after a restart, where both restore as far as the shard allows.

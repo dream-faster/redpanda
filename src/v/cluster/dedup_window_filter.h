@@ -23,6 +23,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <vector>
 
@@ -601,6 +602,11 @@ private:
     int64_t _pass_lo{0};
     int64_t _pass_span{0};
     int64_t _pass_width{1};
+    // Oldest timestamp the pass in progress has visited, which the next pass
+    // starts its frame from.
+    static constexpr int64_t no_pass_oldest
+      = std::numeric_limits<int64_t>::max();
+    int64_t _pass_oldest{no_pass_oldest};
     // Timestamp below which the oldest quarter of the index lay when the last
     // pass completed. timestamp::min() means that pass found no bucket prefix
     // small enough to cut, so nothing is dropped for capacity -- more than a
