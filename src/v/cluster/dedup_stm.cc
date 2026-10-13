@@ -243,27 +243,26 @@ void dedup_stm::restore_snapshot(
             packed_entry_size));
     }
     state.set_window(std::chrono::milliseconds{snapshot.window_ms});
-    dedup_index_snapshot restored{.max_timestamp = snapshot.max_timestamp};
-    // No trimming here: restore() owns the entry-limit policy, and it keeps
-    // the most recent identities rather than a prefix. Selecting the newest N
-    // requires seeing all N, so this intermediate is sized by the snapshot
-    // rather than by this node's ceiling.
-    restored.entries.reserve(packed_bytes / packed_entry_size);
-    {
-        iobuf_const_parser parser(snapshot.entries);
-        while (parser.bytes_left() > 0) {
-            const auto hi = ss::le_to_cpu(parser.consume_type<uint64_t>());
-            const auto lo = ss::le_to_cpu(parser.consume_type<uint64_t>());
-            const auto ts = ss::le_to_cpu(parser.consume_type<int64_t>());
-            restored.entries.push_back(
-              {.identity = {.hi = hi, .lo = lo},
-               .timestamp = model::timestamp{ts}});
-        }
-    }
-    // Released before restore() grows the index, so the packed copy and the
-    // index are never both at full size alongside the entry vector.
-    snapshot.entries = iobuf{};
-    state.restore(restored);
+    // Read straight from the packed entries -- twice when they must be
+    // trimmed -- rather than decoded into an entry vector first: restores run
+    // at startup for every partition on the shard, and one more full copy of
+    // each index is memory a starting broker may not have. restore_from()
+    // owns the selection of which entries to keep.
+    const auto& packed = snapshot.entries;
+    state.restore_from(
+      packed_bytes / packed_entry_size,
+      snapshot.max_timestamp,
+      [&packed](auto&& emit) {
+          iobuf_const_parser parser(packed);
+          while (parser.bytes_left() > 0) {
+              const auto hi = ss::le_to_cpu(parser.consume_type<uint64_t>());
+              const auto lo = ss::le_to_cpu(parser.consume_type<uint64_t>());
+              const auto ts = ss::le_to_cpu(parser.consume_type<int64_t>());
+              emit(
+                dedup_identity_digest{.hi = hi, .lo = lo},
+                model::timestamp{ts});
+          }
+      });
     generation = snapshot.generation;
 }
 

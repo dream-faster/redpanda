@@ -48,6 +48,7 @@ redpanda_cc_library(
         "//src/v/cluster:logger",
         "//src/v/cluster:members_table",
         "//src/v/cluster:partition_properties_stm",
+        "//src/v/cluster:snapshot",
         "//src/v/cluster:tx_manager_migrator_rpc",
         "//src/v/cluster:types",
         "//src/v/cluster/utils:partition_change_notifier_impl",

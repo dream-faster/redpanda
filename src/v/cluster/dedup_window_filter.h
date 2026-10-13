@@ -18,11 +18,13 @@
 
 #include <seastar/core/shared_ptr.hh>
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <vector>
 
 namespace cluster {
 
@@ -145,19 +147,28 @@ struct dedup_index_snapshot {
       const dedup_index_snapshot&, const dedup_index_snapshot&) = default;
 };
 
+class dedup_window_filter;
+
 /// \brief Entry count shared by every dedup index on one shard.
 ///
 /// The per-partition ceiling does not bound a shard: partitions are placed on
 /// shards by count, not by index size, so several saturated indices can share
 /// one shard's memory. Every filter on the shard holds the same budget and
 /// reports its own size changes into it; one that inserts while the shard is
-/// near its limit trims itself the way it would near its own ceiling.
+/// near its limit trims itself the way it would near its own ceiling, and one
+/// that cannot make room in its own index at the limit takes a bounded step
+/// on the largest index instead, so an idle partition holding the budget
+/// cannot leave a busy one without coverage for good.
 struct dedup_shard_budget {
     explicit dedup_shard_budget(size_t max_entries)
       : max_entries(max_entries) {}
 
     size_t entries{0};
     const size_t max_entries;
+    /// Every filter holding this budget. Filters register on construction
+    /// and leave on destruction; they are neither copyable nor movable, so
+    /// the pointers stay valid.
+    std::vector<dedup_window_filter*> filters;
 };
 
 /// \brief Write-path, first-wins deduplication.
@@ -304,10 +315,66 @@ public:
 
     /// \brief Install a snapshot, replacing any current index state.
     ///
-    /// A snapshot holding more than max_entries() identities is reduced to the
-    /// most recent ones. This is the only place that selection happens, so
-    /// callers must not pre-trim.
+    /// A snapshot holding more identities than this filter may keep -- its
+    /// own max_entries(), or what the shard budget has left -- is reduced to
+    /// the most recent ones. restore_from() is the only place that selection
+    /// happens, so callers must not pre-trim.
     void restore(const dedup_index_snapshot&);
+
+    /// \brief restore() from entries the caller produces, without a
+    /// dedup_index_snapshot in between.
+    ///
+    /// \p for_each_entry(emit) must call emit(identity, timestamp) once per
+    /// entry, \p count times in all, and produce the same entries each time
+    /// it is called: it runs once when every entry fits, and twice when they
+    /// must be trimmed -- the first pass only to find the timestamp cutoff.
+    /// That keeps the transient cost of a restore at 8 bytes per entry, and
+    /// only when trimming, rather than a full copy of the entries.
+    template<typename ForEach>
+    void restore_from(
+      size_t count, model::timestamp max_timestamp, ForEach&& for_each_entry) {
+        const auto keep = begin_restore(count);
+        if (keep == count) {
+            for_each_entry(
+              [this](dedup_identity_digest identity, model::timestamp ts) {
+                  _map.emplace(identity, ts);
+              });
+        } else if (keep > 0) {
+            // Keep the most recent identities. The index is a dense hash map
+            // whose iteration is insertion order, so snapshots run roughly
+            // oldest first; taking a prefix would drop exactly the entries
+            // most likely to still match an incoming duplicate.
+            chunked_vector<int64_t> stamps;
+            stamps.reserve(count);
+            for_each_entry(
+              [&stamps](dedup_identity_digest, model::timestamp ts) {
+                  stamps.push_back(ts.value());
+              });
+            const auto smallest_kept
+              = stamps.begin() + static_cast<std::ptrdiff_t>(count - keep);
+            std::nth_element(stamps.begin(), smallest_kept, stamps.end());
+            const int64_t cutoff = *smallest_kept;
+            const auto newer = static_cast<size_t>(
+              std::count_if(stamps.begin(), stamps.end(), [cutoff](int64_t ts) {
+                  return ts > cutoff;
+              }));
+            stamps = chunked_vector<int64_t>{};
+            // Everything newer than the cutoff fits by construction; entries
+            // exactly at it fill what is left, first come first kept.
+            size_t at_cutoff = keep - newer;
+            for_each_entry(
+              [this, cutoff, &at_cutoff](
+                dedup_identity_digest identity, model::timestamp ts) {
+                  if (ts.value() > cutoff) {
+                      _map.emplace(identity, ts);
+                  } else if (ts.value() == cutoff && at_cutoff > 0) {
+                      _map.emplace(identity, ts);
+                      --at_cutoff;
+                  }
+              });
+        }
+        finish_restore(max_timestamp, count - keep);
+    }
 
     /// \brief Record an identity admitted into the log.
     ///
@@ -357,9 +424,10 @@ public:
     /// entry limit. Non-zero means dedup coverage is degraded for new
     /// identities on this partition.
     size_t unindexed_records() const { return _unindexed_records; }
-    /// Identities dropped while installing a snapshot larger than this node's
-    /// entry limit. Non-zero means a peer was configured with a larger limit,
-    /// so dedup coverage here is narrower than the snapshot it restored.
+    /// Identities dropped while installing a snapshot larger than this node
+    /// may hold: a peer configured with a larger per-partition limit, or a
+    /// shard whose budget other partitions had already filled. Non-zero means
+    /// dedup coverage here is narrower than the snapshot it restored.
     size_t truncated_entries() const { return _truncated_entries; }
     /// Still-live identities dropped to make room at the entry limit. Non-zero
     /// means the effective window is narrower than the configured one:
@@ -408,6 +476,11 @@ private:
     /// caller admits the record unindexed.
     bool make_room_for_one();
 
+    /// At the shard limit, with nothing freeable in this index: take one
+    /// bounded sweep step on the largest index on the shard, if it is larger
+    /// than this one. Returns whether this index may now insert.
+    bool take_room_from_largest();
+
     /// Freeze the bucket frame a pass measures entries against, and clear its
     /// histogram.
     void begin_pass();
@@ -428,6 +501,12 @@ private:
     /// Whether a new identity can be inserted without exceeding this
     /// partition's ceiling or the shard's.
     bool at_capacity() const;
+
+    /// Clear the index for a restore of \p count entries and return how many
+    /// of them it may keep.
+    size_t begin_restore(size_t count);
+    /// Account for the restored entries and reset the sweep state.
+    void finish_restore(model::timestamp max_timestamp, size_t truncated);
 
     /// Whether the cursor should drop entries below the capacity cutoff: this
     /// index is within capacity_soft_margin_divisor of its own ceiling, or the

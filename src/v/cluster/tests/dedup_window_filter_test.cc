@@ -2077,24 +2077,122 @@ TEST(DedupShardBudget, AtTheLimitAPartitionWithNothingToFreeAdmitsUnindexed) {
     EXPECT_FALSE(idle.filter(make_batch("new", "v", ts(2100))).has_value());
 }
 
-// restore() is bounded by the partition's own ceiling, not by shard headroom:
-// partitions restore in whatever order they start, so headroom would favour
-// whichever came first. The budget still counts what was restored, and the
-// next insertions trim it back.
-TEST(DedupShardBudget, RestoreIgnoresHeadroomButIsCounted) {
-    constexpr size_t shard_limit = 20;
+// The starvation case: one partition filled the shard's budget and then went
+// quiet, so it never inserts and never trims itself. A partition that starts
+// receiving new identities must still get room -- from the largest index's
+// cursor, a bounded step at a time -- or it would stay without coverage for
+// as long as the idle one sits there.
+TEST(DedupShardBudget, AnIdlePartitionCannotStarveABusyOne) {
+    constexpr size_t shard_limit = 200;
+    auto budget = make_budget(shard_limit);
+    cluster::dedup_window_filter hog(1'000s, 10'000, budget);
+    populate_n(hog, "hog", shard_limit, 1000, 1000);
+    ASSERT_EQ(budget->entries, shard_limit);
+
+    cluster::dedup_window_filter busy(1'000s, 10'000, budget);
+    populate_n(busy, "busy", 2'000, 300'000, 100);
+    EXPECT_LE(budget->entries, shard_limit);
+    EXPECT_EQ(budget->entries, hog.map_size() + busy.map_size());
+    EXPECT_GT(busy.map_size(), shard_limit / 4);
+    EXPECT_LT(hog.map_size(), shard_limit);
+    // The busy partition's newest identity is remembered.
+    EXPECT_FALSE(
+      busy.filter(make_batch("busy-1999", "dup", ts(300'000 + 1999 * 100)))
+        .has_value());
+}
+
+// A partition at its own ceiling makes room only from itself: the shard
+// budget never lets one partition grow past dedup_max_entries_per_partition.
+TEST(DedupShardBudget, OwnCeilingStillApplies) {
+    auto budget = make_budget(1'000);
+    cluster::dedup_window_filter big(1'000s, 10'000, budget);
+    populate_n(big, "big", 900, 1000, 1000);
+    cluster::dedup_window_filter capped(1'000s, 50, budget);
+    populate_n(capped, "c", 500, 300'000, 100);
+    EXPECT_LE(capped.map_size(), 50u);
+    EXPECT_EQ(big.map_size(), 900u);
+}
+
+// Filters leave the budget's registry when destroyed, so a later filter never
+// takes a step on one that is gone.
+TEST(DedupShardBudget, DestroyedFiltersLeaveTheRegistry) {
+    auto budget = make_budget(100);
+    {
+        cluster::dedup_window_filter a(100s, 1'000, budget);
+        cluster::dedup_window_filter b(100s, 1'000, budget);
+        EXPECT_EQ(budget->filters.size(), 2u);
+    }
+    EXPECT_TRUE(budget->filters.empty());
+    cluster::dedup_window_filter c(100s, 1'000, budget);
+    populate_n(c, "c", 150);
+    EXPECT_LE(c.map_size(), 100u);
+}
+
+// restore() is bounded by what the shard budget has left, not only by the
+// partition's own ceiling: restores happen at startup, and a broker whose
+// partitions each restored in full could run out of memory before it served
+// anything. What is kept is the newest identities.
+TEST(DedupShardBudget, RestoreIsBoundedByShardHeadroom) {
+    constexpr size_t shard_limit = 50;
     auto budget = make_budget(shard_limit);
     cluster::dedup_window_filter source(1'000s, 1'000);
     populate_n(source, "r", 100, 1000, 1000);
+    const auto snap = source.snapshot();
 
+    cluster::dedup_window_filter first(1'000s, 1'000, budget);
+    first.restore(snap);
+    EXPECT_EQ(first.map_size(), shard_limit);
+    EXPECT_EQ(first.truncated_entries(), 50u);
+    EXPECT_EQ(budget->entries, shard_limit);
+    for (const auto& entry : first.snapshot().entries) {
+        // r-50..r-99, stamped 1000 + i*1000.
+        EXPECT_GE(entry.timestamp.value(), 1000 + 50 * 1000);
+    }
+
+    // The shard is full, so a second partition restores nothing.
+    cluster::dedup_window_filter second(1'000s, 1'000, budget);
+    second.restore(snap);
+    EXPECT_EQ(second.map_size(), 0u);
+    EXPECT_EQ(second.truncated_entries(), 100u);
+    EXPECT_EQ(budget->entries, shard_limit);
+
+    // Restoring a partition again replaces its own share first, so it gets
+    // that share back rather than being counted against itself.
+    first.restore(snap);
+    EXPECT_EQ(first.map_size(), shard_limit);
+    EXPECT_EQ(budget->entries, shard_limit);
+}
+
+// Entries at the trim cutoff timestamp fill exactly the room that is left, so
+// a restore keeps exactly what it may and never more.
+TEST(DedupShardBudget, RestoreTrimsTiesAtTheCutoffExactly) {
+    cluster::dedup_index_snapshot snap{.max_timestamp = ts(5000)};
+    for (uint64_t i = 0; i < 40; ++i) {
+        snap.entries.push_back(
+          {.identity = {.hi = i + 1, .lo = (i + 1) * 0x9e37'79b9'7f4a'7c15ULL},
+           .timestamp = ts(i < 30 ? 4000 : 5000)});
+    }
+    auto budget = make_budget(25);
     cluster::dedup_window_filter f(1'000s, 1'000, budget);
-    f.restore(source.snapshot());
-    EXPECT_EQ(f.map_size(), 100u);
-    EXPECT_EQ(budget->entries, 100u);
+    f.restore(snap);
+    EXPECT_EQ(f.map_size(), 25u);
+    EXPECT_EQ(f.truncated_entries(), 15u);
+    size_t newest = 0;
+    for (const auto& entry : f.snapshot().entries) {
+        newest += entry.timestamp == ts(5000) ? 1 : 0;
+    }
+    EXPECT_EQ(newest, 10u);
+}
 
-    populate_n(f, "fresh", 2'000, 200'000, 1000);
-    EXPECT_LE(f.map_size(), shard_limit);
-    EXPECT_EQ(budget->entries, f.map_size());
+// With no shard budget, restore keeps everything up to the partition ceiling,
+// as it always did.
+TEST(DedupShardBudget, RestoreWithoutABudgetKeepsUpToTheCeiling) {
+    cluster::dedup_window_filter source(1'000s, 1'000);
+    populate_n(source, "r", 100, 1000, 1000);
+    cluster::dedup_window_filter f(1'000s, 60);
+    f.restore(source.snapshot());
+    EXPECT_EQ(f.map_size(), 60u);
+    EXPECT_EQ(f.truncated_entries(), 40u);
 }
 
 // The leader's and the follower's paths must still agree with each other when

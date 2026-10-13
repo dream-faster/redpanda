@@ -73,12 +73,16 @@ dedup_window_filter::dedup_window_filter(
   : _window(window)
   , _max_entries(max_entries)
   , _shard_budget(std::move(shard_budget)) {
+    if (_shard_budget) {
+        _shard_budget->filters.push_back(this);
+    }
     begin_pass();
 }
 
 dedup_window_filter::~dedup_window_filter() {
     if (_shard_budget) {
         _shard_budget->entries -= _budget_accounted;
+        std::erase(_shard_budget->filters, this);
     }
 }
 
@@ -186,7 +190,7 @@ bool dedup_window_filter::is_duplicate(
     // point, and capacity trimming is decision-affecting, so the two orders
     // must match or replicas drift. See populate().
     sweep_step(sweep_budget);
-    if (at_capacity() && !make_room_for_one()) {
+    if (at_capacity() && !make_room_for_one() && !take_room_from_largest()) {
         // The bounded step found nothing freeable. The record is admitted but
         // this identity is not remembered.
         ++_unindexed_records;
@@ -387,7 +391,7 @@ void dedup_window_filter::populate(const iobuf& key, model::timestamp ts) {
         return;
     }
     sweep_step(sweep_budget);
-    if (at_capacity() && !make_room_for_one()) {
+    if (at_capacity() && !make_room_for_one() && !take_room_from_largest()) {
         ++_unindexed_records;
         return;
     }
@@ -493,6 +497,33 @@ bool dedup_window_filter::make_room_for_one() {
     return !at_capacity();
 }
 
+bool dedup_window_filter::take_room_from_largest() {
+    if (!_shard_budget || _map.size() >= _max_entries) {
+        // Without a shard budget, or at its own ceiling, the room this index
+        // needs can only come from itself.
+        return false;
+    }
+    dedup_window_filter* largest = nullptr;
+    for (auto* f : _shard_budget->filters) {
+        if (
+          f != this && f->_map.size() > _map.size() + 1
+          && (largest == nullptr || f->_map.size() > largest->_map.size())) {
+            largest = f;
+        }
+    }
+    if (largest == nullptr) {
+        return false;
+    }
+    // The largest index's own cursor decides what goes, so it loses its
+    // oldest entries as it would at its own ceiling -- once its next pass has
+    // found them. That is a change to another partition's index driven by
+    // this one's traffic, so replicas of the larger partition, which share a
+    // shard with different neighbours, can diverge: the same best-effort
+    // divergence the shard budget already accepts.
+    largest->make_room_for_one();
+    return !at_capacity();
+}
+
 dedup_index_snapshot dedup_window_filter::snapshot() const {
     dedup_index_snapshot result{.max_timestamp = _max_ts};
     result.entries.reserve(_map.size());
@@ -504,49 +535,49 @@ dedup_index_snapshot dedup_window_filter::snapshot() const {
 }
 
 void dedup_window_filter::restore(const dedup_index_snapshot& snapshot) {
-    _map.clear();
+    restore_from(
+      snapshot.entries.size(),
+      snapshot.max_timestamp,
+      [&snapshot](auto&& emit) {
+          for (const auto& entry : snapshot.entries) {
+              emit(entry.identity, entry.timestamp);
+          }
+      });
+}
+
+size_t dedup_window_filter::begin_restore(size_t count) {
+    // Assigned rather than cleared, so a restore that keeps fewer entries than
+    // the index held does not inherit its bucket array.
+    _map = {};
     sync_shard_budget();
-    // Bounded by this partition's ceiling only, not by the shard's headroom:
-    // a restore runs once per partition at startup, in whatever order the
-    // partitions happen to start, so letting the shard budget pick would
-    // hand the whole shard to whichever restores first. The shard limit
-    // catches up through the cursor as soon as identities arrive.
-    const auto restore_count = std::min(snapshot.entries.size(), _max_entries);
-    _map.reserve(restore_count);
-    if (restore_count == snapshot.entries.size()) {
-        for (const auto& entry : snapshot.entries) {
-            _map.emplace(entry.identity, entry.timestamp);
-        }
-    } else {
-        // Keep the most recent identities. The index is a dense hash map whose
-        // iteration is insertion order, so snapshot() emits roughly oldest
-        // first; taking a prefix would drop exactly the entries most likely to
-        // still match an incoming duplicate. Ordering a pointer view leaves
-        // the caller's snapshot untouched (and it could not be copied anyway:
-        // chunked_vector is move-only). nth_element is O(n) and only runs when
-        // the snapshot exceeds this node's ceiling.
-        chunked_vector<const dedup_index_entry*> by_recency;
-        by_recency.reserve(snapshot.entries.size());
-        for (const auto& entry : snapshot.entries) {
-            by_recency.push_back(&entry);
-        }
-        std::nth_element(
-          by_recency.begin(),
-          by_recency.begin() + static_cast<std::ptrdiff_t>(restore_count),
-          by_recency.end(),
-          [](const dedup_index_entry* a, const dedup_index_entry* b) {
-              return a->timestamp > b->timestamp;
-          });
-        for (size_t i = 0; i < restore_count; ++i) {
-            _map.emplace(by_recency[i]->identity, by_recency[i]->timestamp);
-        }
-        _truncated_entries += snapshot.entries.size() - restore_count;
+    // Bounded by the shard's headroom as well as by this partition's ceiling.
+    // Restores run at startup, before anything else on the shard has settled,
+    // and a restore that ignored the shard limit is exactly how a broker
+    // could fail to start: every partition loading its full snapshot at once.
+    // Partitions that restore later get less when the shard is full; that
+    // narrows their coverage, which is recoverable, where an allocation
+    // failure at startup is not.
+    size_t allowed = _max_entries;
+    if (_shard_budget) {
+        const auto used = _shard_budget->entries;
+        const auto headroom = used >= _shard_budget->max_entries
+                                ? 0
+                                : _shard_budget->max_entries - used;
+        allowed = std::min(allowed, headroom);
     }
+    const auto keep = std::min(count, allowed);
+    _map.reserve(keep);
+    return keep;
+}
+
+void dedup_window_filter::finish_restore(
+  model::timestamp max_timestamp, size_t truncated) {
+    _truncated_entries += truncated;
     sync_shard_budget();
     // A snapshot written by a broker without the clamp can carry a poisoned
     // watermark; clamping here lets such a partition heal on restart rather
     // than needing a dedup_generation bump. Not counted as record skew.
-    _max_ts = std::min(snapshot.max_timestamp, broker_now());
+    _max_ts = std::min(max_timestamp, broker_now());
     // The cursor indexes the value array it was walking, and the histogram
     // describes that array's contents; neither survives a different map. Both
     // are reset rather than persisted: a pass is bounded work that the next

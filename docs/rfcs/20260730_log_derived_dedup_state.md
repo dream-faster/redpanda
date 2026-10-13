@@ -426,6 +426,32 @@ a single pass straight from the index. A snapshot therefore costs one
 serialized copy of the live entries. Earlier versions are refused on compat
 version, and the index is rebuilt from the log, in both upgrade directions.
 
+Startup is where a memory shortfall does the most damage, because a broker
+that cannot start cannot shed load either. Three paths were bounded:
+
+- **kvstore recovery** runs before any partition starts, so it would load an
+  earlier build's dedup snapshots before `dedup_stm::start()` could remove
+  them. The kvstore is configured with `discarded_stm_snapshots =
+  {dedup.snapshot}`: recovery drops those keys from the snapshot and the
+  replayed segments without retaining them, and rewrites its snapshot so the
+  next start never reads them. The snapshot is now restored record by record
+  straight from the buffer read off disk, rather than being decoded into a
+  batch (a re-encoded second copy) and walked with a copying iterator; the
+  batch checksum is accumulated record by record over the same encoding
+  (`model::crc_extend_record()`), so integrity checking is unchanged.
+- **Snapshot restore** is bounded by the shard budget's headroom as well as by
+  the partition ceiling, keeping the newest identities. It reads the packed
+  entries in place (twice when trimming, the first pass only to find the
+  timestamp cutoff), so it costs at most 8 bytes an entry beyond the index.
+- **Log replay** was already bounded: every insert goes through the same
+  capacity checks as the produce path.
+
+A partition that cannot make room in its own index at the shard limit takes
+one bounded cursor step on the largest index on the shard instead. Without it,
+partitions that filled the budget and then went idle -- and so never trim
+themselves -- would leave a newly busy partition without coverage for as long
+as they sat there.
+
 The original design notes follow.
 
 

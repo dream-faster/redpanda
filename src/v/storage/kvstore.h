@@ -16,6 +16,7 @@
 #include "container/chunked_hash_map.h"
 #include "container/chunked_vector.h"
 #include "metrics/metrics.h"
+#include "model/record.h"
 #include "ssx/mutex.h"
 #include "storage/fwd.h"
 #include "storage/ntp_config.h"
@@ -28,6 +29,8 @@
 #include <seastar/core/future.hh>
 #include <seastar/core/gate.hh>
 #include <seastar/core/timer.hh>
+
+#include <vector>
 
 namespace storage {
 
@@ -78,16 +81,24 @@ struct kvstore_config {
     config::binding<std::chrono::milliseconds> commit_interval;
     ss::sstring base_dir;
     std::optional<storage::file_sanitize_config> sanitizer_config;
+    /// Names of persisted_stm snapshots that no longer live in the kvstore.
+    /// Their entries in key_space::stms (keyed "<name>/<ntp>") are dropped
+    /// while the store recovers, before they are ever held in memory as a
+    /// whole: an earlier build may have stored values there large enough that
+    /// loading them is what stops the broker from starting.
+    std::vector<ss::sstring> discarded_stm_snapshots;
 
     kvstore_config(
       size_t max_segment_size,
       config::binding<std::chrono::milliseconds> commit_interval,
       ss::sstring base_dir,
-      std::optional<storage::file_sanitize_config> sanitizer_config)
+      std::optional<storage::file_sanitize_config> sanitizer_config,
+      std::vector<ss::sstring> discarded_stm_snapshots = {})
       : max_segment_size(max_segment_size)
       , commit_interval(commit_interval)
       , base_dir(std::move(base_dir))
-      , sanitizer_config(std::move(sanitizer_config)) {}
+      , sanitizer_config(std::move(sanitizer_config))
+      , discarded_stm_snapshots(std::move(discarded_stm_snapshots)) {}
 };
 
 class kvstore {
@@ -217,6 +228,19 @@ private:
     ss::future<> load_snapshot();
     ss::future<> load_snapshot_from_reader(snapshot_reader&);
     ss::future<> replay_segments(segment_set);
+
+    /// Whether a (spaced) key belongs to a discarded_stm_snapshots entry.
+    bool is_discarded(bytes_view spaced_key) const;
+    /// Restore one record of the snapshot batch into the db, unless its key is
+    /// discarded.
+    void restore_snapshot_record(model::record, const ssx::semaphore_units&);
+
+    // Spaced key prefixes built from kvstore_config::discarded_stm_snapshots.
+    std::vector<bytes> _discarded_prefixes;
+    // Entries and bytes dropped by recovery; non-zero means the recovered
+    // state differs from the snapshot on disk, which is then rewritten.
+    size_t _discarded_entries{0};
+    size_t _discarded_bytes{0};
 
     /**
      * Replay batches against the key-value store.

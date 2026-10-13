@@ -15,6 +15,13 @@
 
 #include <gtest/gtest.h>
 
+#include <filesystem>
+#include <fstream>
+#include <map>
+#include <optional>
+#include <string_view>
+#include <vector>
+
 template<typename T>
 static void set_configuration(ss::sstring p_name, T v) {
     ss::smp::invoke_on_all([p_name, v = std::move(v)] {
@@ -478,4 +485,215 @@ TEST_F(kvstore_test_fixture, persist_pre_start_key_space_isolation) {
     EXPECT_FALSE(
       kvs->get(storage::kvstore::key_space::consensus, key).has_value());
     kvs->stop().get();
+}
+
+// ---------------------------------------------------------------------------
+// Discarded stm snapshots
+//
+// An earlier build kept whole dedup indices in the kvstore, as values tens of
+// MiB large. Loading them is what can stop a broker from starting, so recovery
+// drops them before they are held in memory, from both the snapshot and the
+// replayed segments, and rewrites the snapshot so the next start never reads
+// them again.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+using key_space = storage::kvstore::key_space;
+
+struct mixed_store {
+    // Dropped: the discarded snapshot name, any ntp.
+    std::vector<bytes> discarded{
+      bytes::from_string("dedup.snapshot/kafka/topic/0"),
+      bytes::from_string("dedup.snapshot/kafka/other/12")};
+    // Kept: another stm's snapshot, a name that merely starts the same way,
+    // and the discarded key itself in another key space.
+    std::vector<std::pair<key_space, bytes>> kept{
+      {key_space::stms, bytes::from_string("rm_stm.snapshot/kafka/topic/0")},
+      {key_space::stms, bytes::from_string("dedup.snapshot.v2/kafka/topic/0")},
+      {key_space::stms, bytes::from_string("dedup.snapshotkafka/topic/0")},
+      {key_space::testing, bytes::from_string("dedup.snapshot/kafka/topic/0")},
+      {key_space::consensus, bytes::from_string("voted_for")}};
+    std::map<std::pair<key_space, bytes>, iobuf> kept_values;
+
+    void write(storage::kvstore& kvs, size_t discarded_value_size) {
+        for (const auto& key : discarded) {
+            kvs
+              .put(
+                key_space::stms,
+                key,
+                bytes_to_iobuf(tests::random_bytes(discarded_value_size)))
+              .get();
+        }
+        for (const auto& [ks, key] : kept) {
+            auto value = bytes_to_iobuf(tests::random_bytes(64));
+            kept_values[{ks, key}] = value.copy();
+            kvs.put(ks, key, std::move(value)).get();
+        }
+    }
+
+    void expect_discarded_gone(storage::kvstore& kvs) const {
+        for (const auto& key : discarded) {
+            EXPECT_FALSE(kvs.get(key_space::stms, key).has_value());
+        }
+    }
+
+    void expect_discarded_present(storage::kvstore& kvs) const {
+        for (const auto& key : discarded) {
+            EXPECT_TRUE(kvs.get(key_space::stms, key).has_value());
+        }
+    }
+
+    void expect_kept(storage::kvstore& kvs) const {
+        for (const auto& [ks, key] : kept) {
+            auto value = kvs.get(ks, key);
+            ASSERT_TRUE(value.has_value());
+            EXPECT_EQ(*value, kept_values.at({ks, key}));
+        }
+    }
+};
+
+std::optional<std::filesystem::path>
+find_file(const std::filesystem::path& root, std::string_view name) {
+    for (const auto& entry :
+         std::filesystem::recursive_directory_iterator(root)) {
+        if (entry.is_regular_file() && entry.path().filename() == name) {
+            return entry.path();
+        }
+    }
+    return std::nullopt;
+}
+
+} // namespace
+
+// Small values stay in the open segment, so recovery finds them while
+// replaying segments rather than in the snapshot.
+TEST_F(kvstore_test_fixture, discarded_stm_snapshots_dropped_from_segments) {
+    set_configuration("disable_metrics", true);
+    mixed_store store;
+
+    auto kvs = make_kvstore();
+    kvs->start().get();
+    store.write(*kvs, 16);
+    // Never rolled, so no snapshot: the next recovery reads everything from
+    // the segment. (Recovery itself snapshots and drops the segments it
+    // replayed, so that has to be the discarding one.)
+    store.expect_discarded_present(*kvs);
+    kvs->stop().get();
+    ASSERT_FALSE(find_file(std::filesystem::path(test_dir()), "snapshot"));
+
+    kvs = make_kvstore({"dedup.snapshot"});
+    kvs->start().get();
+    store.expect_discarded_gone(*kvs);
+    store.expect_kept(*kvs);
+    kvs->stop().get();
+
+    // The drop is durable: a store opened without the list does not see them
+    // again.
+    kvs = make_kvstore();
+    kvs->start().get();
+    store.expect_discarded_gone(*kvs);
+    store.expect_kept(*kvs);
+    kvs->stop().get();
+}
+
+// Values larger than the segment size roll it, which writes a snapshot, so
+// recovery finds them in the snapshot it loads.
+TEST_F(kvstore_test_fixture, discarded_stm_snapshots_dropped_from_snapshot) {
+    set_configuration("disable_metrics", true);
+    mixed_store store;
+
+    auto kvs = make_kvstore();
+    kvs->start().get();
+    store.write(*kvs, 64 * 1024);
+    kvs->stop().get();
+    ASSERT_TRUE(find_file(std::filesystem::path(test_dir()), "snapshot"));
+
+    kvs = make_kvstore({"dedup.snapshot"});
+    kvs->start().get();
+    store.expect_discarded_gone(*kvs);
+    store.expect_kept(*kvs);
+    kvs->stop().get();
+
+    kvs = make_kvstore();
+    kvs->start().get();
+    store.expect_discarded_gone(*kvs);
+    store.expect_kept(*kvs);
+    kvs->stop().get();
+}
+
+// A discarded key written again after recovery is an ordinary key: the list
+// only filters what recovery reads, never what the running store accepts.
+TEST_F(kvstore_test_fixture, discarded_stm_snapshot_can_be_written_again) {
+    set_configuration("disable_metrics", true);
+    const auto key = bytes::from_string("dedup.snapshot/kafka/topic/0");
+
+    auto kvs = make_kvstore({"dedup.snapshot"});
+    kvs->start().get();
+    kvs->put(key_space::stms, key, iobuf::from("fresh")).get();
+    EXPECT_EQ(kvs->get(key_space::stms, key).value(), iobuf::from("fresh"));
+    kvs->stop().get();
+}
+
+// Restoring the snapshot record by record must keep its integrity check: a
+// corrupted snapshot still fails recovery rather than loading bad data.
+TEST_F(kvstore_test_fixture, corrupted_snapshot_still_fails_recovery) {
+    set_configuration("disable_metrics", true);
+    mixed_store store;
+
+    auto kvs = make_kvstore();
+    kvs->start().get();
+    store.write(*kvs, 64 * 1024);
+    kvs->stop().get();
+
+    auto snapshot = find_file(std::filesystem::path(test_dir()), "snapshot");
+    ASSERT_TRUE(snapshot.has_value());
+    {
+        // Flip a byte well inside the record payload, away from the framing.
+        std::fstream f(
+          *snapshot, std::ios::in | std::ios::out | std::ios::binary);
+        ASSERT_TRUE(f.is_open());
+        f.seekg(0, std::ios::end);
+        const auto size = static_cast<std::streamoff>(f.tellg());
+        ASSERT_GT(size, 4096);
+        f.seekg(size / 2);
+        char c = 0;
+        f.read(&c, 1);
+        c = static_cast<char>(c ^ 0x5a);
+        f.seekp(size / 2);
+        f.write(&c, 1);
+    }
+
+    kvs = make_kvstore();
+    EXPECT_ANY_THROW(kvs->recover().get());
+    kvs->stop().get();
+}
+
+// A large store round-trips through the record-by-record snapshot load
+// exactly, across several restarts.
+TEST_F(kvstore_test_fixture, snapshot_load_round_trips_many_keys) {
+    set_configuration("disable_metrics", true);
+    std::map<bytes, iobuf> truth;
+
+    auto kvs = make_kvstore();
+    kvs->start().get();
+    for (int i = 0; i < 300; i++) {
+        auto key = bytes::from_string(fmt::format("key-{}", i));
+        auto value = bytes_to_iobuf(
+          tests::random_bytes(random_generators::get_int(0, 4096)));
+        truth[key] = value.copy();
+        kvs->put(key_space::testing, key, std::move(value)).get();
+    }
+    kvs->stop().get();
+
+    for (int restart = 0; restart < 3; ++restart) {
+        kvs = make_kvstore({"dedup.snapshot"});
+        kvs->start().get();
+        for (const auto& [key, value] : truth) {
+            auto got = kvs->get(key_space::testing, key);
+            ASSERT_TRUE(got.has_value());
+            EXPECT_EQ(*got, value);
+        }
+        kvs->stop().get();
+    }
 }
