@@ -27,7 +27,9 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <memory>
 #include <optional>
+#include <random>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -1880,4 +1882,288 @@ TEST(DedupWindowFilter, NullValuedIdentityHeaderIsRejected) {
     EXPECT_FALSE(result.batch.has_value());
     // Nothing was indexed, so a later well-formed record is unaffected.
     EXPECT_EQ(f.map_size(), 0u);
+}
+
+// ---------------------------------------------------------------------------
+// Shard budget
+//
+// Every dedup index on a shard reports its size into one dedup_shard_budget,
+// and new identities are refused or trimmed against the shard total as well
+// as against the partition's own ceiling. These tests pin the accounting --
+// the budget must equal the sum of the indices on every path that changes an
+// index's size -- and the capacity behaviour built on it.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+ss::lw_shared_ptr<cluster::dedup_shard_budget> make_budget(size_t limit) {
+    return ss::make_lw_shared<cluster::dedup_shard_budget>(limit);
+}
+
+void populate_n(
+  cluster::dedup_window_filter& f,
+  std::string_view prefix,
+  size_t n,
+  int64_t first_ts = 1000,
+  int64_t step_ms = 1) {
+    for (size_t i = 0; i < n; ++i) {
+        f.populate(
+          iobuf::from(fmt::format("{}-{}", prefix, i)),
+          ts(first_ts + static_cast<int64_t>(i) * step_ms));
+    }
+}
+
+} // namespace
+
+TEST(DedupShardBudget, WithoutABudgetNothingIsShared) {
+    cluster::dedup_window_filter f(100s, 50);
+    EXPECT_EQ(f.shard_budget(), nullptr);
+    populate_n(f, "k", 40);
+    EXPECT_EQ(f.map_size(), 40u);
+    EXPECT_EQ(f.unindexed_records(), 0u);
+}
+
+TEST(DedupShardBudget, CountsEveryFilterOnTheShard) {
+    auto budget = make_budget(1'000);
+    cluster::dedup_window_filter a(100s, 1'000, budget);
+    cluster::dedup_window_filter b(100s, 1'000, budget);
+    populate_n(a, "a", 10);
+    populate_n(b, "b", 5);
+    EXPECT_EQ(budget->entries, 15u);
+    EXPECT_EQ(a.shard_budget(), budget.get());
+
+    // A repeated identity updates in place and costs nothing more.
+    populate_n(a, "a", 10, 2000);
+    EXPECT_EQ(budget->entries, 15u);
+}
+
+TEST(DedupShardBudget, ProducePathInsertsAreCounted) {
+    auto budget = make_budget(1'000);
+    cluster::dedup_window_filter f(100s, 1'000, budget);
+    ASSERT_TRUE(
+      f.filter(make_multi_batch({{"a", "1"}, {"b", "2"}, {"c", "3"}}, ts(1000)))
+        .has_value());
+    EXPECT_EQ(budget->entries, 3u);
+    // Duplicates are dropped without touching the index.
+    EXPECT_FALSE(f.filter(make_batch("a", "dup", ts(1100))).has_value());
+    EXPECT_EQ(budget->entries, 3u);
+}
+
+TEST(DedupShardBudget, RevertedRequestGivesItsEntriesBack) {
+    auto budget = make_budget(1'000);
+    cluster::dedup_window_filter f(100s, 1'000, budget);
+    populate_n(f, "kept", 4);
+    auto result = f.filter_request(
+      make_multi_batch({{"x", "1"}, {"y", "2"}, {"kept-0", "3"}}, ts(5000)));
+    ASSERT_TRUE(result.batch.has_value());
+    EXPECT_EQ(budget->entries, 6u);
+    f.revert_request(result.undo);
+    EXPECT_EQ(f.map_size(), 4u);
+    EXPECT_EQ(budget->entries, 4u);
+}
+
+TEST(DedupShardBudget, ExpirySweepsGiveEntriesBack) {
+    auto budget = make_budget(1'000);
+    cluster::dedup_window_filter f(1000ms, 1'000, budget);
+    populate_n(f, "old", 64, 1000, 0);
+    ASSERT_EQ(budget->entries, 64u);
+    // Each new identity far past the window sweeps eight expired entries.
+    populate_n(f, "new", 4, 1'000'000, 0);
+    EXPECT_LT(f.map_size(), 64u);
+    EXPECT_EQ(budget->entries, f.map_size());
+}
+
+TEST(DedupShardBudget, ClearRestoreAndDestructionKeepTheTotalExact) {
+    auto budget = make_budget(1'000);
+    cluster::dedup_window_filter a(100s, 1'000, budget);
+    populate_n(a, "a", 20);
+    {
+        cluster::dedup_window_filter b(100s, 1'000, budget);
+        populate_n(b, "b", 30);
+        EXPECT_EQ(budget->entries, 50u);
+
+        auto snap = b.snapshot();
+        b.clear();
+        EXPECT_EQ(budget->entries, 20u);
+        b.restore(snap);
+        EXPECT_EQ(budget->entries, 50u);
+        // Restoring over a populated index replaces, not adds.
+        b.restore(snap);
+        EXPECT_EQ(budget->entries, 50u);
+    }
+    // b's entries go back when it is destroyed.
+    EXPECT_EQ(budget->entries, 20u);
+    a.clear();
+    EXPECT_EQ(budget->entries, 0u);
+}
+
+// The bug this guards against: four saturated partitions on one shard, each
+// within its own ceiling, together far over what the shard can hold.
+TEST(DedupShardBudget, CombinedSizeStaysWithinTheShardLimit) {
+    constexpr size_t shard_limit = 200;
+    auto budget = make_budget(shard_limit);
+    std::vector<std::unique_ptr<cluster::dedup_window_filter>> filters;
+    for (int i = 0; i < 4; ++i) {
+        filters.push_back(
+          std::make_unique<cluster::dedup_window_filter>(100s, 1'000, budget));
+    }
+    for (size_t i = 0; i < 2'000; ++i) {
+        auto& f = *filters[i % filters.size()];
+        f.populate(
+          iobuf::from(fmt::format("id-{}", i)),
+          ts(1000 + static_cast<int64_t>(i)));
+        ASSERT_LE(budget->entries, shard_limit) << "after " << i;
+    }
+    size_t total = 0;
+    size_t trimmed = 0;
+    for (auto& f : filters) {
+        total += f->map_size();
+        trimmed += f->capacity_evicted_entries() + f->unindexed_records();
+        // Far below its own ceiling: the shard is what bound it.
+        EXPECT_LT(f->map_size(), f->max_entries());
+    }
+    EXPECT_EQ(total, budget->entries);
+    EXPECT_GT(trimmed, 0u);
+}
+
+// Shard pressure trims a partition that is nowhere near its own soft limit,
+// through the same oldest-quarter cursor the per-partition ceiling uses, so
+// the partition keeps its most recent identities rather than going blind.
+TEST(DedupShardBudget, PressureTrimsTheOldestEntriesOfTheInsertingPartition) {
+    constexpr size_t shard_limit = 100;
+    auto budget = make_budget(shard_limit);
+    // Timestamps spread across many of the cursor's histogram buckets: an
+    // index packed into one narrow range is deliberately never trimmed for
+    // capacity (see finish_pass()), which is not what this test is about.
+    cluster::dedup_window_filter f(100s, 10'000, budget);
+    constexpr size_t identities = 2'000;
+    constexpr int64_t step_ms = 100;
+    populate_n(f, "id", identities, 1000, step_ms);
+
+    EXPECT_LE(f.map_size(), shard_limit);
+    EXPECT_GT(f.capacity_evicted_entries(), 0u);
+    EXPECT_EQ(budget->entries, f.map_size());
+    // The newest identity is still indexed, so its duplicate is caught.
+    const auto newest = fmt::format("id-{}", identities - 1);
+    EXPECT_FALSE(
+      f.filter(make_batch(newest, "dup", ts(1000 + (identities - 1) * step_ms)))
+        .has_value());
+}
+
+// At the hard shard limit with nothing of its own to free, a partition admits
+// new identities unindexed rather than exceeding the limit. Once the space is
+// released elsewhere, it indexes again.
+TEST(DedupShardBudget, AtTheLimitAPartitionWithNothingToFreeAdmitsUnindexed) {
+    constexpr size_t shard_limit = 50;
+    auto budget = make_budget(shard_limit);
+    cluster::dedup_window_filter idle(100s, 1'000, budget);
+    {
+        auto full = std::make_unique<cluster::dedup_window_filter>(
+          100s, 1'000, budget);
+        populate_n(*full, "full", shard_limit);
+        ASSERT_EQ(budget->entries, shard_limit);
+
+        EXPECT_TRUE(idle.filter(make_batch("new", "v", ts(1000))).has_value());
+        EXPECT_EQ(idle.map_size(), 0u);
+        EXPECT_EQ(idle.unindexed_records(), 1u);
+        EXPECT_GT(idle.capacity_sweeps(), 0u);
+        EXPECT_EQ(budget->entries, shard_limit);
+    }
+    // The full partition went away (moved or deleted) and took its entries
+    // with it.
+    EXPECT_EQ(budget->entries, 0u);
+    EXPECT_TRUE(idle.filter(make_batch("new", "v", ts(2000))).has_value());
+    EXPECT_EQ(idle.map_size(), 1u);
+    EXPECT_FALSE(idle.filter(make_batch("new", "v", ts(2100))).has_value());
+}
+
+// restore() is bounded by the partition's own ceiling, not by shard headroom:
+// partitions restore in whatever order they start, so headroom would favour
+// whichever came first. The budget still counts what was restored, and the
+// next insertions trim it back.
+TEST(DedupShardBudget, RestoreIgnoresHeadroomButIsCounted) {
+    constexpr size_t shard_limit = 20;
+    auto budget = make_budget(shard_limit);
+    cluster::dedup_window_filter source(1'000s, 1'000);
+    populate_n(source, "r", 100, 1000, 1000);
+
+    cluster::dedup_window_filter f(1'000s, 1'000, budget);
+    f.restore(source.snapshot());
+    EXPECT_EQ(f.map_size(), 100u);
+    EXPECT_EQ(budget->entries, 100u);
+
+    populate_n(f, "fresh", 2'000, 200'000, 1000);
+    EXPECT_LE(f.map_size(), shard_limit);
+    EXPECT_EQ(budget->entries, f.map_size());
+}
+
+// The leader's and the follower's paths must still agree with each other when
+// the shard budget is what is doing the trimming, given the same shard state.
+TEST(DedupShardBudget, LeaderAndFollowerPathsAgreeUnderShardPressure) {
+    constexpr size_t shard_limit = 40;
+    auto leader_budget = make_budget(shard_limit);
+    auto follower_budget = make_budget(shard_limit);
+    cluster::dedup_window_filter leader(100s, 1'000, leader_budget);
+    cluster::dedup_window_filter follower(100s, 1'000, follower_budget);
+
+    for (size_t i = 0; i < 500; ++i) {
+        const auto key = fmt::format("id-{}", i);
+        const auto stamp = ts(1000 + static_cast<int64_t>(i) * 150);
+        ASSERT_TRUE(leader.filter(make_batch(key, "v", stamp)).has_value());
+        follower.populate(iobuf::from(key), stamp);
+    }
+    ASSERT_GT(leader.capacity_evicted_entries(), 0u);
+    EXPECT_EQ(leader.snapshot(), follower.snapshot());
+    EXPECT_EQ(leader_budget->entries, follower_budget->entries);
+    EXPECT_EQ(
+      leader.capacity_evicted_entries(), follower.capacity_evicted_entries());
+}
+
+// Randomized: whatever mix of operations runs against several filters, the
+// budget equals the sum of their sizes after every one of them.
+TEST(DedupShardBudget, TotalMatchesTheIndicesUnderRandomOperations) {
+    auto budget = make_budget(300);
+    std::vector<std::unique_ptr<cluster::dedup_window_filter>> filters;
+    for (int i = 0; i < 3; ++i) {
+        filters.push_back(
+          std::make_unique<cluster::dedup_window_filter>(5s, 150, budget));
+    }
+    std::mt19937 rng(20261013); // NOLINT(cert-msc51-cpp): reproducible
+    int64_t clock = 1000;
+    std::vector<cluster::dedup_request_undo> pending;
+    for (int step = 0; step < 20'000; ++step) {
+        auto& f = *filters[rng() % filters.size()];
+        clock += static_cast<int64_t>(rng() % 50);
+        const auto key = fmt::format("k-{}", rng() % 700);
+        switch (rng() % 100) {
+        case 0:
+            f.clear();
+            break;
+        case 1:
+            f.restore(f.snapshot());
+            break;
+        case 2:
+            if (!pending.empty()) {
+                f.revert_request(pending.back());
+                pending.pop_back();
+            }
+            break;
+        default:
+            if (rng() % 2 == 0) {
+                f.populate(iobuf::from(key), ts(clock));
+            } else {
+                auto result = f.filter_request(make_batch(key, "v", ts(clock)));
+                if (rng() % 10 == 0) {
+                    pending.push_back(std::move(result.undo));
+                }
+            }
+        }
+        size_t total = 0;
+        for (auto& g : filters) {
+            total += g->map_size();
+        }
+        ASSERT_EQ(budget->entries, total) << "step " << step;
+    }
+    filters.clear();
+    EXPECT_EQ(budget->entries, 0u);
 }

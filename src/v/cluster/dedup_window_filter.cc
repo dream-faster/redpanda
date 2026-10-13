@@ -67,10 +67,58 @@ dedup_identity_digest dedup_digest_of(const iobuf& identity) {
 }
 
 dedup_window_filter::dedup_window_filter(
-  std::chrono::milliseconds window, size_t max_entries)
+  std::chrono::milliseconds window,
+  size_t max_entries,
+  ss::lw_shared_ptr<dedup_shard_budget> shard_budget)
   : _window(window)
-  , _max_entries(max_entries) {
+  , _max_entries(max_entries)
+  , _shard_budget(std::move(shard_budget)) {
     begin_pass();
+}
+
+dedup_window_filter::~dedup_window_filter() {
+    if (_shard_budget) {
+        _shard_budget->entries -= _budget_accounted;
+    }
+}
+
+namespace {
+
+// A tenth below the ceiling, and at least one entry below it so a tiny
+// configured ceiling still leaves the cursor a margin to trim in.
+size_t soft_limit_of(size_t ceiling, size_t margin_divisor) {
+    return ceiling
+           - std::min(ceiling, std::max<size_t>(1, ceiling / margin_divisor));
+}
+
+} // namespace
+
+void dedup_window_filter::sync_shard_budget() {
+    if (!_shard_budget) {
+        return;
+    }
+    const auto size = _map.size();
+    _shard_budget->entries = _shard_budget->entries - _budget_accounted + size;
+    _budget_accounted = size;
+}
+
+bool dedup_window_filter::at_capacity() const {
+    if (_map.size() >= _max_entries) {
+        return true;
+    }
+    return _shard_budget
+           && _shard_budget->entries >= _shard_budget->max_entries;
+}
+
+bool dedup_window_filter::over_soft_limit() const {
+    if (
+      _map.size()
+      >= soft_limit_of(_max_entries, capacity_soft_margin_divisor)) {
+        return true;
+    }
+    return _shard_budget
+           && _shard_budget->entries >= soft_limit_of(
+                _shard_budget->max_entries, capacity_soft_margin_divisor);
 }
 
 namespace {
@@ -138,13 +186,14 @@ bool dedup_window_filter::is_duplicate(
     // point, and capacity trimming is decision-affecting, so the two orders
     // must match or replicas drift. See populate().
     sweep_step(sweep_budget);
-    if (_map.size() >= _max_entries && !make_room_for_one()) {
+    if (at_capacity() && !make_room_for_one()) {
         // The bounded step found nothing freeable. The record is admitted but
         // this identity is not remembered.
         ++_unindexed_records;
         return false;
     }
     _map.emplace(identity, ts);
+    sync_shard_budget();
     if (undo) {
         undo->entries.push_back(
           {.identity = identity,
@@ -312,6 +361,7 @@ void dedup_window_filter::revert_request(const dedup_request_undo& undo) {
             _map.erase(it);
         }
     }
+    sync_shard_budget();
 }
 
 void dedup_window_filter::populate(const iobuf& key, model::timestamp ts) {
@@ -337,22 +387,17 @@ void dedup_window_filter::populate(const iobuf& key, model::timestamp ts) {
         return;
     }
     sweep_step(sweep_budget);
-    if (_map.size() >= _max_entries && !make_room_for_one()) {
+    if (at_capacity() && !make_room_for_one()) {
         ++_unindexed_records;
         return;
     }
     _map.emplace(identity, ts);
-}
-
-size_t dedup_window_filter::soft_limit() const {
-    // A tenth below the ceiling, and at least one entry below it so a tiny
-    // configured ceiling still leaves the cursor a margin to trim in.
-    return _max_entries
-           - std::max<size_t>(1, _max_entries / capacity_soft_margin_divisor);
+    sync_shard_budget();
 }
 
 void dedup_window_filter::erase_at(size_t index) {
     _map.erase(_map.begin() + static_cast<std::ptrdiff_t>(index));
+    sync_shard_budget();
 }
 
 void dedup_window_filter::begin_pass() {
@@ -394,7 +439,6 @@ void dedup_window_filter::finish_pass() {
 
 void dedup_window_filter::sweep_step(size_t budget) {
     const int64_t expiry_cutoff = _max_ts.value() - _window.count();
-    const auto soft = soft_limit();
 
     for (size_t step = 0; step < budget; ++step) {
         if (_map.empty()) {
@@ -419,7 +463,7 @@ void dedup_window_filter::sweep_step(size_t budget) {
             erase_at(_sweep_pos);
             continue;
         }
-        if (_map.size() >= soft && stamp.value() < _capacity_cutoff.value()) {
+        if (stamp.value() < _capacity_cutoff.value() && over_soft_limit()) {
             // Inside the window, so this is coverage genuinely lost. Doing it
             // here, a few entries at a time from the soft limit upwards, is
             // what replaced dropping a quarter of the index in one step once
@@ -446,7 +490,7 @@ bool dedup_window_filter::make_room_for_one() {
     // walk the index and eventually complete a pass, recomputing the cutoff.
     ++_capacity_sweeps;
     sweep_step(capacity_emergency_budget);
-    return _map.size() < _max_entries;
+    return !at_capacity();
 }
 
 dedup_index_snapshot dedup_window_filter::snapshot() const {
@@ -461,6 +505,12 @@ dedup_index_snapshot dedup_window_filter::snapshot() const {
 
 void dedup_window_filter::restore(const dedup_index_snapshot& snapshot) {
     _map.clear();
+    sync_shard_budget();
+    // Bounded by this partition's ceiling only, not by the shard's headroom:
+    // a restore runs once per partition at startup, in whatever order the
+    // partitions happen to start, so letting the shard budget pick would
+    // hand the whole shard to whichever restores first. The shard limit
+    // catches up through the cursor as soon as identities arrive.
     const auto restore_count = std::min(snapshot.entries.size(), _max_entries);
     _map.reserve(restore_count);
     if (restore_count == snapshot.entries.size()) {
@@ -492,6 +542,7 @@ void dedup_window_filter::restore(const dedup_index_snapshot& snapshot) {
         }
         _truncated_entries += snapshot.entries.size() - restore_count;
     }
+    sync_shard_budget();
     // A snapshot written by a broker without the clamp can carry a poisoned
     // watermark; clamping here lets such a partition heal on restart rather
     // than needing a dedup_generation bump. Not counted as record skew.
@@ -515,6 +566,7 @@ void dedup_window_filter::clear() {
     // memory back. restore() keeps using clear(), since it refills
     // immediately and the capacity is worth keeping there.
     _map = {};
+    sync_shard_budget();
     _max_ts = model::timestamp::min();
     _sweep_pos = 0;
     _capacity_cutoff = model::timestamp::min();

@@ -16,6 +16,8 @@
 #include "model/record.h"
 #include "model/timestamp.h"
 
+#include <seastar/core/shared_ptr.hh>
+
 #include <array>
 #include <chrono>
 #include <cstddef>
@@ -143,6 +145,21 @@ struct dedup_index_snapshot {
       const dedup_index_snapshot&, const dedup_index_snapshot&) = default;
 };
 
+/// \brief Entry count shared by every dedup index on one shard.
+///
+/// The per-partition ceiling does not bound a shard: partitions are placed on
+/// shards by count, not by index size, so several saturated indices can share
+/// one shard's memory. Every filter on the shard holds the same budget and
+/// reports its own size changes into it; one that inserts while the shard is
+/// near its limit trims itself the way it would near its own ceiling.
+struct dedup_shard_budget {
+    explicit dedup_shard_budget(size_t max_entries)
+      : max_entries(max_entries) {}
+
+    size_t entries{0};
+    const size_t max_entries;
+};
+
 /// \brief Write-path, first-wins deduplication.
 ///
 /// Records are dropped at produce time (before Raft replication) when their
@@ -175,11 +192,18 @@ struct dedup_index_snapshot {
 /// that advances a few entries per new identity drops them as it goes.
 /// Finally, a hard per-partition entry limit prevents a large window,
 /// high-cardinality traffic, or non-advancing producer timestamps from
-/// exhausting shard memory. The same cursor keeps the index under that limit:
-/// from a soft limit a tenth below it, the cursor also drops the entries a
-/// completed pass found to be in the oldest quarter, so the effective window
-/// narrows to roughly the limit divided by the new-identity arrival rate
-/// rather than dedup switching off for new identities.
+/// exhausting shard memory, and an optional dedup_shard_budget applies the
+/// same rule to the sum of every index on the shard. The same cursor keeps the
+/// index under that limit: from a soft limit a tenth below it, the cursor also
+/// drops the entries a completed pass found to be in the oldest quarter, so the
+/// effective window narrows to roughly the limit divided by the new-identity
+/// arrival rate rather than dedup switching off for new identities.
+///
+/// The shard budget makes a partition's effective capacity depend on which
+/// other partitions share its shard, and replicas of one partition rarely share
+/// a shard with the same set. Under shard pressure replicas therefore trim
+/// different amounts: the same best-effort divergence capacity eviction
+/// already has (see _sweep_pos), reached from a different cause.
 ///
 /// No path into the filter does work proportional to the index. That is a
 /// hard requirement, not an optimization: sweeps happen at the same log
@@ -210,7 +234,14 @@ public:
 
     explicit dedup_window_filter(
       std::chrono::milliseconds window,
-      size_t max_entries = default_max_entries);
+      size_t max_entries = default_max_entries,
+      ss::lw_shared_ptr<dedup_shard_budget> shard_budget = nullptr);
+
+    dedup_window_filter(const dedup_window_filter&) = delete;
+    dedup_window_filter& operator=(const dedup_window_filter&) = delete;
+    dedup_window_filter(dedup_window_filter&&) = delete;
+    dedup_window_filter& operator=(dedup_window_filter&&) = delete;
+    ~dedup_window_filter();
 
     /// \brief Filter duplicate records from a batch.
     ///
@@ -311,6 +342,9 @@ public:
 
     size_t map_size() const { return _map.size(); }
     size_t max_entries() const { return _max_entries; }
+    const dedup_shard_budget* shard_budget() const {
+        return _shard_budget.get();
+    }
     model::timestamp max_timestamp() const { return _max_ts; }
 
     /// Records dropped as duplicates. The denominator that makes the two
@@ -386,9 +420,19 @@ private:
     /// than advance.
     void erase_at(size_t index);
 
-    /// Index size at and above which the cursor also drops entries below the
-    /// capacity cutoff, leaving the hard ceiling as a backstop.
-    size_t soft_limit() const;
+    /// Report the map's size change since the last call to the shard budget.
+    /// Called after every insert or erase, so the budget is exact whenever a
+    /// capacity check reads it.
+    void sync_shard_budget();
+
+    /// Whether a new identity can be inserted without exceeding this
+    /// partition's ceiling or the shard's.
+    bool at_capacity() const;
+
+    /// Whether the cursor should drop entries below the capacity cutoff: this
+    /// index is within capacity_soft_margin_divisor of its own ceiling, or the
+    /// shard is within it of the shard's.
+    bool over_soft_limit() const;
 
     // Entries the cursor visits per new-identity attempt. This matches the
     // throughput of the periodic full passes it replaced -- those swept the
@@ -423,6 +467,9 @@ private:
 
     std::chrono::milliseconds _window;
     const size_t _max_entries;
+    ss::lw_shared_ptr<dedup_shard_budget> _shard_budget;
+    // This filter's contribution to _shard_budget->entries.
+    size_t _budget_accounted{0};
     std::optional<ss::sstring> _key_header;
     chunked_hash_map<
       dedup_identity_digest,

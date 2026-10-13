@@ -10,16 +10,22 @@
 #include "bytes/bytes.h"
 #include "cluster/dedup_stm.h"
 #include "cluster/logger.h"
+#include "cluster/snapshot.h"
 #include "config/mock_property.h"
 #include "model/batch_builder.h"
 #include "raft/tests/raft_fixture.h"
-#include "serde/async.h"
+#include "serde/envelope.h"
+#include "serde/rw/envelope.h"
+#include "serde/rw/vector.h"
+#include "serde/serde_exception.h"
+#include "storage/kvstore.h"
 #include "storage/record_batch_builder.h"
 #include "test_utils/test.h"
 
 #include <gtest/gtest.h>
 
 #include <optional>
+#include <string>
 #include <string_view>
 
 using namespace std::chrono_literals;
@@ -29,7 +35,8 @@ namespace cluster {
 struct dedup_stm_test_accessor {
     static size_t snapshot_size(iobuf snapshot) {
         return serde::from_iobuf<dedup_stm::state_snapshot>(std::move(snapshot))
-          .entries.size();
+                 .entries.size_bytes()
+               / dedup_stm::packed_entry_size;
     }
 
     static ss::future<raft::local_snapshot_applied>
@@ -42,27 +49,30 @@ struct dedup_stm_test_accessor {
         co_await stm.apply_raft_snapshot(buffer);
     }
 
-    /// Built twice rather than copied: the entry vector is move-only.
-    static dedup_stm::state_snapshot state_snapshot_with(size_t entries) {
-        dedup_stm::state_snapshot snapshot{
-          .window_ms = 300'000,
-          .generation = 7,
-          .max_timestamp = model::timestamp{1'699'000'000'000},
-          .legacy_inserts_since_evict = 4'096};
-        snapshot.entries.reserve(entries);
-        for (size_t i = 0; i < entries; ++i) {
-            snapshot.entries.push_back(
-              {.identity_hi = 0x0123'4567'89ab'cdefULL + i,
-               .identity_lo = ~uint64_t{i},
-               .timestamp = model::timestamp{static_cast<int64_t>(i)}});
-        }
-        return snapshot;
+    static iobuf
+    serialize(const dedup_window_filter& state, int64_t generation) {
+        return dedup_stm::serialize_snapshot(state, generation);
     }
 
-    static ss::future<iobuf> write_async(dedup_stm::state_snapshot snapshot) {
-        iobuf out;
-        co_await serde::write_async(out, std::move(snapshot));
-        co_return std::move(out);
+    static void
+    restore(dedup_window_filter& state, int64_t& generation, iobuf buffer) {
+        dedup_stm::restore_snapshot(
+          state,
+          generation,
+          serde::from_iobuf<dedup_stm::state_snapshot>(std::move(buffer)));
+    }
+
+    static iobuf state_snapshot_with_entry_bytes(size_t bytes) {
+        auto entries = iobuf::from(std::string(bytes, 'x'));
+        return serde::to_iobuf(
+          dedup_stm::state_snapshot{
+            .window_ms = 1000, .generation = 1, .entries = std::move(entries)});
+    }
+
+    static bytes legacy_kvstore_key(const model::ntp& ntp) {
+        return bytes::from_string(
+          raft::kvstore_backed_stm_snapshot::snapshot_key(
+            dedup_stm_snapshot, ntp));
     }
 };
 
@@ -98,23 +108,168 @@ model::record_batch make_batch_with_header(
     return std::move(builder).build_sync();
 }
 
-// The snapshot paths serialize with serde::write_async() so a saturated index
-// does not hold the reactor for the whole walk. That path is a hand-written
-// field walk, so nothing but a test keeps it in step with the serde_fields()
-// layout that every reader -- including a broker running an older build of
-// this branch -- expects. Sizes straddle the yield boundary so a batching bug
-// cannot hide between them.
-TEST_CORO(dedup_stm_snapshot, async_write_matches_the_serde_layout) {
-    for (const size_t count : {0UL, 1UL, 1023UL, 1024UL, 1025UL, 4097UL}) {
+// The packed entry encoding is hand-written rather than serde's, so a test is
+// what keeps the writer and reader in step. Sizes include zero and enough
+// entries to span several iobuf fragments.
+TEST(dedup_stm_snapshot, packed_entries_round_trip) {
+    for (const size_t count : {0UL, 1UL, 5461UL, 5462UL, 100'000UL}) {
         SCOPED_TRACE(count);
-        auto expected = serde::to_iobuf(
-          dedup_stm_test_accessor::state_snapshot_with(count));
-        auto actual = co_await dedup_stm_test_accessor::write_async(
-          dedup_stm_test_accessor::state_snapshot_with(count));
-        ASSERT_EQ_CORO(expected, actual);
-        ASSERT_EQ_CORO(
-          dedup_stm_test_accessor::snapshot_size(std::move(actual)), count);
+        dedup_window_filter source(1h);
+        dedup_index_snapshot seed{
+          .max_timestamp = model::timestamp{1'000'000'000 + 999}};
+        for (size_t i = 0; i < count; ++i) {
+            seed.entries.push_back(
+              {.identity
+               = {.hi = 0xbf58'476d'1ce4'e5b9ULL * (i + 1), .lo = 0x9e37'79b9'7f4a'7c15ULL * (i + 1)},
+               .timestamp = model::timestamp{
+                 1'000'000'000 + static_cast<int64_t>(i % 1000)}});
+        }
+        source.restore(seed);
+        ASSERT_EQ(source.map_size(), count);
+
+        auto buffer = dedup_stm_test_accessor::serialize(source, 7);
+        ASSERT_EQ(dedup_stm_test_accessor::snapshot_size(buffer.copy()), count);
+
+        dedup_window_filter target(1ms);
+        int64_t generation = 0;
+        dedup_stm_test_accessor::restore(target, generation, std::move(buffer));
+        ASSERT_EQ(generation, 7);
+        ASSERT_EQ(target.window(), source.window());
+        ASSERT_EQ(target.snapshot(), source.snapshot());
     }
+}
+
+// A blob that is not a whole number of entries is corrupt, and must fail the
+// read -- which try_restore_snapshot() turns into a discard and rebuild --
+// rather than restore a partial last entry.
+TEST(dedup_stm_snapshot, misaligned_entries_are_rejected) {
+    dedup_window_filter target(1h);
+    int64_t generation = 0;
+    EXPECT_THROW(
+      dedup_stm_test_accessor::restore(
+        target,
+        generation,
+        dedup_stm_test_accessor::state_snapshot_with_entry_bytes(
+          dedup_stm::packed_entry_size + 1)),
+      serde::serde_exception);
+    EXPECT_EQ(target.map_size(), 0u);
+}
+
+namespace {
+
+/// The version 1 layout, which the STM no longer carries: one serde envelope
+/// per entry. Reproduced to prove such a snapshot is refused, not misread.
+struct v1_wire_entry
+  : serde::
+      envelope<v1_wire_entry, serde::version<1>, serde::compat_version<1>> {
+    uint64_t identity_hi{0};
+    uint64_t identity_lo{0};
+    model::timestamp timestamp;
+
+    auto serde_fields() {
+        return std::tie(identity_hi, identity_lo, timestamp);
+    }
+};
+
+struct v1_state_snapshot
+  : serde::
+      envelope<v1_state_snapshot, serde::version<1>, serde::compat_version<1>> {
+    int64_t window_ms{0};
+    int64_t generation{0};
+    model::timestamp max_timestamp{model::timestamp::min()};
+    uint64_t legacy_inserts_since_evict{0};
+    chunked_vector<v1_wire_entry> entries;
+
+    auto serde_fields() {
+        return std::tie(
+          window_ms,
+          generation,
+          max_timestamp,
+          legacy_inserts_since_evict,
+          entries);
+    }
+};
+
+iobuf v1_snapshot_with(size_t entries) {
+    v1_state_snapshot snapshot{
+      .window_ms = 300'000,
+      .generation = 0,
+      .max_timestamp = model::timestamp{1'000'000}};
+    for (size_t i = 0; i < entries; ++i) {
+        snapshot.entries.push_back(
+          {.identity_hi = i + 1,
+           .identity_lo = ~uint64_t{i},
+           .timestamp = model::timestamp{1'000'000}});
+    }
+    return serde::to_iobuf(std::move(snapshot));
+}
+
+} // namespace
+
+TEST(dedup_stm_snapshot, version_1_snapshot_is_refused) {
+    dedup_window_filter target(1h);
+    int64_t generation = 0;
+    EXPECT_THROW(
+      dedup_stm_test_accessor::restore(target, generation, v1_snapshot_with(3)),
+      serde::serde_exception);
+    EXPECT_EQ(target.map_size(), 0u);
+}
+
+// Entries outside the window are left out of the snapshot: they could never
+// match again, so persisting them would only cost memory and disk.
+TEST(dedup_stm_snapshot, expired_entries_are_not_serialized) {
+    dedup_window_filter source(1000ms);
+    dedup_index_snapshot seed{.max_timestamp = model::timestamp{1'000'000}};
+    for (size_t i = 0; i < 10; ++i) {
+        seed.entries.push_back(
+          {.identity = {.hi = i + 1, .lo = (i + 1) * 0x9e37'79b9'7f4a'7c15ULL},
+           .timestamp = model::timestamp{i < 4 ? 1'000 : 999'500}});
+    }
+    source.restore(seed);
+    ASSERT_EQ(source.map_size(), 10u);
+    auto buffer = dedup_stm_test_accessor::serialize(source, 0);
+    EXPECT_EQ(dedup_stm_test_accessor::snapshot_size(std::move(buffer)), 6u);
+}
+
+// A snapshot from a broker with a larger per-partition ceiling is cut to this
+// broker's ceiling on restore, keeping the newest identities.
+TEST(dedup_stm_snapshot, restore_into_a_smaller_ceiling_keeps_the_newest) {
+    dedup_window_filter source(1h);
+    dedup_index_snapshot seed{.max_timestamp = model::timestamp{1'000'100}};
+    for (size_t i = 0; i < 100; ++i) {
+        seed.entries.push_back(
+          {.identity = {.hi = i + 1, .lo = (i + 1) * 0x9e37'79b9'7f4a'7c15ULL},
+           .timestamp = model::timestamp{1'000'000 + static_cast<int64_t>(i)}});
+    }
+    source.restore(seed);
+
+    dedup_window_filter target(1h, 10);
+    int64_t generation = 0;
+    dedup_stm_test_accessor::restore(
+      target, generation, dedup_stm_test_accessor::serialize(source, 3));
+    EXPECT_EQ(target.map_size(), 10u);
+    EXPECT_EQ(target.truncated_entries(), 90u);
+    for (const auto& entry : target.snapshot().entries) {
+        EXPECT_GE(entry.timestamp.value(), 1'000'090);
+    }
+}
+
+// The serialized size is the format's whole point: a fixed header plus 24
+// bytes an entry, against 30 for the version 1 envelope-per-entry layout.
+TEST(dedup_stm_snapshot, packed_format_is_smaller_than_version_1) {
+    constexpr size_t count = 10'000;
+    dedup_window_filter source(1h);
+    dedup_index_snapshot seed{.max_timestamp = model::timestamp{1'000'000}};
+    for (size_t i = 0; i < count; ++i) {
+        seed.entries.push_back(
+          {.identity = {.hi = i + 1, .lo = (i + 1) * 0x9e37'79b9'7f4a'7c15ULL},
+           .timestamp = model::timestamp{1'000'000}});
+    }
+    source.restore(seed);
+    const auto packed
+      = dedup_stm_test_accessor::serialize(source, 0).size_bytes();
+    EXPECT_LE(packed, count * dedup_stm::packed_entry_size + 64);
+    EXPECT_LT(packed, v1_snapshot_with(count).size_bytes());
 }
 
 struct dedup_stm_fixture : raft::stm_raft_fixture<dedup_stm> {
@@ -133,8 +288,14 @@ struct dedup_stm_fixture : raft::stm_raft_fixture<dedup_stm> {
           clusterlog,
           node.get_kvstore(),
           sync_timeout.bind(),
-          dedup_window_filter::default_max_entries);
+          dedup_window_filter::default_max_entries,
+          _shard_budget);
     }
+
+    /// Shared by every STM the fixture creates. All replicas run on one shard
+    /// here, so they count against one budget -- which is what lets a test
+    /// observe that a stopped STM gives its entries back.
+    ss::lw_shared_ptr<dedup_shard_budget> _shard_budget;
 
     // The STM apply path reads the dedup window, generation, and key header
     // from the partition's ntp_config; in production these arrive via topic
@@ -315,6 +476,46 @@ TEST_F_CORO(dedup_stm_fixture, state_survives_local_snapshot_restart) {
       leader, "key", "value-2", model::timestamp{1500});
     ASSERT_EQ_CORO(duplicate.replicated_record_count, 0);
     ASSERT_EQ_CORO(get_stm<0>(node(leader))->map_size(), 1);
+}
+
+// Local snapshots go to a file in the partition directory, and the copy an
+// earlier build left in the kvstore -- which the kvstore would otherwise hold
+// in memory indefinitely -- is removed when the STM starts.
+TEST_F_CORO(
+  dedup_stm_fixture, snapshot_is_a_file_and_legacy_kvstore_copy_is_dropped) {
+    co_await initialize_state_machines();
+    set_dedup_config(1000ms);
+    auto leader = co_await wait_for_leader(10s);
+
+    co_await produce(leader, "key", "value-1", model::timestamp{1000});
+    co_await wait_for_stms(node(leader).raft()->committed_offset());
+    const auto ntp = node(leader).raft()->ntp();
+    const auto legacy_key = dedup_stm_test_accessor::legacy_kvstore_key(ntp);
+    for (auto& [_, n] : nodes()) {
+        auto stm = get_stm<0>(*n);
+        co_await stm->write_local_snapshot();
+        // The kvstore backend reports 0 here; the file backend reports the
+        // file's size.
+        ASSERT_GT_CORO(stm->get_local_snapshot_size(), 0);
+        co_await n->get_kvstore().put(
+          storage::kvstore::key_space::stms, legacy_key, iobuf::from("stale"));
+        ASSERT_TRUE_CORO(n->get_kvstore()
+                           .get(storage::kvstore::key_space::stms, legacy_key)
+                           .has_value());
+    }
+
+    co_await restart_nodes();
+    set_dedup_config(1000ms);
+    leader = co_await wait_for_leader(10s);
+    for (auto& [_, n] : nodes()) {
+        ASSERT_FALSE_CORO(n->get_kvstore()
+                            .get(storage::kvstore::key_space::stms, legacy_key)
+                            .has_value());
+    }
+    // And the index came back from the file snapshot.
+    auto duplicate = co_await produce(
+      leader, "key", "value-2", model::timestamp{1500});
+    ASSERT_EQ_CORO(duplicate.replicated_record_count, 0);
 }
 
 // get_initial_recovery_start_offset() resolves a bounded recovery offset via
@@ -814,4 +1015,99 @@ TEST_F_CORO(dedup_stm_fixture, partial_filter_converges_across_replicas) {
 }
 
 } // namespace
+// A version 1 snapshot -- what a not-yet-upgraded peer sends as a raft
+// snapshot during a rolling upgrade -- is discarded and the index rebuilt,
+// never misread and never a failed partition.
+TEST_F_CORO(dedup_stm_fixture, version_1_snapshot_is_discarded) {
+    co_await initialize_state_machines();
+    set_dedup_config(1000ms);
+    auto leader = co_await wait_for_leader(10s);
+    auto stm = get_stm<0>(node(leader));
+
+    co_await produce(leader, "a", "value-a", model::timestamp{1000});
+    co_await stm->wait(
+      node(leader).raft()->committed_offset(),
+      model::timeout_clock::now() + 10s);
+    ASSERT_EQ_CORO(stm->map_size(), 1);
+
+    auto applied = co_await dedup_stm_test_accessor::apply_local_snapshot(
+      *stm, v1_snapshot_with(5));
+    ASSERT_EQ_CORO(applied, raft::local_snapshot_applied::no);
+    ASSERT_EQ_CORO(stm->map_size(), 0);
+
+    co_await dedup_stm_test_accessor::apply_raft_snapshot(
+      *stm, v1_snapshot_with(5));
+    ASSERT_EQ_CORO(stm->map_size(), 0);
+}
+
+// Every replica's index is counted in the shard budget, and an STM that stops
+// gives its entries back: after a restart the budget equals exactly what the
+// new STMs restored, not that plus what the old ones held.
+TEST_F_CORO(
+  dedup_stm_fixture, shard_budget_counts_replicas_and_survives_restart) {
+    _shard_budget = ss::make_lw_shared<dedup_shard_budget>(1'000);
+    co_await initialize_state_machines();
+    set_dedup_config(1000ms);
+    auto leader = co_await wait_for_leader(10s);
+
+    co_await produce(leader, "a", "value-a", model::timestamp{1000});
+    co_await produce(leader, "b", "value-b", model::timestamp{1100});
+    co_await wait_for_stms(node(leader).raft()->committed_offset());
+
+    auto total_entries = [this] {
+        size_t total = 0;
+        for (auto& [_, n] : nodes()) {
+            total += get_stm<0>(*n)->map_size();
+        }
+        return total;
+    };
+    ASSERT_EQ_CORO(total_entries(), 2 * nodes().size());
+    ASSERT_EQ_CORO(_shard_budget->entries, total_entries());
+
+    for (auto& [_, n] : nodes()) {
+        co_await get_stm<0>(*n)->write_local_snapshot();
+    }
+    co_await restart_nodes();
+    set_dedup_config(1000ms);
+    leader = co_await wait_for_leader(10s);
+    co_await wait_for_stms(node(leader).raft()->committed_offset());
+
+    ASSERT_EQ_CORO(total_entries(), 2 * nodes().size());
+    ASSERT_EQ_CORO(_shard_budget->entries, total_entries());
+
+    // The restored index still catches duplicates.
+    auto duplicate = co_await produce(
+      leader, "a", "value-a2", model::timestamp{1500});
+    ASSERT_EQ_CORO(duplicate.replicated_record_count, 0);
+}
+
+// With the shard budget exhausted, produce keeps working: new identities are
+// admitted unindexed rather than failing the request or growing past the
+// limit.
+TEST_F_CORO(dedup_stm_fixture, exhausted_shard_budget_admits_unindexed) {
+    // Three replicas share the budget here, so a limit of three lets the
+    // first identity be indexed on each of them and nothing more.
+    _shard_budget = ss::make_lw_shared<dedup_shard_budget>(3);
+    co_await initialize_state_machines();
+    set_dedup_config(1000s);
+    auto leader = co_await wait_for_leader(10s);
+
+    co_await produce(leader, "first", "v", model::timestamp{1000});
+    co_await wait_for_stms(node(leader).raft()->committed_offset());
+    ASSERT_EQ_CORO(_shard_budget->entries, 3u);
+
+    for (int i = 0; i < 5; ++i) {
+        auto admitted = co_await produce(
+          leader, fmt::format("later-{}", i), "v", model::timestamp{2000 + i});
+        ASSERT_EQ_CORO(admitted.replicated_record_count, -1);
+    }
+    co_await wait_for_stms(node(leader).raft()->committed_offset());
+    ASSERT_LE_CORO(_shard_budget->entries, 3u);
+
+    // The identity indexed before the budget ran out is still deduplicated.
+    auto duplicate = co_await produce(
+      leader, "first", "v2", model::timestamp{1500});
+    ASSERT_EQ_CORO(duplicate.replicated_record_count, 0);
+}
+
 } // namespace cluster

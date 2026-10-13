@@ -9,6 +9,7 @@
 
 #include "cluster/dedup_stm.h"
 
+#include "bytes/iobuf_parser.h"
 #include "cluster/logger.h"
 #include "cluster/snapshot.h"
 #include "config/configuration.h"
@@ -18,39 +19,36 @@
 #include "model/namespace.h"
 #include "model/record_batch_types.h"
 #include "raft/consensus.h"
-#include "serde/async.h"
+#include "serde/serde_exception.h"
 #include "ssx/future-util.h"
+#include "ssx/sformat.h"
+#include "storage/kvstore.h"
 #include "storage/types.h"
 
+#include <seastar/core/byteorder.hh>
+#include <seastar/core/memory.hh>
 #include <seastar/core/metrics.hh>
 #include <seastar/core/with_timeout.hh>
 #include <seastar/coroutine/as_future.hh>
-#include <seastar/coroutine/maybe_yield.hh>
 
-#include <limits>
+#include <array>
+#include <cstring>
 #include <new>
 
 namespace cluster {
-
-namespace {
-
-// Entries serialized between preemption checks. Small enough that a batch is
-// microseconds of work, large enough that the check itself does not show up
-// next to the write.
-constexpr size_t entries_per_yield = 1024;
-
-} // namespace
 
 dedup_stm::dedup_stm(
   raft::consensus* raft,
   ss::logger& logger,
   storage::kvstore& kvstore,
   config::binding<std::chrono::milliseconds> sync_timeout,
-  size_t max_entries)
-  : raft::persisted_stm<raft::kvstore_backed_stm_snapshot>(
-      dedup_stm_snapshot, logger, raft, kvstore)
+  size_t max_entries,
+  ss::lw_shared_ptr<dedup_shard_budget> shard_budget)
+  : raft::persisted_stm<>(dedup_stm_snapshot, logger, raft)
+  , _kvstore(kvstore)
   , _sync_timeout(std::move(sync_timeout))
-  , _state(std::chrono::milliseconds{0}, max_entries) {}
+  , _state(std::chrono::milliseconds{0}, max_entries, std::move(shard_budget)) {
+}
 
 void dedup_stm::setup_metrics() {
     if (config::shard_local_cfg().disable_metrics()) {
@@ -137,7 +135,17 @@ void dedup_stm::setup_metrics() {
 }
 
 ss::future<> dedup_stm::start() {
-    co_await raft::persisted_stm<raft::kvstore_backed_stm_snapshot>::start();
+    // Earlier builds kept the snapshot in the kvstore, which holds it in
+    // memory until it is removed. It is not migrated: the index rebuilds from
+    // the log, bounded to one window by get_initial_recovery_start_offset().
+    // Unconditional because kvstore::get() would copy the value just to
+    // learn whether it exists; removing an absent key is a no-op.
+    co_await _kvstore.remove(
+      storage::kvstore::key_space::stms,
+      bytes::from_string(
+        raft::kvstore_backed_stm_snapshot::snapshot_key(
+          dedup_stm_snapshot, _raft->ntp())));
+    co_await raft::persisted_stm<>::start();
     setup_metrics();
 }
 
@@ -148,7 +156,7 @@ ss::future<> dedup_stm::stop() {
     // that is constructed and discarded without ever running, which is what
     // the fixture does when it recreates nodes.
     _metrics.clear();
-    co_await raft::persisted_stm<raft::kvstore_backed_stm_snapshot>::stop();
+    co_await raft::persisted_stm<>::stop();
 }
 
 raft::stm_initial_recovery_policy
@@ -200,65 +208,61 @@ dedup_stm::get_initial_recovery_start_offset() {
     co_return aligned.value_or(log_offsets.start_offset);
 }
 
-dedup_stm::state_snapshot
-dedup_stm::to_snapshot(const dedup_window_filter& state, int64_t generation) {
-    state_snapshot result{
-      .window_ms = state.window().count(),
-      .generation = generation,
-      .max_timestamp = state.max_timestamp()};
-    // Filled from the index directly rather than from state.snapshot(): this
-    // is the one pass that cannot yield, because it is what gives the
-    // serializer a view of the index that the produce path cannot move
-    // underneath it. Going through dedup_index_snapshot would make it two.
-    result.entries.reserve(state.map_size());
+iobuf dedup_stm::serialize_snapshot(
+  const dedup_window_filter& state, int64_t generation) {
+    iobuf entries;
     state.for_each_live_entry(
-      [&result](dedup_identity_digest identity, model::timestamp timestamp) {
-          result.entries.push_back(
-            {.identity_hi = identity.hi,
-             .identity_lo = identity.lo,
-             .timestamp = timestamp});
+      [&entries](dedup_identity_digest identity, model::timestamp timestamp) {
+          std::array<char, packed_entry_size> packed{};
+          const auto hi = ss::cpu_to_le(identity.hi);
+          const auto lo = ss::cpu_to_le(identity.lo);
+          const auto ts = ss::cpu_to_le(timestamp.value());
+          std::memcpy(packed.data(), &hi, sizeof(hi));
+          std::memcpy(packed.data() + sizeof(hi), &lo, sizeof(lo));
+          std::memcpy(packed.data() + sizeof(hi) + sizeof(lo), &ts, sizeof(ts));
+          entries.append(packed.data(), packed.size());
       });
-    return result;
-}
-
-ss::future<> dedup_stm::state_snapshot::serde_async_write(iobuf& out) {
-    // Field order, and the count-prefixed entry encoding, are serde's own --
-    // see serde/rw/vector.h. Keep them in step with serde_fields().
-    serde::write(out, window_ms);
-    serde::write(out, generation);
-    serde::write(out, max_timestamp);
-    serde::write(out, legacy_inserts_since_evict);
-    using size_limit = std::numeric_limits<serde::serde_size_t>;
-    if (unlikely(entries.size() > size_limit::max())) {
-        throw serde::serde_exception("dedup snapshot too big");
-    }
-    serde::write(out, static_cast<serde::serde_size_t>(entries.size()));
-    size_t written = 0;
-    for (auto& entry : entries) {
-        serde::write(out, entry);
-        if (++written % entries_per_yield == 0) {
-            co_await ss::coroutine::maybe_yield();
-        }
-    }
+    // serde moves the entry fragments into the output rather than copying
+    // them, so this is still the only serialized copy.
+    return serde::to_iobuf(
+      state_snapshot{
+        .window_ms = state.window().count(),
+        .generation = generation,
+        .max_timestamp = state.max_timestamp(),
+        .entries = std::move(entries)});
 }
 
 void dedup_stm::restore_snapshot(
-  dedup_window_filter& state,
-  int64_t& generation,
-  const state_snapshot& snapshot) {
+  dedup_window_filter& state, int64_t& generation, state_snapshot snapshot) {
+    const auto packed_bytes = snapshot.entries.size_bytes();
+    if (packed_bytes % packed_entry_size != 0) {
+        throw serde::serde_exception(
+          ssx::sformat(
+            "dedup snapshot entries are {} bytes, not a multiple of {}",
+            packed_bytes,
+            packed_entry_size));
+    }
     state.set_window(std::chrono::milliseconds{snapshot.window_ms});
     dedup_index_snapshot restored{.max_timestamp = snapshot.max_timestamp};
     // No trimming here: restore() owns the entry-limit policy, and it keeps
     // the most recent identities rather than a prefix. Selecting the newest N
     // requires seeing all N, so this intermediate is sized by the snapshot
-    // rather than by this node's ceiling -- bounded by the wire snapshot that
-    // is already fully deserialized alongside it.
-    restored.entries.reserve(snapshot.entries.size());
-    for (const auto& entry : snapshot.entries) {
-        restored.entries.push_back(
-          {.identity = {.hi = entry.identity_hi, .lo = entry.identity_lo},
-           .timestamp = entry.timestamp});
+    // rather than by this node's ceiling.
+    restored.entries.reserve(packed_bytes / packed_entry_size);
+    {
+        iobuf_const_parser parser(snapshot.entries);
+        while (parser.bytes_left() > 0) {
+            const auto hi = ss::le_to_cpu(parser.consume_type<uint64_t>());
+            const auto lo = ss::le_to_cpu(parser.consume_type<uint64_t>());
+            const auto ts = ss::le_to_cpu(parser.consume_type<int64_t>());
+            restored.entries.push_back(
+              {.identity = {.hi = hi, .lo = lo},
+               .timestamp = model::timestamp{ts}});
+        }
     }
+    // Released before restore() grows the index, so the packed copy and the
+    // index are never both at full size alongside the entry vector.
+    snapshot.entries = iobuf{};
     state.restore(restored);
     generation = snapshot.generation;
 }
@@ -384,20 +388,33 @@ ss::future<result<kafka_result>> dedup_stm::do_replicate(
         const auto unindexed_before = _state.unindexed_records();
         filtered = _state.filter_request(std::move(batch));
         if (_state.unindexed_records() != unindexed_before) {
-            // The index is at its ceiling and is admitting new identities
-            // without remembering them, so their duplicates go undetected.
-            // Raising dedup_max_entries_per_partition needs a broker restart,
-            // so operators need to know this is happening.
+            // The index is at its ceiling, or the shard is at its own, and is
+            // admitting new identities without remembering them, so their
+            // duplicates go undetected. Raising either limit needs a broker
+            // restart, so operators need to know this is happening.
             thread_local static ss::logger::rate_limit rate(
               std::chrono::minutes(5));
-            clusterlog.log(
-              ss::log_level::warn,
-              rate,
-              "Dedup index for {} is full at {} entries; new identities are "
-              "admitted without being deduplicated. Consider raising "
-              "dedup_max_entries_per_partition.",
-              _raft->ntp(),
-              _state.max_entries());
+            if (_state.map_size() >= _state.max_entries()) {
+                clusterlog.log(
+                  ss::log_level::warn,
+                  rate,
+                  "Dedup index for {} is full at {} entries; new identities "
+                  "are admitted without being deduplicated. Consider raising "
+                  "dedup_max_entries_per_partition.",
+                  _raft->ntp(),
+                  _state.max_entries());
+            } else {
+                clusterlog.log(
+                  ss::log_level::warn,
+                  rate,
+                  "Dedup indices on this shard are full ({} entries, {} of "
+                  "them for {}); new identities are admitted without being "
+                  "deduplicated. Consider raising dedup_max_entries_per_shard "
+                  "or giving the broker more memory per core.",
+                  _state.shard_budget() ? _state.shard_budget()->entries : 0,
+                  _state.map_size(),
+                  _raft->ntp());
+            }
         }
     } else {
         // Dedup was disabled between the partition's routing check and this
@@ -573,10 +590,7 @@ ss::future<iobuf> dedup_stm::take_raft_snapshot(model::offset) {
     // target offset. populate() is idempotent (max-timestamp-wins), so a
     // replica installing this snapshot and replaying the remaining log
     // converges to exactly this state; see the log-derived dedup RFC.
-    auto snapshot = to_snapshot(_state, _generation);
-    iobuf buffer;
-    co_await serde::write_async(buffer, std::move(snapshot));
-    co_return std::move(buffer);
+    co_return serialize_snapshot(_state, _generation);
 }
 
 bool dedup_stm::try_restore_snapshot(iobuf buffer) {
@@ -587,8 +601,10 @@ bool dedup_stm::try_restore_snapshot(iobuf buffer) {
     // from the retained log is a correct -- if slower -- outcome, and a far
     // better one than refusing to start the partition.
     try {
-        auto snapshot = serde::from_iobuf<state_snapshot>(std::move(buffer));
-        restore_snapshot(_state, _generation, snapshot);
+        restore_snapshot(
+          _state,
+          _generation,
+          serde::from_iobuf<state_snapshot>(std::move(buffer)));
         return true;
     } catch (const std::bad_alloc&) {
         // Not a bad snapshot either, and the worst thing to answer with: a
@@ -637,14 +653,9 @@ dedup_stm::apply_local_snapshot(raft::stm_snapshot_header, iobuf&& buffer) {
 
 ss::future<raft::stm_snapshot>
 dedup_stm::take_local_snapshot(ssx::semaphore_units apply_units) {
-    auto snapshot = to_snapshot(_state, _generation);
+    auto buffer = serialize_snapshot(_state, _generation);
     auto offset = last_applied_offset();
     apply_units.return_all();
-    // Serialized after the units are back and off the index: snapshot holds
-    // its own copy of the entries, so the yields inside write_async() cost
-    // the apply and produce paths nothing beyond the copy above.
-    iobuf buffer;
-    co_await serde::write_async(buffer, std::move(snapshot));
     // The 0 here is stm_snapshot_header::version, a channel this STM does
     // not use: unlike rm_stm/tm_stm, which dispatch between snapshot layouts
     // on it, dedup_stm versions its payload through the serde envelope
@@ -653,13 +664,60 @@ dedup_stm::take_local_snapshot(ssx::semaphore_units apply_units) {
     co_return raft::stm_snapshot::create(0, offset, std::move(buffer));
 }
 
+namespace {
+
+size_t resolve_shard_limit(size_t configured) {
+    if (configured > 0) {
+        return configured;
+    }
+    const auto shard_memory = ss::memory::stats().total_memory();
+    return std::max<size_t>(
+      1,
+      shard_memory / 100 * DEDUP_SHARD_MEMORY_PERCENT
+        / DEDUP_SHARD_BYTES_PER_ENTRY);
+}
+
+} // namespace
+
 dedup_stm_factory::dedup_stm_factory(
   storage::kvstore& kvstore,
   config::binding<std::chrono::milliseconds> sync_timeout,
-  size_t max_entries)
+  size_t max_entries,
+  size_t max_entries_per_shard)
   : _kvstore(kvstore)
   , _sync_timeout(std::move(sync_timeout))
-  , _max_entries(max_entries) {}
+  , _max_entries(max_entries)
+  , _shard_budget(
+      ss::make_lw_shared<dedup_shard_budget>(
+        resolve_shard_limit(max_entries_per_shard))) {
+    vlog(
+      clusterlog.info,
+      "Dedup indices on this shard are limited to {} entries in total",
+      _shard_budget->max_entries);
+    setup_metrics();
+}
+
+void dedup_stm_factory::setup_metrics() {
+    if (config::shard_local_cfg().disable_metrics()) {
+        return;
+    }
+    namespace sm = ss::metrics;
+    _metrics.add_group(
+      prometheus_sanitize::metrics_name("dedup:shard"),
+      {
+        sm::make_gauge(
+          "index_entries",
+          [budget = _shard_budget] { return budget->entries; },
+          sm::description(
+            "Number of identities in all dedup indices on this shard.")),
+        sm::make_gauge(
+          "max_index_entries",
+          [budget = _shard_budget] { return budget->max_entries; },
+          sm::description(
+            "Limit on the identities all dedup indices on this shard hold "
+            "together (dedup_max_entries_per_shard).")),
+      });
+}
 
 bool dedup_stm_factory::is_applicable_for(
   const storage::ntp_config& cfg) const {
@@ -671,7 +729,7 @@ void dedup_stm_factory::create(
   raft::consensus* raft,
   const cluster::stm_instance_config&) {
     auto stm = builder.create_stm<dedup_stm>(
-      raft, clusterlog, _kvstore, _sync_timeout, _max_entries);
+      raft, clusterlog, _kvstore, _sync_timeout, _max_entries, _shard_budget);
     raft->log()->stm_hookset()->add_stm(stm);
 }
 

@@ -462,6 +462,20 @@ configuration::configuration()
        .visibility = visibility::tunable},
       cluster::DEFAULT_DEDUP_MAX_ENTRIES_PER_PARTITION,
       {.min = 1, .max = cluster::MAX_DEDUP_MAX_ENTRIES_PER_PARTITION})
+  , dedup_max_entries_per_shard(
+      *this,
+      "dedup_max_entries_per_shard",
+      "Maximum number of deduplication identities retained by all partition "
+      "replicas on one shard together. Partitions are placed on shards by "
+      "count rather than by index size, so dedup_max_entries_per_partition "
+      "alone does not bound one shard's memory. Once the shard nears the "
+      "limit, partitions adding new identities drop their oldest ones; at the "
+      "limit, new identities are admitted without being indexed. 0 derives "
+      "the limit from the shard's memory. Read once at startup.",
+      {.needs_restart = needs_restart::yes,
+       .example = "4000000",
+       .visibility = visibility::tunable},
+      cluster::DEFAULT_DEDUP_MAX_ENTRIES_PER_SHARD)
   , quota_manager_gc_sec(
       *this,
       "quota_manager_gc_sec",

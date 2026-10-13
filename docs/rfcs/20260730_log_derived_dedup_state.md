@@ -130,6 +130,19 @@ Guarantees:
   different ceilings now retain a prefix relationship (the smaller keeps a
   subset of the larger) rather than arbitrary disjoint subsets.
 
+  The per-partition ceiling does not bound a shard: partitions are placed on
+  shards by count, not by index size, so several saturated indices can share
+  one shard's memory. `dedup_max_entries_per_shard` (0, the default, derives it
+  from 15% of shard memory at ~80 bytes an entry) caps the sum. Every index on
+  the shard reports its size into one shared `dedup_shard_budget`; the same
+  cursor trims a partition that inserts while the shard is within a tenth of
+  its limit, and at the limit a new identity with nothing freeable in its own
+  partition is admitted unindexed. The shard total is exported as the
+  `dedup:shard` gauges `index_entries` and `max_index_entries`. Effective
+  capacity now depends on which partitions share a shard, which differs per
+  replica, so under shard pressure replicas trim differently -- the same
+  best-effort divergence capacity eviction already has.
+
 - **G8** — The two ways the filter can stop deduplicating without failing a
   request -- entry-limit saturation (G7) and producer timestamp skew (B5) --
   are both counted per partition, alongside the drop count that makes them
@@ -397,6 +410,24 @@ definition and cannot influence future decisions). `_max_ts` is not reverted
 (monotonic advance only sharpens eviction; harmless).
 
 ## Snapshots
+
+Local snapshots are files in the partition directory (`persisted_stm<>`'s
+default file backend), not kvstore values. The kvstore holds every value in
+memory for as long as it exists and copies all of them each time it rolls a
+segment, which a value larger than `kvstore_max_segment_size` forces on nearly
+every write; with several saturated indices on a shard, that cost a multiple
+of the indices themselves and ran the shard out of memory. `start()` removes
+the key an earlier build left in the kvstore; that snapshot is not migrated,
+and the index rebuilds from the log within one window.
+
+The payload (`state_snapshot` version 2) carries the entries as one packed blob
+of 24-byte records (digest hi, digest lo, timestamp; little-endian), written in
+a single pass straight from the index. A snapshot therefore costs one
+serialized copy of the live entries. Earlier versions are refused on compat
+version, and the index is rebuilt from the log, in both upgrade directions.
+
+The original design notes follow.
+
 
 - `take_local_snapshot`: `evict_expired()`, then serialize
   `{generation, window_ms, max_timestamp, inserts_since_evict, entries}` at
