@@ -253,6 +253,13 @@ jobs:
               > /mnt/timing/time_trace.txt 2>&1 || true
             cat /mnt/timing/time_trace.txt
           fi
+          # Per-feature attribution. Exact without unity; with unity each
+          # chunk is attributed by its library only.
+          TRACE=()
+          if [[ -f /mnt/timing/time_trace.json ]]; then TRACE=(--time-trace /mnt/timing/time_trace.json); fi
+          python3 tools/build-timing/feature_breakdown.py \
+            /mnt/timing/profile.json.gz "${TRACE[@]}" --files \
+            > /mnt/timing/features.txt 2>&1 || true
           bazel --output_base=/mnt/bazel-output analyze-profile \
             /mnt/timing/profile.json.gz > /mnt/timing/analyze-profile.txt 2>&1 || true
 
