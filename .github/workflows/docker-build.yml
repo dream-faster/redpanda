@@ -98,9 +98,9 @@ jobs:
         run: sudo ./bazel/install-deps.sh
 
       # The caches below are shared with unit-tests.yml: same paths, same key
-      # scheme, same host toolchain and the same --config=release, so the core
-      # objects either workflow compiles are cache hits for the other. Keep the
-      # two in step when changing either.
+      # scheme, same host toolchain and the same --config=release
+      # --config=unity, so the core objects either workflow compiles are cache
+      # hits for the other. Keep the two in step when changing either.
       - name: Restore bazelisk cache
         uses: actions/cache@v4
         with:
@@ -125,12 +125,12 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: /mnt/bazel-disk-cache
-          key: bazel-release-disk-${{ runner.os }}-image-${{ github.ref_name }}-${{ github.sha }}
+          key: bazel-release-unity-disk-${{ runner.os }}-image-${{ github.ref_name }}-${{ github.sha }}
           restore-keys: |
-            bazel-release-disk-${{ runner.os }}-image-${{ github.ref_name }}-
-            bazel-release-disk-${{ runner.os }}-unit-tests-${{ github.ref_name }}-
-            bazel-release-disk-${{ runner.os }}-image-
-            bazel-release-disk-${{ runner.os }}-
+            bazel-release-unity-disk-${{ runner.os }}-image-${{ github.ref_name }}-
+            bazel-release-unity-disk-${{ runner.os }}-unit-tests-${{ github.ref_name }}-
+            bazel-release-unity-disk-${{ runner.os }}-image-
+            bazel-release-unity-disk-${{ runner.os }}-
 
       - name: Log in to ghcr.io
         uses: docker/login-action@v3
@@ -174,13 +174,17 @@ jobs:
           # final link of the redpanda binary isn't over-scheduled. Quoted so
           # the shell doesn't glob-expand the '*'.
           #
-          # --config=release must match unit-tests.yml: a different --config
-          # is a different Bazel configuration and so a different set of cache
-          # keys, which would make the shared disk cache useless.
+          # --config=release --config=unity must match unit-tests.yml: a
+          # different --config is a different Bazel configuration and so a
+          # different set of cache keys, which would make the shared disk
+          # cache useless. unity compiles each library as a few multi-file
+          # translation units (see redpanda_cc_library in bazel/build.bzl);
+          # scheduled-default-build.yml covers the default build.
           bazel \
             --output_base=/mnt/bazel-output \
             build \
             --config=release \
+            --config=unity \
             --repository_cache=/mnt/bazel-repo-cache \
             --disk_cache=/mnt/bazel-disk-cache \
             --spawn_strategy=sandboxed,local \
