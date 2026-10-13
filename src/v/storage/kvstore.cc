@@ -41,6 +41,21 @@ static ss::logger lg("kvstore");
 
 namespace storage {
 
+namespace {
+
+bytes make_spaced_key_prefix(kvstore::key_space ks, std::string_view prefix) {
+    auto ks_native = static_cast<std::underlying_type_t<kvstore::key_space>>(
+      ks);
+    auto ks_le = ss::cpu_to_le(ks_native);
+    bytes spaced(bytes::initialized_later{}, sizeof(ks_le) + prefix.size());
+    auto out = std::copy_n(
+      reinterpret_cast<const char*>(&ks_le), sizeof(ks_le), spaced.begin());
+    std::copy_n(prefix.begin(), prefix.size(), out);
+    return spaced;
+}
+
+} // namespace
+
 kvstore::kvstore(
   kvstore_config kv_conf,
   ss::shard_id shard,
@@ -65,21 +80,6 @@ kvstore::kvstore(
           _ntpc.ntp());
     }
 }
-
-namespace {
-
-bytes make_spaced_key_prefix(kvstore::key_space ks, std::string_view prefix) {
-    auto ks_native = static_cast<std::underlying_type_t<kvstore::key_space>>(
-      ks);
-    auto ks_le = ss::cpu_to_le(ks_native);
-    bytes spaced(bytes::initialized_later{}, sizeof(ks_le) + prefix.size());
-    auto out = std::copy_n(
-      reinterpret_cast<const char*>(&ks_le), sizeof(ks_le), spaced.begin());
-    std::copy_n(prefix.begin(), prefix.size(), out);
-    return spaced;
-}
-
-} // namespace
 
 bool kvstore::is_discarded(bytes_view spaced_key) const {
     return std::ranges::any_of(
