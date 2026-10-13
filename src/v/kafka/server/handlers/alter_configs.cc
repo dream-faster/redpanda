@@ -242,6 +242,14 @@ create_topic_properties_update(
                 continue;
             }
 
+            if (cfg.name == topic_property_delete_retention_ms) {
+                parse_and_set_tristate(
+                  update.properties.delete_retention_ms,
+                  cfg.value,
+                  kafka::config_resource_operation::set);
+                continue;
+            }
+
             if (cfg.name == topic_property_min_cleanable_dirty_ratio) {
                 parse_and_set_tristate(
                   update.properties.min_cleanable_dirty_ratio,
@@ -296,6 +304,16 @@ create_topic_properties_update(
                   kafka::config_resource_operation::set,
                   dedup_key_header_validator{},
                   std::identity{});
+                continue;
+            }
+
+            if (cfg.name == topic_property_message_timestamp_after_max_ms) {
+                parse_and_set_optional_duration(
+                  update.properties.message_timestamp_after_max_ms,
+                  cfg.value,
+                  kafka::config_resource_operation::set,
+                  message_timestamp_after_max_ms_validator,
+                  /*clamp_to_duration_max=*/true);
                 continue;
             }
 
