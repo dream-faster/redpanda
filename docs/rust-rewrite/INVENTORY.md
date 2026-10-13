@@ -4,6 +4,9 @@ This maps the code in this tree (the slim, local-storage-only broker described
 in `HANDOFF.md`, based on v26.2.x) to features, with line counts, so the
 rewrite in `PLAN.md` can be scoped and tracked.
 
+Counted at `v26.2.x` commit `9daa2fab`. That includes the fork's windowed
+produce-time deduplication (`5801001a`).
+
 **How it was counted.** Non-blank lines of `.h`/`.cc` under `src/v`, assigned
 to features by path globs in `tools/rust-rewrite/loc_inventory.py`. Every file
 lands in exactly one feature and none are left unassigned. Code under a
@@ -32,11 +35,11 @@ python3 tools/rust-rewrite/loc_inventory.py --markdown # full table
 
 | | Prod C++ | Test C++ |
 |---|---:|---:|
-| **keep** (to rewrite) | **239,068** | 124,692 |
+| **keep** (to rewrite) | **241,206** | 127,622 |
 | drop (authn, authz, audit, license, TLS) | 18,628 | 9,476 |
-| compat (state from older C++ versions) | 1,431 | 373 |
+| compat (state from older C++ versions) | 1,431 | 432 |
 | dead (no production caller) | 13,736 | 9,706 |
-| **all of `src/v`** | 272,863 | 144,247 |
+| **all of `src/v`** | 275,001 | 147,236 |
 
 The `compat` row only counts whole files. Most backward-compatibility code
 is spread through files that stay. Examples: `legacy_*` placeholder fields,
@@ -57,28 +60,28 @@ Not counted above:
 | Admin API v1 Swagger docs (`redpanda/admin/api-doc`) | 6,144 lines JSON | Contract for the REST surface |
 | Admin API v2 protobufs (`proto/`) | 1,456 lines | Reused as-is (prost/tonic or connect-rust) |
 | `rpk` CLI (Go, `src/go/rpk`) | 55,738 + 26,182 test | **Not rewritten.** It is a client of the Kafka and Admin APIs; parity of those APIs keeps it working |
-| Ducktape integration tests (`tests/rptest`) | ~126k Python | **Reused** as black-box acceptance tests against the Rust broker |
+| Ducktape integration tests (`tests/rptest`) | ~106k Python | **Reused** as black-box acceptance tests against the Rust broker |
 | Java/Go verifiers (`tests/java`, `tests/go`) | ~12k | Reused as-is (client-side correctness checkers) |
 
 ## Features by layer
 
 Subtotals are production lines only.
 
-### Kafka API (44,412)
+### Kafka API (44,534)
 
 | Feature | Scope | Prod LOC | Test LOC |
 |---|---|---:|---:|
-| Kafka protocol codecs + schema generator | keep | 6,009 | 1,503 |
-| Kafka server core (listener, connections, dispatch) | keep | 6,519 | 10,299 |
-| Kafka produce path | keep | 1,337 | 0 |
+| Kafka protocol codecs + schema generator | keep | 6,013 | 1,503 |
+| Kafka server core (listener, connections, dispatch) | keep | 6,519 | 10,355 |
+| Kafka produce path | keep | 1,356 | 0 |
 | Kafka fetch path (fetch, sessions, memory units, coalescing) | keep | 3,759 | 2,740 |
 | Kafka consumer groups + offsets | keep | 10,490 | 1,529 |
 | Kafka transactions + idempotence (broker-side handlers) | keep | 1,131 | 0 |
-| Kafka topic + config admin APIs | keep | 6,375 | 0 |
+| Kafka topic + config admin APIs | keep | 6,472 | 0 |
 | Kafka metadata / api_versions / describe_cluster | keep | 1,003 | 0 |
 | Kafka client quotas + throughput control | keep | 3,686 | 2,412 |
 | Kafka usage accounting | keep | 745 | 182 |
-| Kafka partition proxy + kafka_data RPC | keep | 3,095 | 1,156 |
+| Kafka partition proxy + kafka_data RPC | keep | 3,097 | 1,156 |
 | Kafka misc utils | keep | 263 | 538 |
 
 Kafka APIs served after the cut (38 of 46; API key and supported versions):
@@ -97,14 +100,14 @@ DescribeAcls (29), CreateAcls (30), DeleteAcls (31),
 DescribeUserScramCredentials (50), AlterUserScramCredentials (51),
 DescribeRedpandaRoles (15000).
 
-### Raft (21,399)
+### Raft (21,440)
 
 | Feature | Scope | Prod LOC | Test LOC |
 |---|---|---:|---:|
-| Raft: consensus core (election, replication, heartbeats) | keep | 11,550 | 891 |
+| Raft: consensus core (election, replication, heartbeats) | keep | 11,556 | 891 |
 | Raft: recovery + throttling | keep | 1,816 | 385 |
 | Raft: membership / joint-consensus configuration | keep | 2,826 | 1,238 |
-| Raft: state machine framework (persisted_stm, snapshots) | keep | 3,624 | 1,511 |
+| Raft: state machine framework (persisted_stm, snapshots) | keep | 3,659 | 1,511 |
 | Raft: group manager, RPC service, probes | keep | 1,583 | 6,632 |
 
 `raft/consensus.cc` alone is 4,933 lines. Raft runs one group per partition
@@ -112,11 +115,11 @@ plus raft0 (the controller), with heartbeats batched per node pair
 (`heartbeat_manager`), leadership transfer, voter priorities, learners, and
 the 8-method `raftgen` RPC service.
 
-### Storage (29,161)
+### Storage (29,196)
 
 | Feature | Scope | Prod LOC | Test LOC |
 |---|---|---:|---:|
-| Storage: segments, index, appender, readers, log manager | keep | 19,699 | 13,473 |
+| Storage: segments, index, appender, readers, log manager | keep | 19,734 | 13,473 |
 | Storage: compaction (sliding window, key maps, indexes) | keep | 4,120 | 5,234 |
 | Storage: caches (batch cache, readers cache, chunk cache) | keep | 1,950 | 597 |
 | Storage: offset translator | keep | 1,021 | 712 |
@@ -129,20 +132,21 @@ scheduling. Segment data is written with O_DIRECT through
 `segment_appender` and read through `chunk_cache`. `batch_cache` registers
 with Seastar's memory reclaimer, so it shrinks under allocator pressure.
 
-### Cluster and controller (68,388)
+### Cluster and controller (70,235)
 
 | Feature | Scope | Prod LOC | Test LOC |
 |---|---|---:|---:|
 | Transactions: coordinator (tm_stm, tx gateway) + rm_stm | keep | 13,162 | 2,742 |
-| Cluster shared types, errors, RPC service | keep | 6,456 | 6,348 |
+| Cluster shared types, errors, RPC service | keep | 6,467 | 6,355 |
 | Controller core (controller stm, backend, snapshot, commands) | keep | 6,286 | 915 |
-| Topic metadata (topic_table, frontend, dispatcher) | keep | 6,193 | 1,312 |
+| Topic metadata (topic_table, frontend, dispatcher) | keep | 6,244 | 1,445 |
 | Partition placement: allocator + leader balancer | keep | 5,268 | 575 |
 | Membership, discovery, cluster bootstrap | keep | 4,612 | 0 |
 | Health monitor + node status | keep | 4,349 | 703 |
 | Partition auto-balancer (planner/backend) | keep | 3,712 | 2,756 |
-| Feature flags + upgrade gating | keep | 3,579 | 700 |
-| Partition runtime (partition, manager, eviction/properties stms) | keep | 3,042 | 1,703 |
+| Feature flags + upgrade gating | keep | 3,581 | 700 |
+| Partition runtime (partition, manager, eviction/properties stms) | keep | 3,058 | 1,703 |
+| Windowed produce-time dedup (dedup_stm, window filter) | keep | 1,767 | 2,638 |
 | Metadata dissemination + leaders table + caches | keep | 2,799 | 812 |
 | Shard placement + core balancing | keep | 2,439 | 1,137 |
 | Self-test (disk/network benchmarks) | keep | 1,999 | 237 |
@@ -155,6 +159,21 @@ The biggest files: `types` (3,791), `tx_gateway_frontend` (3,066), `rm_stm`
 (2,758), `topic_table` (2,412), `partition_balancer_planner` (2,302),
 `topics_frontend` (2,046), `controller_backend` (2,041), `members_manager`
 (1,917). The controller RPC service has 31 methods and `tx_gateway` has 13.
+
+**Windowed produce-time deduplication** exists only in this fork (design in
+`docs/rfcs/20260730_log_derived_dedup_state.md`). Two topic properties turn it
+on: `redpanda.dedup.window.ms` and `redpanda.dedup.key.header`. A cluster
+property, `dedup_max_entries_per_partition`, bounds the per-partition index.
+The partition leader drops records whose key (or chosen header value) it
+already saw inside the window, before replicating them. Idempotent and
+transactional produce bypass it. Followers rebuild the index from the data
+batches they apply (`dedup_stm`), so it needs no extra replicated state. The
+index is advisory: only the leader consults it, and duplicates near the window
+boundary may get through by design. Outside this module it touches the
+produce path (the reported base offset accounts for dropped records via
+`replicated_record_count`), the raft state machine manager, topic properties
+and `ntp_config`. Ducktape has no tests for it yet; its coverage is the C++
+unit tests in `cluster/tests/dedup_*`.
 
 The feature-flag mechanism stays because Rust releases will need rolling
 upgrades between themselves. Its contents don't carry over: the 48 C++
@@ -176,30 +195,30 @@ keeps `BrokerService` (GetBroker, ListBrokers), `ClusterService`
 and the internal debug and forced-reconfiguration services; the 15
 `SecurityService` RPCs go. `server.cc` is 4,186 lines on its own.
 
-### Platform: config, RPC, networking, model, codecs (26,025)
+### Platform: config, RPC, networking, model, codecs (26,111)
 
 | Feature | Scope | Prod LOC | Test LOC |
 |---|---|---:|---:|
-| Configuration framework + ~350 properties | keep | 8,038 | 2,084 |
+| Configuration framework + ~350 properties | keep | 8,056 | 2,084 |
 | Data model (record batches, ntp, offsets) | keep | 5,333 | 1,958 |
 | Networking: server, connection limits/rates, transports | keep | 3,387 | 1,014 |
 | Internal RPC framework (serde over TCP) | keep | 3,364 | 1,968 |
 | HTTP client | keep | 2,109 | 2,207 |
-| Compression (gzip, snappy, lz4, zstd) | keep | 1,949 | 708 |
+| Compression (gzip, snappy, lz4, zstd) | keep | 2,017 | 804 |
 | serde: positional binary envelope format | keep | 1,845 | 1,360 |
 
-Configuration is 319 cluster properties (`config/configuration.h`) and 30
+Configuration is 320 cluster properties (`config/configuration.h`) and 30
 node properties (`config/node_config.h`), each with validation, defaults,
 bounds, YAML and JSON (de)serialisation, and live-update bindings. 51
 headers declare `serde::envelope` types (284 envelope declarations in
 total), which are the internal RPC and on-disk payloads. In Rust these
 become derive-generated types in a format of the rewrite's choosing.
 
-### Operations and observability (11,432)
+### Operations and observability (11,439)
 
 | Feature | Scope | Prod LOC | Test LOC |
 |---|---|---:|---:|
-| Application wiring (main, service startup/shutdown) | keep | 3,236 | 1,041 |
+| Application wiring (main, service startup/shutdown) | keep | 3,243 | 1,041 |
 | Metrics (Prometheus endpoints, host metrics) | keep | 2,727 | 633 |
 | Debug bundle service | keep | 2,163 | 1,435 |
 | Resource mgmt (memory groups, CPU sched groups, profilers) | keep | 1,490 | 559 |
@@ -235,7 +254,7 @@ layer to shrink the most.
 
 | Feature | Scope | Prod LOC | Test LOC |
 |---|---|---:|---:|
-| Compatibility with older C++ versions (ADL, legacy wire slots, upgrade migrators) | compat | 1,431 | 373 |
+| Compatibility with older C++ versions (ADL, legacy wire slots, upgrade migrators) | compat | 1,431 | 432 |
 
 Covers the ADL encoding (`reflection/adl*`, `model/adl_serde*`), the
 `legacy_*` placeholder fields in `cluster/legacy_wire.h`, the feature
@@ -303,7 +322,7 @@ choose (see PLAN.md §2).
 | Kafka record batch format v2 | Kafka spec, `model/record*` | Mandatory on the wire; also the natural on-disk payload for zero-copy fetch |
 | Kafka-visible semantics | Kafka spec, ducktape, verifiers | Offsets, LSO and HWM, idempotence, transactions, compaction, retention, group rebalancing |
 | Config file and property schema | `config/` | YAML node config, cluster config property names, types, defaults, bounds |
-| Topic configs | `kafka/server/handlers/configs/*` | Names and semantics of the topic properties clients set |
+| Topic configs | `kafka/server/handlers/configs/*` | Names and semantics of the topic properties clients set, including `redpanda.dedup.window.ms` and `redpanda.dedup.key.header` |
 | Admin API v1 routes and JSON shapes | `redpanda/admin/api-doc` | rpk, Helm chart, operator depend on these |
 | Admin API v2 protos | `proto/redpanda/core/admin` | |
 | Prometheus metric names and labels | probes across the tree | `/metrics` and `/public_metrics`; dashboards in `tools/dashboards` |

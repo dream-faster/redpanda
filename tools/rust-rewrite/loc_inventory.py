@@ -169,6 +169,9 @@ FEATURES = [
         "cluster/producer_state*", "cluster/rm_stm*",
         "cluster/migrations/*",
     ]),
+    ("Windowed produce-time dedup (dedup_stm, window filter)", "keep", [
+        "cluster/dedup_*",
+    ]),
     ("Partition placement: allocator + leader balancer", "keep", [
         "cluster/scheduling/*",
     ]),
