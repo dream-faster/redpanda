@@ -275,3 +275,16 @@ jobs:
     with:
       slim_image: ${{ needs.build.outputs.image_ref }}
       stock_image: ${{ inputs.stock_image }}
+
+  # Every dedup scenario against real clusters of the published image, and
+  # the upgrade, downgrade and mixed-version legs against the same baseline
+  # the upgrade test rolls from.
+  dedup-acceptance:
+    needs: build
+    permissions:
+      contents: read
+      packages: read
+    uses: ./.github/workflows/dedup-acceptance.yml
+    with:
+      image: ${{ needs.build.outputs.image_ref }}
+      old_image: ${{ inputs.stock_image }}
