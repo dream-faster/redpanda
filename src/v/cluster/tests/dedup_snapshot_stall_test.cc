@@ -35,8 +35,8 @@ namespace cluster {
 // a different struct in a different binary rather than a redefinition of this
 // one.
 struct dedup_stm_test_accessor {
-    static iobuf
-    serialize(const dedup_window_filter& state, int64_t generation) {
+    static ss::future<iobuf>
+    serialize(dedup_window_filter& state, int64_t generation) {
         return dedup_stm::serialize_snapshot(state, generation);
     }
 };
@@ -217,7 +217,7 @@ ss::future<> compare_at(size_t entries) {
         stall_probe probe;
         probe.start();
         const auto start = clock::now();
-        packed = dedup_stm_test_accessor::serialize(filter, 7);
+        packed = co_await dedup_stm_test_accessor::serialize(filter, 7);
         packed_m.total = clock::now() - start;
         packed_m.stall = co_await probe.stop();
     }
@@ -239,15 +239,14 @@ ss::future<> compare_at(size_t entries) {
       packed.size_bytes(), entries * dedup_stm::packed_entry_size + 64);
     ASSERT_LT_CORO(packed.size_bytes(), legacy_bytes);
 
-    // The packed write is one pass that cannot yield, since the produce path
-    // mutates the index without the apply lock. It replaces three such
-    // passes, so it must stall the reactor for less than they did together.
-    // Not by the factor observed, so a loaded runner cannot turn a real
-    // improvement into a red build.
+    // The packed write yields between chunks of the index, so its longest
+    // stretch without a preemption point is a task quota's worth of work
+    // plus whatever the runner's scheduler adds, however large the index --
+    // where the passes it replaced ran for hundreds of milliseconds at this
+    // size. The bound is loose enough that a loaded runner cannot turn a
+    // real improvement into a red build.
     ASSERT_LT_CORO(us(packed_m.stall), us(legacy_m.stall));
-    // Nor may it stall much longer than the copy the yielding serializer used
-    // to start from, which was the indivisible part of the snapshot before.
-    ASSERT_LT_CORO(us(packed_m.stall), 2 * us(copy_m.stall) + 1'000);
+    ASSERT_LT_CORO(us(packed_m.stall), 20'000);
 }
 
 } // namespace

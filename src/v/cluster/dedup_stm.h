@@ -147,11 +147,13 @@ private:
       raft::replicate_options,
       ss::lw_shared_ptr<available_promise<>>);
 
-    /// Serialize the index's live entries. One pass that cannot yield: the
-    /// produce path mutates the index without the apply lock, so nothing but
-    /// running to completion gives the serializer a consistent view of it.
-    static iobuf
-    serialize_snapshot(const dedup_window_filter&, int64_t generation);
+    /// Serialize the index's live entries, yielding between chunks. The
+    /// produce path mutates the index meanwhile; the filter's walk accounts
+    /// for that (dedup_window_filter::for_each_live_entry_async()), and a walk
+    /// the index was cleared or replaced under starts over. \p generation is
+    /// read once the entries are written, so the two describe the same index.
+    static ss::future<iobuf>
+    serialize_snapshot(dedup_window_filter&, const int64_t& generation);
     static void
     restore_snapshot(dedup_window_filter&, int64_t& generation, state_snapshot);
     /// Deserialize and install a snapshot, or reset to an empty index if the

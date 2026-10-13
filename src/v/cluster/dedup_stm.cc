@@ -223,36 +223,44 @@ dedup_stm::get_initial_recovery_start_offset() {
     co_return aligned.value_or(log_offsets.start_offset);
 }
 
-iobuf dedup_stm::serialize_snapshot(
-  const dedup_window_filter& state, int64_t generation) {
-    // One pass over the live index, which cannot yield: the produce path
-    // mutates the index without the apply lock. Entries are staged in a fixed
-    // local buffer and appended a chunk at a time, so the pass costs a memcpy
-    // per entry rather than an iobuf append per entry.
+ss::future<iobuf> dedup_stm::serialize_snapshot(
+  dedup_window_filter& state, const int64_t& generation) {
+    // Entries are staged in a fixed local buffer and appended a chunk at a
+    // time, so the pass costs a memcpy per entry rather than an iobuf append
+    // per entry.
     constexpr size_t chunk_entries = 16_KiB / packed_entry_size;
     std::array<char, chunk_entries * packed_entry_size> chunk{};
-    size_t staged = 0;
     iobuf entries;
-    state.for_each_live_entry(
-      [&](dedup_identity_digest identity, model::timestamp timestamp) {
-          char* out = chunk.data() + staged * packed_entry_size;
-          const auto hi = ss::cpu_to_le(identity.hi);
-          const auto lo = ss::cpu_to_le(identity.lo);
-          const auto ts = ss::cpu_to_le(timestamp.value());
-          std::memcpy(out, &hi, sizeof(hi));
-          std::memcpy(out + sizeof(hi), &lo, sizeof(lo));
-          std::memcpy(out + sizeof(hi) + sizeof(lo), &ts, sizeof(ts));
-          if (++staged == chunk_entries) {
-              entries.append(chunk.data(), staged * packed_entry_size);
-              staged = 0;
-          }
-      });
-    if (staged > 0) {
-        entries.append(chunk.data(), staged * packed_entry_size);
+    for (;;) {
+        size_t staged = 0;
+        const bool complete = co_await state.for_each_live_entry_async(
+          [&](dedup_identity_digest identity, model::timestamp timestamp) {
+              char* out = chunk.data() + staged * packed_entry_size;
+              const auto hi = ss::cpu_to_le(identity.hi);
+              const auto lo = ss::cpu_to_le(identity.lo);
+              const auto ts = ss::cpu_to_le(timestamp.value());
+              std::memcpy(out, &hi, sizeof(hi));
+              std::memcpy(out + sizeof(hi), &lo, sizeof(lo));
+              std::memcpy(out + sizeof(hi) + sizeof(lo), &ts, sizeof(ts));
+              if (++staged == chunk_entries) {
+                  entries.append(chunk.data(), staged * packed_entry_size);
+                  staged = 0;
+              }
+          });
+        if (complete) {
+            if (staged > 0) {
+                entries.append(chunk.data(), staged * packed_entry_size);
+            }
+            break;
+        }
+        // The index was cleared or replaced under the walk (a generation
+        // change, a raft snapshot): what was written describes no single
+        // index. Rare, so simply start over on the new one.
+        entries = iobuf{};
     }
     // serde moves the entry fragments into the output rather than copying
     // them, so this is still the only serialized copy.
-    return serde::to_iobuf(
+    co_return serde::to_iobuf(
       state_snapshot{
         .window_ms = state.window().count(),
         .generation = generation,
@@ -673,7 +681,7 @@ ss::future<iobuf> dedup_stm::take_raft_snapshot(model::offset) {
     // target offset. populate() is idempotent (max-timestamp-wins), so a
     // replica installing this snapshot and replaying the remaining log
     // converges to exactly this state; see the log-derived dedup RFC.
-    co_return serialize_snapshot(_state, _generation);
+    co_return co_await serialize_snapshot(_state, _generation);
 }
 
 bool dedup_stm::try_restore_snapshot(iobuf buffer) {
@@ -736,7 +744,9 @@ dedup_stm::apply_local_snapshot(raft::stm_snapshot_header, iobuf&& buffer) {
 
 ss::future<raft::stm_snapshot>
 dedup_stm::take_local_snapshot(ssx::semaphore_units apply_units) {
-    auto buffer = serialize_snapshot(_state, _generation);
+    // The walk yields, but the apply lock is held throughout, so the offset
+    // read after it is the one the entries cover.
+    auto buffer = co_await serialize_snapshot(_state, _generation);
     auto offset = last_applied_offset();
     apply_units.return_all();
     // The 0 here is stm_snapshot_header::version, a channel this STM does

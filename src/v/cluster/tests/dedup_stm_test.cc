@@ -22,8 +22,12 @@
 #include "storage/record_batch_builder.h"
 #include "test_utils/test.h"
 
+#include <seastar/core/byteorder.hh>
+
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <iterator>
 #include <map>
 #include <optional>
 #include <string>
@@ -50,9 +54,8 @@ struct dedup_stm_test_accessor {
         co_await stm.apply_raft_snapshot(buffer);
     }
 
-    static iobuf
-    serialize(const dedup_window_filter& state, int64_t generation) {
-        return dedup_stm::serialize_snapshot(state, generation);
+    static iobuf serialize(dedup_window_filter& state, int64_t generation) {
+        return dedup_stm::serialize_snapshot(state, generation).get();
     }
 
     static void
@@ -68,6 +71,16 @@ struct dedup_stm_test_accessor {
         return serde::to_iobuf(
           dedup_stm::state_snapshot{
             .window_ms = 1000, .generation = 1, .entries = std::move(entries)});
+    }
+
+    static iobuf
+    state_snapshot_with_entries(iobuf entries, model::timestamp max_timestamp) {
+        return serde::to_iobuf(
+          dedup_stm::state_snapshot{
+            .window_ms = 3'600'000,
+            .generation = 1,
+            .max_timestamp = max_timestamp,
+            .entries = std::move(entries)});
     }
 
     static bytes legacy_kvstore_key(const model::ntp& ntp) {
@@ -271,6 +284,227 @@ TEST(dedup_stm_snapshot, packed_format_is_smaller_than_version_1) {
       = dedup_stm_test_accessor::serialize(source, 0).size_bytes();
     EXPECT_LE(packed, count * dedup_stm::packed_entry_size + 64);
     EXPECT_LT(packed, v1_snapshot_with(count).size_bytes());
+}
+
+// --- The yielding walk the snapshot is written from ---
+//
+// for_each_live_entry_async() suspends between chunks of the index while the
+// produce path keeps mutating it. These tests mutate from inside emit(), which
+// is the same thing: the walk's view of the array changes under it.
+
+namespace {
+
+constexpr int64_t walk_base_ts = 1'000'000'000;
+
+std::string bulk_key(size_t i) { return "bulk-" + std::to_string(i); }
+
+void populate_bulk(dedup_window_filter& f, size_t count) {
+    for (size_t i = 0; i < count; ++i) {
+        f.populate(iobuf::from(bulk_key(i)), model::timestamp{walk_base_ts});
+    }
+}
+
+// Admit `count` distinct keys through filter_request(), whose undo is the only
+// way to erase chosen entries from the middle of the array.
+dedup_filter_result admit_victims(dedup_window_filter& f, size_t count) {
+    storage::record_batch_builder builder(
+      model::record_batch_type::raft_data, model::offset{0});
+    builder.set_timestamp(model::timestamp{walk_base_ts});
+    for (size_t i = 0; i < count; ++i) {
+        builder.add_raw_kv(
+          iobuf::from("victim-" + std::to_string(i)), iobuf::from("v"));
+    }
+    return f.filter_request(std::move(builder).build());
+}
+
+std::vector<dedup_identity_digest>
+sorted(std::vector<dedup_identity_digest> v) {
+    std::ranges::sort(v, [](const auto& a, const auto& b) {
+        return std::tie(a.hi, a.lo) < std::tie(b.hi, b.lo);
+    });
+    return v;
+}
+
+std::vector<dedup_identity_digest> bulk_digests(size_t count) {
+    std::vector<dedup_identity_digest> out;
+    for (size_t i = 0; i < count; ++i) {
+        out.push_back(dedup_digest_of(iobuf::from(bulk_key(i))));
+    }
+    return sorted(std::move(out));
+}
+
+// Every digest in `expected` occurs in `seen` at least `at_least` times and at
+// most once more; nothing else does.
+void expect_covers(
+  std::vector<dedup_identity_digest> seen,
+  const std::vector<dedup_identity_digest>& expected) {
+    seen = sorted(std::move(seen));
+    std::vector<dedup_identity_digest> missing;
+    std::ranges::set_difference(
+      expected, seen, std::back_inserter(missing), [](auto& a, auto& b) {
+          return std::tie(a.hi, a.lo) < std::tie(b.hi, b.lo);
+      });
+    EXPECT_TRUE(missing.empty()) << missing.size() << " entries missing";
+}
+
+size_t duplicates_in(std::vector<dedup_identity_digest> seen) {
+    seen = sorted(std::move(seen));
+    const auto [first, last] = std::ranges::unique(
+      seen, [](const auto& a, const auto& b) { return a == b; });
+    return static_cast<size_t>(std::distance(first, last));
+}
+
+} // namespace
+
+// Erasing entries the walk has passed moves the array's last entries, not yet
+// walked, into their slots. Those must still be emitted.
+TEST_CORO(dedup_live_walk, erases_behind_the_cursor_lose_nothing) {
+    dedup_window_filter f(1h);
+    // The victims come first, so they sit at the front of the array.
+    auto request = admit_victims(f, 50);
+    ASSERT_EQ_CORO(request.undo.entries.size(), 50u);
+    populate_bulk(f, 10'000);
+    ASSERT_EQ_CORO(f.map_size(), 10'050u);
+
+    std::vector<dedup_identity_digest> seen;
+    bool reverted = false;
+    const bool complete = co_await f.for_each_live_entry_async(
+      [&](dedup_identity_digest identity, model::timestamp) {
+          seen.push_back(identity);
+          if (!reverted && seen.size() == 100) {
+              // The cursor is past the victims; each erase pulls one of the
+              // last 50 bulk entries behind it.
+              reverted = true;
+              f.revert_request(request.undo);
+          }
+      });
+    ASSERT_TRUE_CORO(complete);
+    ASSERT_TRUE_CORO(reverted);
+    EXPECT_EQ(f.map_size(), 10'000u);
+    expect_covers(seen, bulk_digests(10'000));
+    // The victims were emitted before they were erased; nothing was emitted
+    // twice.
+    EXPECT_EQ(seen.size(), 10'050u);
+    EXPECT_EQ(duplicates_in(seen), 0u);
+}
+
+// Erasing entries the walk has not reached needs no bookkeeping: whatever
+// moves into their slots is still ahead of the cursor.
+TEST_CORO(dedup_live_walk, erases_ahead_of_the_cursor_are_simply_gone) {
+    dedup_window_filter f(1h);
+    populate_bulk(f, 10'000);
+    auto request = admit_victims(f, 50);
+    ASSERT_EQ_CORO(f.map_size(), 10'050u);
+
+    std::vector<dedup_identity_digest> seen;
+    bool reverted = false;
+    const bool complete = co_await f.for_each_live_entry_async(
+      [&](dedup_identity_digest identity, model::timestamp) {
+          seen.push_back(identity);
+          if (!reverted) {
+              reverted = true;
+              f.revert_request(request.undo);
+          }
+      });
+    ASSERT_TRUE_CORO(complete);
+    EXPECT_EQ(f.map_size(), 10'000u);
+    EXPECT_EQ(seen.size(), 10'000u);
+    expect_covers(seen, bulk_digests(10'000));
+}
+
+// Inserts during the walk append to the array: they are emitted at most once,
+// and everything already there is still emitted.
+TEST_CORO(dedup_live_walk, inserts_during_the_walk_are_emitted_at_most_once) {
+    dedup_window_filter f(1h);
+    populate_bulk(f, 1'000);
+
+    std::vector<dedup_identity_digest> seen;
+    bool inserted = false;
+    const bool complete = co_await f.for_each_live_entry_async(
+      [&](dedup_identity_digest identity, model::timestamp) {
+          seen.push_back(identity);
+          if (!inserted && seen.size() == 10) {
+              inserted = true;
+              for (size_t i = 0; i < 100; ++i) {
+                  f.populate(
+                    iobuf::from("late-" + std::to_string(i)),
+                    model::timestamp{walk_base_ts + 1});
+              }
+          }
+      });
+    ASSERT_TRUE_CORO(complete);
+    EXPECT_EQ(f.map_size(), 1'100u);
+    expect_covers(seen, bulk_digests(1'000));
+    EXPECT_EQ(duplicates_in(seen), 0u);
+    EXPECT_EQ(seen.size(), 1'100u);
+}
+
+// An index cleared or replaced under the walk invalidates it: the caller is
+// told, and a fresh walk describes the new index.
+TEST_CORO(dedup_live_walk, a_replaced_index_invalidates_the_walk) {
+    dedup_window_filter f(1h);
+    populate_bulk(f, 10'000);
+
+    size_t seen = 0;
+    bool complete = co_await f.for_each_live_entry_async(
+      [&](dedup_identity_digest, model::timestamp) {
+          if (++seen == 5) {
+              f.clear();
+          }
+      });
+    EXPECT_FALSE(complete);
+    EXPECT_EQ(f.map_size(), 0u);
+
+    populate_bulk(f, 10'000);
+    dedup_index_snapshot replacement{
+      .max_timestamp = model::timestamp{walk_base_ts}};
+    for (size_t i = 0; i < 3; ++i) {
+        replacement.entries.push_back(
+          {.identity = {.hi = i + 1, .lo = (i + 1) * 0x9e37'79b9'7f4a'7c15ULL},
+           .timestamp = model::timestamp{walk_base_ts}});
+    }
+    seen = 0;
+    complete = co_await f.for_each_live_entry_async(
+      [&](dedup_identity_digest, model::timestamp) {
+          if (++seen == 5) {
+              f.restore(replacement);
+          }
+      });
+    EXPECT_FALSE(complete);
+
+    seen = 0;
+    complete = co_await f.for_each_live_entry_async(
+      [&](dedup_identity_digest, model::timestamp) { ++seen; });
+    EXPECT_TRUE(complete);
+    EXPECT_EQ(seen, 3u);
+}
+
+// A snapshot can carry an identity twice when it was erased and admitted
+// again during the walk; the restore keeps the newer timestamp, as populate()
+// would.
+TEST(dedup_stm_snapshot, a_repeated_identity_restores_to_the_newer_timestamp) {
+    dedup_window_filter target(1h);
+    int64_t generation = 0;
+    const dedup_identity_digest id{.hi = 1, .lo = 2};
+    auto entries = iobuf{};
+    for (const int64_t ts :
+         {walk_base_ts + 5, walk_base_ts + 9, walk_base_ts}) {
+        const auto hi = ss::cpu_to_le(id.hi);
+        const auto lo = ss::cpu_to_le(id.lo);
+        const auto le_ts = ss::cpu_to_le(ts);
+        entries.append(reinterpret_cast<const char*>(&hi), sizeof(hi));
+        entries.append(reinterpret_cast<const char*>(&lo), sizeof(lo));
+        entries.append(reinterpret_cast<const char*>(&le_ts), sizeof(le_ts));
+    }
+    dedup_stm_test_accessor::restore(
+      target,
+      generation,
+      dedup_stm_test_accessor::state_snapshot_with_entries(
+        std::move(entries), model::timestamp{walk_base_ts + 9}));
+    ASSERT_EQ(target.map_size(), 1u);
+    const auto restored = target.snapshot().entries;
+    ASSERT_EQ(restored.size(), 1u);
+    EXPECT_EQ(restored[0].timestamp, model::timestamp{walk_base_ts + 9});
 }
 
 struct dedup_stm_fixture : raft::stm_raft_fixture<dedup_stm> {

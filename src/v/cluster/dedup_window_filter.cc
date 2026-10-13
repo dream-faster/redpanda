@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
+#include <iterator>
 #include <ranges>
 
 namespace cluster {
@@ -388,6 +389,7 @@ void dedup_window_filter::revert_request(const dedup_request_undo& undo) {
         if (entry.previous_timestamp) {
             it->second = *entry.previous_timestamp;
         } else {
+            note_erase(static_cast<size_t>(std::distance(_map.begin(), it)));
             _map.erase(it);
         }
     }
@@ -431,8 +433,34 @@ void dedup_window_filter::populate(
 }
 
 void dedup_window_filter::erase_at(size_t index) {
+    note_erase(index);
     _map.erase(_map.begin() + static_cast<std::ptrdiff_t>(index));
     sync_shard_budget();
+}
+
+void dedup_window_filter::note_erase(size_t index) {
+    if (_walks.empty()) [[likely]] {
+        return;
+    }
+    const size_t last = _map.size() - 1;
+    if (index == last) {
+        // Nothing moves.
+        return;
+    }
+    for (auto* walk : _walks) {
+        // The entry at `last` moves to `index`. It needs recording only when
+        // the walk has passed `index` but has not emitted `last` yet.
+        if (index < walk->cursor && last >= walk->cursor) {
+            const auto& [identity, timestamp] = _map.values()[last];
+            walk->displaced.push_back({identity, timestamp});
+        }
+    }
+}
+
+void dedup_window_filter::invalidate_walks() {
+    for (auto* walk : _walks) {
+        walk->invalidated = true;
+    }
 }
 
 void dedup_window_filter::begin_pass() {
@@ -649,6 +677,7 @@ void dedup_window_filter::restore(const dedup_index_snapshot& snapshot) {
 size_t dedup_window_filter::begin_restore(size_t count) {
     // Assigned rather than cleared, so a restore that keeps fewer entries than
     // the index held does not inherit its bucket array.
+    invalidate_walks();
     _map = {};
     sync_shard_budget();
     stop_being_largest();
@@ -709,6 +738,7 @@ void dedup_window_filter::clear() {
     // generation change, a discarded or applied raft snapshot) all want that
     // memory back. restore() keeps using clear(), since it refills
     // immediately and the capacity is worth keeping there.
+    invalidate_walks();
     _map = {};
     sync_shard_budget();
     stop_being_largest();

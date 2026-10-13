@@ -19,7 +19,10 @@
 #include "model/timestamp.h"
 #include "ssx/semaphore.h"
 
+#include <seastar/core/coroutine.hh>
 #include <seastar/core/shared_ptr.hh>
+#include <seastar/coroutine/maybe_yield.hh>
+#include <seastar/util/defer.hh>
 
 #include <fmt/format.h>
 
@@ -463,6 +466,52 @@ public:
         }
     }
 
+    /// \brief for_each_live_entry(), yielding to the reactor between chunks
+    /// of the index.
+    ///
+    /// The index changes while the walk is suspended: the produce path
+    /// inserts, sweeps and reverts without the apply lock. An insert appends
+    /// to the map's value array and is emitted or not depending on where the
+    /// cursor is, which a convergent snapshot tolerates either way. An erase
+    /// moves the array's last entry into the hole, and when the hole is
+    /// behind the cursor that entry would never be reached: erases record
+    /// such entries for every walk in progress (see note_erase()), and the
+    /// walk emits them at the end. So every entry that was in the index for
+    /// the whole walk is emitted, as a non-yielding pass would have.
+    ///
+    /// Returns false if the index was cleared or replaced during the walk: what
+    /// was emitted then describes no single index, and the caller starts over.
+    template<typename F>
+    ss::future<bool> for_each_live_entry_async(F emit) {
+        live_walk walk;
+        _walks.push_back(&walk);
+        auto unregister = ss::defer(
+          [this, &walk]() noexcept { std::erase(_walks, &walk); });
+        const int64_t cutoff = _max_ts.value() - _window.count();
+        while (!walk.invalidated && walk.cursor < _map.size()) {
+            const auto end = std::min(walk.cursor + walk_chunk, _map.size());
+            // emit may mutate the index; the bound is re-read each step.
+            for (; walk.cursor < end && walk.cursor < _map.size()
+                   && !walk.invalidated;
+                 ++walk.cursor) {
+                const auto& [identity, timestamp] = _map.values()[walk.cursor];
+                if (timestamp.value() >= cutoff) {
+                    emit(identity, timestamp);
+                }
+            }
+            co_await ss::coroutine::maybe_yield();
+        }
+        if (walk.invalidated) {
+            co_return false;
+        }
+        for (const auto& [identity, timestamp] : walk.displaced) {
+            if (timestamp.value() >= cutoff) {
+                emit(identity, timestamp);
+            }
+        }
+        co_return true;
+    }
+
     /// \brief Install a snapshot, replacing any current index state.
     ///
     /// A snapshot holding more identities than this filter may keep -- its
@@ -574,9 +623,9 @@ public:
                           return;
                       }
                       if (!trimming || ts.value() > keep_from) {
-                          _map.emplace(identity, ts);
+                          restore_entry(identity, ts);
                       } else if (ts.value() == keep_from && ties_left > 0) {
-                          _map.emplace(identity, ts);
+                          restore_entry(identity, ts);
                           --ties_left;
                       }
                   });
@@ -718,6 +767,25 @@ private:
     /// than advance.
     void erase_at(size_t index);
 
+    /// A walk over the value array in progress (for_each_live_entry_async()).
+    struct live_walk {
+        /// Entries before it have been emitted.
+        size_t cursor{0};
+        /// Entries an erase moved from ahead of the cursor to behind it.
+        chunked_vector<dedup_index_entry> displaced;
+        /// The index was cleared or replaced under the walk.
+        bool invalidated{false};
+    };
+    /// Called before an entry is erased, with its index: records the entry
+    /// the map will move into its place for every walk that has passed the
+    /// index but not reached the end of the array.
+    void note_erase(size_t index);
+    /// Called when the whole value array is discarded.
+    void invalidate_walks();
+    /// Entries emitted between preemption checks. 24 bytes each on the wire,
+    /// so about 100 KiB of snapshot per check.
+    static constexpr size_t walk_chunk = 4096;
+
     /// Report the map's size change since the last call to the shard budget.
     /// Called after every insert or erase, so the budget is exact whenever a
     /// capacity check reads it.
@@ -735,6 +803,15 @@ private:
     void begin_restore_pass(model::timestamp max_timestamp, int64_t oldest);
     /// Turn the restore pass into the capacity cutoff, and return it.
     int64_t finish_restore_pass();
+    /// Insert one restored entry. A snapshot taken while the index was being
+    /// mutated can hold an identity twice (see for_each_live_entry_async());
+    /// the newer timestamp wins, as it does in populate().
+    void restore_entry(dedup_identity_digest identity, model::timestamp ts) {
+        auto [it, inserted] = _map.try_emplace(identity, ts);
+        if (!inserted) {
+            it->second = std::max(it->second, ts);
+        }
+    }
     /// Account for the restored entries.
     void finish_restore(size_t truncated);
 
@@ -808,6 +885,8 @@ private:
     // a divergence the whole-map passes this replaced did not have, and it is
     // inherent to doing bounded work: a cursor is a position in a layout.
     size_t _sweep_pos{0};
+    // Walks in progress; one per snapshot being taken, so at most a few.
+    std::vector<live_walk*> _walks;
     // Histogram of the entries the pass in progress has visited, measured
     // against the frame frozen at the start of that pass. _max_ts moves while
     // the cursor walks, and buckets shifting underneath it would describe no
