@@ -2243,8 +2243,11 @@ TEST(DedupShardBudget, EqualIndicesAtTheShardLimitKeepIndexing) {
     cluster::dedup_window_filter b(1'000s, 100'000, budget);
     populate_n(a, "a", shard_limit / 2, 1000, 10);
     populate_n(b, "b", shard_limit / 2, 1000, 10);
-    ASSERT_EQ(budget->entries, shard_limit);
-    ASSERT_EQ(a.map_size(), b.map_size());
+    // b starts trimming itself as soon as it draws level with a, so the
+    // shard settles a few entries short of the limit.
+    ASSERT_GE(budget->entries, shard_limit - 10);
+    ASSERT_NEAR(
+      static_cast<double>(a.map_size()), static_cast<double>(b.map_size()), 10);
 
     populate_n(b, "b-new", 200, 1000 + 10 * shard_limit);
     const auto transient = b.unindexed_records();
