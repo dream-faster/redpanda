@@ -50,6 +50,7 @@
 #include <cstdint>
 #include <exception>
 #include <memory>
+#include <regex>
 
 using namespace std::chrono_literals;
 

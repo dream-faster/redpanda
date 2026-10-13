@@ -18,6 +18,9 @@
 #include "model/validation.h"
 #include "security/acl.h"
 #include "security/scram_credential.h"
+
+#include <bitset>
+
 namespace kafka {
 
 /*

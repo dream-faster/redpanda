@@ -43,6 +43,7 @@
 #include <seastar/net/socket_defs.hh>
 
 #include <chrono>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <optional>

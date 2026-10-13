@@ -44,6 +44,8 @@
 #include <boost/multi_index/sequenced_index.hpp>
 #include <boost/multi_index_container.hpp>
 
+#include <bitset>
+
 using namespace std::chrono_literals;
 
 namespace security::audit {

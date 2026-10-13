@@ -9,12 +9,45 @@
  * by the Apache License, Version 2.0
  */
 
-#include "fs_utils.h"
+#include "storage/fs_utils.h"
 
 #include "config/node_config.h"
 #include "model/namespace.h"
 
+#include <boost/lexical_cast.hpp>
+
+#include <regex>
+
 namespace storage {
+
+std::optional<segment_path::metadata>
+segment_path::parse_segment_filename(const ss::sstring& name) {
+    const std::regex re(R"(^(\d+)-(\d+)-([\x00-\x7F]+).log$)");
+    std::cmatch match;
+    if (!std::regex_match(name.c_str(), match, re)) {
+        return std::nullopt;
+    }
+    return metadata{
+      .base_offset = model::offset(
+        boost::lexical_cast<uint64_t>(match[1].str())),
+      .term = model::term_id(boost::lexical_cast<int64_t>(match[2].str())),
+      .version = from_string(match[3].str()),
+    };
+}
+
+std::optional<partition_path::metadata>
+partition_path::parse_partition_directory(const ss::sstring& name) {
+    const std::regex re(R"(^(\d+)_(\d+)$)");
+    std::cmatch match;
+    if (!std::regex_match(name.c_str(), match, re)) {
+        return std::nullopt;
+    }
+    return metadata{
+      .partition_id = model::partition_id(
+        boost::lexical_cast<uint64_t>(match[1].str())),
+      .revision_id = model::revision_id(
+        boost::lexical_cast<uint64_t>(match[2].str()))};
+}
 
 ss::sstring segment_full_path::string() const {
     if (unlikely(override_path.has_value())) {

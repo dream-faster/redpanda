@@ -22,6 +22,7 @@
 #include <fmt/core.h>
 #include <yaml-cpp/node/node.h>
 
+#include <locale>
 #include <memory>
 #include <optional>
 #include <string>

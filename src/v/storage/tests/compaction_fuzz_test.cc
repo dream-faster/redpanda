@@ -19,6 +19,7 @@
 
 #include <gtest/gtest.h>
 
+#include <deque>
 #include <exception>
 
 using namespace std::chrono_literals;

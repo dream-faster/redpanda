@@ -22,7 +22,6 @@
 #include <boost/lexical_cast.hpp>
 
 #include <filesystem>
-#include <regex>
 
 namespace storage {
 
@@ -50,19 +49,7 @@ struct segment_path {
 
     /// Parse metadata from a segment filename.
     static std::optional<metadata>
-    parse_segment_filename(const ss::sstring& name) {
-        const std::regex re(R"(^(\d+)-(\d+)-([\x00-\x7F]+).log$)");
-        std::cmatch match;
-        if (!std::regex_match(name.c_str(), match, re)) {
-            return std::nullopt;
-        }
-        return metadata{
-          .base_offset = model::offset(
-            boost::lexical_cast<uint64_t>(match[1].str())),
-          .term = model::term_id(boost::lexical_cast<int64_t>(match[2].str())),
-          .version = from_string(match[3].str()),
-        };
-    }
+    parse_segment_filename(const ss::sstring& name);
 };
 
 class segment_full_path;
@@ -76,18 +63,7 @@ public:
 
     /// Parse ntp directory name
     static std::optional<metadata>
-    parse_partition_directory(const ss::sstring& name) {
-        const std::regex re(R"(^(\d+)_(\d+)$)");
-        std::cmatch match;
-        if (!std::regex_match(name.c_str(), match, re)) {
-            return std::nullopt;
-        }
-        return metadata{
-          .partition_id = model::partition_id(
-            boost::lexical_cast<uint64_t>(match[1].str())),
-          .revision_id = model::revision_id(
-            boost::lexical_cast<uint64_t>(match[2].str()))};
-    }
+    parse_partition_directory(const ss::sstring& name);
 
     partition_path(const ntp_config& ntpc);
 

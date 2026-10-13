@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <deque>
 #include <iterator>
 #include <unordered_map>
 
