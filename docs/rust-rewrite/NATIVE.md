@@ -1,66 +1,68 @@
-# Proposal: a simpler, Rust-native broker
+# Plan: a Rust-native broker
 
-`PLAN.md` describes a parity port. It keeps Redpanda's architecture, ports
-its algorithms decision for decision, and matches every operator surface:
-350 config properties, the full Admin API, every metric. That is a faithful
-translation, about 140–190k lines of Rust.
+**Status: chosen direction (decisions recorded 2026-10-13, §11).** This
+replaces the parity port in `PLAN.md`, which is kept only as a reference.
+`INVENTORY.md` remains the map of the C++ code being replaced.
 
-This proposal is the alternative. It keeps what Kafka clients and the data
-depend on, redesigns the rest the way a Rust codebase would naturally be
-built, and deletes what only exists because of C++, Seastar or Redpanda's
-commercial product. The target is roughly **60k lines of Rust** (estimate,
-§5) for the same 38 Kafka APIs and the same data guarantees.
+The broker keeps what Kafka clients and the data depend on. It is designed
+the way a Rust codebase would naturally be built, and it deletes what only
+exists because of C++, Seastar or Redpanda's commercial product.
+Compatibility with Redpanda's own tooling (Helm chart, operator, `rpk`
+admin commands, config files, metric names) is not a goal: the broker ships
+its own. The v1 target is roughly **60k lines of Rust** (estimate, §5).
 
 Line counts below are from `INVENTORY.md` (production C++, `v26.2.x` at
 `9daa2fab`).
 
 ## Summary
 
-| | Parity port (`PLAN.md`) | Rust-native (this proposal) |
+| | Parity port (`PLAN.md`, not chosen) | Rust-native (this plan) |
 |---|---|---|
-| Kafka protocol, 38 APIs | same | same |
-| Data guarantees (raft safety, `acks=all` fsync, idempotence, transactions, compaction, dedup G1–G5) | same | same |
-| Concurrency model | Thread-per-core, Seastar re-implemented | tokio work-stealing runtime, partition actors |
+| Kafka protocol | 38 APIs | 32 APIs in v1; the 6 transaction APIs follow in v1.1 |
+| Data guarantees (raft safety, `acks=all` fsync, idempotence, compaction, dedup G1–G5) | same | same |
+| Transactions (exactly-once) | yes | after v1 (§4.7) |
+| Concurrency model | Thread-per-core, Seastar re-implemented | Standard tokio multi-thread runtime, one task per partition |
 | Disk I/O | O_DIRECT plus Redpanda's own caches | Buffered I/O, OS page cache, explicit fsync |
 | Kafka offsets vs raft log | Two offset spaces with a translator | One offset space |
 | Cluster metadata | Controller plus dissemination plus per-node tables | One replicated `ClusterState` on every node |
-| Config | 350 properties | ~60 properties, plus a list of legacy names that are accepted when left at their defaults |
-| Admin API | ~95 v1 operations plus v2 | ~20 routes, including what Helm and `rpk` need |
-| Metrics | Every metric, same names | ~30 public metrics the shipped dashboards use, same names |
-| Debug bundle, crash tracker, self-test, usage, phone-home | ported | dropped |
+| Balancing | Full set | Full set: placement, leader balancing, continuous rebalancing, leadership pinning, decommission, failure moves, maintenance mode |
+| Config | 350 Redpanda properties | ~60 properties, own format, Apache Kafka names where Kafka has an equivalent |
+| Admin API and tooling | Redpanda's Admin API, `rpk`, Helm chart | Own small HTTP API, CLI, Helm chart and Grafana dashboard |
 | Upgrades | Feature-flag table | One cluster version number |
-| Rust size (estimate) | 140–190k lines | ~50–80k lines |
-| Effort (rough) | 20–28 engineer-years | 8–12 engineer-years |
+| Rust size (estimate) | 140–190k lines | ~60k for v1, ~63k with transactions |
+| Effort (rough) | 20–28 engineer-years | 7–10 engineer-years for v1, plus 1.5–2 for transactions |
 
-What you give up: some peak throughput and tail latency compared with
-Seastar on the same hardware (§8), and compatibility with tools that use
-Admin API routes or config properties outside the kept set.
+What this gives up:
+- **Performance.** Some peak throughput and tail latency compared with
+  Seastar on the same hardware. The bar is the gates in §8, not parity.
+- **Redpanda tooling.** Nothing built for Redpanda's Admin API, config or
+  metrics will work.
+- **Exactly-once users.** They can't move until transactions land.
 
 ## 1. What stays fixed
 
-These are the reasons the broker exists, so they don't move:
-
-1. **The Kafka protocol.** The 38 APIs at the same version ranges listed in
-   `INVENTORY.md`, record batch format v2, and Kafka's error codes.
-   Existing clients, Kafka CLI tools, Kafka Streams, Flink and Connect work
-   unchanged.
-2. **The data guarantees** from `PLAN.md` C2:
+1. **The Kafka protocol.** v1 serves 32 of the 38 APIs listed in
+   `INVENTORY.md`, at the same version ranges, with record batch format v2
+   and Kafka's error codes. The six transaction-only APIs follow in v1.1
+   (§4.7). Existing clients, Kafka CLI tools, Kafka Connect and Kafka
+   Streams (at-least-once) work unchanged. `rpk`'s Kafka-protocol commands
+   (`topic`, `group`, `produce`, `consume`) should also keep working,
+   because they only speak Kafka.
+2. **The data guarantees:**
    - Raft safety.
    - `acks=all` is acknowledged only after a majority has fsynced.
-   - Idempotent producers, exactly-once transactions (read_committed, LSO).
+   - Idempotent producers.
    - Compaction and retention semantics.
    - Consumer group offset durability.
    - Windowed dedup per guarantees G1–G5 and bounds B1–B5 of
      `docs/rfcs/20260730_log_derived_dedup_state.md`.
+
+   Exactly-once transactions join this list in v1.1.
 3. **Topic configs.** Kafka's standard names and meanings, plus
    `redpanda.dedup.window.ms` and `redpanda.dedup.key.header`.
-4. **What the deployment tooling calls** (§4.11):
-   - The six Admin API calls the Helm chart's post-upgrade job makes
-     (listed in the commit message of `926f87a6`).
-   - `rpk redpanda start`'s config file and flags.
-   - The `rpk` commands that go through the Kafka API.
-   - The ~30 `redpanda_*` metrics used by the dashboards `rpk generate
-     grafana-dashboard` ships.
+
+Everything else (process flags, config files, the admin interface, metric
+names, deployment) is designed fresh in §4.11.
 
 ## 2. Design rules
 
@@ -71,23 +73,23 @@ These are the reasons the broker exists, so they don't move:
   - Embedded KV: `redb`.
   - Metrics: `prometheus-client`.
   - Logging: `tracing`.
+  - CLI: `clap`.
   - Compression: `zstd`, `lz4_flex`, `snap`, `flate2`.
   - Checksums: `crc32c`.
 
-  Write code only where Redpanda's value is: replication, the log, Kafka
-  semantics.
-- **Sans-IO cores.** Raft, the group coordinator, the transaction
-  coordinator, producer state and dedup are pure state machines: `step(event)
-  -> actions`, no I/O, no clocks, no tasks. Drivers do the I/O. Everything
-  that has to be correct can be tested deterministically without a
-  simulator.
-- **One owner per piece of state.** Each partition is an actor (one tokio
-  task) that owns its log, raft state and state machines, and is driven by a
-  channel. No locks on the hot path, no `Arc<Mutex<…>>` webs.
-- **Delete before porting.** A C++ component is only ported if a Kafka
-  client, a data guarantee, or the deployment tooling in §1 needs it.
-  Tuning knobs that exist because of Seastar or Redpanda's caches go away
-  with them.
+  Write code only where the broker's value is: replication, the log, Kafka
+  semantics, balancing.
+- **Sans-IO cores.** Raft, the group coordinator, producer state, dedup,
+  the balancer planners and (later) the transaction coordinator are pure
+  state machines: `step(event) -> actions`, no I/O, no clocks, no tasks.
+  Drivers do the I/O. Everything that has to be correct can be tested
+  deterministically without a simulator.
+- **One owner per piece of state.** Each partition is a tokio task that owns
+  its log, raft state and state machines, and is driven by a channel. No
+  locks on the hot path, no `Arc<Mutex<…>>` webs.
+- **Delete before porting.** A C++ component is only rebuilt if a Kafka
+  client, a data guarantee, or running the cluster needs it. Tuning knobs
+  that exist because of Seastar or Redpanda's caches go away with them.
 - **Versioned from day one.** Every on-disk structure and internal message
   carries a version; the cluster has one version number (§4.12).
 
@@ -95,19 +97,18 @@ These are the reasons the broker exists, so they don't move:
 
 | # | Simplification | Removes | Cost |
 |---|---|---|---|
-| S1 | tokio multi-thread runtime instead of thread-per-core | Seastar re-implementation, `sharded<>`, cross-core message passing, scheduling and memory groups, shard placement and core balancing (2,439 lines), cross-core request routing | Less control over scheduling and tail latency (§8) |
+| S1 | Standard tokio multi-thread runtime instead of thread-per-core | Seastar re-implementation, `sharded<>`, cross-core message passing, scheduling and memory groups, shard placement and core balancing (2,439 lines), cross-core request routing | Less control over scheduling and tail latency (§8) |
 | S2 | Buffered I/O and the OS page cache instead of O_DIRECT plus own caches | `batch_cache`, `chunk_cache`, `readers_cache`, the DMA appender, the I/O scheduler, and their tuning knobs | Less control over memory under mixed read and write load. The page cache is how Apache Kafka works, so it is proven at scale |
-| S3 | One offset space: raft log index = Kafka offset | The offset translator (1,021 lines) and the Kafka-offset vs log-offset split that runs through storage, raft, Kafka and transactions | Raft configuration entries become Kafka control batches that clients skip, so they show up as offset gaps the way transaction markers already do. Needs client verification (§9, M0) |
+| S3 | One offset space: raft log index = Kafka offset | The offset translator (1,021 lines) and the Kafka-offset vs log-offset split that runs through storage, raft and Kafka | Raft configuration entries become Kafka control batches that clients skip, so they show up as offset gaps the way transaction markers already do. Needs client verification (M0) |
 | S4 | Every node holds a replica of the controller state (voters on 3 or 5 nodes, learners elsewhere) | Metadata dissemination, separate members, topic and leader tables, most of the health monitor | Controller log replication to every node. Small: metadata only |
 | S5 | Kafka-standard client quotas only | Throughput control groups, usage accounting | Loses Redpanda-specific quota features |
-| S6 | Small operations surface | Debug bundle, crash tracker, self-test, phone-home metrics reporter, fault-injection endpoints, most of the Admin API, ~290 config properties | Tools built against those Redpanda endpoints stop working (§4.11) |
-| S7 | Fewer balancing modes: placement on create, greedy leader balancing, moves on decommission and node failure | Continuous partition auto-balancing planner, core balancing | No continuous rebalancing for skewed load in v1 |
-| S8 | One cluster version number instead of 48 feature flags | Feature table, migrators, gated code paths | Behaviour changes switch on per release rather than per feature |
-| S9 | Fixed number of transaction coordinator partitions | `tx_manager_migrator`, recovery mode | Repartitioning the coordinator topic needs a new cluster |
+| S6 | Own small operations surface, no Redpanda tooling compatibility | Redpanda's Admin API (~95 v1 operations plus v2), ~290 config properties, debug bundle, crash tracker, self-test, phone-home reporter, fault-injection endpoints, Seastar process flags | Helm chart, operator, `rpk` admin commands and Redpanda dashboards stop working; replaced by our own (§4.11) |
+| S7 | One cluster version number instead of 48 feature flags | Feature table, migrators, gated code paths | Behaviour changes switch on per release rather than per feature |
+| S8 | Transactions after v1, fixed number of coordinator partitions | `tx_manager_migrator`, recovery mode; the transaction coordinator moves out of the v1 critical path | Exactly-once users wait for v1.1 |
 
-**What does not get simpler:** raft, transactions, consumer groups,
-compaction, fetch long-polling and produce validation. These are where the
-correctness work goes, and they set the schedule.
+**What does not get simpler:** raft, consumer groups, compaction, fetch
+long-polling, produce validation, the balancer, and (in v1.1) transactions.
+These are where the correctness work goes, and they set the schedule.
 
 ## 4. Design
 
@@ -160,10 +161,12 @@ offsets and Kafka offsets.
 
 Instead, every raft entry is a Kafka batch. Data batches are data. Raft
 configuration and leader no-op entries are Kafka **control batches**
-(attribute bit 5) with a Redpanda-specific control type. Clients already
+(attribute bit 5) with a broker-specific control type. Clients already
 skip control batches: transaction commit and abort markers are control
-batches, and consumers step over them today. The leader epoch Kafka uses
-in `OffsetForLeaderEpoch` and fetch is the raft term.
+batches, and consumers step over them today. When transactions arrive,
+their markers are ordinary Kafka control batches in the same space. The
+leader epoch Kafka uses in `OffsetForLeaderEpoch` and fetch is the raft
+term.
 
 The visible effect: offsets have gaps where raft entries sit (one per
 leader election or membership change), exactly like transaction markers.
@@ -172,11 +175,13 @@ unchanged, and an entire translation layer disappears.
 
 ### 4.4 Replication
 
-- **Model.** One raft group per partition, as today. It gives the
-  guarantees in §1, and per-partition leadership scales across nodes.
+- **Model.** One raft group per partition. It gives the guarantees in §1,
+  and per-partition leadership scales across nodes and is what the
+  balancer moves.
 - **Raft core.** A sans-IO implementation of about 3–4k lines:
   - pre-vote, joint-consensus membership changes, learners;
-  - leadership transfer, priority-based elections;
+  - leadership transfer, priority-based elections (used by leadership
+    pinning);
   - follower recovery from log or snapshot.
 
   It is modelled on etcd raft and `raft-rs`, and backed by a TLA+ spec and
@@ -185,13 +190,15 @@ unchanged, and an entire translation layer disappears.
   Why not a library? `raft-rs` has not published a release since 0.7.0 in
   2023 (TiKV builds it from git). `openraft` is maintained but runs one
   set of tasks per group with per-group heartbeats, which doesn't fit tens
-  of thousands of groups per node. Both should be evaluated in M0; the
-  sans-IO core is the default.
+  of thousands of groups per node. Both are evaluated in M0; the sans-IO
+  core is the default.
 - **Multi-raft driver.** Per node, one driver multiplexes all local groups:
   - It batches heartbeats per node pair: one message carries every group's
     heartbeat for that peer, as Redpanda's `heartbeat_manager` does.
   - It sends append-entries over a dedicated connection per peer.
   - It coalesces ticks so idle groups cost nothing.
+  - It enforces a node-wide recovery bandwidth limit, so replica moves
+    from the balancer can't starve live traffic.
 - **Transport.** One framed binary protocol over TCP (`tokio-util` codec,
   versioned message enum, zero-copy `Bytes` for batch payloads), used for
   raft traffic and for forwarding requests to partition and coordinator
@@ -200,9 +207,10 @@ unchanged, and an entire translation layer disappears.
 ### 4.5 Controller
 
 - **State.** The controller is one raft group whose state machine is a
-  plain Rust struct, `ClusterState`: brokers, topics, partition
-  assignments, cluster config, quotas, cluster version. It is changed only
-  by applying a `Command` enum.
+  plain Rust struct, `ClusterState`: brokers (with rack), topics, partition
+  assignments, in-progress moves, cluster config, quotas, leadership
+  preferences, cluster version. It is changed only by applying a `Command`
+  enum.
 - **Replicas.** Every node holds a replica (voters on 3 or 5 nodes,
   learners on the rest), so Kafka `Metadata` and config reads are served
   from local state.
@@ -212,8 +220,9 @@ unchanged, and an entire translation layer disappears.
   with the replicas it hosts, then creates, deletes, reconfigures or moves
   them. It replaces `controller_backend`, the topic updates dispatcher, the
   members backend and the drain manager with one diff-and-act loop.
-- **Health.** Node liveness comes from raft transport heartbeats; disk
-  usage is reported in them. A separate health monitor isn't needed.
+- **Health.** Node liveness comes from raft transport heartbeats. Each node
+  also sends the controller leader a periodic report of disk usage and
+  per-partition sizes, which the balancer needs (§4.9).
 
 ### 4.6 Kafka layer
 
@@ -236,41 +245,78 @@ unchanged, and an entire translation layer disappears.
 These follow Apache Kafka's server design closely, because clients are
 written against its behaviour.
 
+**In v1:**
+
 - **Group coordinator.** A sans-IO state machine per `__consumer_offsets`
   partition, covering:
   - the classic rebalance protocol and static membership;
   - offset commit, expiry and deletion.
 
   Group state is rebuilt from the compacted partition on leader change.
-- **Producer state.** Per-partition producer ID → sequence and epoch
-  tracking, part of the partition actor's state machine and included in
-  its snapshot.
-- **Transaction coordinator.** A sans-IO state machine per
-  `__transaction_state` partition, implementing KIP-98 and the
-  epoch-bumping defence from KIP-890. It writes commit and abort markers
-  as control batches; the LSO and aborted-transaction index are computed
-  per partition.
+- **Idempotent producers.** `InitProducerId` without a transactional ID,
+  plus per-partition producer ID → sequence and epoch tracking, which is
+  part of the partition actor's state machine and its snapshot. This is in
+  v1 because modern clients turn it on by default (Java clients since
+  Kafka 3.0), so most producers depend on it.
+- **Transactions are refused clearly.**
+  - `ApiVersions` does not advertise AddPartitionsToTxn, AddOffsetsToTxn,
+    EndTxn, TxnOffsetCommit, DescribeTransactions or ListTransactions.
+  - `FindCoordinator` for a transaction coordinator returns an error.
+  - `InitProducerId` with a transactional ID fails with a fatal error, so
+    a transactional producer stops at start-up rather than part-way
+    through. M3 picks the exact error code by checking how the Java client,
+    librdkafka and franz-go report each option.
+  - `read_committed` consumers work: with no open transactions, the LSO
+    equals the high watermark.
+
+**In v1.1: transactions.** A sans-IO coordinator per `__transaction_state`
+partition, implementing KIP-98 and the epoch-bumping defence from KIP-890.
+Commit and abort markers are written as control batches; the LSO and
+aborted-transaction index are computed per partition; transactional offset
+commits go to the group coordinator.
+
+v1 leaves room for this. Producer state already carries epochs and is
+versioned. The one offset space already treats control batches as
+first-class. The fetch path already computes an LSO, which is equal to the
+high watermark until transactions exist.
 
 ### 4.8 Windowed dedup
 
 Ported as the RFC describes: the window filter lives in the partition
 actor. Followers rebuild it by applying data batches, and it is consulted
-only on the leader, before replication. With one offset space (§4.3) and
-one owner per partition, it needs no separate STM plumbing. It is the
-smallest component and nearly 1:1 with today's design.
+only on the leader, before replication. Idempotent produce bypasses it,
+and so will transactional produce. With one offset space (§4.3) and one
+owner per partition, it needs no separate STM plumbing. It is the smallest
+component and nearly 1:1 with today's design.
 
 ### 4.9 Placement and balancing
 
+The full set from the C++ broker, minus core balancing (there are no
+per-core shards under tokio):
+
 - **Placement on create.** Rack-aware, least-loaded by replica count and
   disk use.
-- **Leader balancing.** Greedy, toward an even leader count per node.
-- **Moves.** On decommission and after a node has been unreachable for a
-  configurable time, replicas move using joint consensus.
-- **Maintenance mode.** Leaders drain off the node and it stops being a
-  placement target.
+- **Leader balancing.** Greedy, toward an even leader count per node,
+  subject to leadership pinning.
+- **Leadership pinning.** Cluster-wide and per-topic preferred racks for
+  leaders. Enforced by the leader balancer and by raft priority-based
+  elections, so leaders return to preferred racks after failures.
+- **Continuous rebalancing.** A sans-IO planner over `ClusterState` and the
+  node reports (§4.5). It produces replica moves:
+  - to keep disk usage under a configurable threshold;
+  - to even out replica counts after a node joins;
+  - to restore replication after a node has been unreachable for a
+    configurable time.
 
-Continuous load-based rebalancing and leadership pinning are left out of v1
-(§10).
+  Moves run through joint consensus, with a cap on concurrent moves and the
+  node-wide recovery bandwidth limit (§4.4).
+- **Decommission and recommission**, including draining all replicas off a
+  node.
+- **Maintenance mode.** Leaders drain off the node and it stops being a
+  placement or leadership target.
+
+The planner is tested against recorded and generated cluster states, plus
+simulation of whole clusters with nodes joining, failing and filling up.
 
 ### 4.10 Quotas
 
@@ -281,39 +327,37 @@ responses as Kafka does.
 
 ### 4.11 Operations surface
 
-- **Admin API.** `axum` on the admin port, about 20 routes:
-  - Status and probes: readiness, liveness.
-  - Brokers: list, decommission, recommission, maintenance on and off.
-  - Cluster config: get, patch, schema, status.
-  - Node config.
-  - Partitions: list, move replicas, transfer leadership.
-  - Cluster health overview.
-  - Helm compatibility: `PUT /v1/features/license` (accepted, ignored)
-    and `PUT /v1/debug/restart_service` (succeeds, does nothing).
+Designed fresh. No compatibility with Redpanda's Admin API, config files,
+process flags, metric names, Helm chart or operator.
 
-  These are the Helm chart job's six calls, plus the routes `rpk` uses for
-  cluster config, broker and maintenance commands. The exact `rpk` set is
-  recorded in M0 by capturing `rpk` traffic against the C++ broker.
-- **Config.** One typed `Config` struct (serde) with about 60 properties:
-  - Node config is read from the same `redpanda.yaml` layout `rpk` writes
-    (data directory, node ID, seed servers, listeners, advertised
-    addresses).
-  - Cluster config lives in `ClusterState`.
-  - The full v26.2.x property name list is kept as data. A legacy property
-    set to its old default is accepted with a warning. A legacy property
-    set to anything else is rejected, so nothing is silently ignored. That
-    covers the Helm chart, which sends whole config blocks, and it follows
-    the precedent `926f87a6` set for `cloud_storage_enabled`.
-- **Process flags.** The binary accepts the flags `rpk redpanda start`
-  passes:
-  - `--smp` sets the worker thread count.
-  - `--memory` and `--reserve-memory` set the memory budget.
-  - `--overprovisioned`, `--lock-memory`, `--thread-affinity` and
-    `--io-properties-file` are accepted and logged.
-  - `--unsafe-bypass-fsync` is honoured.
-- **Metrics.** Prometheus on `/public_metrics` with the ~30 `redpanda_*`
-  names and labels that `rpk generate grafana-dashboard` uses, plus
-  whatever new metrics the Rust components need.
+- **Config.**
+  - Node config: one TOML file (node ID, data directories, listeners,
+    advertised addresses, seed nodes, rack, memory budget, worker
+    threads), with environment-variable overrides.
+  - Cluster config: about 60 properties, stored in `ClusterState` and
+    changed through the admin API.
+  - Naming: where Apache Kafka has a broker setting for the same thing,
+    the property uses its name and meaning (`log.retention.ms`,
+    `num.partitions`, `default.replication.factor`, and so on).
+  - Validation: one typed serde struct. Unknown properties are rejected.
+- **Command line.** `clap`: config path and a few overrides.
+- **Admin API.** HTTP/JSON with `axum` under `/v1`, about 20 routes, with
+  an OpenAPI spec generated from the handlers:
+  - health and readiness;
+  - brokers: list, decommission, recommission, maintenance on and off;
+  - cluster config: get, patch, schema;
+  - partitions: list, move replicas, transfer leadership;
+  - balancer status;
+  - cluster version and upgrade status.
+- **CLI.** A small `rpctl` binary over the admin API, for the cluster
+  operations Kafka tools can't do: brokers, maintenance, decommission,
+  config, partition moves, balancer status. Topic, group, produce and
+  consume work stays with Kafka tools (and with `rpk`'s Kafka commands).
+- **Metrics.** Prometheus on `/metrics`, own names, plus a Grafana
+  dashboard in the repo.
+- **Deployment.** A container image, a minimal Helm chart (StatefulSet,
+  services, config map, readiness probe on the admin API, a pre-stop hook
+  that enters maintenance mode), and a systemd unit for bare metal.
 - **Logs.** `tracing` with structured fields. Panics abort and leave a core
   dump.
 
@@ -327,30 +371,33 @@ nodes, stored in `ClusterState`.
 - Decoders always accept the previous version.
 - CI runs N-1 → N rolling upgrades from the first release.
 
+v1.1 turns transactions on once the whole cluster runs it.
+
 ## 5. What each C++ area becomes
 
 | Area | C++ lines | Rust-native approach | Rust estimate |
 |---|---:|---|---:|
 | Runtime and foundations (`ssx`, `bytes`, containers, utils, `resource_mgmt`) plus Seastar | 25,616 + Seastar | tokio, `bytes`, std | ~2,000 |
 | Codecs and model (Kafka protocol, model, serde, compression) | 15,208 | `kafka-protocol` crate, serde with versioned enums, compression crates | ~3,000 |
-| Config | 8,056 | Typed serde struct, ~60 properties, legacy-name policy | ~2,000 |
+| Config | 8,056 | Typed serde struct, ~60 properties | ~1,500 |
 | Networking and internal RPC (`net`, `rpc`, `http`) | 8,860 | tokio, one framed transport | ~2,500 |
 | Storage | 29,196 | Page cache, Kafka-style segments and cleaner, `redb` | ~8,000 |
-| Raft | 21,440 | Sans-IO core plus multi-raft driver | ~6,000 |
-| Controller and cluster core | 40,665 | `ClusterState` + `Command`, one reconciler per node | ~8,000 |
-| Placement and balancing | 11,419 | Placement, greedy leaders, decommission and failure moves | ~2,500 |
+| Raft | 21,440 | Sans-IO core plus multi-raft driver with recovery throttling | ~6,000 |
+| Controller and cluster core | 40,665 | `ClusterState` + `Command`, one reconciler per node, node reports | ~8,000 |
+| Placement and balancing | 11,419 | Full set: placement, leaders, pinning, continuous planner, decommission, maintenance | ~5,000 |
 | Kafka server (connections, produce, fetch, metadata, topic admin) | 23,214 | Handler per API on `kafka-protocol` types | ~10,000 |
 | Client quotas | 3,686 | Kafka-standard byte-rate quotas | ~800 |
 | Consumer groups | 10,490 | Sans-IO coordinator per offsets partition | ~4,500 |
-| Transactions and idempotence | 14,293 | Sans-IO coordinator per Kafka's design; producer state in the partition actor | ~6,000 |
+| Idempotence (v1) and transactions (v1.1) | 14,293 | Producer state in the partition actor; later a sans-IO transaction coordinator per Kafka's design | ~1,500 v1, +~4,500 v1.1 |
 | Windowed dedup | 1,767 | Same design, inside the partition actor | ~1,500 |
-| Admin API | 14,125 | `axum`, ~20 routes | ~2,500 |
-| Operations and app wiring | 13,171 | Metrics, startup, CLI flags; the rest dropped | ~2,500 |
-| **Total** | **241,206** | | **~62,000** |
+| Admin API and CLI | 14,125 | `axum`, ~20 routes, OpenAPI; `rpctl` | ~3,000 |
+| Operations and app wiring | 13,171 | Metrics, startup, config loading; the rest dropped | ~1,500 |
+| **Total** | **241,206** | | **~59,000 v1, ~63,000 with transactions** |
 
-The estimates are judgement, not measurement; read them as 50–80k. Tests
+The estimates are judgement, not measurement; read v1 as 50–75k. Tests
 come on top. Expect roughly as much test code again, much of it simulation
-and property tests rather than ported fixtures.
+and property tests rather than ported fixtures. Deployment assets (Helm
+chart, dashboard, systemd unit) are not counted.
 
 ## 6. Workspace layout
 
@@ -358,50 +405,59 @@ and property tests rather than ported fixtures.
 |---|---|
 | `rp-log` | Segments, indexes, retention, compaction, recovery; `LogFile` trait with real and fault-injecting in-memory backends |
 | `rp-raft` | Sans-IO raft core |
-| `rp-cluster` | `ClusterState`, `Command`, reconciler, placement, balancing |
-| `rp-partition` | Partition actor: log + raft node + producer state, transactions, dedup; multi-raft driver |
-| `rp-kafka` | Connection handling, dispatch, per-API handlers, group and transaction coordinators, quotas |
+| `rp-cluster` | `ClusterState`, `Command`, reconciler, placement, balancer planners |
+| `rp-partition` | Partition actor: log + raft node + producer state + dedup; multi-raft driver |
+| `rp-kafka` | Connection handling, dispatch, per-API handlers, group coordinator, quotas; later the transaction coordinator |
 | `rp-transport` | Framed node-to-node protocol |
 | `rp-admin` | Admin API, metrics, config |
-| `redpanda` | Binary: flag parsing, startup, shutdown |
+| `redpanda` | Broker binary: startup and shutdown |
+| `rpctl` | Operations CLI |
 | `rp-sim` | Deterministic cluster simulation (test-only) |
 
-Nine crates, a shallow graph that compiles in parallel.
+Ten crates, a shallow graph that compiles in parallel.
 
 ## 7. How the guarantees are proven
 
-1. **Sans-IO unit and property tests.** Raft, group coordinator,
-   transaction coordinator, producer state and dedup are pure state
-   machines, so `proptest` drives them through millions of event sequences
-   and checks invariants directly.
+1. **Sans-IO unit and property tests.** Raft, group coordinator, producer
+   state, dedup and the balancer planners are pure state machines, so
+   `proptest` drives them through millions of event sequences and checks
+   invariants directly.
 2. **Deterministic cluster simulation.** Whole clusters run in one thread:
    - network simulated with `turmoil` (maintained, tokio-native);
    - disk simulated with the fault-injecting `LogFile` backend (torn
      writes, lost unsynced data, EIO);
    - time controlled by the simulator.
 
-   Any failing seed reproduces exactly.
-3. **Model checking.** TLA+ specs for raft membership changes and the
-   transaction coordinator, with simulation traces checked against them.
+   Any failing seed reproduces exactly. Balancer scenarios (nodes joining,
+   failing, filling up, maintenance) run the same way.
+3. **Model checking.** A TLA+ spec for raft membership changes in v1, and
+   one for the transaction coordinator in v1.1. Simulation traces are
+   checked against them.
 4. **Black-box checks with real clients.** Run the Java and Go verifiers
-   (`tests/java`, `tests/go`) and the pruned ducktape suite. Add a
-   Jepsen-style linearizability and EOS checker on real 3- and 5-node
-   clusters with process kills and network partitions.
+   (`tests/java`, `tests/go`). Add a Jepsen-style linearizability and
+   durability checker on real 3- and 5-node clusters with process kills,
+   network partitions and disk-full. In v1.1, add exactly-once checks with
+   Kafka Streams (`exactly_once_v2`) and Flink.
 5. **C++ as the reference.** Run the same workloads against the C++ and
-   Rust brokers and compare what clients see: fetched data, offsets
-   modulo control-batch gaps, group behaviour, transaction outcomes,
-   error codes.
+   Rust brokers and compare what Kafka clients see: fetched data, offsets
+   modulo control-batch gaps, group behaviour, error codes. Only the Kafka
+   protocol is compared, since everything else is deliberately different.
 6. **Client compatibility matrix.** franz-go, librdkafka, the Java client,
-   sarama and kafka-python, plus Kafka CLI tools, Kafka Streams and Flink
-   (for EOS), across every supported API version.
+   sarama and kafka-python, plus Kafka CLI tools and Kafka Connect, across
+   every supported API version.
 7. **Fuzzing** every decoder: Kafka requests, transport frames, segment and
    index parsing, config.
 
-## 8. Performance
+The ducktape suite is not reused. It drives the broker through Redpanda's
+Admin API, config and `rpk`, none of which carry over. Its Kafka-level
+scenarios are a useful checklist for the black-box tests.
 
-Seastar's thread-per-core design is Redpanda's main performance argument,
-and this proposal gives it up for simplicity. Expected outcome (a judgement
-to be tested in M0, not a measurement):
+## 8. Performance gates
+
+Strict parity with C++ is not a goal. Seastar's thread-per-core design is
+Redpanda's main performance argument, and this plan gives it up for
+simplicity. Expected outcome (a judgement to be tested in M0, not a
+measurement):
 
 - **Throughput.** Should be close. The work is dominated by syscalls,
   fsync and copying, and fetch sends bytes from the page cache.
@@ -410,12 +466,18 @@ to be tested in M0, not a measurement):
   Likely worse: work stealing and the page cache give up the control
   Seastar has.
 
-Proposed gates, to be agreed: produce and fetch throughput ≥ 80% of C++ on
-the same hardware; `acks=all` p99 ≤ 1.5× C++ at 50% of max throughput;
-10k partitions per node without idle CPU over 5%. If M0 shows these can't
-be met with tokio, the fallback is a thread-per-core runtime behind the
-same partition-actor design. That costs complexity, but the actor
-boundaries make it a contained change.
+Gates, measured against C++ on the same hardware from M1 onwards:
+
+| Benchmark | Gate |
+|---|---|
+| Produce and fetch throughput | ≥ 80% of C++ |
+| `acks=all` p99 at 50% of max throughput (3 nodes, RF=3) | ≤ 1.5× C++ |
+| 10k partitions per node, idle | < 5% CPU |
+| Recovery after node restart | ≤ 1.5× C++ |
+
+If M0 shows tokio can't meet them, the options are tuning the hot paths
+(dedicated runtime for replication, io_uring behind `LogFile`) or
+revisiting the runtime. That would come back to you as a decision.
 
 ## 9. Milestones
 
@@ -424,43 +486,45 @@ systems.
 
 | Milestone | Months | Exit criteria |
 |---|---|---|
-| M0: Spikes and decisions | 0–3 | Single-node produce and fetch on tokio vs C++ benchmark; client matrix accepts raft control batches (§4.3); raft core choice; `rpk` and Helm Admin API traffic recorded |
-| M1: Single node | 2–6 | Log, compaction, retention, single-replica partitions, Kafka produce, fetch, metadata, topic admin; clients produce and consume |
+| M0: Spikes and decisions | 0–3 | Single-node produce and fetch on tokio vs C++ benchmark; client matrix accepts raft control batches (§4.3); raft core choice |
+| M1: Single node | 2–6 | Log, compaction, retention, single-replica partitions, Kafka produce, fetch, metadata, topic admin; clients produce and consume; performance gates tracked |
 | M2: Replication | 4–10 | Sans-IO raft, multi-raft driver, transport, controller with `ClusterState` and reconciler; 3-node cluster survives fault simulation and Jepsen-style runs |
-| M3: Kafka completeness | 8–14 | Consumer groups, idempotence, dedup, quotas, offset deletion, delete records |
-| M4: Transactions | 12–18 | Transaction coordinator, LSO, read_committed; Kafka Streams and Flink EOS tests pass |
-| M5: Operations and hardening | 15–22 | Admin API, config, metrics, Helm chart install and upgrade, `rpk` workflows, performance gates, soak runs, N-1 → N upgrade |
+| M3: Kafka completeness | 8–13 | Consumer groups, idempotence, dedup, quotas, offset deletion, delete records, transactional producers refused cleanly |
+| M4: Balancing | 10–15 | Placement, leader balancing, leadership pinning, continuous rebalancing, decommission, failure moves, maintenance mode; balancer simulations pass |
+| M5: Operations and v1.0 | 13–18 | Admin API, `rpctl`, config, metrics and dashboard, container image, Helm chart, N-1 → N upgrades, soak runs, gates met: **v1.0** |
+| M6: Transactions (v1.1) | 18–24 | Transaction coordinator, LSO and aborted-transaction index, the six transaction APIs; Kafka Streams `exactly_once_v2` and Flink exactly-once tests pass |
 
-Total roughly 8–12 engineer-years, versus 20–28 for the parity port. Raft
-and transactions set the critical path, as before.
+v1.0 is roughly 7–10 engineer-years; transactions add 1.5–2. Raft and the
+balancer set the v1 critical path; transactions set v1.1's.
 
 ## 10. Risks and trade-offs
 
 | Risk | Mitigation |
 |---|---|
-| Performance below expectations on tokio | M0 benchmark before committing; partition actors keep a thread-per-core fallback contained |
+| Performance below the gates on tokio | M0 benchmark before committing; partition actors keep a runtime change contained |
 | A widely used client mishandles the raft control batches | M0 client matrix; fallback is a much smaller offset translation than today's (only raft entries, not six batch types) |
-| Behaviour differences from Redpanda that users notice (offset gaps, missing Admin API routes, fewer config properties) | Document them; the C++ broker is the reference for anything a Kafka client sees |
+| Exactly-once users (Kafka Streams `exactly_once_v2`, Flink exactly-once sinks, Connect exactly-once sources) can't move before v1.1 | Refuse transactional producers clearly at start-up (§4.7) so nothing fails half-way; v1 leaves room for transactions in producer state, offsets and fetch |
+| No Redpanda tooling compatibility | Own CLI, Helm chart and dashboard are part of v1.0 (M5), not follow-ups |
 | Own raft core | Sans-IO plus property tests, simulation, TLA+, Jepsen-style runs; evaluate `raft-rs` and `openraft` in M0 |
+| Continuous rebalancing makes bad moves under churn | Sans-IO planner tested on recorded and generated states; move caps and recovery throttling; can be switched off by config |
 | Page cache under heavy mixed load (cold reads evicting the hot tail) | Measure in M5; `posix_fadvise` hints; an application-level cache can be added later if needed |
-| Losing continuous balancing | Add later as an offline planner over `ClusterState`; the data model supports it |
-| Licensing: a design derived from BSL-licensed code | The native design copies less code than a port, but get the same legal advice as for `PLAN.md` |
+| Licensing: a design derived from BSL-licensed code | The native design copies less code than a port, but get legal advice before starting |
 
-## 11. Decisions needed
+## 11. Decisions
 
-1. **Native or parity?** This proposal (recommended) or `PLAN.md`. If this
-   one, `PLAN.md` becomes the fallback and `INVENTORY.md` stays as the map
-   of what is being replaced.
-2. **Runtime.** tokio multi-thread (recommended) or thread-per-core from the
-   start.
-3. **Operations compatibility.** Helm chart and `rpk` compatibility shim
-   (recommended) or no Redpanda tooling compatibility at all.
-4. **Transactions in the first production release?** Recommended: yes. Java
-   clients have enabled idempotence by default since Kafka 3.0, and EOS
-   users can't move without it. The alternative is shipping M3 and adding
-   transactions after.
-5. **Balancing scope for v1.** Placement, greedy leader balancing,
-   decommission and failure moves only (recommended), or also continuous
-   rebalancing and leadership pinning.
-6. **Performance bar.** The gates in §8 (recommended) or strict parity with
-   C++.
+Recorded 2026-10-13:
+
+| # | Question | Decision |
+|---|---|---|
+| 1 | Native redesign or parity port | **Native.** `PLAN.md` is kept for reference only |
+| 2 | Runtime | **Standard tokio** multi-thread runtime |
+| 3 | Compatibility with Redpanda tooling (Helm chart, operator, `rpk` admin commands, Admin API, config, metrics) | **None.** Own admin API, CLI, chart and dashboard (§4.11) |
+| 4 | Transactions | **After v1** (v1.1, M6). Idempotence stays in v1 |
+| 5 | Balancing | **Full set:** placement, leader balancing, leadership pinning, continuous rebalancing, decommission, failure moves, maintenance mode. Core balancing doesn't apply under tokio |
+| 6 | Performance | **Gates in §8**, not strict parity |
+
+Still open, to be settled in M0 and M3:
+
+- Raft core: own sans-IO implementation (default) vs `raft-rs` or `openraft`.
+- The exact error returned to transactional producers in v1 (§4.7).
+- Final list of cluster config properties (target ~60).
