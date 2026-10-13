@@ -240,6 +240,22 @@ def consume_all(
             time.sleep(1)
 
 
+def high_watermark(brokers: str, topic: str, partition: int) -> int:
+    """The partition's high watermark: how many offsets it has written."""
+    c = Consumer(
+        {
+            "bootstrap.servers": brokers,
+            "group.id": f"dedup-acc-{uuid.uuid4()}",
+            "enable.auto.commit": False,
+        }
+    )
+    try:
+        _, high = c.get_watermark_offsets(TopicPartition(topic, partition), timeout=30)
+        return high
+    finally:
+        c.close()
+
+
 def _consume_all_once(brokers, topic, partition, isolation, deadline) -> list[Consumed]:
     c = Consumer(
         {

@@ -2498,6 +2498,79 @@ TEST(DedupShardBudget, LeaderAndFollowerPathsAgreeUnderShardPressure) {
       leader.capacity_evicted_entries(), follower.capacity_evicted_entries());
 }
 
+// The same, when the room comes from replacing the oldest entry of another
+// index: an idle index whose entries share one timestamp never forms a
+// capacity cutoff, so every slot the busy partition gets is a replacement.
+// The leader's produce path and the follower's apply path must still make
+// the same choice on both indices.
+TEST(DedupShardBudget, LeaderAndFollowerAgreeWhenReplacing) {
+    constexpr size_t shard_limit = 50;
+    auto leader_budget = make_budget(shard_limit);
+    auto follower_budget = make_budget(shard_limit);
+    cluster::dedup_window_filter leader_idle(100s, 1'000, leader_budget);
+    cluster::dedup_window_filter leader_busy(100s, 1'000, leader_budget);
+    cluster::dedup_window_filter follower_idle(100s, 1'000, follower_budget);
+    cluster::dedup_window_filter follower_busy(100s, 1'000, follower_budget);
+    populate_n(leader_idle, "idle", 40, 1000, 0);
+    populate_n(follower_idle, "idle", 40, 1000, 0);
+
+    for (size_t i = 0; i < 200; ++i) {
+        const auto key = fmt::format("busy-{}", i);
+        const auto stamp = ts(2000 + static_cast<int64_t>(i));
+        ASSERT_TRUE(
+          leader_busy.filter(make_batch(key, "v", stamp)).has_value());
+        follower_busy.populate(iobuf::from(key), stamp);
+    }
+    ASSERT_GT(leader_idle.capacity_evicted_entries(), 0u);
+    EXPECT_EQ(leader_busy.unindexed_records(), 0u);
+    EXPECT_EQ(leader_idle.snapshot(), follower_idle.snapshot());
+    EXPECT_EQ(leader_busy.snapshot(), follower_busy.snapshot());
+    EXPECT_EQ(leader_budget->entries, follower_budget->entries);
+    EXPECT_LE(leader_budget->entries, shard_limit);
+}
+
+// Replacement keeps the newer identity, never an older one: an identity older
+// than everything in the full shard is admitted unindexed, and nothing is
+// evicted for it.
+TEST(DedupShardBudget, ReplacementNeverDropsANewerEntry) {
+    constexpr size_t shard_limit = 50;
+    auto budget = make_budget(shard_limit);
+    cluster::dedup_window_filter full(100s, 1'000, budget);
+    cluster::dedup_window_filter late(100s, 1'000, budget);
+    populate_n(full, "full", shard_limit, 5000, 0);
+    ASSERT_EQ(budget->entries, shard_limit);
+
+    late.populate(iobuf::from("older"), ts(1000));
+    EXPECT_EQ(late.unindexed_records(), 1u);
+    EXPECT_EQ(late.map_size(), 0u);
+    EXPECT_EQ(full.capacity_evicted_entries(), 0u);
+    EXPECT_EQ(full.map_size(), shard_limit);
+}
+
+// Shard pressure trims down to the shard's soft limit and no further: the
+// condition is re-checked as each entry is dropped, so a sweep step does not
+// keep trimming live identities once its own erases have brought the shard
+// back under it.
+TEST(DedupShardBudget, ShardPressureTrimsNoFurtherThanTheSoftLimit) {
+    constexpr size_t shard_limit = 1'000;
+    auto budget = make_budget(shard_limit);
+    cluster::dedup_window_filter f(1'000s, 100'000, budget);
+    bool reached = false;
+    size_t lowest = shard_limit;
+    for (size_t i = 0; i < 3'000; ++i) {
+        f.populate(
+          iobuf::from(fmt::format("k{}", i)),
+          ts(1000 + static_cast<int64_t>(i) * 10));
+        reached = reached || f.map_size() >= shard_limit;
+        if (reached) {
+            lowest = std::min(lowest, f.map_size());
+        }
+    }
+    ASSERT_TRUE(reached);
+    EXPECT_GE(lowest, shard_limit * 9 / 10);
+    EXPECT_EQ(f.unindexed_records(), 0u);
+}
+
 // Randomized: whatever mix of operations runs against several filters, the
 // budget equals the sum of their sizes after every one of them.
 TEST(DedupShardBudget, TotalMatchesTheIndicesUnderRandomOperations) {

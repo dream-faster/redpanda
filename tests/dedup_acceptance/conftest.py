@@ -32,6 +32,17 @@ def pytest_addoption(parser):
         default=os.environ.get("DEDUP_REQUIRE_NEW_BUILD") == "1",
     )
     parser.addoption(
+        "--bench",
+        action="store_true",
+        default=os.environ.get("DEDUP_BENCH") == "1",
+        help="run the throughput benchmarks (test_bench.py)",
+    )
+    parser.addoption(
+        "--bench-out",
+        default=os.environ.get("DEDUP_BENCH_OUT"),
+        help="append the benchmark results table to this Markdown file",
+    )
+    parser.addoption(
         "--keep-clusters",
         action="store_true",
         default=os.environ.get("DEDUP_KEEP_CLUSTERS") == "1",
@@ -46,6 +57,16 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "upgrade: needs --old-image")
     config.addinivalue_line("markers", "slow: takes minutes rather than seconds")
     config.addinivalue_line("markers", "stress: sustained or adversarial load")
+    config.addinivalue_line("markers", "bench: throughput benchmark, needs --bench")
+
+
+def pytest_collection_modifyitems(config, items):
+    if config.getoption("--bench"):
+        return
+    skip = pytest.mark.skip(reason="benchmark: pass --bench to run")
+    for item in items:
+        if "bench" in item.keywords:
+            item.add_marker(skip)
 
 
 @pytest.hookimpl(hookwrapper=True)

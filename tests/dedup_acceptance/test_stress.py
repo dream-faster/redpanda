@@ -28,6 +28,7 @@ from test_capacity import (
     PART_ENTRIES,
     SHARD_ENTRIES,
     SHARD_MAX,
+    UNINDEXED,
     require_new_build,
     topic_on_one_node,
 )
@@ -602,3 +603,87 @@ def test_idle_partitions_holding_the_budget_do_not_starve_a_busy_one(
     assert readmitted <= 100, (
         f"{readmitted} of the busy partition's newest 1000 forgotten"
     )
+
+
+def _readmitted(c: Cluster, t: str, partition: int, keys: list[bytes]) -> int:
+    """How many of `keys`, sent again now, the partition admits."""
+    before = len(kafka.consume_all(c.brokers, t, partition))
+    later = int(time.time() * 1000)
+    kafka.produce_ok(
+        c.brokers, t, [Rec(k, timestamp_ms=later) for k in keys], partition=partition
+    )
+    return len(kafka.consume_all(c.brokers, t, partition)) - before
+
+
+def test_many_small_idle_partitions_do_not_starve_a_busy_one(
+    make_cluster, pytestconfig
+):
+    """Twenty idle partitions fill the shard between them, none holding more
+    than a twentieth of it. A partition that then turns busy must take room
+    from them and grow, rather than count as one of the largest because they
+    are all small and so only ever trim its own few entries."""
+    limit = 20_000
+    idle = 20
+    c = make_cluster(
+        nodes=1, smp=1, cluster_config={"dedup_max_entries_per_shard": limit}
+    )
+    require_new_build(c, pytestconfig)
+    t = topic_on_one_node(c, idle + 1)
+    now = int(time.time() * 1000)
+    for p in range(idle):
+        kafka.produce_bulk(
+            c.brokers,
+            t,
+            p,
+            (f"idle{p}-{i}".encode() for i in range(limit // idle)),
+            timestamp_ms=lambda i, p=p: now - 3_000_000 + p * 10_000 + i,
+        )
+    assert c.node(0).metrics().sum(SHARD_ENTRIES) >= limit * 9 // 10
+    busy = scaled(20_000)
+    kafka.produce_bulk(
+        c.brokers,
+        t,
+        idle,
+        (f"busy-{i}".encode() for i in range(busy)),
+        timestamp_ms=lambda i: now - 1_000_000 + i * (1_000_000 // busy),
+    )
+    m = c.node(0).metrics()
+    assert m.sum(SHARD_ENTRIES) <= limit
+    # A twentieth of the shard is what each idle partition held.
+    assert m.sum(PART_ENTRIES, topic=t, partition=str(idle)) > limit // idle
+    newest = [f"busy-{i}".encode() for i in range(busy - 500, busy)]
+    assert _readmitted(c, t, idle, newest) == 0
+
+
+def test_full_shard_keeps_the_newest_identities(make_cluster, pytestconfig):
+    """A partition producing far more identities than the shard can hold, next
+    to an idle one holding half of it: the shard stays at its limit the whole
+    run, and the newest identities are always the ones kept -- none of them is
+    admitted unindexed, and resending them admits nothing."""
+    limit = 20_000
+    c = make_cluster(
+        nodes=1, smp=1, cluster_config={"dedup_max_entries_per_shard": limit}
+    )
+    require_new_build(c, pytestconfig)
+    t = topic_on_one_node(c, 2)
+    now = int(time.time() * 1000)
+    kafka.produce_bulk(
+        c.brokers,
+        t,
+        0,
+        (f"idle-{i}".encode() for i in range(limit // 2)),
+        timestamp_ms=lambda i: now - 3_000_000 + i,
+    )
+    total = scaled(200_000)
+    kafka.produce_bulk(
+        c.brokers,
+        t,
+        1,
+        (f"busy-{i}".encode() for i in range(total)),
+        timestamp_ms=lambda i: now - 2_000_000 + i * (2_000_000 // total),
+    )
+    m = c.node(0).metrics()
+    assert m.sum(SHARD_ENTRIES) <= limit
+    assert m.sum(UNINDEXED, topic=t, partition="1") == 0
+    newest = [f"busy-{i}".encode() for i in range(total - 2_000, total)]
+    assert _readmitted(c, t, 1, newest) == 0
