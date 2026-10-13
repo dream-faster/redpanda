@@ -1,0 +1,44 @@
+---
+# Temporary: fetch every external repository the broker build needs and
+# upload Bazel's repository cache, so a sandbox without GitHub archive
+# access can build offline. Delete with its branch.
+name: tmp-export-repo-cache
+on:
+  push:
+    branches:
+      - 'claude/tmp-export-repo-cache'
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Bazelisk
+        run: |
+          mkdir -p ~/bin
+          wget -q -O ~/bin/bazel https://github.com/bazelbuild/bazelisk/releases/latest/download/bazelisk-linux-amd64
+          chmod +x ~/bin/bazel
+          echo "$HOME/bin" >> $GITHUB_PATH
+      - name: Fetch
+        run: |
+          T="//src/v/redpanda:redpanda //bazel/packaging:image
+             //src/v/cluster/tests:legacy_wire_test //src/v/cluster/tests:topic_table_test
+             //src/v/cluster/tests:dedup_window_filter_test //src/v/cluster/tests:dedup_stm_test
+             //src/v/kafka/server/tests:validator_tests //src/v/compression/tests:zstd_test"
+          for cfg in "--config=release --config=unity" "" ; do
+            for attempt in 1 2 3; do
+              bazel fetch $cfg --repository_cache=$HOME/rc --lockfile_mode=update \
+                --http_timeout_scaling=4 $T && break
+            done
+          done
+          bazel fetch --repository_cache=$HOME/rc --lockfile_mode=update --keep_going \
+            '//src/v/...' || true
+          du -sh $HOME/rc
+          tar -C $HOME -cf $HOME/rc.tar rc
+          cp MODULE.bazel.lock $HOME/MODULE.bazel.lock
+      - uses: actions/upload-artifact@v4
+        with:
+          name: repo-cache
+          compression-level: 0
+          path: |
+            ~/rc.tar
+            ~/MODULE.bazel.lock
