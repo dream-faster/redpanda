@@ -1428,6 +1428,8 @@ TEST(DedupIdentityWalk, RejectsATruncatedBatch) {
     auto data = batch.data().copy();
     // Leaves less than one record, so the first record's size overruns.
     data.trim_back(data.size_bytes() - 10);
+    header.size_bytes = static_cast<int32_t>(
+      model::packed_record_batch_header_size + data.size_bytes());
     model::record_batch truncated(
       header, std::move(data), model::record_batch::tag_ctor_ng{});
     EXPECT_THROW(walk(truncated, std::nullopt), std::out_of_range);
