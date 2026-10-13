@@ -1673,11 +1673,14 @@ redpanda_cc_gtest(
 redpanda_cc_bench(
     name = "dedup_window_filter_rpbench",
     srcs = ["dedup_window_filter_bench.cc"],
+    memory = "2GiB",
     deps = [
         "//src/v/bytes:iobuf",
         "//src/v/cluster",
         "//src/v/model",
+        "//src/v/model:batch_builder",
         "//src/v/random:generators",
+        "//src/v/serde",
         "//src/v/storage:record_batch_builder",
         "@seastar",
         "@seastar//:benchmark",

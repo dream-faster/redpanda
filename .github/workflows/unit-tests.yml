@@ -114,6 +114,33 @@ jobs:
             //src/v/kafka/server/tests:validator_tests \
             //src/v/compression/tests:zstd_test
 
+      # The per-record cost of dedup next to its baseline, in the job log:
+      # produce path, apply path, inserts at the ceiling, snapshot write and
+      # restore. A benchmark, not a test: nothing here fails the build.
+      - name: Run the dedup microbenchmark
+        run: |
+          unset CI
+          set -o pipefail
+          bazel \
+            --output_base=/mnt/bazel-output \
+            run \
+            --config=release \
+            --config=unity \
+            --repository_cache=/mnt/bazel-repo-cache \
+            --disk_cache=/mnt/bazel-disk-cache \
+            --spawn_strategy=sandboxed,local \
+            --lockfile_mode=update \
+            '--local_resources=memory=HOST_RAM*.8' \
+            //src/v/cluster/tests:dedup_window_filter_rpbench \
+            -- --runs=3 --duration=1 2>&1 | tee dedup-rpbench.txt
+
+      - name: Upload the benchmark output
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: dedup-rpbench
+          path: dedup-rpbench.txt
+
       # Bazel bumps the mtime of every disk cache entry it reads, so entries
       # untouched for a few days are the ones no recent build has needed.
       - name: Trim the disk cache

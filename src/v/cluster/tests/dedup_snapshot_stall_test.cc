@@ -17,6 +17,7 @@
 #include "test_utils/test.h"
 
 #include <seastar/core/future.hh>
+#include <seastar/core/memory.hh>
 #include <seastar/util/later.hh>
 
 #include <gtest/gtest.h>
@@ -25,6 +26,7 @@
 #include <chrono>
 #include <cstdint>
 #include <iostream>
+#include <memory>
 
 using namespace std::chrono_literals;
 
@@ -250,6 +252,30 @@ ss::future<> compare_at(size_t entries) {
 }
 
 } // namespace
+
+// The shard budget turns memory into an entry limit at
+// DEDUP_SHARD_BYTES_PER_ENTRY, which has to cover what the index itself takes
+// per entry (map storage and bucket array, at the map's worst load) with room
+// for the snapshot's packed copy. Measured rather than derived, since the map
+// implementation decides it.
+TEST_CORO(dedup_snapshot_stall, index_memory_per_entry_fits_the_budget) {
+    constexpr size_t entries = 1'000'000;
+    const auto before = ss::memory::stats().allocated_memory();
+    auto filter = std::make_unique<dedup_window_filter>(1h, entries);
+    fill(*filter, entries);
+    const auto after = ss::memory::stats().allocated_memory();
+    const auto per_entry = (after - before) / entries;
+    std::cout << "\nindex memory: " << per_entry << " bytes per entry at "
+              << entries << " entries (budget assumes "
+              << DEDUP_SHARD_BYTES_PER_ENTRY << ")\n"
+              << std::flush;
+    ASSERT_EQ_CORO(filter->map_size(), entries);
+    // The packed snapshot adds dedup_stm::packed_entry_size on top while it
+    // is written; the budget's figure must cover both.
+    ASSERT_LE_CORO(
+      per_entry + dedup_stm::packed_entry_size, DEDUP_SHARD_BYTES_PER_ENTRY);
+    co_return;
+}
 
 // An index this size is what put 123-124ms reactor stalls in the produce and
 // raft_recv scheduling groups: request_make_snapshot_in_background() spawns
