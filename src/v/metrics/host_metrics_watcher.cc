@@ -1,4 +1,4 @@
-#include "host_metrics_watcher.h"
+#include "metrics/host_metrics_watcher.h"
 
 #include "base/vlog.h"
 #include "config/configuration.h"

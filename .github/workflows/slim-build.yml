@@ -169,6 +169,7 @@ jobs:
             --output_base=/mnt/bazel-output \
             build \
             --config=release \
+            --config=unity \
             --repository_cache=/mnt/bazel-repo-cache \
             --disk_cache=/mnt/bazel-disk-cache \
             --spawn_strategy=sandboxed,local \
@@ -193,6 +194,7 @@ jobs:
             --output_base=/mnt/bazel-output \
             test \
             --config=release \
+            --config=unity \
             --repository_cache=/mnt/bazel-repo-cache \
             --disk_cache=/mnt/bazel-disk-cache \
             --spawn_strategy=sandboxed,local \
@@ -216,6 +218,7 @@ jobs:
             --output_base=/mnt/bazel-output \
             test \
             --config=release \
+            --config=unity \
             --repository_cache=/mnt/bazel-repo-cache \
             --disk_cache=/mnt/bazel-disk-cache \
             --spawn_strategy=sandboxed,local \
@@ -232,6 +235,7 @@ jobs:
             --output_base=/mnt/bazel-output \
             build \
             --config=release \
+            --config=unity \
             --repository_cache=/mnt/bazel-repo-cache \
             --disk_cache=/mnt/bazel-disk-cache \
             --spawn_strategy=sandboxed,local \
@@ -243,7 +247,7 @@ jobs:
       - name: Smoke test
         if: ${{ inputs.analysis_only != true }}
         run: |
-          RPK=$(bazel --output_base=/mnt/bazel-output cquery --config=release \
+          RPK=$(bazel --output_base=/mnt/bazel-output cquery --config=release --config=unity \
                   --lockfile_mode=update --output=files //src/go/rpk/cmd/rpk | head -n1)
           tools/slim-checks/smoke.sh \
             bazel-bin/src/v/redpanda/redpanda "$RPK" "$RUNNER_TEMP/smoke"

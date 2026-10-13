@@ -14,9 +14,9 @@
 #include "serde/checksum_t.h"
 #include "serde/envelope.h"
 #include "serde/rw/scalar.h"
+#include "serde/serde_exception.h"
 #include "serde/serde_size_t.h"
 #include "serde/type_str.h"
-#include "serde_exception.h"
 #include "ssx/sformat.h"
 
 namespace serde {

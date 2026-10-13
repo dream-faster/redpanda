@@ -11,6 +11,8 @@
 
 #include "utils/to_string.h"
 
+#include "absl/time/time.h"
+
 fmt::format_context::iterator fmt::formatter<std::monostate>::format(
   const std::monostate&, format_context& ctx) const {
     return fmt::format_to(ctx.out(), "{{}}");

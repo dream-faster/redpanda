@@ -9,7 +9,7 @@
  * by the Apache License, Version 2.0
  */
 
-#include "enterprise_features.h"
+#include "features/enterprise_features.h"
 
 #include "base/vassert.h"
 

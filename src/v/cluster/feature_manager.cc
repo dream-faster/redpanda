@@ -9,7 +9,7 @@
  * by the Apache License, Version 2.0
  */
 
-#include "feature_manager.h"
+#include "cluster/feature_manager.h"
 
 #include "base/outcome.h"
 #include "cluster/commands.h"
@@ -45,7 +45,7 @@
 
 namespace cluster {
 
-static constexpr std::chrono::seconds status_retry = 5s;
+static constexpr std::chrono::seconds feature_status_retry = 5s;
 
 feature_manager::feature_manager(
   ss::sharded<controller_stm>& stm,
@@ -457,7 +457,7 @@ ss::future<> feature_manager::maybe_update_feature_table() {
     try {
         if (failed) {
             // Sleep for a while before next iteration of our outer do_until
-            co_await ss::sleep_abortable(status_retry, _as.local());
+            co_await ss::sleep_abortable(feature_status_retry, _as.local());
         } else {
             // Sleep until we have some node version updates to process, or
             // some feature activations to do.
@@ -513,7 +513,7 @@ ss::future<> feature_manager::replicate_feature_update_cmd(
       0 // unused
     );
 
-    auto timeout = model::timeout_clock::now() + status_retry;
+    auto timeout = model::timeout_clock::now() + feature_status_retry;
     auto err = co_await replicate_and_wait(
       _stm, _as, std::move(cmd), timeout, term);
     if (err == errc::not_leader) {
@@ -584,7 +584,7 @@ feature_manager::do_maybe_update_active_version(bool& failed_barrier) {
     // while leadership is held, subsequent committed entries replicate
     // through us, so per-tick barriers aren't needed. On transient
     // barrier failure we throw rather than return so the outer loop
-    // sleeps status_retry before retrying (avoiding a tight spin when
+    // sleeps feature_status_retry before retrying (avoiding a tight spin when
     // the barrier fails synchronously), and so that _updates is
     // preserved for the next attempt.
     // Need a fresh barrier when we have no record of one, or when the
@@ -594,7 +594,7 @@ feature_manager::do_maybe_update_active_version(bool& failed_barrier) {
                               || *_caught_up_for_term != *_is_leader_of;
     const auto target_term = *_is_leader_of;
     if (need_barrier) {
-        auto deadline = model::timeout_clock::now() + status_retry;
+        auto deadline = model::timeout_clock::now() + feature_status_retry;
         auto barrier = co_await _stm.local().insert_linearizable_barrier(
           deadline);
         if (!barrier) {
@@ -957,7 +957,7 @@ feature_manager::write_action(cluster::feature_update_action action) {
         return ss::make_ready_future<std::error_code>(cluster::errc::success);
     } else {
         // Construct and dispatch command to log
-        auto timeout = model::timeout_clock::now() + status_retry;
+        auto timeout = model::timeout_clock::now() + feature_status_retry;
         auto data = feature_update_cmd_data{
           .logical_version = _feature_table.local().get_active_version(),
           .actions = {action}};

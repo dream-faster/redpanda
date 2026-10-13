@@ -13,8 +13,8 @@
 
 #include "bytes/bytes.h"
 #include "crypto/crypto.h"
+#include "crypto/ssl_utils.h"
 #include "crypto/types.h"
-#include "ssl_utils.h"
 
 namespace crypto {
 class key::impl {

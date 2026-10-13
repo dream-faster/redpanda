@@ -20,6 +20,8 @@
 #include <seastar/core/sstring.hh>
 #include <seastar/util/defer.hh>
 
+#include <deque>
+
 using namespace std::chrono_literals;
 
 namespace ssx {

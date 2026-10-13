@@ -30,20 +30,21 @@ scram_credential_to_credential_info(const security::scram_credential& c) {
 };
 
 template<typename T>
-kafka::describe_user_scram_credentials_result
-generate_error(const T& item, kafka::error_code code, std::string_view msg) {
+kafka::describe_user_scram_credentials_result describe_scram_generate_error(
+  const T& item, kafka::error_code code, std::string_view msg) {
     return {
       .user = item.name, .error_code = code, .error_message = ss::sstring{msg}};
 }
 
 template<typename Iter, typename ErrIter>
-Iter validate_range_no_empty_users(Iter begin, Iter end, ErrIter out_it) {
+Iter describe_scram_validate_range_no_empty_users(
+  Iter begin, Iter end, ErrIter out_it) {
     using type = typename Iter::value_type;
     auto valid_range_end = std::partition(
       begin, end, [](const type& item) { return !item.name().empty(); });
 
     std::transform(valid_range_end, end, out_it, [](const type& item) {
-        return generate_error(
+        return describe_scram_generate_error(
           item,
           kafka::error_code::resource_not_found,
           "User name cannot be empty");
@@ -71,7 +72,7 @@ Iter validate_range_duplicates(Iter begin, Iter end, ErrIter out_it) {
     for (auto& user : std::ranges::subrange(valid_range_end, end)) {
         auto& name_count = freq[user.name()];
         if (name_count > 1) {
-            *out_it = generate_error(
+            *out_it = describe_scram_generate_error(
               user,
               kafka::error_code::duplicate_resource,
               fmt::format(
@@ -104,7 +105,7 @@ void populate_results_with_users(
                 scram_credential_to_credential_info(cred.value())}};
         } else {
             // store.get<T> returns std::nullopt if the user does not exist
-            return generate_error(
+            return describe_scram_generate_error(
               item,
               kafka::error_code::resource_not_found,
               fmt::format(
@@ -153,7 +154,7 @@ ss::future<response_ptr> describe_user_scram_credentials_handler::handle(
         }
     } else {
         const auto begin = request.data.users.value().begin();
-        auto valid_range_end = validate_range_no_empty_users(
+        auto valid_range_end = describe_scram_validate_range_no_empty_users(
           begin,
           request.data.users.value().end(),
           std::back_inserter(res.data.results));

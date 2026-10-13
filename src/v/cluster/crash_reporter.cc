@@ -37,7 +37,7 @@
 
 namespace cluster {
 
-static ss::logger logger("crash-reporter");
+static ss::logger crash_reporter_log("crash-reporter");
 
 /// Key used to rate limiting metadata in the kvstore
 static constexpr std::string_view rate_limiter_kvs_key
@@ -59,24 +59,24 @@ crash_reporter::crash_reporter(
   , _controller_stm(stm)
   , _metrics_reporter(mr)
   , _as(as)
-  , _client_logger{logger, "crash-reporter"} {}
+  , _client_logger{crash_reporter_log, "crash-reporter"} {}
 
 ss::future<> crash_reporter::start() {
-    vlog(logger.trace, "Starting Crash Reporter");
+    vlog(crash_reporter_log.trace, "Starting Crash Reporter");
     _address = details::parse_url(
       config::shard_local_cfg().metrics_reporter_url() + "/crash_reports");
 
     ssx::background = ssx::spawn_with_gate_then(_gate, [this] {
                           return report_crashes();
                       }).handle_exception([](std::exception_ptr e) {
-        vlog(logger.warn, "Exception reporting crashes: {}", e);
+        vlog(crash_reporter_log.warn, "Exception reporting crashes: {}", e);
     });
 
     co_return;
 }
 
 ss::future<> crash_reporter::stop() {
-    vlog(logger.info, "Stopping Crash Reporter...");
+    vlog(crash_reporter_log.info, "Stopping Crash Reporter...");
     co_await _gate.close();
 }
 
@@ -89,7 +89,7 @@ ss::future<> crash_reporter::rate_limiter::record() {
     serde::write(buf, md);
 
     vlog(
-      logger.trace,
+      crash_reporter_log.trace,
       "Recording rate limiter last upload time as: {}",
       md.last_upload_time);
     co_await _kvstore.put(
@@ -116,7 +116,7 @@ crash_reporter::rate_limiter::wait_time() {
         return std::clamp<clock::duration>(remaining, 0s, upload_rate);
     } catch (const serde::serde_exception& e) {
         vlog(
-          logger.info,
+          crash_reporter_log.info,
           "Error while reading crash reporter rate limiting metadata: {}",
           e);
         return upload_rate;
@@ -161,7 +161,8 @@ ss::future<> crash_reporter::report_crashes() {
         co_return;
     }
 
-    vlog(logger.debug, "Waiting for cluster UUID to be initialized");
+    vlog(
+      crash_reporter_log.debug, "Waiting for cluster UUID to be initialized");
     co_await _metrics_reporter.local().wait_cluster_info_initialized(
       _as.local());
 
@@ -169,7 +170,7 @@ ss::future<> crash_reporter::report_crashes() {
         co_return; // shortcut shutdown if requested
     }
 
-    vlog(logger.debug, "Uploading crash reports");
+    vlog(crash_reporter_log.debug, "Uploading crash reports");
     auto reports
       = co_await crash_tracker::get_recorder().get_recorded_crashes();
     auto it = reports.begin();
@@ -186,7 +187,7 @@ ss::future<> crash_reporter::report_crashes() {
         }
 
         if (current_batch.empty()) {
-            vlog(logger.trace, "No crash reports to upload");
+            vlog(crash_reporter_log.trace, "No crash reports to upload");
             co_return;
         }
 
@@ -203,7 +204,7 @@ ss::future<> crash_reporter::report_crashes() {
             auto rl_wait = _rate_limiter.wait_time();
             if (rl_wait > 0s) {
                 vlog(
-                  logger.trace,
+                  crash_reporter_log.trace,
                   "Sleeping for {}ms for rate limit to pass",
                   rl_wait / 1ms);
                 co_await ss::sleep_abortable(rl_wait, _as.local());
@@ -215,7 +216,7 @@ ss::future<> crash_reporter::report_crashes() {
 
         if (!success) {
             vlog(
-              logger.info,
+              crash_reporter_log.info,
               "Failed to upload crash reports after {} upload attempts",
               max_upload_attempts);
             co_return;
@@ -239,13 +240,13 @@ crash_reporter::try_report_crashes(const report_batch& current_batch) {
         co_await details::metrics_http_client::send_metrics(
           conf, std::move(out));
         vlog(
-          logger.info,
+          crash_reporter_log.info,
           "Successfully uploaded {} crash reports",
           current_batch.size());
         co_return true;
     } catch (...) {
         vlog(
-          logger.info,
+          crash_reporter_log.info,
           "Exception thrown while reporting crashes - {}",
           std::current_exception());
         co_return false;

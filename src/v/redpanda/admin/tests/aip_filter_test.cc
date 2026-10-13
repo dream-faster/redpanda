@@ -9,6 +9,7 @@
  * by the Apache License, Version 2.0
  */
 
+#include "absl/time/time.h"
 #include "redpanda/admin/aip_filter.h"
 #include "redpanda/admin/tests/aip_test_message_helpers.h"
 #include "serde/protobuf/rpc.h"

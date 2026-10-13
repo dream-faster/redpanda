@@ -7,6 +7,8 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0
 
+#pragma once
+
 #include "cluster/ephemeral_credential_rpc_service.h"
 #include "cluster/fwd.h"
 

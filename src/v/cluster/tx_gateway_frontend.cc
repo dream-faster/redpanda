@@ -38,6 +38,7 @@
 #include <seastar/util/log.hh>
 
 #include <algorithm>
+#include <deque>
 #include <optional>
 #include <utility>
 
@@ -248,7 +249,7 @@ tx_gateway_frontend::tx_gateway_frontend(
   ss::sharded<cluster::id_allocator_frontend>& id_allocator_frontend,
   rm_group_proxy* group_proxy,
   ss::sharded<cluster::rm_partition_frontend>& rm_partition_frontend,
-  ss::sharded<features::feature_table>& feature_table,
+  ss::sharded<features::feature_table>&,
   ss::sharded<cluster::tx_topic_manager>& tx_topic_manager,
   config::binding<uint64_t> max_transactions_per_coordinator)
   : _ssg(ssg)
@@ -261,7 +262,6 @@ tx_gateway_frontend::tx_gateway_frontend(
   , _id_allocator_frontend(id_allocator_frontend)
   , _rm_group_proxy(group_proxy)
   , _rm_partition_frontend(rm_partition_frontend)
-  , _feature_table(feature_table)
   , _tx_topic_manager(tx_topic_manager)
   , _metadata_dissemination_retries(
       config::shard_local_cfg().metadata_dissemination_retries.value())

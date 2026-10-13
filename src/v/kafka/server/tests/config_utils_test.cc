@@ -94,9 +94,9 @@ BOOST_AUTO_TEST_CASE(parse_and_set_topic_replication_factor_test) {
 
     using rep_factor_validator = config_validator_list<
       cluster::replication_factor,
-      replication_factor_must_be_positive,
-      replication_factor_must_be_odd,
-      replication_factor_must_be_greater_or_equal_to_minimum>;
+      replication_factor_property_must_be_positive,
+      replication_factor_property_must_be_odd,
+      replication_factor_property_must_be_greater_or_equal_to_minimum>;
 
     parse_and_set_topic_replication_factor(
       topic,
@@ -149,9 +149,9 @@ BOOST_AUTO_TEST_CASE(test_min_replication_factor) {
 
     using rep_factor_validator = config_validator_list<
       cluster::replication_factor,
-      replication_factor_must_be_positive,
-      replication_factor_must_be_odd,
-      replication_factor_must_be_greater_or_equal_to_minimum>;
+      replication_factor_property_must_be_positive,
+      replication_factor_property_must_be_odd,
+      replication_factor_property_must_be_greater_or_equal_to_minimum>;
 
     parse_and_set_topic_replication_factor(
       topic,

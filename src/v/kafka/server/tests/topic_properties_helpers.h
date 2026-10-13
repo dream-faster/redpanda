@@ -7,6 +7,8 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0
 
+#pragma once
+
 #include "cluster/config_frontend.h"
 #include "cluster/controller.h"
 #include "config/configuration.h"

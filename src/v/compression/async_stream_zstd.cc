@@ -25,7 +25,7 @@
 #include <zstd_errors.h>
 
 namespace compression {
-[[gnu::cold]] static void throw_zstd_err(size_t rc) {
+[[gnu::cold]] static void throw_async_zstd_err(size_t rc) {
     if (rc == ZSTD_error_memory_allocation) {
         ss::throw_with_backtrace<std::bad_alloc>();
     } else {
@@ -34,9 +34,9 @@ namespace compression {
     }
 }
 
-static void throw_if_error(size_t rc) {
+static void throw_if_async_zstd_error(size_t rc) {
     if (unlikely(ZSTD_isError(rc))) {
-        throw_zstd_err(rc);
+        throw_async_zstd_err(rc);
     }
 }
 
@@ -81,7 +81,7 @@ async_stream_zstd::static_cctx::static_cctx(int compression_level) {
 
     _compress_ctx = ZSTD_initStaticCCtx(_c_workspace.get(), c_workspace_size);
 
-    throw_if_error(ZSTD_CCtx_setParameter(
+    throw_if_async_zstd_error(ZSTD_CCtx_setParameter(
       _compress_ctx, ZSTD_c_compressionLevel, default_compression_level));
     // ZSTD_initStaticCCtx() zeroes the context rather than running the
     // parameter initialiser ZSTD_createCCtx() uses, so it starts with the
@@ -92,7 +92,7 @@ async_stream_zstd::static_cctx::static_cctx(int compression_level) {
     // allocations under memory pressure are made of. Parameters survive the
     // ZSTD_reset_session_only in compress(), so setting it once here holds
     // for every frame. Same reasoning as stream_zstd::compressor().
-    throw_if_error(
+    throw_if_async_zstd_error(
       ZSTD_CCtx_setParameter(_compress_ctx, ZSTD_c_contentSizeFlag, 1));
 }
 
@@ -174,7 +174,7 @@ ss::future<iobuf> async_stream_zstd::compress(iobuf i_buf) {
     ZSTD_CCtx_reset(ctx._compress_ctx, ZSTD_reset_session_only);
 
     // NOTE: always enable content size. **decompression** depends on this
-    throw_if_error(
+    throw_if_async_zstd_error(
       ZSTD_CCtx_setPledgedSrcSize(ctx._compress_ctx, i_buf.size_bytes()));
 
     iobuf ret_buf;
@@ -189,7 +189,7 @@ ss::future<iobuf> async_stream_zstd::compress(iobuf i_buf) {
               .size = ctx._c_buffer.size(),
               .pos = 0};
             remaining = ZSTD_endStream(ctx._compress_ctx, &out);
-            throw_if_error(remaining);
+            throw_if_async_zstd_error(remaining);
             ret_buf.append(ctx._c_buffer.get(), out.pos);
         } while (remaining > 0);
 
@@ -212,7 +212,7 @@ ss::future<iobuf> async_stream_zstd::compress(iobuf i_buf) {
 
             const auto remaining = ZSTD_compressStream2(
               ctx._compress_ctx, &out, &in, mode);
-            throw_if_error(remaining);
+            throw_if_async_zstd_error(remaining);
 
             ret_buf.append(ctx._c_buffer.get(), out.pos);
             finished = (mode == ZSTD_e_end) ? (remaining == 0)
@@ -252,7 +252,7 @@ ss::future<iobuf> async_stream_zstd::uncompress(iobuf i_buf) {
 
             const auto zstd_ret = ZSTD_decompressStream(
               ctx._decompress_ctx, &out, &in);
-            throw_if_error(zstd_ret);
+            throw_if_async_zstd_error(zstd_ret);
 
             ret_buf.append(ctx._d_buffer.get(), out.pos);
             last_zstd_ret = zstd_ret;
@@ -316,7 +316,7 @@ ss::future<ioarray> async_stream_zstd::uncompress(ioarray i_arr) {
 
             const auto zstd_ret = ZSTD_decompressStream(
               ctx._decompress_ctx, &out, &in);
-            throw_if_error(zstd_ret);
+            throw_if_async_zstd_error(zstd_ret);
 
             append({ctx._d_buffer.get(), out.pos});
             last_zstd_ret = zstd_ret;

@@ -9,7 +9,7 @@
  * by the Apache License, Version 2.0
  */
 
-#include "external_process.h"
+#include "utils/external_process.h"
 
 #include <seastar/core/seastar.hh>
 #include <seastar/core/sleep.hh>

@@ -10,6 +10,7 @@
  */
 #include "kafka/server/connection_context.h"
 
+#include "absl/time/time.h"
 #include "base/likely.h"
 #include "base/units.h"
 #include "base/vlog.h"
@@ -50,6 +51,7 @@
 #include <cstdint>
 #include <exception>
 #include <memory>
+#include <regex>
 
 using namespace std::chrono_literals;
 

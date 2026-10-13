@@ -45,7 +45,7 @@
 #include <utility>
 
 namespace cluster {
-static ss::logger logger("tx-migration");
+static ss::logger tx_migrator_log("tx-migration");
 namespace {
 
 topic_configuration create_topic_configuration(
@@ -93,7 +93,7 @@ ss::future<std::error_code> transform_batches(
 
         if (read_result.ec != errc::success) {
             vlog(
-              logger.warn,
+              tx_migrator_log.warn,
               "error reading batches from {} - {}",
               source_ntp,
               read_result.ec);
@@ -102,7 +102,7 @@ ss::future<std::error_code> transform_batches(
         }
         if (read_result.batches.empty()) {
             vlog(
-              logger.warn,
+              tx_migrator_log.warn,
               "Read no batches from {}, last read offset: {}, log end offset: "
               "{}",
               source_ntp,
@@ -110,7 +110,7 @@ ss::future<std::error_code> transform_batches(
               read_result.log_dirty_offset);
             if (last_read >= read_result.log_dirty_offset) {
                 vlog(
-                  logger.info,
+                  tx_migrator_log.info,
                   "Finished transforming batches from {}",
                   source_ntp);
 
@@ -121,7 +121,7 @@ ss::future<std::error_code> transform_batches(
         }
         const auto batch_last_offset = read_result.batches.back().last_offset();
         vlog(
-          logger.info,
+          tx_migrator_log.info,
           "Read {} batches from {}, last offset: {}, log end offset: {}",
           read_result.batches.size(),
           source_ntp,
@@ -134,7 +134,7 @@ ss::future<std::error_code> transform_batches(
           std::move(read_result.batches));
         if (transform_ec) {
             vlog(
-              logger.warn,
+              tx_migrator_log.warn,
               "error while transforming batches from {} - {}",
               source_ntp,
               transform_ec.message());
@@ -143,7 +143,7 @@ ss::future<std::error_code> transform_batches(
 
         if (last_read >= read_result.log_dirty_offset) {
             vlog(
-              logger.info,
+              tx_migrator_log.info,
               "Finished transforming batches from {} with last offset: {}",
               source_ntp,
               batch_last_offset);
@@ -211,7 +211,11 @@ tx_manager_replicate_router::tx_manager_replicate_router(
 
 ss::future<tx_manager_read_reply> tx_manager_read_handler::do_read(
   partition_manager& pm, model::ntp ntp, model::offset offset) {
-    vlog(logger.debug, "Requested read from {} at offset: {}", ntp, offset);
+    vlog(
+      tx_migrator_log.debug,
+      "Requested read from {} at offset: {}",
+      ntp,
+      offset);
     auto partition = pm.get(ntp);
     if (!partition) {
         co_return tx_manager_read_reply(errc::partition_not_exists);
@@ -235,7 +239,7 @@ tx_manager_replicate_handler::do_replicate(
   model::ntp ntp,
   chunked_vector<model::record_batch> batches) {
     vlog(
-      logger.info,
+      tx_migrator_log.info,
       "Requested replication of {} batches to {}",
       batches.size(),
       ntp);
@@ -314,7 +318,7 @@ ss::future<std::error_code> tx_manager_migrator::migrate() {
          */
         if (!temp_topic_md) {
             vlog(
-              logger.info,
+              tx_migrator_log.info,
               "skipping tx manager topic migration, no previous tx manager "
               "topic "
               "is present",
@@ -356,7 +360,7 @@ ss::future<std::error_code> tx_manager_migrator::migrate() {
           current_partition_count
           == static_cast<size_t>(_requested_partition_count)) {
             vlog(
-              logger.info,
+              tx_migrator_log.info,
               "current partition count {} is equal to desired partition count "
               "{}, doing nothing",
               current_partition_count,
@@ -367,14 +371,16 @@ ss::future<std::error_code> tx_manager_migrator::migrate() {
     }
 
     vlog(
-      logger.info,
+      tx_migrator_log.info,
       "starting tx manager topic migration from {} to {} partitions",
       current_partition_count,
       _requested_partition_count);
 
     while (current_step != migration_step::finished) {
         vlog(
-          logger.info, "Executing tx manager migration step: {}", current_step);
+          tx_migrator_log.info,
+          "Executing tx manager migration step: {}",
+          current_step);
         switch (current_step) {
         case migration_step::create_new_temp_topic: {
             if (_topics.local().contains(temporary_tx_manager_topic)) {
@@ -403,7 +409,7 @@ ss::future<std::error_code> tx_manager_migrator::migrate() {
 
             if (!success) {
                 vlog(
-                  logger.warn,
+                  tx_migrator_log.warn,
                   "Error rehashing tx manager topic, results: {}",
                   results);
                 // TODO: return correct error here
@@ -416,7 +422,7 @@ ss::future<std::error_code> tx_manager_migrator::migrate() {
             auto ec = co_await delete_topic(model::tx_manager_nt);
             if (ec) {
                 vlog(
-                  logger.warn,
+                  tx_migrator_log.warn,
                   "Error deleting tx manager topic - {}",
                   ec.message());
                 co_return ec;
@@ -458,7 +464,7 @@ ss::future<std::error_code> tx_manager_migrator::migrate() {
 
             if (!success) {
                 vlog(
-                  logger.warn,
+                  tx_migrator_log.warn,
                   "Error copying data to new tx_manager topic, results: {}",
                   results);
                 co_return errc::partition_operation_failed;
@@ -470,7 +476,7 @@ ss::future<std::error_code> tx_manager_migrator::migrate() {
             auto ec = co_await delete_topic(temporary_tx_manager_topic);
             if (ec) {
                 vlog(
-                  logger.warn,
+                  tx_migrator_log.warn,
                   "Error deleting temp tx manager topic - {}",
                   ec.message());
                 co_return errc::partition_operation_failed;
@@ -479,7 +485,7 @@ ss::future<std::error_code> tx_manager_migrator::migrate() {
             break;
         }
         case migration_step::finished:
-            vlog(logger.info, "Finished migrating tx manager topic");
+            vlog(tx_migrator_log.info, "Finished migrating tx manager topic");
             co_return errc::success;
         }
     }
@@ -519,7 +525,7 @@ bool tx_manager_migrator::is_migration_required() const {
 ss::future<std::error_code>
 tx_manager_migrator::create_topic(model::topic_namespace_view tp_ns) {
     vlog(
-      logger.info,
+      tx_migrator_log.info,
       "Creating topic {} with {} partitions",
       tp_ns,
       _requested_partition_count);
@@ -577,7 +583,7 @@ ss::future<std::error_code> tx_manager_migrator::rehash_chunk(
         auto target_partition_id = get_tx_coordinator_partition(
           get_tx_id_hash(tx_id), _requested_partition_count);
         vlog(
-          logger.trace,
+          tx_migrator_log.trace,
           "Moving {} transactional id from partition {} to partition {}",
           tx_id,
           source_partition_id,
@@ -626,7 +632,7 @@ tx_manager_migrator::copy_from_temporary_to_tx_manager_topic(
     model::ntp target_ntp(
       model::kafka_internal_namespace, model::tx_manager_nt.tp, p_id);
     vlog(
-      logger.info,
+      tx_migrator_log.info,
       "copying tx_manager batches from temporary partition {} to {}",
       source_ntp,
       target_ntp);

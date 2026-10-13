@@ -37,6 +37,8 @@
 #include <seastar/core/sleep.hh>
 #include <seastar/coroutine/maybe_yield.hh>
 
+#include <deque>
+
 namespace cluster {
 
 controller_api::controller_api(

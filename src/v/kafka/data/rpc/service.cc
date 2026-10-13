@@ -46,7 +46,7 @@ make_replicate_options(model::timeout_clock::duration timeout) {
       std::chrono::duration_cast<std::chrono::milliseconds>(timeout)};
 }
 
-cluster::errc map_errc(std::error_code ec) {
+cluster::errc map_service_errc(std::error_code ec) {
     if (ec.category() == cluster::error_category()) {
         return static_cast<cluster::errc>(ec.value());
     }
@@ -314,7 +314,7 @@ ss::future<result<model::offset, cluster::errc>> local_service::produce(
               [](result<model::offset> r)
                 -> result<model::offset, cluster::errc> {
                   if (r.has_error()) {
-                      return map_errc(r.assume_error());
+                      return map_service_errc(r.assume_error());
                   }
                   return r.value();
               });

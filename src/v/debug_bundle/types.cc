@@ -9,7 +9,7 @@
  * by the Apache License, Version 2.0
  */
 
-#include "types.h"
+#include "debug_bundle/types.h"
 
 #include "absl/strings/str_split.h"
 #include "model/fundamental.h"

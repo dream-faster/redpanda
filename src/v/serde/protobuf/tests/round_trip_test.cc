@@ -10,6 +10,7 @@
  */
 
 #include "absl/strings/escaping.h"
+#include "absl/time/time.h"
 #include "base/units.h"
 #include "gtest/gtest.h"
 #include "proto/redpanda/core/testing/example.pb.h"

@@ -51,9 +51,9 @@ jobs:
         run: sudo ./bazel/install-deps.sh
 
       # The caches below are shared with docker-build: same paths, same key
-      # scheme, same host toolchain and the same --config=release, so the core
-      # objects either workflow compiles are cache hits for the other. Keep the
-      # two in step when changing either.
+      # scheme, same host toolchain and the same --config=release
+      # --config=unity, so the core objects either workflow compiles are cache
+      # hits for the other. Keep the two in step when changing either.
       - name: Restore bazelisk cache
         uses: actions/cache@v4
         with:
@@ -77,12 +77,12 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: /mnt/bazel-disk-cache
-          key: bazel-release-disk-${{ runner.os }}-unit-tests-${{ github.ref_name }}-${{ github.sha }}
+          key: bazel-release-unity-disk-${{ runner.os }}-unit-tests-${{ github.ref_name }}-${{ github.sha }}
           restore-keys: |
-            bazel-release-disk-${{ runner.os }}-unit-tests-${{ github.ref_name }}-
-            bazel-release-disk-${{ runner.os }}-image-${{ github.ref_name }}-
-            bazel-release-disk-${{ runner.os }}-unit-tests-
-            bazel-release-disk-${{ runner.os }}-
+            bazel-release-unity-disk-${{ runner.os }}-unit-tests-${{ github.ref_name }}-
+            bazel-release-unity-disk-${{ runner.os }}-image-${{ github.ref_name }}-
+            bazel-release-unity-disk-${{ runner.os }}-unit-tests-
+            bazel-release-unity-disk-${{ runner.os }}-
 
       - name: Run unit tests
         run: |
@@ -90,10 +90,12 @@ jobs:
           # Same --config as docker-build, on purpose: a different --config is
           # a different Bazel configuration and so a different set of cache
           # keys, which would make the shared disk cache useless.
+          # scheduled-default-build.yml covers the default (non-unity) build.
           bazel \
             --output_base=/mnt/bazel-output \
             test \
             --config=release \
+            --config=unity \
             --repository_cache=/mnt/bazel-repo-cache \
             --disk_cache=/mnt/bazel-disk-cache \
             --spawn_strategy=sandboxed,local \

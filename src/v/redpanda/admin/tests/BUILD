@@ -81,6 +81,7 @@ redpanda_cc_bench(
         "//src/v/ssx:async_algorithm",
         "//src/v/ssx:async_clear",
         "//src/v/ssx:async_merge_top_k",
+        "@abseil-cpp//absl/time",
         "@boost//:uuid",
         "@seastar",
         "@seastar//:benchmark",

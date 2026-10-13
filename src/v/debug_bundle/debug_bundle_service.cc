@@ -9,7 +9,7 @@
  * by the Apache License, Version 2.0
  */
 
-#include "debug_bundle_service.h"
+#include "debug_bundle/debug_bundle_service.h"
 
 #include "config/configuration.h"
 #include "config/node_config.h"

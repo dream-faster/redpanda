@@ -1,0 +1,125 @@
+---
+# docker-build and unit-tests use --config=unity, which compiles each
+# library as a few translation units that #include several of its .cc files.
+# That hides a missing #include whenever an earlier file in the same chunk
+# happens to provide it, and adding or removing a source shifts the chunks
+# and can expose it later in an unrelated file. This builds the broker and
+# runs the unit tests without unity each week to catch those early.
+name: scheduled-default-build
+on:
+  schedule:
+    - cron: '17 3 * * 1'
+  workflow_dispatch:
+
+concurrency:
+  group: scheduled-default-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  default-build:
+    runs-on: ubicloud-standard-4
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+
+      # Same runner shape and output base layout as docker-build: the test
+      # targets compile all of core, so they need the same disk and swap
+      # headroom as the image build.
+      - name: Prepare build environment
+        run: |
+          echo "=== disk before cleanup ==="
+          df -h
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          sudo docker image prune --all --force || true
+          sudo fallocate -l 16G /mnt/swapfile
+          sudo chmod 600 /mnt/swapfile
+          sudo mkswap /mnt/swapfile
+          sudo swapon /mnt/swapfile
+          sudo mkdir -p /mnt/bazel-output /mnt/bazel-repo-cache /mnt/bazel-disk-cache
+          sudo chown "$(id -u):$(id -g)" /mnt/bazel-output /mnt/bazel-repo-cache \
+            /mnt/bazel-disk-cache
+          echo "=== disk after cleanup ==="
+          df -h
+          free -h
+
+      - name: Install Bazelisk
+        run: |
+          mkdir -p ~/bin
+          wget -O ~/bin/bazel https://github.com/bazelbuild/bazelisk/releases/latest/download/bazelisk-linux-amd64
+          chmod +x ~/bin/bazel
+          echo "$HOME/bin" >> $GITHUB_PATH
+
+      - name: Install system dependencies
+        run: sudo ./bazel/install-deps.sh
+
+      - name: Restore bazelisk cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/bazelisk
+          key: bazelisk-${{ runner.os }}-${{ hashFiles('.bazelversion') }}
+
+      - name: Restore Bazel repository cache
+        uses: actions/cache@v4
+        with:
+          path: /mnt/bazel-repo-cache
+          key: bazel-release-repo-${{ runner.os }}-${{ hashFiles('.bazelversion', 'MODULE.bazel', 'MODULE.bazel.lock') }}
+          restore-keys: |
+            bazel-release-repo-${{ runner.os }}-
+
+      # Its own cache: a different configuration from docker-build and
+      # unit-tests, so their entries could never hit here.
+      - name: Restore Bazel disk cache
+        id: disk-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: /mnt/bazel-disk-cache
+          key: bazel-default-disk-${{ runner.os }}-${{ github.ref_name }}-${{ github.sha }}
+          restore-keys: |
+            bazel-default-disk-${{ runner.os }}-${{ github.ref_name }}-
+            bazel-default-disk-${{ runner.os }}-
+
+      # fastbuild (no --config): include errors do not depend on the
+      # optimization level, and it compiles much faster than release.
+      - name: Build and run unit tests without unity
+        run: |
+          unset CI
+          bazel \
+            --output_base=/mnt/bazel-output \
+            test \
+            --repository_cache=/mnt/bazel-repo-cache \
+            --disk_cache=/mnt/bazel-disk-cache \
+            --spawn_strategy=sandboxed,local \
+            --verbose_failures \
+            --lockfile_mode=update \
+            --test_output=errors \
+            '--local_resources=memory=HOST_RAM*.8' \
+            //src/v/redpanda:redpanda \
+            //src/v/cluster/tests:legacy_wire_test \
+            //src/v/cluster/tests:topic_table_test \
+            //src/v/cluster/tests:dedup_window_filter_test \
+            //src/v/cluster/tests:dedup_stm_test \
+            //src/v/kafka/server/tests:validator_tests \
+            //src/v/compression/tests:zstd_test
+
+      # Bazel bumps the mtime of every disk cache entry it reads, so entries
+      # untouched for two weeks are the ones no recent build has needed.
+      - name: Trim the disk cache
+        if: ${{ !cancelled() && steps.disk-cache.outcome == 'success' && steps.disk-cache.outputs.cache-hit != 'true' }}
+        run: |
+          SIZE=$(du -sm /mnt/bazel-disk-cache | cut -f1)
+          echo "disk cache: ${SIZE}MB"
+          if [[ "$SIZE" -gt 12000 ]]; then
+            find /mnt/bazel-disk-cache -type f -mtime +14 -delete || true
+            echo "trimmed to $(du -sm /mnt/bazel-disk-cache | cut -f1)MB"
+          fi
+
+      # Saved on failure too: a failing test still leaves hours of compile
+      # output that the next run should not redo.
+      - name: Save Bazel disk cache
+        if: ${{ !cancelled() && steps.disk-cache.outcome == 'success' && steps.disk-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: /mnt/bazel-disk-cache
+          key: ${{ steps.disk-cache.outputs.cache-primary-key }}

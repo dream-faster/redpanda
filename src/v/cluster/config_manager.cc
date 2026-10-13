@@ -9,7 +9,7 @@
  * by the Apache License, Version 2.0
  */
 
-#include "config_manager.h"
+#include "cluster/config_manager.h"
 
 #include "base/vlog.h"
 #include "cluster/config_frontend.h"

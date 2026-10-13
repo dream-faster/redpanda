@@ -8,6 +8,8 @@
  * https://github.com/redpanda-data/redpanda/blob/master/licenses/rcl.md
  */
 
+#pragma once
+
 #include "base/seastarx.h"
 #include "cluster/fwd.h"
 #include "container/chunked_vector.h"

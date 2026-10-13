@@ -14,6 +14,8 @@
 
 #include <boost/algorithm/string/case_conv.hpp>
 
+#include <locale>
+
 namespace security::tls {
 namespace detail {
 

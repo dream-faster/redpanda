@@ -9,7 +9,7 @@
  * by the Apache License, Version 2.0
  */
 
-#include "txn_reader.h"
+#include "kafka/utils/txn_reader.h"
 
 #include "absl/container/btree_set.h"
 #include "kafka/data/partition_proxy.h"

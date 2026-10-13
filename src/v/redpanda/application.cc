@@ -11,7 +11,6 @@
 
 #include "absl/log/globals.h"
 #include "base/vlog.h"
-#include "cli_parser.h"
 #include "cluster/cluster_discovery.h"
 #include "cluster/config_manager.h"
 #include "cluster/controller.h"
@@ -28,6 +27,7 @@
 #include "metrics/prometheus_sanitize.h"
 #include "migrations/migrators.h"
 #include "net/tls_certificate_probe.h"
+#include "redpanda/cli_parser.h"
 #include "resource_mgmt/cpu_profiler.h"
 #include "resource_mgmt/memory_groups.h"
 #include "resource_mgmt/memory_sampling.h"

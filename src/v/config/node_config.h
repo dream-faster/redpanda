@@ -12,12 +12,12 @@
 #include "config/bounded_property.h"
 #include "config/broker_authn_endpoint.h"
 #include "config/broker_endpoint.h"
+#include "config/config_store.h"
 #include "config/convert.h"
 #include "config/data_directory_path.h"
 #include "config/node_overrides.h"
 #include "config/property.h"
 #include "config/seed_server.h"
-#include "config_store.h"
 #include "model/fundamental.h"
 
 #include <algorithm>

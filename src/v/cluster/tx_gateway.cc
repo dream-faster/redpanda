@@ -12,8 +12,8 @@
 #include "cluster/rm_group_proxy.h"
 #include "cluster/rm_partition_frontend.h"
 #include "cluster/tx_gateway_frontend.h"
+#include "cluster/tx_protocol_types.h"
 #include "model/record.h"
-#include "tx_protocol_types.h"
 
 #include <seastar/core/sharded.hh>
 

@@ -39,7 +39,6 @@
 #include "ssx/event.h"
 #include "ssx/future-util.h"
 #include "storage/offset_translator.h"
-#include "types.h"
 
 #include <seastar/core/abort_source.hh>
 #include <seastar/core/future.hh>

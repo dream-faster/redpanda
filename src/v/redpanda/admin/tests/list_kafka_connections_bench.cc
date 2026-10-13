@@ -7,6 +7,7 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0
 
+#include "absl/time/time.h"
 #include "container/chunked_vector.h"
 #include "kafka/protocol/types.h"
 #include "proto/redpanda/core/admin/v2/cluster.proto.h"

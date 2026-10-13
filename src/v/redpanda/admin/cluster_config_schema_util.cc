@@ -8,7 +8,7 @@
  * the Business Source License, use of this software will be governed
  * by the Apache License, Version 2.0
  */
-#include "cluster_config_schema_util.h"
+#include "redpanda/admin/cluster_config_schema_util.h"
 
 #include "redpanda/admin/api-doc/cluster_config.json.hh"
 

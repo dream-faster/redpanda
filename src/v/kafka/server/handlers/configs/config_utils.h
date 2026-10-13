@@ -131,7 +131,7 @@ struct segment_size_validator {
     }
 };
 
-struct replication_factor_must_be_positive {
+struct replication_factor_property_must_be_positive {
     std::optional<ss::sstring> operator()(
       model::topic_namespace_view,
       const ss::sstring& raw,
@@ -145,7 +145,7 @@ struct replication_factor_must_be_positive {
     }
 };
 
-struct replication_factor_must_be_odd {
+struct replication_factor_property_must_be_odd {
     std::optional<ss::sstring> operator()(
       model::topic_namespace_view,
       const ss::sstring&,
@@ -157,7 +157,7 @@ struct replication_factor_must_be_odd {
     }
 };
 
-struct replication_factor_must_be_greater_or_equal_to_minimum {
+struct replication_factor_property_must_be_greater_or_equal_to_minimum {
     std::optional<ss::sstring> operator()(
       model::topic_namespace_view tns,
       const ss::sstring&,
@@ -345,9 +345,9 @@ struct config_validator_list {
 
 using replication_factor_validator = config_validator_list<
   cluster::replication_factor,
-  replication_factor_must_be_positive,
-  replication_factor_must_be_odd,
-  replication_factor_must_be_greater_or_equal_to_minimum>;
+  replication_factor_property_must_be_positive,
+  replication_factor_property_must_be_odd,
+  replication_factor_property_must_be_greater_or_equal_to_minimum>;
 
 template<
   typename T,

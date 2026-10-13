@@ -7,7 +7,7 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0
 
-#include "node_config.h"
+#include "config/node_config.h"
 
 #include "config/configuration.h"
 #include "config/types.h"

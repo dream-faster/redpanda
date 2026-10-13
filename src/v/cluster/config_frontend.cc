@@ -9,7 +9,7 @@
  * by the Apache License, Version 2.0
  */
 
-#include "config_frontend.h"
+#include "cluster/config_frontend.h"
 
 #include "cluster/controller_service.h"
 #include "cluster/controller_utils.h"

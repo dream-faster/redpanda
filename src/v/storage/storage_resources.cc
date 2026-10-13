@@ -9,7 +9,7 @@
  * by the Apache License, Version 2.0
  */
 
-#include "storage_resources.h"
+#include "storage/storage_resources.h"
 
 #include "base/seastarx.h"
 #include "base/vlog.h"

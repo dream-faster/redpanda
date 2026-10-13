@@ -8,6 +8,8 @@
  * https://github.com/redpanda-data/redpanda/blob/master/licenses/rcl.md
  */
 
+#pragma once
+
 namespace security::audit {
 class audit_log_manager;
 class audit_sink;

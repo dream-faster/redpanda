@@ -24,6 +24,7 @@
 #include <seastar/core/chunked_fifo.hh>
 #include <seastar/core/sharded.hh>
 
+#include <deque>
 #include <system_error>
 
 namespace cluster {
