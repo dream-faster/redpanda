@@ -83,6 +83,22 @@ config_setting(
     },
 )
 
+# Compile each multi-source redpanda_cc_library as a few "unity" translation
+# units that #include its .cc files, so shared headers are parsed and shared
+# templates instantiated and optimized once per chunk instead of once per
+# file. See redpanda_cc_library in build.bzl.
+bool_flag(
+    name = "unity_build",
+    build_setting_default = False,
+)
+
+config_setting(
+    name = "unity_build_enabled",
+    flag_values = {
+        ":unity_build": "true",
+    },
+)
+
 bool_flag(
     name = "antithesis",
     build_setting_default = False,

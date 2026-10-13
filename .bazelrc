@@ -169,6 +169,13 @@ build:san-all  --//bazel:sanitizer_mode=all
 build:san-all     --copt=-fsanitize=address,undefined,vptr,function,alignment
 build:san-all  --linkopt=-fsanitize=address,undefined,vptr,function,alignment
 
+# unity mixin: compile each multi-source redpanda_cc_library as a few
+# translation units that #include several of its .cc files, so their shared
+# headers are parsed once per chunk. Much less total CPU for a full build;
+# an edit recompiles the whole chunk the file belongs to. See
+# redpanda_cc_library in bazel/build.bzl.
+build:unity --//bazel:unity_build
+
 # LTO mixin: enable thin LTO for C++. Usually mixed in with
 # PGO + release, but should work with any.
 build:lto --copt -flto=thin
