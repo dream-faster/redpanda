@@ -14,7 +14,6 @@ from connectrpc.errors import ConnectError, ConnectErrorCode
 from ducktape.errors import TimeoutError as DucktapeTimeoutError
 from ducktape.mark import parametrize
 from ducktape.utils.util import wait_until
-from requests.exceptions import HTTPError
 
 from rptest.clients.admin.proto.redpanda.core.admin.v2 import features_pb2
 from rptest.clients.admin.v2 import Admin as AdminV2
@@ -1854,45 +1853,6 @@ class ManualFinalizationUpgradeTest(UnfinalizedUpgradeMixin, FeaturesTestBase):
         self.redpanda.stop_node(victim, forced=True)
         self.installer.install([victim], RedpandaInstaller.HEAD)
         self.redpanda.start_node(victim)
-
-
-class ManualFinalizationLicenseTest(RedpandaTest):
-    """
-    Verifies that disabling `features_auto_finalization` is rejected by the
-    cluster config validator when no Enterprise license is in effect.
-    """
-
-    def __init__(self, test_context):
-        super().__init__(
-            test_context=test_context,
-            num_brokers=3,
-            environment={"__REDPANDA_DISABLE_BUILTIN_TRIAL_LICENSE": "1"},
-        )
-        self.admin = Admin(self.redpanda)
-
-    @cluster(num_nodes=3)
-    def test_finalization_requires_enterprise_license(self):
-        try:
-            self.admin.patch_cluster_config(
-                upsert={"features_auto_finalization": False}
-            )
-        except HTTPError as e:
-            # Enterprise restrictions are rejected as 400 with the property
-            # name in the response body (validator path), or 403 if the
-            # license/auth path catches it first. Accept either.
-            assert e.response.status_code in (400, 403), (
-                f"Expected 400 or 403, got {e.response.status_code}"
-            )
-            if e.response.status_code == 400:
-                body = e.response.json()
-                assert "features_auto_finalization" in body, (
-                    f"Expected validator to reject features_auto_finalization, "
-                    f"got: {body}"
-                )
-        else:
-            raise RuntimeError(
-                "Expected patch_cluster_config to fail without an enterprise license"
-            )
 
 
 class FeatureManagerDecommissionRegressionTest(FeaturesTestBase):

@@ -638,7 +638,8 @@ public:
     const std::optional<security::license>& get_configured_license() const;
 
     /// Whether to act on an expired license or evaluation period by restricting
-    /// enterprise feature usage
+    /// enterprise feature usage. Always false: this fork does not enforce
+    /// licenses.
     bool should_sanction() const;
 
     /**
@@ -774,10 +775,6 @@ private:
 
     // Built in trial license to fall back to if there is no license set
     std::optional<security::license> _builtin_trial_license;
-
-    // Whether _builtin_trial_license has ever been initialized
-    // Used for implementing revoking the trial license for testing
-    bool _builtin_trial_license_initialized{false};
 
     model::offset _applied_offset{};
 

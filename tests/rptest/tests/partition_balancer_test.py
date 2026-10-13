@@ -982,7 +982,7 @@ class PartitionBalancerTest(PartitionBalancerService):
 
     @cluster(num_nodes=7, log_allow_list=CHAOS_LOG_ALLOW_LIST)
     @matrix(disable_license=[True, False])
-    def test_partition_autobalancer_sanction(self, disable_license):
+    def test_partition_autobalancer_without_license(self, disable_license):
         def partitions_in_node(node_id):
             return self.node2partition_count().get(node_id, 0)
 
@@ -1022,17 +1022,13 @@ class PartitionBalancerTest(PartitionBalancerService):
             s = status["status"]
             assert s == "ready", f"Expected status == 'ready' but got '{s}' instead"
 
+            # This fork does not enforce licenses: continuous balancing works
+            # with or without one.
             unavailable = status["violations"].get("unavailable_nodes", [])
-            if disable_license:
-                assert len(unavailable) == 0, (
-                    f"Expected no nodes in unavailable. unavailable: {unavailable}"
-                )
-                assert partitions_in_node_after == partitions_in_node_before
-            else:
-                assert kill_id in unavailable, (
-                    f'Expected node with id "{kill_id}" in unavailable. unavailable: {unavailable}'
-                )
-                assert partitions_in_node_after == 0
+            assert kill_id in unavailable, (
+                f'Expected node with id "{kill_id}" in unavailable. unavailable: {unavailable}'
+            )
+            assert partitions_in_node_after == 0
 
             # Restore the system to a fully healthy state before validation:
             # not strictly necessary but simplifies debugging.

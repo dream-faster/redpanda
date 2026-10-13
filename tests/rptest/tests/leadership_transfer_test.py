@@ -1038,7 +1038,7 @@ class LeadershipPinningTest(RedpandaTest):
 
     @cluster(num_nodes=6, log_allow_list=RESTART_LOG_ALLOW_LIST)
     @matrix(ordering=[Ordering.ordered, Ordering.unordered])
-    def test_leadership_pinning_sanctions(self, ordering: Ordering):
+    def test_leadership_pinning_without_license(self, ordering: Ordering):
         config = LeaderPinningConfig(ordering)
         for ix, node in enumerate(self.redpanda.nodes):
             self.redpanda.set_extra_node_conf(
@@ -1096,10 +1096,13 @@ class LeadershipPinningTest(RedpandaTest):
             f"Failed to load topic's preferences on restart. Got '{topic_config}'."
         )
 
-        # existing leadership preferences should be ignored as there is no active license
-        time.sleep(90)
-        t2r = self._get_topic2racks()
-        expected = {"foo": {"A", "B", "C"}, "bar": {"A", "B", "C"}}
-        assert t2r == expected, (
-            f"Expected topic-to-rack leaders {expected}. Got {t2r} instead"
+        # This fork does not enforce licenses: leadership preferences are
+        # still honoured without one.
+        self.wait_for_racks(
+            partition_counts,
+            {
+                "foo": RackPreference(racks=["A"], is_ordered=config.is_ordered),
+                "bar": RackPreference(racks=["C"], is_ordered=config.is_ordered),
+            },
+            timeout_sec=90,
         )
