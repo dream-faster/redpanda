@@ -1,0 +1,298 @@
+---
+# Measures a cold build of one revision: no disk cache, so every action
+# runs. The repository cache (downloads only) is still restored. Run it on
+# two refs and diff the summaries to see what a change did to build time.
+#
+# Besides workflow_dispatch, a push whose head commit message contains
+# "[build-timing: <mode> ...]" runs one job per mode on that commit (useful
+# before this file reaches the default branch). <mode> is "release" or
+# "fastbuild", optionally followed by "+trace" (-ftime-trace), "+unity"
+# (--//bazel:unity_build) and "+baseline" (first build the default branch on
+# the same runner, for a like-for-like comparison), e.g. "release+baseline".
+name: build-timing
+on:
+  push:
+  workflow_dispatch:
+    inputs:
+      config:
+        description: 'Bazel --config (empty for fastbuild)'
+        required: false
+        default: 'release'
+        type: string
+      targets:
+        description: 'Targets to build'
+        required: false
+        default: '//src/v/redpanda:redpanda'
+        type: string
+      time_trace:
+        description: 'Also collect clang -ftime-trace and summarize headers'
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: build-timing-${{ github.sha }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  TOOLCHAIN_IMAGE: ghcr.io/${{ github.repository }}/bazel-toolchain
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      contains(github.event.head_commit.message, '[build-timing:')
+    outputs:
+      modes: ${{ steps.modes.outputs.modes }}
+    steps:
+      - name: Pick modes
+        id: modes
+        env:
+          MESSAGE: ${{ github.event.head_commit.message }}
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo 'modes=["dispatch"]' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          MODES=$(grep -o '\[build-timing:[^]]*\]' <<<"$MESSAGE" | head -n1 \
+                    | sed 's/\[build-timing://; s/\]//')
+          JSON=$(for m in $MODES; do echo "$m"; done | jq -R . | jq -cs .)
+          echo "modes=$JSON" | tee -a "$GITHUB_OUTPUT"
+
+  toolchain:
+    needs: plan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Compute toolchain tag
+        id: meta
+        run: |
+          TAG=$(sha256sum tools/docker/bazel.dockerfile bazel/install-deps.sh \
+                 | sha256sum | cut -c1-16)
+          IMAGE=$(echo "${{ env.TOOLCHAIN_IMAGE }}:$TAG" | tr '[:upper:]' '[:lower:]')
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check whether the toolchain image already exists
+        id: exists
+        run: |
+          if docker manifest inspect "${{ steps.meta.outputs.image }}" >/dev/null 2>&1; then
+            echo "hit=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "hit=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: docker/setup-buildx-action@v3
+        if: steps.exists.outputs.hit != 'true'
+
+      - name: Build and push toolchain image
+        if: steps.exists.outputs.hit != 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: tools/docker/bazel.dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.image }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  timing:
+    needs: [plan, toolchain]
+    runs-on: ubicloud-standard-8
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: ${{ fromJSON(needs.plan.outputs.modes) }}
+    permissions:
+      contents: read
+      packages: read
+    container:
+      image: ${{ needs.toolchain.outputs.image }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+      options: --privileged
+      volumes:
+        - /mnt:/mnt
+    env:
+      BAZELISK_HOME: /mnt/bazelisk-cache
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Resolve settings
+        id: cfg
+        run: |
+          CONFIG="${{ inputs.config }}"
+          TARGETS="${{ inputs.targets }}"
+          TRACE="${{ inputs.time_trace }}"
+          FLAGS=""
+          BASELINE=false
+          if [[ "${{ matrix.mode }}" != "dispatch" ]]; then
+            # <config>[+trace][+unity][+baseline], e.g. fastbuild+unity+trace
+            IFS=+ read -r -a PARTS <<<"${{ matrix.mode }}"
+            CONFIG=${PARTS[0]}
+            if [[ "$CONFIG" == fastbuild ]]; then CONFIG=; fi
+            TRACE=false
+            for p in "${PARTS[@]:1}"; do
+              case "$p" in
+                trace) TRACE=true ;;
+                unity) FLAGS="$FLAGS --//bazel:unity_build" ;;
+                baseline) BASELINE=true ;;
+                *) echo "unknown mode part: $p"; exit 1 ;;
+              esac
+            done
+            TARGETS=//src/v/redpanda:redpanda
+          fi
+          {
+            echo "config=$CONFIG"
+            echo "targets=$TARGETS"
+            echo "time_trace=$TRACE"
+            echo "flags=$FLAGS"
+            echo "baseline=$BASELINE"
+          } | tee -a "$GITHUB_OUTPUT"
+
+      - name: Prepare build environment
+        run: |
+          nproc
+          free -h
+          mkdir -p /mnt/bazel-output /mnt/bazel-repo-cache /mnt/bazelisk-cache /mnt/timing
+
+      - name: Restore bazelisk cache
+        uses: actions/cache/restore@v4
+        with:
+          path: /mnt/bazelisk-cache
+          key: bazelisk-${{ hashFiles('.bazelversion') }}
+
+      - name: Restore Bazel repository cache
+        uses: actions/cache/restore@v4
+        with:
+          path: /mnt/bazel-repo-cache
+          key: bazel-repo-${{ hashFiles('.bazelversion', 'MODULE.bazel', 'MODULE.bazel.lock') }}
+          restore-keys: |
+            bazel-repo-
+
+      # Fetching is kept out of the measured build so network speed does
+      # not show up as build time.
+      - name: Fetch
+        run: |
+          CONFIG=()
+          if [[ -n "${{ steps.cfg.outputs.config }}" ]]; then CONFIG=(--config=${{ steps.cfg.outputs.config }}); fi
+          # dl.google.com (the Go SDK) is slow from some runners; retry.
+          for attempt in 1 2 3; do
+            bazel --output_base=/mnt/bazel-output fetch "${CONFIG[@]}" \
+              ${{ steps.cfg.outputs.flags }} \
+              --repository_cache=/mnt/bazel-repo-cache --lockfile_mode=update \
+              --http_timeout_scaling=4 \
+              ${{ steps.cfg.outputs.targets }} && break
+            [[ $attempt == 3 ]] && exit 1
+            echo "fetch attempt $attempt failed; retrying"
+          done
+
+      # With +baseline, the default branch is built first on this same
+      # runner (runner speed varies by 10-20% between jobs, which swamps a
+      # comparison across jobs). It gets the same --config, no extra flags.
+      - name: Baseline build
+        if: steps.cfg.outputs.baseline == 'true'
+        run: |
+          git config --global --add safe.directory "$PWD"
+          git fetch --no-tags --depth=1 origin \
+            "${{ github.event.repository.default_branch }}"
+          git worktree add /mnt/base FETCH_HEAD
+          cd /mnt/base
+          CONFIG=()
+          if [[ -n "${{ steps.cfg.outputs.config }}" ]]; then CONFIG=(--config=${{ steps.cfg.outputs.config }}); fi
+          for attempt in 1 2 3; do
+            bazel --output_base=/mnt/bazel-output-base fetch "${CONFIG[@]}" \
+              --repository_cache=/mnt/bazel-repo-cache --lockfile_mode=update \
+              --http_timeout_scaling=4 \
+              ${{ steps.cfg.outputs.targets }} && break
+            [[ $attempt == 3 ]] && exit 1
+          done
+          start=$(date +%s)
+          bazel --output_base=/mnt/bazel-output-base build "${CONFIG[@]}" \
+            --repository_cache=/mnt/bazel-repo-cache --lockfile_mode=update \
+            --spawn_strategy=sandboxed,local \
+            '--local_resources=memory=HOST_RAM*.8' \
+            --profile=/mnt/timing/base-profile.json.gz \
+            ${{ steps.cfg.outputs.targets }}
+          end=$(date +%s)
+          echo "baseline wall: $((end - start))s" | tee /mnt/timing/base-wall.txt
+          # In a container without an init process the server can linger as
+          # a zombie and shutdown reports failure; that is harmless here.
+          bazel --output_base=/mnt/bazel-output-base shutdown || true
+          # Free the disk for the second build.
+          cd "$GITHUB_WORKSPACE"
+          rm -rf /mnt/bazel-output-base /mnt/base || true
+          git worktree prune
+
+      - name: Cold build
+        run: |
+          CONFIG=()
+          if [[ -n "${{ steps.cfg.outputs.config }}" ]]; then CONFIG=(--config=${{ steps.cfg.outputs.config }}); fi
+          EXTRA=()
+          if [[ "${{ steps.cfg.outputs.time_trace }}" == "true" ]]; then
+            # The trace file is written next to the object; it is not a
+            # declared output, so run compiles unsandboxed to keep it.
+            EXTRA=(--copt=-ftime-trace --strategy=CppCompile=local)
+          fi
+          start=$(date +%s)
+          bazel --output_base=/mnt/bazel-output build "${CONFIG[@]}" "${EXTRA[@]}" \
+            ${{ steps.cfg.outputs.flags }} \
+            --repository_cache=/mnt/bazel-repo-cache --lockfile_mode=update \
+            --spawn_strategy=sandboxed,local \
+            '--local_resources=memory=HOST_RAM*.8' \
+            --profile=/mnt/timing/profile.json.gz \
+            ${{ steps.cfg.outputs.targets }}
+          end=$(date +%s)
+          echo "wall: $((end - start))s" | tee /mnt/timing/wall.txt
+
+      - name: Summarize
+        if: always()
+        run: |
+          {
+            echo "ref: ${{ github.ref_name }} @ ${{ github.sha }}"
+            echo "config: ${{ steps.cfg.outputs.config }} flags: ${{ steps.cfg.outputs.flags }} targets: ${{ steps.cfg.outputs.targets }}"
+            cat /mnt/timing/wall.txt || true
+            python3 tools/build-timing/summarize_profile.py /mnt/timing/profile.json.gz
+          } > /mnt/timing/summary.txt 2>&1 || true
+          if [[ -f /mnt/timing/base-profile.json.gz ]]; then
+            {
+              echo "=== baseline: ${{ github.event.repository.default_branch }} on the same runner ==="
+              cat /mnt/timing/base-wall.txt
+              python3 tools/build-timing/summarize_profile.py /mnt/timing/base-profile.json.gz
+            } > /mnt/timing/base-summary.txt 2>&1 || true
+            cat /mnt/timing/base-summary.txt
+          fi
+          cat /mnt/timing/summary.txt
+          if [[ "${{ steps.cfg.outputs.time_trace }}" == "true" ]]; then
+            python3 tools/build-timing/summarize_time_trace.py \
+              /mnt/bazel-output/execroot/_main/bazel-out \
+              --json /mnt/timing/time_trace.json \
+              > /mnt/timing/time_trace.txt 2>&1 || true
+            cat /mnt/timing/time_trace.txt
+          fi
+          bazel --output_base=/mnt/bazel-output analyze-profile \
+            /mnt/timing/profile.json.gz > /mnt/timing/analyze-profile.txt 2>&1 || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: build-timing-${{ matrix.mode }}-${{ github.run_id }}
+          path: /mnt/timing/
