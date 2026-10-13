@@ -486,21 +486,29 @@ def test_mixed_workloads_on_one_shard(make_cluster, pytestconfig):
 def test_topic_churn_returns_the_budget(make_cluster, pytestconfig):
     """Dedup topics created, filled and deleted over and over: every deleted
     partition gives its entries back, so the shard's count returns to what
-    the surviving topics hold and the budget cannot leak."""
+    the surviving topics hold and the budget cannot leak.
+
+    Allocated memory is compared only once the broker has warmed up: its own
+    caches grow by a couple of hundred MiB over the first rounds and then
+    stay put, with or without dedup. A leaked index would instead keep
+    growing, by several MiB a round at this size."""
     c = make_cluster(nodes=1, smp=1, memory="1G")
     require_new_build(c, pytestconfig)
     keeper = topic_on_one_node(c, 1)
     kafka.produce_bulk(
         c.brokers, keeper, 0, (f"keep-{i}".encode() for i in range(5000))
     )
-    baseline_alloc = c.node(0).metrics().sum("vectorized_memory_allocated_memory")
-    for round_ in range(scaled(20)):
+    per = 50_000
+    warmup = scaled(20)
+    measured = scaled(8)
+    warm_alloc = 0.0
+    for round_ in range(warmup + measured):
         t = topic_on_one_node(c, 2)
         for p in range(2):
             kafka.produce_bulk(
-                c.brokers, t, p, (f"r{round_}-{i}".encode() for i in range(20_000))
+                c.brokers, t, p, (f"r{round_}-{i}".encode() for i in range(per))
             )
-        assert c.node(0).metrics().sum(SHARD_ENTRIES) >= 45_000
+        assert c.node(0).metrics().sum(SHARD_ENTRIES) >= 2 * per
         kafka.delete_topic(c.brokers, t)
 
         def released():
@@ -508,8 +516,12 @@ def test_topic_churn_returns_the_budget(make_cluster, pytestconfig):
             assert got == 5000, got
 
         kafka.eventually(released, timeout_s=60)
+        if round_ == warmup - 1:
+            warm_alloc = c.node(0).metrics().sum("vectorized_memory_allocated_memory")
     alloc = c.node(0).metrics().sum("vectorized_memory_allocated_memory")
-    assert alloc < baseline_alloc + 128 * 2**20, (alloc, baseline_alloc)
+    assert alloc < warm_alloc + 16 * 2**20, (
+        f"allocated memory grew from {warm_alloc} to {alloc} over {measured} rounds"
+    )
     assert_memory_healthy(c)
 
 
