@@ -169,6 +169,18 @@ struct dedup_shard_budget {
     /// and leave on destruction; they are neither copyable nor movable, so
     /// the pointers stay valid.
     std::vector<dedup_window_filter*> filters;
+
+    /// The filter holding the most entries. Rescanned only every
+    /// largest_refresh_interval lookups: it is consulted on every insert under
+    /// shard pressure, a shard can host many partitions, and index sizes move
+    /// slowly next to that, so a slightly stale answer costs nothing.
+    dedup_window_filter* largest();
+    /// Drop a filter from the registry and the cache.
+    void forget(dedup_window_filter*);
+
+    static constexpr size_t largest_refresh_interval = 256;
+    dedup_window_filter* largest_cache{nullptr};
+    size_t lookups_since_refresh{0};
 };
 
 /// \brief Write-path, first-wins deduplication.
@@ -476,9 +488,9 @@ private:
     /// caller admits the record unindexed.
     bool make_room_for_one();
 
-    /// At the shard limit, with nothing freeable in this index: take one
-    /// bounded sweep step on the largest index on the shard, if it is larger
-    /// than this one. Returns whether this index may now insert.
+    /// At the shard limit: take one bounded sweep step on the largest index
+    /// on the shard, if it is larger than this one, before this index trims
+    /// itself. Returns whether this index may now insert.
     bool take_room_from_largest();
 
     /// Freeze the bucket frame a pass measures entries against, and clear its
@@ -508,10 +520,13 @@ private:
     /// Account for the restored entries and reset the sweep state.
     void finish_restore(model::timestamp max_timestamp, size_t truncated);
 
-    /// Whether the cursor should drop entries below the capacity cutoff: this
-    /// index is within capacity_soft_margin_divisor of its own ceiling, or the
-    /// shard is within it of the shard's.
-    bool over_soft_limit() const;
+    /// Whether this index is within capacity_soft_margin_divisor of its own
+    /// ceiling, so its cursor drops entries below the capacity cutoff.
+    bool over_own_soft_limit() const;
+    /// Whether the shard is within capacity_soft_margin_divisor of its limit
+    /// and this is the largest index on it, which is then the one whose
+    /// cursor trims.
+    bool shard_pressure_trims_this() const;
 
     // Entries the cursor visits per new-identity attempt. This matches the
     // throughput of the periodic full passes it replaced -- those swept the

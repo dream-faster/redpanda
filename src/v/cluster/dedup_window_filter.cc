@@ -82,7 +82,7 @@ dedup_window_filter::dedup_window_filter(
 dedup_window_filter::~dedup_window_filter() {
     if (_shard_budget) {
         _shard_budget->entries -= _budget_accounted;
-        std::erase(_shard_budget->filters, this);
+        _shard_budget->forget(this);
     }
 }
 
@@ -96,6 +96,30 @@ size_t soft_limit_of(size_t ceiling, size_t margin_divisor) {
 }
 
 } // namespace
+
+dedup_window_filter* dedup_shard_budget::largest() {
+    if (
+      largest_cache == nullptr
+      || ++lookups_since_refresh >= largest_refresh_interval) {
+        lookups_since_refresh = 0;
+        largest_cache = nullptr;
+        for (auto* f : filters) {
+            if (
+              largest_cache == nullptr
+              || f->map_size() > largest_cache->map_size()) {
+                largest_cache = f;
+            }
+        }
+    }
+    return largest_cache;
+}
+
+void dedup_shard_budget::forget(dedup_window_filter* f) {
+    std::erase(filters, f);
+    if (largest_cache == f) {
+        largest_cache = nullptr;
+    }
+}
 
 void dedup_window_filter::sync_shard_budget() {
     if (!_shard_budget) {
@@ -114,15 +138,19 @@ bool dedup_window_filter::at_capacity() const {
            && _shard_budget->entries >= _shard_budget->max_entries;
 }
 
-bool dedup_window_filter::over_soft_limit() const {
-    if (
-      _map.size()
-      >= soft_limit_of(_max_entries, capacity_soft_margin_divisor)) {
-        return true;
-    }
+bool dedup_window_filter::over_own_soft_limit() const {
+    return _map.size()
+           >= soft_limit_of(_max_entries, capacity_soft_margin_divisor);
+}
+
+bool dedup_window_filter::shard_pressure_trims_this() const {
+    // Only the largest index trims itself under shard pressure. If every
+    // inserting partition trimmed itself instead, a small busy one would keep
+    // shrinking while an idle one that filled the budget kept it all.
     return _shard_budget
            && _shard_budget->entries >= soft_limit_of(
-                _shard_budget->max_entries, capacity_soft_margin_divisor);
+                _shard_budget->max_entries, capacity_soft_margin_divisor)
+           && _shard_budget->largest() == this;
 }
 
 namespace {
@@ -190,7 +218,7 @@ bool dedup_window_filter::is_duplicate(
     // point, and capacity trimming is decision-affecting, so the two orders
     // must match or replicas drift. See populate().
     sweep_step(sweep_budget);
-    if (at_capacity() && !make_room_for_one() && !take_room_from_largest()) {
+    if (at_capacity() && !take_room_from_largest() && !make_room_for_one()) {
         // The bounded step found nothing freeable. The record is admitted but
         // this identity is not remembered.
         ++_unindexed_records;
@@ -391,7 +419,7 @@ void dedup_window_filter::populate(const iobuf& key, model::timestamp ts) {
         return;
     }
     sweep_step(sweep_budget);
-    if (at_capacity() && !make_room_for_one() && !take_room_from_largest()) {
+    if (at_capacity() && !take_room_from_largest() && !make_room_for_one()) {
         ++_unindexed_records;
         return;
     }
@@ -443,6 +471,7 @@ void dedup_window_filter::finish_pass() {
 
 void dedup_window_filter::sweep_step(size_t budget) {
     const int64_t expiry_cutoff = _max_ts.value() - _window.count();
+    const bool shard_trim = shard_pressure_trims_this();
 
     for (size_t step = 0; step < budget; ++step) {
         if (_map.empty()) {
@@ -467,7 +496,9 @@ void dedup_window_filter::sweep_step(size_t budget) {
             erase_at(_sweep_pos);
             continue;
         }
-        if (stamp.value() < _capacity_cutoff.value() && over_soft_limit()) {
+        if (
+          stamp.value() < _capacity_cutoff.value()
+          && (shard_trim || over_own_soft_limit())) {
             // Inside the window, so this is coverage genuinely lost. Doing it
             // here, a few entries at a time from the soft limit upwards, is
             // what replaced dropping a quarter of the index in one step once
@@ -498,20 +529,17 @@ bool dedup_window_filter::make_room_for_one() {
 }
 
 bool dedup_window_filter::take_room_from_largest() {
-    if (!_shard_budget || _map.size() >= _max_entries) {
-        // Without a shard budget, or at its own ceiling, the room this index
-        // needs can only come from itself.
+    if (
+      !_shard_budget || _map.size() >= _max_entries
+      || _shard_budget->entries < _shard_budget->max_entries) {
+        // Without a shard budget, at its own ceiling, or with the shard not
+        // full, the room this index needs can only come from itself.
         return false;
     }
-    dedup_window_filter* largest = nullptr;
-    for (auto* f : _shard_budget->filters) {
-        if (
-          f != this && f->_map.size() > _map.size() + 1
-          && (largest == nullptr || f->_map.size() > largest->_map.size())) {
-            largest = f;
-        }
-    }
-    if (largest == nullptr) {
+    auto* largest = _shard_budget->largest();
+    if (
+      largest == nullptr || largest == this
+      || largest->_map.size() <= _map.size() + 1) {
         return false;
     }
     // The largest index's own cursor decides what goes, so it loses its

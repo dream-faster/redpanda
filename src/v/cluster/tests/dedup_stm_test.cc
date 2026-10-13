@@ -24,6 +24,7 @@
 
 #include <gtest/gtest.h>
 
+#include <map>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -489,9 +490,11 @@ TEST_F_CORO(
 
     co_await produce(leader, "key", "value-1", model::timestamp{1000});
     co_await wait_for_stms(node(leader).raft()->committed_offset());
-    const auto ntp = node(leader).raft()->ntp();
-    const auto legacy_key = dedup_stm_test_accessor::legacy_kvstore_key(ntp);
-    for (auto& [_, n] : nodes()) {
+    // Each fixture node runs its own ntp, so each has its own legacy key.
+    std::map<model::node_id, bytes> legacy_keys;
+    for (auto& [id, n] : nodes()) {
+        const auto& legacy_key = legacy_keys[id]
+          = dedup_stm_test_accessor::legacy_kvstore_key(n->raft()->ntp());
         auto stm = get_stm<0>(*n);
         co_await stm->write_local_snapshot();
         // The kvstore backend reports 0 here; the file backend reports the
@@ -507,10 +510,11 @@ TEST_F_CORO(
     co_await restart_nodes();
     set_dedup_config(1000ms);
     leader = co_await wait_for_leader(10s);
-    for (auto& [_, n] : nodes()) {
-        ASSERT_FALSE_CORO(n->get_kvstore()
-                            .get(storage::kvstore::key_space::stms, legacy_key)
-                            .has_value());
+    for (auto& [id, n] : nodes()) {
+        ASSERT_FALSE_CORO(
+          n->get_kvstore()
+            .get(storage::kvstore::key_space::stms, legacy_keys.at(id))
+            .has_value());
     }
     // And the index came back from the file snapshot.
     auto duplicate = co_await produce(
