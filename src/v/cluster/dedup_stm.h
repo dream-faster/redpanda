@@ -12,6 +12,7 @@
 #include "cluster/dedup_window_filter.h"
 #include "cluster/state_machine_registry.h"
 #include "cluster/types.h"
+#include "container/chunked_hash_map.h"
 #include "metrics/metrics.h"
 #include "model/fundamental.h"
 #include "raft/persisted_stm.h"
@@ -21,6 +22,7 @@
 #include "serde/rw/scalar.h"
 #include "utils/available_promise.h"
 
+#include <seastar/core/circular_buffer.hh>
 #include <seastar/core/future.hh>
 #include <seastar/core/shared_future.hh>
 #include <seastar/core/shared_ptr.hh>
@@ -163,6 +165,20 @@ private:
       int64_t generation,
       const std::optional<ss::sstring>& key_header);
     kafka::offset from_log_offset(model::offset) const;
+
+    /// Batches this leader filtered and handed to raft, by their record crc
+    /// and count, so do_apply() can skip indexing what filter_request()
+    /// already indexed; see self_filtered_key(). Bounded: an entry is
+    /// removed when its batch applies or its request fails, and a batch that
+    /// never does either (a request still in flight at a leadership change,
+    /// before raft reports it) ages out.
+    static uint64_t self_filtered_key(const model::record_batch_header&);
+    void remember_self_filtered(uint64_t key);
+    void forget_self_filtered(uint64_t key);
+    bool take_self_filtered(uint64_t key);
+    static constexpr size_t self_filtered_max = 4096;
+    chunked_hash_map<uint64_t, uint32_t> _self_filtered;
+    ss::circular_buffer<uint64_t> _self_filtered_order;
 
     /// Only to drop the snapshot an earlier build kept in the kvstore.
     storage::kvstore& _kvstore;

@@ -290,6 +290,10 @@ void dedup_stm::adopt_config(
   const std::optional<ss::sstring>& key_header) {
     if (_generation != generation) {
         _state.clear();
+        // Whatever this leader filtered under the old generation is gone
+        // from the index; its batches must be indexed when they apply.
+        _self_filtered.clear();
+        _self_filtered_order.clear();
         _generation = generation;
     }
     _state.set_window(window);
@@ -312,6 +316,8 @@ ss::future<> dedup_stm::do_apply(const model::record_batch& batch) {
     if (!window) {
         if (_state.map_size() > 0) {
             _state.clear();
+            _self_filtered.clear();
+            _self_filtered_order.clear();
         }
         co_return;
     }
@@ -337,6 +343,13 @@ ss::future<> dedup_stm::do_apply(const model::record_batch& batch) {
         co_return;
     }
     adopt_config(*window, cfg.dedup_generation(), cfg.dedup_key_header());
+    if (take_self_filtered(self_filtered_key(batch.header()))) {
+        // This leader indexed the batch's identities when it filtered the
+        // request, with these timestamps (max-wins makes the two the same
+        // state), so applying it again would only cost the parse. Followers,
+        // which never filtered it, index it here.
+        co_return;
+    }
 
     std::optional<model::record_batch> decompressed;
     if (batch.compressed()) {
@@ -363,6 +376,48 @@ ss::future<> dedup_stm::do_apply(const model::record_batch& batch) {
 
 kafka::offset dedup_stm::from_log_offset(model::offset offset) const {
     return kafka::offset(_raft->log()->from_log_offset(offset));
+}
+
+uint64_t dedup_stm::self_filtered_key(const model::record_batch_header& h) {
+    // The batch crc covers the records and the attributes, timestamps and
+    // count, but not the base offset raft assigns: it is the same when the
+    // batch comes back through do_apply as when filter_request() saw it. A
+    // crc collision between two batches in flight on one partition would
+    // leave the other's identities unindexed on this replica alone -- a
+    // 2^-32 chance per pair of a bounded coverage loss the index already
+    // tolerates elsewhere.
+    return (static_cast<uint64_t>(h.crc) << 32)
+           | static_cast<uint32_t>(h.record_count);
+}
+
+void dedup_stm::remember_self_filtered(uint64_t key) {
+    if (_self_filtered_order.size() >= self_filtered_max) {
+        forget_self_filtered(_self_filtered_order.front());
+        _self_filtered_order.pop_front();
+    }
+    _self_filtered_order.push_back(key);
+    ++_self_filtered.try_emplace(key, 0U).first->second;
+}
+
+void dedup_stm::forget_self_filtered(uint64_t key) {
+    auto it = _self_filtered.find(key);
+    if (it == _self_filtered.end()) {
+        return;
+    }
+    if (--it->second == 0) {
+        _self_filtered.erase(it);
+    }
+}
+
+bool dedup_stm::take_self_filtered(uint64_t key) {
+    auto it = _self_filtered.find(key);
+    if (it == _self_filtered.end()) {
+        return false;
+    }
+    if (--it->second == 0) {
+        _self_filtered.erase(it);
+    }
+    return true;
 }
 
 kafka_stages dedup_stm::replicate_in_stages(
@@ -550,6 +605,8 @@ ss::future<result<kafka_result>> dedup_stm::do_replicate(
           .replicated_record_count = 0};
     }
 
+    const auto self_key = self_filtered_key(filtered.batch->header());
+    remember_self_filtered(self_key);
     auto stages = _raft->replicate_in_stages(std::move(*filtered.batch), opts);
     auto append_done = ss::make_lw_shared<ss::shared_promise<bool>>();
     _append_tail = append_done;
@@ -568,6 +625,7 @@ ss::future<result<kafka_result>> dedup_stm::do_replicate(
           _raft->ntp(),
           ex);
         _state.revert_request(filtered.undo);
+        forget_self_filtered(self_key);
         co_return errc::replication_error;
     }
     enqueued->set_value();
@@ -578,12 +636,16 @@ ss::future<result<kafka_result>> dedup_stm::do_replicate(
         auto ex = replicated.get_exception();
         vlog(
           clusterlog.debug, "{} dedup replicate failed: {}", _raft->ntp(), ex);
+        // The entries are reverted, so if the batch commits after all its
+        // apply must index it: stop telling do_apply to skip it.
         _state.revert_request(filtered.undo);
+        forget_self_filtered(self_key);
         co_return errc::replication_error;
     }
     auto result = replicated.get();
     if (!result) {
         _state.revert_request(filtered.undo);
+        forget_self_filtered(self_key);
         co_return result.error();
     }
 
