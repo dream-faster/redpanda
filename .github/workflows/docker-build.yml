@@ -1,6 +1,12 @@
 ---
 name: docker-build
 on:
+  # Every commit builds the image and runs the upgrade test and the dedup
+  # acceptance suite against it. Branch pushes only: tags are not commits to
+  # test.
+  push:
+    branches:
+      - '**'
   workflow_dispatch:
     inputs:
       image_tag:
@@ -33,7 +39,8 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 # A cold build takes ~3h of runner time; don't let pushes pile up overlapping
-# runs. Newer pushes to the same ref cancel the in-flight build.
+# runs. Newer pushes (or dispatches) to the same ref cancel the in-flight
+# build, and with it the tests waiting on its image.
 concurrency:
   group: docker-build-${{ github.ref }}
   cancel-in-progress: true
@@ -274,7 +281,10 @@ jobs:
     uses: ./.github/workflows/upgrade-test.yml
     with:
       slim_image: ${{ needs.build.outputs.image_ref }}
-      stock_image: ${{ inputs.stock_image }}
+      # A push has no inputs, so it takes the same default a dispatch does; a
+      # dispatch keeps what it was given, empty included. (Repeated below:
+      # the env context is not available to a reusable workflow's `with`.)
+      stock_image: ${{ github.event_name == 'push' && 'ghcr.io/dream-faster/redpanda:085657d38360db6808462a096274b4aabb23b1df' || inputs.stock_image }}
 
   # Every dedup scenario against real clusters of the published image, and
   # the upgrade, downgrade and mixed-version legs against the same baseline
@@ -287,4 +297,4 @@ jobs:
     uses: ./.github/workflows/dedup-acceptance.yml
     with:
       image: ${{ needs.build.outputs.image_ref }}
-      old_image: ${{ inputs.stock_image }}
+      old_image: ${{ github.event_name == 'push' && 'ghcr.io/dream-faster/redpanda:085657d38360db6808462a096274b4aabb23b1df' || inputs.stock_image }}
