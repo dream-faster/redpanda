@@ -102,6 +102,7 @@ jobs:
             --verbose_failures \
             --lockfile_mode=update \
             --test_output=errors \
+            --experimental_ui_max_stdouterr_bytes=33554432 \
             '--local_resources=memory=HOST_RAM*.8' \
             //src/v/cluster/tests:legacy_wire_test \
             //src/v/cluster/tests:topic_table_test \

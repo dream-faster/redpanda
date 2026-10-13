@@ -2060,7 +2060,12 @@ TEST(DedupShardBudget, AtTheLimitAPartitionWithNothingToFreeAdmitsUnindexed) {
     {
         auto full = std::make_unique<cluster::dedup_window_filter>(
           100s, 1'000, budget);
-        populate_n(*full, "full", shard_limit);
+        // One timestamp for every entry, so the full index has no oldest
+        // quarter its cursor could give up: nothing anywhere on the shard is
+        // freeable, which is the case this test is about. (With spread
+        // timestamps the idle partition would get room from it instead; see
+        // AnIdlePartitionCannotStarveABusyOne.)
+        populate_n(*full, "full", shard_limit, 1000, 0);
         ASSERT_EQ(budget->entries, shard_limit);
 
         EXPECT_TRUE(idle.filter(make_batch("new", "v", ts(1000))).has_value());
@@ -2087,14 +2092,19 @@ TEST(DedupShardBudget, AnIdlePartitionCannotStarveABusyOne) {
     auto budget = make_budget(shard_limit);
     cluster::dedup_window_filter hog(1'000s, 10'000, budget);
     populate_n(hog, "hog", shard_limit, 1000, 1000);
-    ASSERT_EQ(budget->entries, shard_limit);
+    // Shard pressure trims the hog's own oldest entries as it nears the
+    // limit, so it settles just under it rather than exactly at it.
+    const auto hog_full = hog.map_size();
+    ASSERT_GE(budget->entries, shard_limit * 9 / 10);
+    ASSERT_LE(budget->entries, shard_limit);
 
     cluster::dedup_window_filter busy(1'000s, 10'000, budget);
     populate_n(busy, "busy", 2'000, 300'000, 100);
     EXPECT_LE(budget->entries, shard_limit);
     EXPECT_EQ(budget->entries, hog.map_size() + busy.map_size());
     EXPECT_GT(busy.map_size(), shard_limit / 4);
-    EXPECT_LT(hog.map_size(), shard_limit);
+    // The room came out of the hog.
+    EXPECT_LT(hog.map_size(), hog_full);
     // The busy partition's newest identity is remembered.
     EXPECT_FALSE(
       busy.filter(make_batch("busy-1999", "dup", ts(300'000 + 1999 * 100)))
