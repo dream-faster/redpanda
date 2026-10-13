@@ -1,6 +1,11 @@
 ---
 name: docker-build
 on:
+  # Every commit gets an image and a rolling-upgrade test, so a change that
+  # breaks the upgrade from the deployed build shows up on its own push.
+  push:
+    branches:
+      - '**'
   workflow_dispatch:
     inputs:
       image_tag:
@@ -32,8 +37,8 @@ env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
 
-# A cold build takes ~3h of runner time; don't let pushes pile up overlapping
-# runs. Newer pushes to the same ref cancel the in-flight build.
+# A cold build is slow; don't let pushes pile up overlapping runs. Newer
+# pushes to the same ref cancel the in-flight build.
 concurrency:
   group: docker-build-${{ github.ref }}
   cancel-in-progress: true
@@ -274,4 +279,7 @@ jobs:
     uses: ./.github/workflows/upgrade-test.yml
     with:
       slim_image: ${{ needs.build.outputs.image_ref }}
-      stock_image: ${{ inputs.stock_image }}
+      # A push has no inputs, and an empty stock_image would quietly switch
+      # the baseline to public v26.2.x, so pushes get the dispatch default.
+      # Keep this in step with the stock_image defaults above.
+      stock_image: ${{ github.event_name == 'push' && 'ghcr.io/dream-faster/redpanda:085657d38360db6808462a096274b4aabb23b1df' || inputs.stock_image }}
