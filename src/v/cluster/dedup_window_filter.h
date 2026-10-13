@@ -541,15 +541,20 @@ private:
     /// produce and apply paths perform.
     void sweep_step(size_t budget);
 
-    /// One bounded sweep step taken because a new identity arrived with the
-    /// index at the hard ceiling. Returns whether it freed a slot; if not, the
-    /// caller admits the record unindexed.
-    bool make_room_for_one();
+    /// One bounded sweep step taken because a new identity stamped
+    /// \p incoming arrived with the index at the hard ceiling. Returns whether
+    /// it freed a slot; if not, the caller admits the record unindexed.
+    bool make_room_for_one(model::timestamp incoming);
+
+    /// At the shard limit, when the bounded step found nothing below the
+    /// capacity cutoff: drop the oldest entry the step just walked past, if it
+    /// is older than \p incoming.
+    void replace_oldest_visited(model::timestamp incoming);
 
     /// At the shard limit: take one bounded sweep step on the largest index
     /// on the shard, if it is larger than this one, before this index trims
     /// itself. Returns whether this index may now insert.
-    bool take_room_from_largest();
+    bool take_room_from_largest(model::timestamp incoming);
 
     /// Freeze the bucket frame a pass measures entries against, and clear its
     /// histogram.

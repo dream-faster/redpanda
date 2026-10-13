@@ -234,7 +234,8 @@ bool dedup_window_filter::is_duplicate(
     // point, and capacity trimming is decision-affecting, so the two orders
     // must match or replicas drift. See populate().
     sweep_step(sweep_budget);
-    if (at_capacity() && !take_room_from_largest() && !make_room_for_one()) {
+    if (
+      at_capacity() && !take_room_from_largest(ts) && !make_room_for_one(ts)) {
         // The bounded step found nothing freeable. The record is admitted but
         // this identity is not remembered.
         ++_unindexed_records;
@@ -435,7 +436,8 @@ void dedup_window_filter::populate(const iobuf& key, model::timestamp ts) {
         return;
     }
     sweep_step(sweep_budget);
-    if (at_capacity() && !take_room_from_largest() && !make_room_for_one()) {
+    if (
+      at_capacity() && !take_room_from_largest(ts) && !make_room_for_one(ts)) {
         ++_unindexed_records;
         return;
     }
@@ -550,7 +552,7 @@ void dedup_window_filter::count_in_pass(model::timestamp stamp) {
     _pass_oldest = std::min(_pass_oldest, stamp.value());
 }
 
-bool dedup_window_filter::make_room_for_one() {
+bool dedup_window_filter::make_room_for_one(model::timestamp incoming) {
     // One bounded extra step, never a scan. Freeing nothing leaves the caller
     // to admit the record unindexed, which is the trade the refused whole-map
     // sweep already made -- but at a cost that no longer depends on how large
@@ -558,10 +560,45 @@ bool dedup_window_filter::make_room_for_one() {
     // walk the index and eventually complete a pass, recomputing the cutoff.
     ++_capacity_sweeps;
     sweep_step(capacity_emergency_budget);
+    if (
+      at_capacity() && _shard_budget && _map.size() < _max_entries
+      && !_map.empty()) {
+        replace_oldest_visited(incoming);
+    }
     return !at_capacity();
 }
 
-bool dedup_window_filter::take_room_from_largest() {
+void dedup_window_filter::replace_oldest_visited(model::timestamp incoming) {
+    // The cutoff marks the oldest quarter as of the last completed pass, and
+    // the cursor drops those entries as it reaches them. Under shard pressure
+    // other partitions' inserts drive this cursor too -- log replay after a
+    // restart drives it hardest -- so it can use them all up well before the
+    // pass ends, and until it wraps nothing it walks is below the cutoff:
+    // every new identity on the shard would be admitted unindexed while the
+    // index keeps older ones. Replacing the oldest entry the step just walked
+    // past keeps the newer identity instead, at no extra bound on the work.
+    //
+    // Only for the shard budget. At its own ceiling an index still admits
+    // unindexed what it cannot make room for (see
+    // CapacityEvictionFailsOpenWhenNoSliceCanBeFreed), and only an entry
+    // strictly older than the incoming one is replaced, so an index whose
+    // entries all share the incoming timestamp keeps them.
+    const auto end = std::min(_sweep_pos, _map.size());
+    const auto begin = end - std::min(end, capacity_emergency_budget);
+    std::optional<size_t> oldest;
+    for (size_t i = begin; i < end; ++i) {
+        if (
+          !oldest || _map.values()[i].second < _map.values()[*oldest].second) {
+            oldest = i;
+        }
+    }
+    if (oldest && _map.values()[*oldest].second < incoming) {
+        erase_at(*oldest);
+        ++_capacity_evicted_entries;
+    }
+}
+
+bool dedup_window_filter::take_room_from_largest(model::timestamp incoming) {
     if (
       !_shard_budget || _map.size() >= _max_entries
       || _shard_budget->entries < _shard_budget->max_entries) {
@@ -581,7 +618,7 @@ bool dedup_window_filter::take_room_from_largest() {
     // this one's traffic, so replicas of the larger partition, which share a
     // shard with different neighbours, can diverge: the same best-effort
     // divergence the shard budget already accepts.
-    largest->make_room_for_one();
+    largest->make_room_for_one(incoming);
     return !at_capacity();
 }
 

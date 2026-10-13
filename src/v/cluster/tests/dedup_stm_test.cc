@@ -1085,12 +1085,13 @@ TEST_F_CORO(
     ASSERT_EQ_CORO(duplicate.replicated_record_count, 0);
 }
 
-// With the shard budget exhausted, produce keeps working: new identities are
-// admitted unindexed rather than failing the request or growing past the
-// limit.
-TEST_F_CORO(dedup_stm_fixture, exhausted_shard_budget_admits_unindexed) {
-    // Three replicas share the budget here, so a limit of three lets the
-    // first identity be indexed on each of them and nothing more.
+// With the shard budget exhausted, produce keeps working and never grows the
+// indices past the limit. Each new identity replaces the oldest one its replica
+// holds -- the newest identities are the ones a retry is most likely to repeat
+// -- rather than being admitted unindexed.
+TEST_F_CORO(dedup_stm_fixture, exhausted_shard_budget_keeps_the_newest) {
+    // Three replicas share the budget here, so a limit of three lets each of
+    // them hold one identity.
     _shard_budget = ss::make_lw_shared<dedup_shard_budget>(3);
     co_await initialize_state_machines();
     set_dedup_config(1000s);
@@ -1108,9 +1109,9 @@ TEST_F_CORO(dedup_stm_fixture, exhausted_shard_budget_admits_unindexed) {
     co_await wait_for_stms(node(leader).raft()->committed_offset());
     ASSERT_LE_CORO(_shard_budget->entries, 3u);
 
-    // The identity indexed before the budget ran out is still deduplicated.
+    // The newest identity is still deduplicated.
     auto duplicate = co_await produce(
-      leader, "first", "v2", model::timestamp{1500});
+      leader, "later-4", "v2", model::timestamp{2004});
     ASSERT_EQ_CORO(duplicate.replicated_record_count, 0);
 }
 

@@ -2311,6 +2311,75 @@ TEST(DedupShardBudget, PartitionsRestoredIntoAFullShardKeepIndexing) {
     }
 }
 
+// Indices built on a larger shard, restarted into one with half the budget:
+// some partitions restore in full, later ones are cut short, and each then
+// replays the log past its snapshot. That replay takes its room from the
+// largest index, which drives the largest one's cursor through all its entries
+// below the capacity cutoff long before the pass ends. New identities that
+// arrive afterwards still get indexed -- each replaces the oldest entry the
+// bounded step walked past -- instead of being admitted unindexed until the
+// cursor wraps.
+TEST(DedupShardBudget, AfterReplayIntoASmallerShardNewIdentitiesAreIndexed) {
+    constexpr size_t big_limit = 40'000;
+    constexpr size_t per_partition = big_limit * 22 / 100;
+    constexpr std::array<double, 4> snapshot_at{0.65, 1.0, 0.9, 1.0};
+    constexpr auto window = std::chrono::milliseconds{3'600'000};
+    constexpr size_t no_ceiling = 1'000'000'000;
+    auto key = [](size_t p, size_t i) {
+        return iobuf::from(fmt::format("p{}-{}", p, i));
+    };
+    struct partition {
+        cluster::dedup_index_snapshot snap;
+        size_t snapshotted;
+        int64_t first_ts;
+    };
+    std::vector<partition> parts;
+    int64_t clock = 1'000'000;
+    {
+        auto budget = make_budget(big_limit);
+        for (size_t p = 0; p < snapshot_at.size(); ++p) {
+            cluster::dedup_window_filter f(window, no_ceiling, budget);
+            const auto cut = static_cast<size_t>(
+              static_cast<double>(per_partition) * snapshot_at[p]);
+            for (size_t i = 0; i < per_partition; ++i) {
+                if (i == cut) {
+                    parts.push_back({f.snapshot(), cut, clock});
+                }
+                f.populate(key(p, i), ts(clock + static_cast<int64_t>(i / 50)));
+            }
+            if (cut == per_partition) {
+                parts.push_back({f.snapshot(), cut, clock});
+            }
+            clock += static_cast<int64_t>(per_partition / 50);
+        }
+    }
+
+    auto budget = make_budget(big_limit / 2);
+    std::array<std::unique_ptr<cluster::dedup_window_filter>, 4> restored;
+    for (const size_t p : {0UL, 2UL, 1UL, 3UL}) {
+        restored[p] = std::make_unique<cluster::dedup_window_filter>(
+          window, no_ceiling, budget);
+        restored[p]->restore(parts[p].snap);
+        for (size_t i = parts[p].snapshotted; i < per_partition; ++i) {
+            restored[p]->populate(
+              key(p, i), ts(parts[p].first_ts + static_cast<int64_t>(i / 50)));
+        }
+    }
+    ASSERT_LE(budget->entries, big_limit / 2);
+
+    for (size_t p = 0; p < restored.size(); ++p) {
+        const auto before = restored[p]->unindexed_records();
+        for (int64_t i = 0; i < 500; ++i) {
+            restored[p]->populate(
+              iobuf::from(fmt::format("new{}-{}", p, i)),
+              ts(clock + 10'000 + i));
+        }
+        EXPECT_EQ(restored[p]->unindexed_records(), before)
+          << "partition " << p;
+        EXPECT_LE(budget->entries, big_limit / 2);
+    }
+}
+
 // An index written in a burst covers a sliver of a long window. The capacity
 // cutoff is measured against the timestamps the index holds rather than the
 // whole window, so it still marks the oldest quarter instead of nothing.
