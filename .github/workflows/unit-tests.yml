@@ -1,13 +1,14 @@
 ---
 name: unit-tests
 on:
+  push:
+    branches:
+      - '**'
   workflow_dispatch:
-  workflow_call:
 
-# github.workflow is the caller's name when this runs as a reusable workflow,
-# so a standalone dispatch and a docker-build run land in different groups.
+# One group per branch: a newer push cancels the in-flight run.
 concurrency:
-  group: unit-tests-${{ github.workflow }}-${{ github.ref }}
+  group: unit-tests-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -67,10 +68,10 @@ jobs:
           restore-keys: |
             bazel-release-repo-${{ runner.os }}-
 
-      # Cache keys are immutable and both workflows run at once, so each saves
-      # under its own name. Restore prefers this workflow's newest entry (it
-      # holds the test objects too) and falls back to docker-build's, which
-      # still covers the bulk of the compile.
+      # Cache keys are immutable and the two workflows can run at once, so
+      # each saves under its own name. Restore prefers this workflow's newest
+      # entry (it holds the test objects too) and falls back to docker-build's,
+      # which still covers the bulk of the compile.
       - name: Restore Bazel disk cache
         id: disk-cache
         uses: actions/cache/restore@v4
