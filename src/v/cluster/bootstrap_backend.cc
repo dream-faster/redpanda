@@ -51,8 +51,8 @@ bootstrap_backend::bootstrap_backend(
 
 namespace {
 
-std::error_code
-do_apply(user_and_credential cred, security::credential_store& store) {
+std::error_code apply_bootstrap_user(
+  user_and_credential cred, security::credential_store& store) {
     if (store.contains(cred.username)) {
         return errc::user_exists;
     }
@@ -66,7 +66,7 @@ ss::future<std::error_code> dispatch_updates_to_cores(
     using res_type = std::optional<std::error_code>;
     const res_type res = co_await sharded_service.map_reduce0(
       [cmd](security::credential_store& service) {
-          return do_apply(std::move(cmd), service);
+          return apply_bootstrap_user(std::move(cmd), service);
       },
       res_type{},
       [](const res_type result, const std::error_code errc) -> res_type {

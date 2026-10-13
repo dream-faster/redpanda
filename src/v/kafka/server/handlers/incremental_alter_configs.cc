@@ -349,7 +349,8 @@ create_topic_properties_update(
     return update;
 }
 
-static ss::future<chunked_vector<resp_resource_t>> alter_topic_configuration(
+static ss::future<chunked_vector<resp_resource_t>>
+incremental_alter_topic_configuration(
   request_context& ctx,
   chunked_vector<req_resource_t> resources,
   bool validate_only) {
@@ -380,7 +381,8 @@ inline std::string_view map_config_name(std::string_view input) {
       .default_match(input);
 }
 
-static ss::future<chunked_vector<resp_resource_t>> alter_broker_configuration(
+static ss::future<chunked_vector<resp_resource_t>>
+incremental_alter_broker_configuration(
   request_context& ctx, chunked_vector<req_resource_t> resources) {
     chunked_vector<resp_resource_t> responses;
     responses.reserve(resources.size());
@@ -550,10 +552,10 @@ ss::future<response_ptr> incremental_alter_configs_handler::handle(
 
     std::vector<ss::future<chunked_vector<resp_resource_t>>> futures;
     futures.reserve(2);
-    futures.push_back(alter_topic_configuration(
+    futures.push_back(incremental_alter_topic_configuration(
       ctx, std::move(groupped.topic_changes), request.data.validate_only));
-    futures.push_back(
-      alter_broker_configuration(ctx, std::move(groupped.broker_changes)));
+    futures.push_back(incremental_alter_broker_configuration(
+      ctx, std::move(groupped.broker_changes)));
 
     auto ret = co_await ss::when_all_succeed(futures.begin(), futures.end());
     // include authorization errors
