@@ -279,6 +279,13 @@ cluster::topic_configuration to_topic_config(
         topic_property_message_timestamp_after_max_ms,
         /*clamp_to_duration_max=*/true);
 
+    cfg.properties.dedup_window_ms
+      = get_tristate_value<std::chrono::milliseconds>(
+        config_entries, topic_property_dedup_window_ms);
+
+    cfg.properties.dedup_key_header = get_string_value(
+      config_entries, topic_property_dedup_key_header);
+
     return cfg;
 }
 

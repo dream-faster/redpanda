@@ -10,6 +10,7 @@
 #include "base/vlog.h"
 #include "cluster/cluster_discovery.h"
 #include "cluster/controller.h"
+#include "cluster/dedup_stm.h"
 #include "cluster/feature_manager.h"
 #include "cluster/id_allocator_stm.h"
 #include "cluster/log_eviction_stm.h"
@@ -62,6 +63,10 @@ void application::start_runtime_services(::stop_signal& app_signal) {
           pm.register_factory<cluster::partition_properties_stm_factory>(
             storage.local().kvs(),
             config::shard_local_cfg().internal_rpc_request_timeout_ms.bind());
+          pm.register_factory<cluster::dedup_stm_factory>(
+            storage.local().kvs(),
+            config::shard_local_cfg().internal_rpc_request_timeout_ms.bind(),
+            config::shard_local_cfg().dedup_max_entries_per_partition.value());
       })
       .get();
     partition_manager.invoke_on_all(&cluster::partition_manager::start).get();

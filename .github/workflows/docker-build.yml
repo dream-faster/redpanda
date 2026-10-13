@@ -7,12 +7,22 @@ on:
         description: 'Tag for the Docker image (default: commit sha)'
         required: false
         type: string
+      stock_image:
+        description: 'Image the upgrade test rolls FROM (default: the deployed dedup build; set empty to fall back to the newest public v26.2.x, which has no dedup and skips the dedup leg)'
+        required: false
+        type: string
+        default: 'ghcr.io/dream-faster/redpanda:085657d38360db6808462a096274b4aabb23b1df'
   workflow_call:
     inputs:
       image_tag:
         description: 'Tag for the Docker image (default: commit sha)'
         required: false
         type: string
+      stock_image:
+        description: 'Image the upgrade test rolls FROM (default: the deployed dedup build; set empty to fall back to the newest public v26.2.x, which has no dedup and skips the dedup leg)'
+        required: false
+        type: string
+        default: 'ghcr.io/dream-faster/redpanda:085657d38360db6808462a096274b4aabb23b1df'
     outputs:
       image_ref:
         description: 'Full image reference pushed to ghcr'
@@ -142,6 +152,9 @@ jobs:
             '--local_resources=memory=HOST_RAM*.8' \
             //src/v/cluster/tests:legacy_wire_test \
             //src/v/cluster/tests:topic_table_test \
+            //src/v/cluster/tests:dedup_window_filter_test \
+            //src/v/cluster/tests:dedup_stm_test \
+            //src/v/kafka/server/tests:validator_tests \
             //src/v/compression/tests:zstd_test
 
       - name: Build OCI image with Bazel
@@ -189,7 +202,7 @@ jobs:
           FROM debian:bookworm-slim
           RUN apt-get update && \
               apt-get install -y --no-install-recommends \
-                bash ca-certificates coreutils curl grep sed wget && \
+                bash ca-certificates coreutils curl grep sed tzdata wget && \
               rm -rf /var/lib/apt/lists/*
           RUN groupadd --gid 65532 nonroot && \
               useradd --uid 65532 --gid 65532 --no-create-home --shell /usr/sbin/nologin nonroot
@@ -209,8 +222,15 @@ jobs:
             docker push "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
           fi
 
-  # Roll the published image over a three node stock v26.2.x cluster, one node
-  # at a time, on the same data volumes.
+  # Roll the published image over a three node cluster, one node at a time, on
+  # the same data volumes. The baseline defaults to the dedup build currently
+  # deployed (stock v26.2.x plus this feature, before the zstd workspace and
+  # incremental sweep work),
+  # so the run exercises the upgrade that actually happens: same 52-slot
+  # topic_properties at version 17 and the same dedup.snapshot layout, with
+  # the index carried across the node replacements. Bump the default when the
+  # deployed build moves; set it empty for the public v26.2.x baseline, which
+  # proves the legacy_wire slots but skips the dedup leg.
   upgrade:
     needs: build
     permissions:
@@ -219,3 +239,4 @@ jobs:
     uses: ./.github/workflows/upgrade-test.yml
     with:
       slim_image: ${{ needs.build.outputs.image_ref }}
+      stock_image: ${{ inputs.stock_image }}

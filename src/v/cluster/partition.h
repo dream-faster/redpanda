@@ -257,6 +257,7 @@ public:
     ss::shared_ptr<cluster::log_eviction_stm> _log_eviction_stm;
     ss::shared_ptr<cluster::rm_stm> _rm_stm;
     ss::shared_ptr<partition_properties_stm> _partition_properties_stm;
+    ss::shared_ptr<dedup_stm> _dedup_stm;
     ss::abort_source _as;
     partition_probe _probe;
     ss::sharded<features::feature_table>& _feature_table;

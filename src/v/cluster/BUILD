@@ -238,6 +238,14 @@ redpanda_cc_library(
 )
 
 redpanda_cc_library(
+    name = "dedup_index_limits",
+    hdrs = [
+        "dedup_index_limits.h",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+redpanda_cc_library(
     name = "topic_memory_per_partition_default",
     hdrs = [
         "scheduling/topic_memory_per_partition_default.h",
@@ -1567,6 +1575,8 @@ redpanda_cc_library(
         "controller_stm.cc",
         "controller_utils.cc",
         "crash_reporter.cc",
+        "dedup_stm.cc",
+        "dedup_window_filter.cc",
         "drain_manager.cc",
         "feature_barrier.cc",
         "feature_manager.cc",
@@ -1623,6 +1633,8 @@ redpanda_cc_library(
         "controller_stm.h",
         "controller_utils.h",
         "crash_reporter.h",
+        "dedup_stm.h",
+        "dedup_window_filter.h",
         "drain_manager.h",
         "ephemeral_credential_rpc_service.h",
         "feature_barrier.h",
@@ -1695,6 +1707,7 @@ redpanda_cc_library(
         ":commands",
         ":controller_log_limiter",
         ":controller_snapshot",
+        ":dedup_index_limits",
         ":distributed_kv_stm",
         ":drain_status",
         ":ephemeral_credential_frontend",
@@ -1776,6 +1789,7 @@ redpanda_cc_library(
         "//src/v/features",
         "//src/v/features:enterprise_features",
         "//src/v/finjector",
+        "//src/v/hashing:crc32c",
         "//src/v/hashing:murmur",
         "//src/v/hashing:secure",
         "//src/v/hashing:xx",
@@ -1785,6 +1799,8 @@ redpanda_cc_library(
         "//src/v/kafka/protocol",
         "//src/v/metrics",
         "//src/v/model",
+        "//src/v/model:batch_builder",
+        "//src/v/model:batch_compression",
         "//src/v/model:fips_config",
         "//src/v/net",
         "//src/v/net:tls",
@@ -1798,6 +1814,7 @@ redpanda_cc_library(
         "//src/v/security:license",
         "//src/v/serde",
         "//src/v/serde:bool_class",
+        "//src/v/serde:bytes",
         "//src/v/serde:chrono",
         "//src/v/serde:enum",
         "//src/v/serde:inet_address",

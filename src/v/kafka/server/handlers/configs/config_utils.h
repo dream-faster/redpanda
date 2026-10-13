@@ -268,6 +268,16 @@ struct delete_retention_ms_validator {
     }
 };
 
+struct dedup_key_header_validator {
+    std::optional<ss::sstring>
+    operator()(const ss::sstring& /*raw*/, const ss::sstring& value) {
+        if (value.empty()) {
+            return ss::sstring{"dedup key header name must not be empty"};
+        }
+        return std::nullopt;
+    }
+};
+
 struct min_cleanable_dirty_ratio_validator {
     std::optional<ss::sstring>
     operator()(const ss::sstring&, const tristate<double>& value) {

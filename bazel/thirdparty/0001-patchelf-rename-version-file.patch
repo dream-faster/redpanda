@@ -1,0 +1,4 @@
+diff --git a/version b/PKG_VERSION
+similarity index 100%
+rename from version
+rename to PKG_VERSION

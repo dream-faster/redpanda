@@ -164,13 +164,32 @@ partition_produce_stages partition_append(
             try {
                 auto r = f.get();
                 if (r.has_value()) {
+                    // Write-path dedup may drop records before replication, so
+                    // prefer the post-filter count when the replicate result
+                    // reports one (-1 means "unspecified": use the request
+                    // count).
+                    auto appended = r.value().replicated_record_count >= 0
+                                      ? r.value().replicated_record_count
+                                      : num_records;
                     // have to subtract num_of_records - 1 as base_offset
-                    // is inclusive
+                    // is inclusive. At appended == 0 -- write-path dedup
+                    // dropped every record -- the same expression yields
+                    // last_offset + 1, the offset the records would have
+                    // taken. That is what "nothing of yours was added here"
+                    // looks like in a protocol with no way to say it;
+                    // reporting last_offset would instead point the producer
+                    // at a record belonging to someone else.
+                    //
+                    // For a partial drop the offsets still cannot be exact:
+                    // the producer maps its i-th record to base_offset + i,
+                    // and dedup removed records from the middle of that
+                    // range. base_offset is the first record actually
+                    // appended, which is the closest the response can get.
                     p.base_offset = model::offset(
-                      r.value().last_offset - (num_records - 1));
+                      r.value().last_offset - (appended - 1));
                     p.log_append_time_ms = log_append_time_ms;
                     p.error_code = error_code::none;
-                    partition.probe().add_records_produced(num_records);
+                    partition.probe().add_records_produced(appended);
                     partition.probe().add_bytes_produced(num_bytes);
                     partition.probe().add_batches_produced(1);
                 } else {
