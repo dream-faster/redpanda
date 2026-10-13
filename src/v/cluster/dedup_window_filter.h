@@ -133,11 +133,11 @@ enum class dedup_identity_lookup {
 /// For each record, in order, calls emit(lookup, digest, timestamp) with the
 /// identity digested straight from the batch's buffer -- the Kafka key, or
 /// in header mode the value of the first header named *key_header -- and the
-/// record's timestamp. Nothing is copied or shared: values, other headers
-/// and, in header mode, the key are skipped over. This is the whole of what
-/// the produce and apply paths look at per record, and it replaced parsing
-/// each record into a model::record (an iobuf per key, value and header) on
-/// both.
+/// record's timestamp. Nothing is copied or shared, and nothing past the
+/// identity is decoded: the rest of the record is skipped by its length.
+/// This is the whole of what the produce and apply paths look at per record,
+/// and it replaced parsing each record into a model::record (an iobuf per
+/// key, value and header) on both.
 ///
 /// emit returns whether to go on; the walk stops at the first false. The
 /// digest is meaningful only for dedup_identity_lookup::identity.
@@ -186,60 +186,74 @@ void for_each_dedup_identity(
         return len;
     };
     for (int32_t i = 0; i < readable.record_count(); ++i) {
-        read_length();  // record size
+        // The length counts the bytes after itself. Whatever dedup does not
+        // read is skipped as one span to this end, rather than header by
+        // header.
+        const auto size = read_length();
+        if (size < 0) [[unlikely]] {
+            throw std::out_of_range(
+              fmt::format("dedup: record of negative size {}", size));
+        }
+        const size_t record_end = parser.bytes_consumed()
+                                  + static_cast<size_t>(size);
         parser.skip(1); // attributes
         auto [ts_delta, _tv] = parser.read_varlong();
         parser.read_varlong(); // offset delta
         const auto key_len = read_length();
         auto lookup = dedup_identity_lookup::no_identity;
         dedup_identity_digest digest;
-        if (key_header) {
-            skip_bytes(key_len);
-        } else if (key_len >= 0) {
+        if (!key_header) {
             // An empty key is an identity, a null one (-1) is not.
-            lookup = dedup_identity_lookup::identity;
-            digest = digest_bytes(key_len);
-        }
-        skip_bytes(read_length()); // value
-        const auto header_count = read_length();
-        if (key_header) {
-            lookup = dedup_identity_lookup::missing_header;
-        }
-        // The first occurrence of the configured header is the identity,
-        // whatever follows it, as the model::record based lookup had it.
-        bool header_seen = false;
-        for (int64_t h = 0; h < header_count; ++h) {
-            const auto hkey_len = read_length();
-            bool matches = false;
-            if (
-              key_header && !header_seen
-              && hkey_len == static_cast<int64_t>(key_header->size())) {
-                const char* want = key_header->data();
-                matches = true;
-                parser.consume(
-                  static_cast<size_t>(hkey_len),
-                  [&want, &matches](const char* data, size_t n) {
-                      matches = matches && std::memcmp(want, data, n) == 0;
-                      want += n;
-                      return ss::stop_iteration::no;
-                  });
-            } else {
-                skip_bytes(hkey_len);
+            if (key_len >= 0) {
+                lookup = dedup_identity_lookup::identity;
+                digest = digest_bytes(key_len);
             }
-            const auto hval_len = read_length();
-            if (matches) {
-                header_seen = true;
+        } else {
+            skip_bytes(key_len);
+            skip_bytes(read_length()); // value
+            const auto header_count = read_length();
+            lookup = dedup_identity_lookup::missing_header;
+            // The first occurrence of the configured header is the identity,
+            // whatever follows it, as the model::record based lookup had it.
+            for (int64_t h = 0; h < header_count; ++h) {
+                const auto hkey_len = read_length();
+                bool matches = false;
+                if (hkey_len == static_cast<int64_t>(key_header->size())) {
+                    const char* want = key_header->data();
+                    matches = true;
+                    parser.consume(
+                      static_cast<size_t>(hkey_len),
+                      [&want, &matches](const char* data, size_t n) {
+                          matches = matches && std::memcmp(want, data, n) == 0;
+                          want += n;
+                          return ss::stop_iteration::no;
+                      });
+                } else {
+                    skip_bytes(hkey_len);
+                }
+                const auto hval_len = read_length();
+                if (!matches) {
+                    skip_bytes(hval_len);
+                    continue;
+                }
                 // A null value is not an identity: treated like an absent
-                // header, so the request is rejected rather than every
-                // such record deduplicating against the empty buffer.
+                // header, so the request is rejected rather than every such
+                // record deduplicating against the empty buffer.
                 if (hval_len >= 0) {
                     lookup = dedup_identity_lookup::identity;
                     digest = digest_bytes(hval_len);
                 }
-            } else {
-                skip_bytes(hval_len);
+                break;
             }
         }
+        const auto at = parser.bytes_consumed();
+        if (at > record_end) [[unlikely]] {
+            throw std::out_of_range(
+              fmt::format(
+                "dedup: record fields run {} bytes past the record's size",
+                at - record_end));
+        }
+        parser.skip(record_end - at);
         if (!emit(lookup, digest, model::timestamp{base_ts + ts_delta})) {
             return;
         }
