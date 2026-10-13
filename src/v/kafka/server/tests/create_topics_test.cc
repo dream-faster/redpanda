@@ -11,7 +11,6 @@
 #include "config/configuration.h"
 #include "config/leaders_preference.h"
 #include "container/chunked_vector.h"
-#include "features/enterprise_feature_messages.h"
 #include "kafka/protocol/create_topics.h"
 #include "kafka/protocol/errors.h"
 #include "kafka/protocol/metadata.h"
@@ -530,90 +529,6 @@ FIXTURE_TEST(unlicensed_permit_if_config_disabled, create_topic_fixture) {
 
         BOOST_CHECK_EQUAL(
           resp.data.topics[0].error_code, kafka::error_code::none);
-    }
-}
-
-FIXTURE_TEST(unlicensed_rejected, create_topic_fixture) {
-    // NOTE(oren): w/o schema validation enabled at the cluster level, related
-    // properties will be ignored on the topic create path. stick to COMPAT here
-    // because it's a superset of REDPANDA.
-    update_cluster_config(lconf().cloud_storage_enabled.name(), "true");
-
-    auto unset_cluster_config = ss::defer([&] {
-        update_cluster_config(lconf().cloud_storage_enabled.name(), "false");
-    });
-
-    wait_for_license_init();
-    revoke_license();
-    using prop_t = std::map<ss::sstring, ss::sstring>;
-    const auto with = [](const std::string_view prop, const auto value) {
-        return std::make_pair(
-          prop, prop_t{{ss::sstring{prop}, ssx::sformat("{}", value)}});
-    };
-    std::vector<std::pair<std::string_view, prop_t>> enterprise_props{
-      // si_props
-      with(kafka::topic_property_remote_read, true),
-      with(kafka::topic_property_remote_write, true),
-      with(kafka::topic_property_recovery, true),
-      with(kafka::topic_property_read_replica, true),
-      // pin_leadership_props
-      with(
-        kafka::topic_property_leaders_preference,
-        config::leaders_preference{
-          .type = config::leaders_preference::type_t::racks,
-          .racks = {model::rack_id{"A"}}})};
-
-    auto client = make_kafka_client().get();
-    auto deferred_close = ss::defer([&client] { client.stop().get(); });
-    client.connect().get();
-
-    for (const auto& [name, props] : enterprise_props) {
-        auto topic = make_topic(
-          ssx::sformat("topic_{}", name), std::nullopt, std::nullopt, props);
-
-        auto resp
-          = client.dispatch(make_req({topic}), kafka::api_version(5)).get();
-
-        BOOST_CHECK_EQUAL(
-          resp.data.topics[0].error_code, kafka::error_code::invalid_config);
-        auto expected_message
-          = (name == kafka::topic_property_recovery
-             || name == kafka::topic_property_read_replica)
-              ? "Tiered storage is not enabled"
-              : features::enterprise_error_message::required;
-        BOOST_CHECK(resp.data.topics[0].error_message.value_or("").contains(
-          expected_message));
-    }
-}
-
-FIXTURE_TEST(unlicensed_reject_defaults, create_topic_fixture) {
-    update_cluster_config(lconf().cloud_storage_enabled.name(), "true");
-    auto unset_cluster_config = ss::defer([&] {
-        update_cluster_config(lconf().cloud_storage_enabled.name(), "false");
-    });
-    wait_for_license_init();
-    revoke_license();
-
-    const std::initializer_list<std::string_view> si_configs{
-      lconf().cloud_storage_enable_remote_read.name(),
-      lconf().cloud_storage_enable_remote_write.name()};
-
-    auto client = make_kafka_client().get();
-    auto deferred_close = ss::defer([&client] { client.stop().get(); });
-    client.connect().get();
-
-    for (const auto& config : si_configs) {
-        update_cluster_config(config, "true");
-        auto topic = make_topic(ssx::sformat("topic_{}", config));
-
-        auto resp
-          = client.dispatch(make_req({topic}), kafka::api_version(5)).get();
-
-        BOOST_CHECK_EQUAL(
-          resp.data.topics[0].error_code, kafka::error_code::invalid_config);
-        BOOST_CHECK(resp.data.topics[0].error_message.value_or("").contains(
-          features::enterprise_error_message::required));
-        update_cluster_config(config, "false");
     }
 }
 

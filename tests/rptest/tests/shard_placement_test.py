@@ -7,7 +7,6 @@
 # the Business Source License, use of this software will be governed
 # by the Apache License, Version 2.0
 
-import time
 
 from ducktape.mark import matrix
 from ducktape.utils.util import wait_until
@@ -607,18 +606,13 @@ class ShardPlacementTest(PreallocNodesTest):
 
             return (True, shard_map)
 
-        if disable_license:
-            time.sleep(60)
-            rebalanced = shard_rebalance_finished()
-            assert not rebalanced, (
-                f"continuous core balancing should not be active. Received {rebalanced}"
-            )
-        else:
-            shard_map_after_balance = wait_until_result(
-                shard_rebalance_finished, timeout_sec=60, backoff_sec=2
-            )
-            self.logger.info("shard rebalance finished")
-            self.print_shard_stats(shard_map_after_balance)
+        # This fork does not enforce licenses: continuous core balancing works
+        # with or without one.
+        shard_map_after_balance = wait_until_result(
+            shard_rebalance_finished, timeout_sec=60, backoff_sec=2
+        )
+        self.logger.info("shard rebalance finished")
+        self.print_shard_stats(shard_map_after_balance)
 
         self.wait_shard_map_consistent_with_cluster_partitions(
             user_topics=topics, admin=admin

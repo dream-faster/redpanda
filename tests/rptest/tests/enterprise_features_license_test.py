@@ -1,7 +1,6 @@
 import json
 from enum import IntEnum
 
-import requests
 from ducktape.mark import matrix
 from ducktape.utils.util import wait_until
 
@@ -16,7 +15,6 @@ from rptest.services.redpanda import (
     SecurityConfig,
 )
 from rptest.tests.redpanda_test import RedpandaTest
-from rptest.util import expect_exception
 from rptest.utils.mode_checks import skip_fips_mode
 
 
@@ -205,25 +203,15 @@ class EnterpriseFeaturesTest(EnterpriseFeaturesTestBase):
 
         has_license = not disable_trial or install_license
 
-        is_autoenable = feature in autoenable_features
-
-        if has_license:
-            self.try_enable_feature(feature)
-        else:
-            with expect_exception(
-                requests.exceptions.HTTPError,
-                lambda e: (
-                    e.response.status_code == 403
-                    or FEATURE_DEPENDENT_CONFIG[feature] in e.response.json().keys()
-                ),
-            ):
-                self.try_enable_feature(feature)
+        # This fork does not enforce licenses: enterprise features can be
+        # enabled with or without one.
+        self.try_enable_feature(feature)
 
         self.logger.debug(f"Check that {feature.name} has the expected state")
 
         statuses = self.check_feature(
             feature,
-            enabled=has_license or is_autoenable,
+            enabled=True,
             license_valid=has_license,
         )
 

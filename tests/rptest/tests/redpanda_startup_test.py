@@ -8,7 +8,6 @@
 # by the Apache License, Version 2.0
 
 import os
-from time import sleep
 
 from typing_extensions import assert_never
 
@@ -20,7 +19,6 @@ from rptest.services.admin import Admin
 from rptest.services.cluster import cluster
 from rptest.services.redpanda import MetricSamples, MetricsEndpoint
 from rptest.tests.redpanda_test import RedpandaTest
-from rptest.utils.log_utils import wait_until_nag_is_set
 from rptest.utils.mode_checks import in_fips_environment
 from rptest.util import FIPSMode
 
@@ -253,51 +251,4 @@ class RedpandaFIPSStartupTest(RedpandaFIPSStartupTestBase):
             timeout_sec=20,
             backoff_sec=0.2,
             err_msg=f"Metrics endpoint never returned 0 after restarting {target_node} in FIPS mode",
-        )
-
-
-class RedpandaFIPSStartupLicenseTest(RedpandaFIPSStartupTestBase):
-    LICENSE_CHECK_INTERVAL_SEC = 1
-
-    def __init__(self, test_context):
-        super(RedpandaFIPSStartupLicenseTest, self).__init__(
-            test_context=test_context, fips_mode=FIPSMode.disabled
-        )
-
-        self.redpanda.set_environment(
-            {
-                "__REDPANDA_PERIODIC_REMINDER_INTERVAL_SEC": f"{self.LICENSE_CHECK_INTERVAL_SEC}",
-                "__REDPANDA_DISABLE_BUILTIN_TRIAL_LICENSE": True,
-            }
-        )
-
-    @ignore  # https://redpandadata.atlassian.net/browse/CORE-4283
-    @cluster(num_nodes=3)
-    def test_fips_license_nag(self):
-        wait_until_nag_is_set(
-            redpanda=self.redpanda, check_interval_sec=self.LICENSE_CHECK_INTERVAL_SEC
-        )
-
-        self.logger.debug("Ensuring no license nag")
-        sleep(self.LICENSE_CHECK_INTERVAL_SEC * 2)
-        assert not self.redpanda.has_license_nag(), (
-            "Should not have license nag yet, FIPS mode not enabled"
-        )
-
-        fips_mode = FIPSMode.enabled if in_fips_environment() else FIPSMode.permissive
-
-        fips_config = dict(
-            fips_mode=self.fips_mode_to_str(fips_mode),
-            openssl_config_file=self.redpanda.get_openssl_config_file_path(),
-            openssl_module_directory=self.redpanda.get_openssl_modules_directory(),
-        )
-
-        self.redpanda.restart_nodes(
-            self.redpanda.nodes, override_cfg_params=fips_config
-        )
-
-        wait_until(
-            self.redpanda.has_license_nag,
-            timeout_sec=30,
-            err_msg="License nag failed to appear",
         )

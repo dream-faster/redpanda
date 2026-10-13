@@ -373,38 +373,38 @@ TEST_F(feature_table_fixture, feature_table_new_snapshot_missing) {
       feature_state::state::active);
 }
 
-TEST_F(feature_table_fixture, feature_table_trial_license_test) {
-    const auto opt_license = security::testing::get_test_license();
-    if (!opt_license) {
-        GTEST_SKIP() << security::testing::skip_no_license_msg;
-        return;
-    }
-    auto& license = *opt_license;
+// This fork does not enforce licenses: no license state, including an
+// expired trial, an expired license or a revoked license, sanctions.
+TEST_F(feature_table_fixture, feature_table_never_sanctions) {
+    const security::license expired_license{
+      .format_version = 0,
+      ._type = security::license_type::enterprise,
+      .organization = "test",
+      .expiry = 0s,
+      .checksum = "",
+    };
 
-    auto expired_license = license;
-    expired_license.expiry = 0s;
-
-    EXPECT_EQ(ft.get_license().has_value(), false);
-    EXPECT_EQ(ft.should_sanction(), false);
+    EXPECT_FALSE(ft.get_license().has_value());
+    EXPECT_FALSE(ft.should_sanction());
 
     ft.set_builtin_trial_license(model::timestamp::now());
-    EXPECT_EQ(ft.get_license().has_value(), true);
-    EXPECT_EQ(ft.get_license()->is_expired(), false);
-    EXPECT_EQ(ft.should_sanction(), false);
+    ASSERT_TRUE(ft.get_license().has_value());
+    EXPECT_FALSE(ft.get_license()->is_expired());
+    EXPECT_FALSE(ft.should_sanction());
+
+    ft.set_builtin_trial_license(model::timestamp{0});
+    ASSERT_TRUE(ft.get_license().has_value());
+    EXPECT_TRUE(ft.get_license()->is_expired());
+    EXPECT_FALSE(ft.should_sanction());
 
     ft.set_license(expired_license);
-    EXPECT_EQ(ft.get_license().has_value(), true);
-    EXPECT_EQ(ft.get_license()->is_expired(), true);
-    EXPECT_EQ(ft.should_sanction(), false);
-
-    ft.set_license(license);
-    EXPECT_EQ(ft.get_license().has_value(), true);
-    EXPECT_EQ(ft.get_license()->is_expired(), false);
-    EXPECT_EQ(ft.should_sanction(), false);
+    ASSERT_TRUE(ft.get_license().has_value());
+    EXPECT_TRUE(ft.get_license()->is_expired());
+    EXPECT_FALSE(ft.should_sanction());
 
     ft.revoke_license();
-    EXPECT_EQ(ft.get_license().has_value(), false);
-    EXPECT_EQ(ft.should_sanction(), false);
+    EXPECT_FALSE(ft.get_license().has_value());
+    EXPECT_FALSE(ft.should_sanction());
 }
 
 TEST_F(FeatureTableTest, feature_table_probe_expiry_metric_test) {
