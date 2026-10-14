@@ -382,7 +382,7 @@ if [[ $USER_BEFORE == true ]]; then
 fi
 rpk 0 security user delete mixed-user-2 >/dev/null || fail "delete a user on slim"
 for route in "GET /v1/usage" "GET /v1/debug/self_test/status" \
-  "GET /v1/debug/bundle"; do
+  "GET /v1/debug/bundle" "POST /redpanda.core.admin.v2.BrokerService/ListBrokers"; do
   # shellcheck disable=SC2086
   expect_removed_route 0 $route
 done
