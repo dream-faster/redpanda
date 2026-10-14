@@ -187,6 +187,11 @@ jobs:
           # cache useless. unity compiles each library as a few multi-file
           # translation units (see redpanda_cc_library in bazel/build.bzl);
           # scheduled-default-build.yml covers the default build.
+          #
+          # oci_image_contents is named as a target of its own because the
+          # next step copies its tarball out of bazel-bin. With a disk cache,
+          # Bazel only writes top-level outputs to disk, so a build made
+          # entirely of cache hits would otherwise leave no tarball behind.
           bazel \
             --output_base=/mnt/bazel-output \
             build \

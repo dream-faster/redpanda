@@ -276,13 +276,6 @@ public:
      */
     virtual std::optional<validation_error> validate(YAML::Node) const = 0;
 
-    /**
-     * Check whether a proposed new value is restricted before it has been
-     * assigned. Rejection logic should be accounted for at the call site.
-     */
-    virtual std::optional<validation_error>
-      check_restricted(YAML::Node) const = 0;
-
     /// Copy the configured value (pending if present, otherwise active)
     /// from another property of the same type into this property's active
     /// value. This is used when creating temporary config copies for

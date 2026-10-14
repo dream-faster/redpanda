@@ -11,23 +11,9 @@ redpanda_cc_gtest(
         "//src/v/features",
         "//src/v/model",
         "//src/v/security:license",
-        "//src/v/security/tests:utils",
+        "//src/v/serde",
         "//src/v/test_utils:gtest",
         "@googletest//:gtest",
         "@seastar",
-    ],
-)
-
-redpanda_cc_gtest(
-    name = "enterprise_features_test",
-    timeout = "short",
-    srcs = [
-        "enterprise_features_test.cc",
-    ],
-    deps = [
-        "//src/v/config",
-        "//src/v/features:enterprise_features",
-        "//src/v/test_utils:gtest",
-        "@googletest//:gtest",
     ],
 )

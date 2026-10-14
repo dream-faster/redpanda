@@ -188,8 +188,6 @@ private:
         return auth_state;
     }
 
-    void check_license(const ss::sstring& msg) const;
-
     void log_exception(
       const ss::sstring& url,
       const request_auth_result& auth_state,
@@ -483,10 +481,6 @@ private:
     /// Feature routes
     ss::future<ss::json::json_return_type>
       put_feature_handler(std::unique_ptr<ss::http::request>);
-    ss::future<ss::json::json_return_type>
-      put_license_handler(std::unique_ptr<ss::http::request>);
-    ss::future<ss::json::json_return_type>
-      get_enterprise_handler(std::unique_ptr<ss::http::request>);
 
     /// Broker routes
 

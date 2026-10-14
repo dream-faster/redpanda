@@ -56,7 +56,6 @@ redpanda_cc_library(
         "//src/v/base",
         "//src/v/container:chunked_hash_map",
         "//src/v/container:intrusive",
-        "//src/v/features:enterprise_feature_messages",
         "//src/v/json",
         "//src/v/model",
         "//src/v/net:tls",

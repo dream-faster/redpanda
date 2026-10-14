@@ -8,7 +8,6 @@
 # by the Apache License, Version 2.0
 
 
-from ducktape.mark import matrix
 from ducktape.utils.util import wait_until
 
 import rptest.services.kgo_verifier_services as kgo
@@ -547,18 +546,12 @@ class ShardPlacementTest(PreallocNodesTest):
         self.stop_client_load()
 
     @cluster(num_nodes=6)
-    @matrix(disable_license=[True, False])
-    def test_node_join(self, disable_license):
+    def test_node_join(self):
         self.redpanda.add_extra_rp_conf(
             {
                 "core_balancing_continuous": True,
             }
         )
-        if disable_license:
-            environment = dict(__REDPANDA_DISABLE_BUILTIN_TRIAL_LICENSE="1")
-        else:
-            environment = dict()
-        self.redpanda.set_environment(environment)
 
         seed_nodes = self.redpanda.nodes[0:3]
         joiner_nodes = self.redpanda.nodes[3:]
@@ -606,8 +599,6 @@ class ShardPlacementTest(PreallocNodesTest):
 
             return (True, shard_map)
 
-        # This fork does not enforce licenses: continuous core balancing works
-        # with or without one.
         shard_map_after_balance = wait_until_result(
             shard_rebalance_finished, timeout_sec=60, backoff_sec=2
         )

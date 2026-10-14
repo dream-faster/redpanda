@@ -325,21 +325,6 @@ redpanda_cc_gtest(
     ],
 )
 
-redpanda_cc_btest(
-    name = "metrics_reporter_test",
-    timeout = "short",
-    srcs = [
-        "metrics_reporter_test.cc",
-    ],
-    deps = [
-        "//src/v/cluster",
-        "//src/v/cluster:fwd",
-        "//src/v/cluster:types",
-        "//src/v/test_utils:seastar_boost",
-        "@boost//:test",
-    ],
-)
-
 redpanda_cc_gtest(
     name = "namespaced_cache_test",
     timeout = "short",
@@ -708,23 +693,6 @@ redpanda_cc_btest(
         "@boost//:test",
         "@fmt",
         "@seastar//:testing",
-    ],
-)
-
-redpanda_cc_gtest(
-    name = "crash_reporter_test",
-    timeout = "short",
-    srcs = [
-        "crash_reporter_test.cc",
-    ],
-    deps = [
-        "//src/v/cluster",
-        "//src/v/cluster:fwd",
-        "//src/v/cluster:types",
-        "//src/v/storage/tests:kvstore_fixture",
-        "//src/v/test_utils:gtest",
-        "@googletest//:gtest",
-        "@seastar",
     ],
 )
 

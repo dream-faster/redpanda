@@ -180,23 +180,47 @@ printf 'a:1\nb:2\na:3\n' | rpk_in 0 topic produce compacted -f '%k:%v\n' -p 0 >/
 rpk 0 topic consume plain -o start -n 50 -g upgrade-group -f '%v\n' >/dev/null ||
   fail "group commit"
 rpk 0 security user create upgrader -p secret >/dev/null 2>&1 || true
+# The slim build sends no telemetry, but a cluster may already carry this
+# setting in its controller log, and the Helm chart sets it on every sync.
+rpk 0 cluster config set enable_metrics_reporter false >/dev/null ||
+  fail "set enable_metrics_reporter on stock"
+# Stock derives the cluster UUID from the first controller batches and copies
+# it into cluster_id; the slim nodes must keep reporting the same identity.
+CLUSTER_ID=""
+for _ in $(seq 1 30); do
+  CLUSTER_ID=$(rpk 0 cluster config get cluster_id 2>/dev/null | tr -d '"[:space:]') || true
+  [[ -n $CLUSTER_ID && $CLUSTER_ID != null ]] && break
+  CLUSTER_ID=""
+  sleep 2
+done
+[[ -n $CLUSTER_ID ]] || fail "stock never set cluster_id"
+echo "-- cluster_id $CLUSTER_ID"
 sleep 15
 rpk 0 topic create after-snapshot -p 3 -r 3 >/dev/null || fail "create after-snapshot"
 for i in $(seq 1 50); do echo "s-$i"; done | rpk_in 0 topic produce after-snapshot -p 0 >/dev/null
 
 # Dedup index state only exists when the node being replaced already runs
-# dedup, so probe for the property instead of assuming it: upstream stock
-# rejects it, a predecessor built from this branch accepts it. Pass that
-# image as the baseline (docker-build's stock_image input) to exercise this.
+# dedup, so probe for the property instead of assuming it: a predecessor
+# built from this branch stores it, while upstream stock either rejects it
+# or, like v26.2.4, creates the topic and silently drops the property, so
+# check that it stuck. Pass a dedup build as the baseline (docker-build's
+# stock_image input) to exercise this.
 #
 # --acks=1 is deliberate. rpk's default --acks=-1 keeps franz-go's idempotent
 # producer, and the dedup filter bypasses idempotent and transactional produce
 # by design, so duplicates would sail through and the leg would assert nothing.
 # Only --acks=0 and --acks=1 disable idempotency, and --acks=0 gives no ack to
 # order the counts against.
+dedup_window_stuck() {
+  for _ in $(seq 1 5); do
+    expect_config 0 deduped redpanda.dedup.window.ms 3600000 >/dev/null && return 0
+    sleep 1
+  done
+  return 1
+}
 DEDUP=false
 if rpk 0 topic create deduped -p 1 -r 3 \
-  -c redpanda.dedup.window.ms=3600000 >/dev/null 2>&1; then
+  -c redpanda.dedup.window.ms=3600000 >/dev/null 2>&1 && dedup_window_stuck; then
   DEDUP=true
   printf 'k1:v1\nk2:v2\nk1:v3\n' |
     rpk_in 0 topic produce deduped --acks=1 -f '%k:%v\n' -p 0 >/dev/null ||
@@ -283,10 +307,35 @@ rpk 1 topic list | grep -q compacted || fail "compacted topic lost"
 rpk 0 cluster config get controller_snapshot_max_age_sec | grep -q '^5$' ||
   fail "cluster config lost"
 
+# expect_cluster_uuid <node>: the UUID slim serves is the one stock derived
+expect_cluster_uuid() {
+  local out
+  out=$(docker exec "$(name "$1")" curl -sf localhost:9644/v1/cluster/metrics_uuid) ||
+    fail "metrics_uuid from node $1"
+  grep -q "\"$CLUSTER_ID\"" <<<"$out" ||
+    fail "cluster UUID changed on node $1: stock $CLUSTER_ID, now $out"
+}
+
+echo "-- cluster identity, telemetry settings and license stubs on slim"
+expect_cluster_uuid 0
+[[ "$(rpk 0 cluster config get cluster_id | tr -d '"[:space:]')" == "$CLUSTER_ID" ]] ||
+  fail "cluster_id lost"
+# The deprecated telemetry settings are left out of the config schema, so rpk
+# refuses them; PUT them the way the Helm chart's sync job does.
+docker exec "$(name 0)" curl -sf -X PUT localhost:9644/v1/cluster_config \
+  -H 'Content-Type: application/json' \
+  -d '{"upsert": {"enable_metrics_reporter": false, "metrics_reporter_url": "https://example.invalid"}, "remove": []}' \
+  >/dev/null || fail "slim rejected the deprecated telemetry settings"
+rpk 0 cluster license set not-a-license >/dev/null || fail "license upload stub"
+license=$(rpk 0 cluster license info --format json) || fail "license info stub"
+grep -Eq '"license_status": ?"not_present"' <<<"$license" ||
+  fail "license info should report no license: $license"
+
 echo "== restart the slim cluster once more"
 for id in 0 1 2; do docker restart -t 60 "$(name "$id")" >/dev/null; done
 for id in 0 1 2; do wait_ready "$id" || fail "slim restart $id"; done
 got=$(count 2 plain 3)
 [[ $got == 200 ]] || fail "plain/3 has $got/200 after slim restart"
+expect_cluster_uuid 2
 
 echo "UPGRADE TEST OK"

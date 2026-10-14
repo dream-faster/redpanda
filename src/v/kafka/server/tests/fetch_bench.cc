@@ -287,7 +287,6 @@ struct fetch_bench_fixture : redpanda_thread_fixture {
         test_local_cfg.get("disable_cluster_recovery_loop_for_tests")
           .set_value(true);
         test_local_cfg.get("retention_local_strict").set_value(true);
-        test_local_cfg.get("enable_metrics_reporter").set_value(false);
 
         test_local_cfg.get("fetch_read_strategy")
           .set_value(model::fetch_read_strategy::non_polling);

@@ -148,27 +148,6 @@ void application::start_runtime_services(::stop_signal& app_signal) {
           .get();
     }
 
-    // Verify the enterprise license when trying to upgrade Redpanda.
-    // By this point during startup we have enough information to evaluate both
-    // the state of the license and what enterprise features are used.
-    // - If redpanda has been restarted on an existing node, we have already
-    //   loaded the feature table from the local snapshot via
-    //   application::maybe_apply_local_feature_table_snapshot and replayed
-    //   the local controller log in controller::start. We may also have
-    //   refreshed the feature table from a fresh controller snapshot
-    //   fetched via fetch_controller_snapshot in establish_cluster_view.
-    // - If this is a new node joining an existing cluster, by this point we
-    //   have received a controller snapshot from another node in the join
-    //   response and have replicated and replayed the the controller stm to the
-    //   last_applied offset received in the join_node_reply above.
-    controller->get_feature_manager()
-      .invoke_on(
-        cluster::feature_manager::backend_shard,
-        [](cluster::feature_manager& fm) {
-            return fm.verify_enterprise_license();
-        })
-      .get();
-
     _debug_bundle_service.invoke_on_all(&debug_bundle::service::start).get();
 
     if (!config::node().admin().empty()) {

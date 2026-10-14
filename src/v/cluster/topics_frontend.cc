@@ -35,7 +35,6 @@
 #include "cluster/types.h"
 #include "config/configuration.h"
 #include "config/leaders_preference.h"
-#include "features/enterprise_feature_messages.h"
 #include "features/feature_table.h"
 #include "model/errc.h"
 #include "model/fundamental.h"
@@ -62,47 +61,6 @@
 #include <system_error>
 
 namespace {
-
-std::vector<std::string_view>
-get_enterprise_features(const cluster::topic_configuration& cfg) {
-    std::vector<std::string_view> features;
-
-    // We are always enforcing leadership preference restrictions
-    if (
-      const auto& leaders_pref = cfg.properties.leaders_preference;
-      leaders_pref.has_value()
-      && config::shard_local_cfg().default_leaders_preference.check_restricted(
-        leaders_pref.value())) {
-        features.emplace_back("leadership pinning");
-    }
-
-    return features;
-}
-
-std::vector<std::string_view> get_enterprise_features(
-  const cluster::metadata_cache& metadata,
-  const cluster::topic_properties_update& update) {
-    auto tp_metadata = metadata.get_topic_metadata_ref(update.tp_ns);
-    if (!tp_metadata.has_value()) {
-        // Topic does not exist, nothing to validate
-        return {};
-    }
-
-    const auto& properties = tp_metadata->get().get_configuration().properties;
-    auto updated_properties = cluster::topic_table::update_topic_properties(
-      properties, {update.tp_ns, update.properties});
-
-    std::vector<std::string_view> features;
-
-    if (
-      const auto& updated_pref = updated_properties.leaders_preference;
-      updated_pref != properties.leaders_preference && updated_pref.has_value()
-      && config::shard_local_cfg().default_leaders_preference.check_restricted(
-        updated_pref.value())) {
-        features.emplace_back("leadership pinning");
-    }
-    return features;
-}
 
 cluster::simple_allocation_request make_simple_allocation_request(
   const cluster::custom_assignable_topic_configuration& ca_cfg,
@@ -174,7 +132,6 @@ topics_frontend::topics_frontend(
   ss::sharded<partition_manager>& pm,
   ss::sharded<shard_table>& shard_table,
   ss::sharded<shard_balancer>& sb,
-  metadata_cache& metadata_cache,
   config::binding<unsigned> hard_max_disk_usage_ratio,
   config::binding<int16_t> minimum_topic_replication,
   config::binding<bool> partition_autobalancing_topic_aware,
@@ -189,7 +146,6 @@ topics_frontend::topics_frontend(
   , _as(as)
   , _features(features)
   , _shard_balancer(sb)
-  , _metadata_cache(metadata_cache)
   , _members_table(members_table)
   , _pm(pm)
   , _shard_table(shard_table)
@@ -311,21 +267,6 @@ topics_frontend::update_topic_properties(
 
         auto results = co_await ssx::parallel_transform<chunked_vector>(
           std::move(updates), [this, timeout](topic_properties_update update) {
-              if (
-                _features.local().should_sanction()
-                && is_user_topic(update.tp_ns)) {
-                  if (
-                    auto f = get_enterprise_features(_metadata_cache, update);
-                    !f.empty()) {
-                      auto msg
-                        = features::enterprise_error_message::topic_property(f);
-                      vlog(clusterlog.warn, "{}", msg);
-                      return ss::make_ready_future<topic_result>(topic_result(
-                        update.tp_ns,
-                        errc::topic_invalid_config,
-                        std::move(msg)));
-                  }
-              }
               return do_update_topic_properties(std::move(update), timeout);
           });
 
@@ -460,17 +401,6 @@ topic_result topics_frontend::validate_topic_configuration(
             }
         }
     }
-    if (
-      _features.local().should_sanction()
-      && is_user_topic(assignable_config.cfg.tp_ns)) {
-        if (
-          auto f = get_enterprise_features(assignable_config.cfg); !f.empty()) {
-            auto msg = features::enterprise_error_message::topic_property(f);
-            vlog(clusterlog.warn, "{}", msg);
-            return make_result(errc::topic_invalid_config, std::move(msg));
-        }
-    }
-
     return make_result(errc::success);
 }
 
@@ -1294,15 +1224,6 @@ ss::future<topic_result> topics_frontend::do_create_partition(
     }
     if (_topics.local().is_fully_disabled(p_cfg.tp_ns)) {
         co_return make_error_result(p_cfg.tp_ns, errc::topic_disabled);
-    }
-
-    if (_features.local().should_sanction() && is_user_topic(tp_cfg->tp_ns)) {
-        if (auto f = get_enterprise_features(*tp_cfg); !f.empty()) {
-            auto msg = features::enterprise_error_message::create_partition(f);
-            vlog(clusterlog.warn, "{}", msg);
-            co_return make_error_result(
-              p_cfg.tp_ns, errc::topic_invalid_config, std::move(msg));
-        }
     }
 
     std::optional<node2count_t> existing_replica_counts;

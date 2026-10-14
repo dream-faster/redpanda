@@ -391,12 +391,6 @@ class MigrationAction(Enum):
     cancel = "cancel"
 
 
-class EnterpriseLicenseStatus(Enum):
-    valid = "valid"
-    expired = "expired"
-    not_present = "not_present"
-
-
 class DebugBundleEncoder(json.JSONEncoder):
     """
     DebugBundleEncoder is a custom JSON encoder that extends the default JSONEncoder
@@ -941,27 +935,6 @@ class Admin:
         return self._request(
             "GET", "features/license", node=node, timeout=timeout
         ).json()
-
-    @staticmethod
-    def is_sample_license(resp: dict[str, Any]) -> bool:
-        """
-        Returns true if the given response to a `get_license` request returned the same license as the sample license
-        configured in `sample_license` ("REDPANDA_SAMPLE_LICENSE" env var). Returns false for the built in evaluation
-        period license and the second sample license 'REDPANDA_SECOND_SAMPLE_LICENSE'.
-        """
-        # NOTE: the initial implementation of the get license endpoint (before v22.3) didn't return the sha256.
-        # We could remove those old tests, but it's simpler to use the type and the org to detect the installed
-        # license instead.
-
-        # REDPANDA_SAMPLE_LICENSE: {'loaded': True, 'license': {'format_version': 0, 'org': 'redpanda-testing', 'type': 'enterprise', 'expires': 4813252273, 'sha256': '2730125070a934ca1067ed073d7159acc9975dc61015892308aae186f7455daf'}}
-        # REDPANDA_SECOND_SAMPLE_LICENSE: {'loaded': True, 'license': {'format_version': 0, 'org': 'redpanda-testing-2', 'type': 'enterprise', 'expires': 4827156118, 'sha256': '54240716865c1196fa6bd0ebb31821ab69160a3ed312b13bc810c17c9ec8852c'}}
-        # Evaluation Period: {'loaded': True, 'license': {'format_version': 0, 'org': 'Redpanda Built-In Evaluation Period', 'type': 'free_trial', 'expires': 1733992567, 'sha256': ''}}
-
-        return (
-            resp.get("license", None) is not None
-            and resp["license"]["type"] == "enterprise"
-            and resp["license"]["org"] == "redpanda-testing"
-        )
 
     def put_license(self, license: str, node: MaybeNode = None):
         return self._request("PUT", "features/license", data=license, node=node)

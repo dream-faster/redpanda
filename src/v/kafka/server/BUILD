@@ -268,7 +268,6 @@ redpanda_cc_library(
         "//src/v/cluster:simple_batch_builder",
         "//src/v/cluster:topic_metrics_watcher",
         "//src/v/cluster:tx_errc",
-        "//src/v/features:enterprise_feature_messages",
     ],
     visibility = ["//visibility:public"],
     deps = [

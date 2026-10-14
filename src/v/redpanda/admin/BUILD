@@ -1,91 +1,37 @@
 load("//bazel:build.bzl", "redpanda_cc_library")
-load("//bazel/thirdparty:seastar.bzl", "seastar_cc_swagger_library")
+load("//bazel/thirdparty:seastar.bzl", "seastar_cc_swagger_libraries")
 
-seastar_cc_swagger_library(
-    name = "broker",
-    src = "api-doc/broker.json",
-)
-
-seastar_cc_swagger_library(
-    name = "cluster",
-    src = "api-doc/cluster.json",
-)
-
-seastar_cc_swagger_library(
-    name = "cluster_config",
-    src = "api-doc/cluster_config.json",
-    definitions = [
-        "api-doc/cluster_config.def.json",
-    ],
-)
-
-seastar_cc_swagger_library(
-    name = "config",
-    src = "api-doc/config.json",
-    definitions = [
-        "api-doc/config.def.json",
-    ],
-)
-
-seastar_cc_swagger_library(
-    name = "debug",
-    src = "api-doc/debug.json",
-)
-
-seastar_cc_swagger_library(
-    name = "features",
-    src = "api-doc/features.json",
-)
-
-seastar_cc_swagger_library(
-    name = "hbadger",
-    src = "api-doc/hbadger.json",
-)
-
-seastar_cc_swagger_library(
-    name = "partition",
-    src = "api-doc/partition.json",
-)
-
-seastar_cc_swagger_library(
-    name = "raft",
-    src = "api-doc/raft.json",
-)
-
-seastar_cc_swagger_library(
-    name = "recovery",
-    src = "api-doc/recovery.json",
-)
-
-seastar_cc_swagger_library(
-    name = "security",
-    src = "api-doc/security.json",
-    definitions = [
-        "api-doc/security.def.json",
-    ],
-)
-
-seastar_cc_swagger_library(
-    name = "status",
-    src = "api-doc/status.json",
-)
-
-seastar_cc_swagger_library(
-    name = "transaction",
-    src = "api-doc/transaction.json",
-)
-
-seastar_cc_swagger_library(
-    name = "usage",
-    src = "api-doc/usage.json",
-)
-
-seastar_cc_swagger_library(
-    name = "debug_bundle",
-    src = "api-doc/debug_bundle.json",
-    definitions = [
-        "api-doc/debug_bundle.def.json",
-    ],
+seastar_cc_swagger_libraries(
+    name = "api_doc",
+    apis = {
+        "broker": {"src": "api-doc/broker.json"},
+        "cluster": {"src": "api-doc/cluster.json"},
+        "cluster_config": {
+            "definitions": ["api-doc/cluster_config.def.json"],
+            "src": "api-doc/cluster_config.json",
+        },
+        "config": {
+            "definitions": ["api-doc/config.def.json"],
+            "src": "api-doc/config.json",
+        },
+        "debug": {"src": "api-doc/debug.json"},
+        "features": {"src": "api-doc/features.json"},
+        "hbadger": {"src": "api-doc/hbadger.json"},
+        "partition": {"src": "api-doc/partition.json"},
+        "raft": {"src": "api-doc/raft.json"},
+        "recovery": {"src": "api-doc/recovery.json"},
+        "security": {
+            "definitions": ["api-doc/security.def.json"],
+            "src": "api-doc/security.json",
+        },
+        "status": {"src": "api-doc/status.json"},
+        "transaction": {"src": "api-doc/transaction.json"},
+        "usage": {"src": "api-doc/usage.json"},
+        "debug_bundle": {
+            "definitions": ["api-doc/debug_bundle.def.json"],
+            "src": "api-doc/debug_bundle.json",
+        },
+    },
 )
 
 redpanda_cc_library(
@@ -256,7 +202,6 @@ redpanda_cc_library(
         "//src/v/cluster:topic_metrics_watcher",
         "//src/v/cluster:tx_manager_migrator_rpc",
         "//src/v/cluster:types",
-        "//src/v/features:enterprise_feature_messages",
         "//src/v/utils:uuid",
     ],
     visibility = ["//visibility:public"],
@@ -301,7 +246,6 @@ redpanda_cc_library(
         "//src/v/debug_bundle:json",
         "//src/v/debug_bundle:types",
         "//src/v/features",
-        "//src/v/features:enterprise_features",
         "//src/v/finjector",
         "//src/v/json",
         "//src/v/kafka/client:config_utils",

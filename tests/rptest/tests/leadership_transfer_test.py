@@ -971,74 +971,7 @@ class LeadershipPinningTest(RedpandaTest):
 
     @cluster(num_nodes=6, log_allow_list=RESTART_LOG_ALLOW_LIST)
     @matrix(ordering=[Ordering.ordered, Ordering.unordered])
-    def test_leadership_pinning_reporting(self, ordering: Ordering):
-        config = LeaderPinningConfig(ordering)
-        for ix, node in enumerate(self.redpanda.nodes):
-            self.redpanda.set_extra_node_conf(
-                node,
-                {
-                    "rack": self.rack_layout[ix],
-                },
-            )
-
-        rpk = RpkTool(self.redpanda)
-        admin = Admin(self.redpanda)
-
-        def get_leadership_pinning_status():
-            features = admin.get_enterprise_features().json()["features"]
-            for f in features:
-                if f["name"] == "leadership_pinning":
-                    return f["enabled"]
-
-        # no default leaders preference and no topic leaders preference
-        self.redpanda.start()
-        rpk.create_topic("foo", partitions=60, replicas=3)
-
-        assert not get_leadership_pinning_status(), (
-            "Leadership pinning reported enabled while is it disabled"
-        )
-
-        # no default leaders preference and no topic leaders preference
-        # but topic leaders preference is defined
-        self.redpanda.start()
-        rpk.create_topic(
-            "foo",
-            partitions=60,
-            replicas=3,
-            config={"redpanda.leaders.preference": "none"},
-        )
-
-        assert not get_leadership_pinning_status(), (
-            "Leadership pinning reported enabled while is it disabled"
-        )
-
-        # topic leaders preference defined
-        self.redpanda.start()
-        rpk.create_topic(
-            "foo",
-            partitions=60,
-            replicas=3,
-            config={"redpanda.leaders.preference": f"{config.preference_str}: C"},
-        )
-
-        assert get_leadership_pinning_status(), (
-            "Leadership pinning reported disabled while is it enabled"
-        )
-
-        # default leaders preference defined as A
-        self.redpanda.start()
-        self.redpanda.set_cluster_config(
-            {"default_leaders_preference": f"{config.preference_str}: A"}
-        )
-        rpk.create_topic("foo", partitions=60, replicas=3)
-
-        assert get_leadership_pinning_status(), (
-            "Leadership pinning reported disabled while is it enabled"
-        )
-
-    @cluster(num_nodes=6, log_allow_list=RESTART_LOG_ALLOW_LIST)
-    @matrix(ordering=[Ordering.ordered, Ordering.unordered])
-    def test_leadership_pinning_without_license(self, ordering: Ordering):
+    def test_leadership_pinning_after_restart(self, ordering: Ordering):
         config = LeaderPinningConfig(ordering)
         for ix, node in enumerate(self.redpanda.nodes):
             self.redpanda.set_extra_node_conf(
@@ -1080,9 +1013,6 @@ class LeadershipPinningTest(RedpandaTest):
             timeout_sec=90,
         )
 
-        # restart redpanda without an active license
-        environment = dict(__REDPANDA_DISABLE_BUILTIN_TRIAL_LICENSE="1")
-        self.redpanda.set_environment(environment)
         self.redpanda.restart_nodes(self.redpanda.nodes)
 
         # validate cluster and topic state
@@ -1096,8 +1026,6 @@ class LeadershipPinningTest(RedpandaTest):
             f"Failed to load topic's preferences on restart. Got '{topic_config}'."
         )
 
-        # This fork does not enforce licenses: leadership preferences are
-        # still honoured without one.
         self.wait_for_racks(
             partition_counts,
             {
