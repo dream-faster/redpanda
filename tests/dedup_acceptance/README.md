@@ -31,6 +31,10 @@ pytest --image <image-under-test> [--old-image <earlier-dedup-build>] [--require
 Brokers run on the host network, so docker must allow `--network host`. A
 node's ports are `port_base + 10 * node_id + {2: kafka, 4: admin, 5: rpc}`.
 
+`test_bench.py` (opt-in with `--bench`) measures what dedup costs end to
+end; results and the per-record microbenchmark are in
+[BENCHMARK.md](BENCHMARK.md).
+
 ## What is covered
 
 | module | scenarios |
