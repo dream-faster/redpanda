@@ -43,10 +43,11 @@ What changed in this PR, per record:
   whole index (hundreds of milliseconds at the shard limit, on every segment
   roll).
 
-The index itself takes 50 bytes an entry at a million entries (measured by
-`dedup_snapshot_stall_test`, which checks that this plus the 24-byte packed
-snapshot entry fits the 80 bytes per entry the shard budget turns memory
-into entries with).
+The index itself takes about 24 bytes an entry at a million entries, down
+from 50 with the general-purpose hash map it used before (measured by
+`dedup_snapshot_stall_test`, which checks that this plus the 20-byte packed
+snapshot entry fits the 48 bytes per entry the shard budget turns memory into
+entries with).
 
 ## End to end: `test_bench.py`
 

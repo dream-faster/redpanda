@@ -242,6 +242,17 @@ redpanda_cc_library(
 )
 
 redpanda_cc_library(
+    name = "dedup_compact_index",
+    srcs = [
+        "dedup_compact_index.cc",
+    ],
+    hdrs = [
+        "dedup_compact_index.h",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+redpanda_cc_library(
     name = "topic_memory_per_partition_default",
     hdrs = [
         "scheduling/topic_memory_per_partition_default.h",
@@ -1627,6 +1638,7 @@ redpanda_cc_library(
         ":commands",
         ":controller_log_limiter",
         ":controller_snapshot",
+        ":dedup_compact_index",
         ":dedup_index_limits",
         ":distributed_kv_stm",
         ":drain_status",

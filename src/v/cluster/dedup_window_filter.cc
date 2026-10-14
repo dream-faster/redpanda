@@ -24,6 +24,10 @@
 
 namespace cluster {
 
+static_assert(
+  MAX_DEDUP_MAX_ENTRIES_PER_PARTITION <= dedup_compact_index::max_size,
+  "the index's positions must cover the largest configurable ceiling");
+
 dedup_identity_digest dedup_digest_of(const iobuf& identity) {
     dedup_digester digester;
     for (const auto& frag : identity) {
@@ -37,7 +41,7 @@ dedup_window_filter::dedup_window_filter(
   size_t max_entries,
   ss::lw_shared_ptr<dedup_shard_budget> shard_budget)
   : _window(window)
-  , _max_entries(max_entries)
+  , _max_entries(std::min(max_entries, dedup_compact_index::max_size))
   , _shard_budget(std::move(shard_budget)) {
     if (_shard_budget) {
         _shard_budget->filters.push_back(this);
@@ -109,13 +113,13 @@ void dedup_window_filter::sync_shard_budget() {
     }
     // A restore in progress counts as the entries it is going to hold, so the
     // room it was granted stays its own while it fills it.
-    const auto size = std::max(_map.size(), _budget_reserved);
+    const auto size = std::max(_index.size(), _budget_reserved);
     _shard_budget->entries = _shard_budget->entries - _budget_accounted + size;
     _budget_accounted = size;
 }
 
 bool dedup_window_filter::at_capacity() const {
-    if (_map.size() >= _max_entries) {
+    if (_index.size() >= _max_entries) {
         return true;
     }
     return _shard_budget
@@ -123,7 +127,7 @@ bool dedup_window_filter::at_capacity() const {
 }
 
 bool dedup_window_filter::over_own_soft_limit() const {
-    return _map.size()
+    return _index.size()
            >= soft_limit_of(_max_entries, capacity_soft_margin_divisor);
 }
 
@@ -141,10 +145,10 @@ bool dedup_window_filter::among_the_largest() const {
     if (largest == nullptr || largest == this) {
         return true;
     }
-    const auto largest_size = largest->_map.size();
+    const auto largest_size = largest->_index.size();
     const auto margin = std::max<size_t>(
       1, largest_size / capacity_soft_margin_divisor);
-    return largest_size <= _map.size() + margin;
+    return largest_size <= _index.size() + margin;
 }
 
 bool dedup_window_filter::over_shard_soft_limit() const {
@@ -162,7 +166,28 @@ model::timestamp broker_now() {
         .count()};
 }
 
+int64_t saturating_sub(int64_t a, int64_t b) {
+    int64_t r{};
+    if (__builtin_sub_overflow(a, b, &r)) [[unlikely]] {
+        return b < 0 ? std::numeric_limits<int64_t>::max()
+                     : std::numeric_limits<int64_t>::min();
+    }
+    return r;
+}
+
+/// Whether two timestamps are at most \p window apart. Either can be at the
+/// extremes of int64: the index reads an expired entry as its minimum, and
+/// client timestamps saturate.
+bool within_window(int64_t a, int64_t b, int64_t window) {
+    const auto diff = static_cast<__int128>(a) - b;
+    return diff >= -window && diff <= window;
+}
+
 } // namespace
+
+int64_t dedup_window_filter::expiry_cutoff() const {
+    return saturating_sub(_max_ts.value(), _window.count());
+}
 
 model::timestamp
 dedup_window_filter::clamp_to_broker_time(model::timestamp ts) {
@@ -189,11 +214,12 @@ bool dedup_window_filter::is_duplicate(
   dedup_identity_digest identity,
   model::timestamp ts,
   dedup_request_undo* undo) {
-    auto it = _map.find(identity);
-    if (it != _map.end()) {
-        auto stored_ts = it->second;
-        auto diff_ms = ts.value() - stored_ts.value();
-        if (diff_ms >= -_window.count() && diff_ms <= _window.count()) {
+    const auto pos = _index.find(identity);
+    if (pos != dedup_compact_index::npos) {
+        const auto stored_ts = model::timestamp{_index.timestamp_at(pos)};
+        if (
+          stored_ts.value() != dedup_compact_index::expired
+          && within_window(ts.value(), stored_ts.value(), _window.count())) {
             ++_dropped_records;
             return true;
         }
@@ -203,12 +229,15 @@ bool dedup_window_filter::is_duplicate(
         // below what a later deterministic apply() would compute for the
         // same identity.
         if (ts.value() > stored_ts.value()) {
-            it->second = ts;
+            _index.set_timestamp_at(pos, ts.value());
         }
         if (undo) {
+            // What the index holds now, which is what a revert compares
+            // against: a write the index could only store as expired reads
+            // back as expired.
             undo->entries.push_back(
               {.identity = identity,
-               .applied_timestamp = it->second,
+               .applied_timestamp = model::timestamp{_index.timestamp_at(pos)},
                .previous_timestamp = stored_ts});
         }
         return false;
@@ -219,18 +248,20 @@ bool dedup_window_filter::is_duplicate(
     // must match or replicas drift. See populate().
     sweep_step(sweep_budget);
     if (
-      at_capacity() && !take_room_from_largest(ts) && !make_room_for_one(ts)) {
-        // The bounded step found nothing freeable. The record is admitted but
-        // this identity is not remembered.
+      (at_capacity() && !take_room_from_largest(ts) && !make_room_for_one(ts))
+      || !_index.push_back(identity, ts.value())) {
+        // The bounded step found nothing freeable, or the index's table could
+        // not take the identity. The record is admitted but this identity is
+        // not remembered.
         ++_unindexed_records;
         return false;
     }
-    _map.emplace(identity, ts);
     sync_shard_budget();
     if (undo) {
         undo->entries.push_back(
           {.identity = identity,
-           .applied_timestamp = ts,
+           .applied_timestamp = model::timestamp{_index.timestamp_at(
+             _index.size() - 1)},
            .previous_timestamp = std::nullopt});
     }
     return false;
@@ -401,16 +432,18 @@ void dedup_window_filter::revert_request(const dedup_request_undo& undo) {
     // unwind correctly: the last entry restores the state the previous entry
     // wrote, and the first entry restores the pre-request state.
     for (const auto& entry : undo.entries | std::ranges::views::reverse) {
-        auto it = _map.find(entry.identity);
-        if (it == _map.end() || it->second != entry.applied_timestamp) {
+        const auto pos = _index.find(entry.identity);
+        if (
+          pos == dedup_compact_index::npos
+          || _index.timestamp_at(pos) != entry.applied_timestamp.value()) {
             // A later request overwrote (or evicted) this key; its state wins.
             continue;
         }
         if (entry.previous_timestamp) {
-            it->second = *entry.previous_timestamp;
+            _index.set_timestamp_at(pos, entry.previous_timestamp->value());
         } else {
-            note_erase(static_cast<size_t>(std::distance(_map.begin(), it)));
-            _map.erase(it);
+            note_erase(pos);
+            _index.erase_at(pos);
         }
     }
     sync_shard_budget();
@@ -435,26 +468,26 @@ void dedup_window_filter::populate(
     // That costs this path the single-probe try_emplace it used to do for a
     // new identity: a miss is now a find plus an emplace. Determinism between
     // leader and follower is worth more than the probe.
-    auto it = _map.find(identity);
-    if (it != _map.end()) {
-        if (ts.value() > it->second.value()) {
-            it->second = ts;
+    const auto pos = _index.find(identity);
+    if (pos != dedup_compact_index::npos) {
+        if (ts.value() > _index.timestamp_at(pos)) {
+            _index.set_timestamp_at(pos, ts.value());
         }
         return;
     }
     sweep_step(sweep_budget);
     if (
-      at_capacity() && !take_room_from_largest(ts) && !make_room_for_one(ts)) {
+      (at_capacity() && !take_room_from_largest(ts) && !make_room_for_one(ts))
+      || !_index.push_back(identity, ts.value())) {
         ++_unindexed_records;
         return;
     }
-    _map.emplace(identity, ts);
     sync_shard_budget();
 }
 
 void dedup_window_filter::erase_at(size_t index) {
     note_erase(index);
-    _map.erase(_map.begin() + static_cast<std::ptrdiff_t>(index));
+    _index.erase_at(index);
     sync_shard_budget();
 }
 
@@ -462,7 +495,7 @@ void dedup_window_filter::note_erase(size_t index) {
     if (_walks.empty()) [[likely]] {
         return;
     }
-    const size_t last = _map.size() - 1;
+    const size_t last = _index.size() - 1;
     if (index == last) {
         // Nothing moves.
         return;
@@ -471,8 +504,9 @@ void dedup_window_filter::note_erase(size_t index) {
         // The entry at `last` moves to `index`. It needs recording only when
         // the walk has passed `index` but has not emitted `last` yet.
         if (index < walk->cursor && last >= walk->cursor) {
-            const auto& [identity, timestamp] = _map.values()[last];
-            walk->displaced.push_back({identity, timestamp});
+            walk->displaced.push_back(
+              {_index.identity_at(last),
+               model::timestamp{_index.timestamp_at(last)}});
         }
     }
 }
@@ -500,12 +534,13 @@ void dedup_window_filter::begin_pass() {
     // of a long window. Measured against the whole window it would fall into
     // a handful of buckets, and whole buckets are all the cutoff can take, so
     // it would mark far less than a quarter -- or nothing -- for trimming.
-    const int64_t window_lo = _max_ts.value()
-                              - std::max<int64_t>(_window.count(), 0);
+    const int64_t window_lo = saturating_sub(
+      _max_ts.value(), std::max<int64_t>(_window.count(), 0));
     _pass_lo = _pass_oldest == no_pass_oldest
                  ? window_lo
                  : std::max(window_lo, std::min(_pass_oldest, _max_ts.value()));
-    _pass_span = _max_ts.value() - _pass_lo;
+    _pass_span = std::max<int64_t>(
+      saturating_sub(_max_ts.value(), _pass_lo), 0);
     _pass_width = _pass_span / static_cast<int64_t>(capacity_evict_buckets - 1)
                   + 1;
     _pass_oldest = no_pass_oldest;
@@ -533,7 +568,7 @@ void dedup_window_filter::finish_pass() {
 }
 
 void dedup_window_filter::sweep_step(size_t budget) {
-    const int64_t expiry_cutoff = _max_ts.value() - _window.count();
+    const int64_t cutoff = expiry_cutoff();
     // Only the largest indices trim themselves under shard pressure. If every
     // inserting partition trimmed itself instead, a small busy one would keep
     // shrinking while an idle one that filled the budget kept it all. Whether
@@ -545,11 +580,11 @@ void dedup_window_filter::sweep_step(size_t budget) {
                               && among_the_largest();
 
     for (size_t step = 0; step < budget; ++step) {
-        if (_map.empty()) {
+        if (_index.empty()) {
             _sweep_pos = 0;
             return;
         }
-        if (_sweep_pos >= _map.size()) {
+        if (_sweep_pos >= _index.size()) {
             // The cursor reached the end, so the histogram it accumulated now
             // covers the index: turn it into the next cutoff, and wrap. An
             // erase elsewhere can also leave the cursor past the end, which
@@ -559,8 +594,8 @@ void dedup_window_filter::sweep_step(size_t budget) {
             finish_pass();
         }
         ++_sweep_visits;
-        const auto stamp = _map.values()[_sweep_pos].second;
-        if (stamp.value() < expiry_cutoff) {
+        const auto stamp = model::timestamp{_index.timestamp_at(_sweep_pos)};
+        if (!is_live(stamp.value(), cutoff)) {
             // Expired: it can never match again, so dropping it costs no
             // coverage. The cursor does not advance -- the erase moved the
             // array's last, still unvisited, entry into this slot.
@@ -583,14 +618,16 @@ void dedup_window_filter::sweep_step(size_t budget) {
     }
 }
 
-void dedup_window_filter::count_in_pass(model::timestamp stamp) {
+void dedup_window_filter::count_in_pass(model::timestamp stamp, size_t times) {
     // restore() can clamp _max_ts below an entry's own timestamp, and the
     // frame is a pass old, so an offset outside the window is reachable.
-    const auto offset = std::clamp<int64_t>(
-      stamp.value() - _pass_lo, 0, _pass_span);
-    ++_pass_counts[static_cast<size_t>(offset / _pass_width)];
-    ++_pass_visited;
-    _pass_oldest = std::min(_pass_oldest, stamp.value());
+    const auto offset = static_cast<int64_t>(std::clamp<__int128>(
+      static_cast<__int128>(stamp.value()) - _pass_lo, 0, _pass_span));
+    _pass_counts[static_cast<size_t>(offset / _pass_width)] += times;
+    _pass_visited += times;
+    if (times > 0) {
+        _pass_oldest = std::min(_pass_oldest, stamp.value());
+    }
 }
 
 bool dedup_window_filter::make_room_for_one(model::timestamp incoming) {
@@ -602,8 +639,8 @@ bool dedup_window_filter::make_room_for_one(model::timestamp incoming) {
     ++_capacity_sweeps;
     sweep_step(capacity_emergency_budget);
     if (
-      at_capacity() && _shard_budget && _map.size() < _max_entries
-      && !_map.empty()) {
+      at_capacity() && _shard_budget && _index.size() < _max_entries
+      && !_index.empty()) {
         replace_oldest_visited(incoming);
     }
     return !at_capacity();
@@ -627,7 +664,7 @@ void dedup_window_filter::replace_oldest_visited(model::timestamp incoming) {
     // CapacityEvictionFailsOpenWhenNoSliceCanBeFreed), and only an entry
     // strictly older than the incoming one is replaced, so an index whose
     // entries all share the incoming timestamp keeps them.
-    if (_sweep_pos >= _map.size()) {
+    if (_sweep_pos >= _index.size()) {
         // The step ended with the cursor at the end, so there is nothing ahead
         // of it in this pass. Wrap as the next step would, and look at the
         // start of the next pass instead: on a small index that is every
@@ -645,19 +682,19 @@ void dedup_window_filter::replace_oldest_visited(model::timestamp incoming) {
           _shard_budget->entries - _shard_budget->max_entries + 1,
           capacity_emergency_budget);
     }
-    for (; need > 0 && _sweep_pos < _map.size(); --need) {
+    for (; need > 0 && _sweep_pos < _index.size(); --need) {
         const auto begin = _sweep_pos;
         const auto end = std::min(
-          begin + capacity_emergency_budget, _map.size());
+          begin + capacity_emergency_budget, _index.size());
         std::optional<size_t> oldest;
         for (size_t i = begin; i < end; ++i) {
             if (
               !oldest
-              || _map.values()[i].second < _map.values()[*oldest].second) {
+              || _index.timestamp_at(i) < _index.timestamp_at(*oldest)) {
                 oldest = i;
             }
         }
-        if (!oldest || !(_map.values()[*oldest].second < incoming)) {
+        if (!oldest || !(_index.timestamp_at(*oldest) < incoming.value())) {
             return;
         }
         erase_at(*oldest);
@@ -667,7 +704,7 @@ void dedup_window_filter::replace_oldest_visited(model::timestamp incoming) {
 
 bool dedup_window_filter::take_room_from_largest(model::timestamp incoming) {
     if (
-      !_shard_budget || _map.size() >= _max_entries
+      !_shard_budget || _index.size() >= _max_entries
       || _shard_budget->entries < _shard_budget->max_entries) {
         // Without a shard budget, at its own ceiling, or with the shard not
         // full, the room this index needs can only come from itself.
@@ -696,7 +733,7 @@ bool dedup_window_filter::take_room_from_largest(model::timestamp incoming) {
 
 dedup_index_snapshot dedup_window_filter::snapshot() const {
     dedup_index_snapshot result{.max_timestamp = _max_ts};
-    result.entries.reserve(_map.size());
+    result.entries.reserve(_index.size());
     for_each_live_entry(
       [&result](dedup_identity_digest identity, model::timestamp timestamp) {
           result.entries.push_back({identity, timestamp});
@@ -723,7 +760,7 @@ size_t dedup_window_filter::begin_restore(size_t count) {
     // Assigned rather than cleared, so a restore that keeps fewer entries than
     // the index held does not inherit its bucket array.
     invalidate_walks();
-    _map = {};
+    _index = {};
     sync_shard_budget();
     stop_being_largest();
     // Bounded by the shard's headroom as well as by this partition's ceiling.
@@ -751,7 +788,7 @@ size_t dedup_window_filter::begin_restore(size_t count) {
     // unindexed.
     _budget_reserved = keep;
     sync_shard_budget();
-    _map.reserve(keep);
+    _index.reserve(keep);
     return keep;
 }
 
@@ -789,14 +826,11 @@ void dedup_window_filter::finish_restore(size_t truncated) {
 }
 
 void dedup_window_filter::clear() {
-    // Assigned rather than cleared: this is a dense map, so clear() keeps the
-    // bucket array and value storage it had grown to -- tens of MiB at the
-    // default entry ceiling. The callers that reach here (dedup disabled, a
-    // generation change, a discarded or applied raft snapshot) all want that
-    // memory back. restore() keeps using clear(), since it refills
-    // immediately and the capacity is worth keeping there.
+    // Assigned rather than cleared, so the memory goes back: the callers that
+    // reach here (dedup disabled, a generation change, a discarded or applied
+    // raft snapshot) all want it back.
     invalidate_walks();
-    _map = {};
+    _index = {};
     _budget_reserved = 0;
     sync_shard_budget();
     stop_being_largest();

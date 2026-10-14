@@ -129,7 +129,7 @@ Guarantees:
   separately in `capacity_evicted_entries`: non-zero there means the effective
   window is narrower than the configured one.
   A snapshot carrying more identities than this broker's ceiling is reduced to
-  the **most recent** ones, not to a prefix: the index is a dense hash map
+  the **most recent** ones, not to a prefix: the index is a dense table
   iterated in insertion order, so keeping a prefix kept the entries closest to
   expiry. `dedup_window_filter::restore()` owns that selection outright --
   `dedup_stm::restore_snapshot()` deliberately does not pre-trim, so the policy
@@ -141,7 +141,7 @@ Guarantees:
   The per-partition ceiling does not bound a shard: partitions are placed on
   shards by count, not by index size, so several saturated indices can share
   one shard's memory. `dedup_max_entries_per_shard` (0, the default, derives it
-  from 15% of shard memory at ~80 bytes an entry) caps the sum. Every index on
+  from 15% of shard memory at ~48 bytes an entry) caps the sum. Every index on
   the shard reports its size into one shared `dedup_shard_budget`; the same
   cursor trims a partition that inserts while the shard is within a tenth of
   its limit, and at the limit a new identity with nothing freeable in its own
@@ -471,11 +471,31 @@ of the indices themselves and ran the shard out of memory. `start()` removes
 the key an earlier build left in the kvstore; that snapshot is not migrated,
 and the index rebuilds from the log within one window.
 
-The payload (`state_snapshot` version 2) carries the entries as one packed blob
-of 24-byte records (digest hi, digest lo, timestamp; little-endian), written
-straight from the index. A snapshot therefore costs one serialized copy of the
-live entries. Earlier versions are refused on compat version, and the index is
-rebuilt from the log, in both upgrade directions.
+The payload (`state_snapshot` version 3) carries the entries as one packed blob
+of 20-byte records (digest lo, the low 32 bits of digest hi, timestamp;
+little-endian), written straight from the index. A snapshot therefore costs one
+serialized copy of the live entries. Version 2 snapshots (24-byte records with
+all 64 bits of digest hi) are still read, keeping the 96 bits the index uses.
+Versions 0 and 1 are refused on compat version, and the index is rebuilt from
+the log; a version 2 binary refuses version 3 the same way, rather than
+restoring 96-bit digests it would never match against its 128-bit ones.
+
+The index (`dedup_compact_index`) keeps an entry in 16 bytes: a 12-byte digest
+and a 32-bit timestamp relative to the base of its block of 4096 entries, in a
+dense array in insertion order whose erase moves the last entry into the hole
+-- the layout the sweep cursor and the snapshot walk depend on. Positions are
+found through a robin-hood table of 4-byte slots (24-bit position, 8-bit probe
+distance) split into segments of at most 4096 slots under a directory indexed
+by the digest's top bits, so a full segment splits on its own and the table
+never rehashes as a whole. That is about 22 bytes an entry against the 50 of
+the general-purpose map it replaced, and no call does work proportional to the
+index: a segment split, the largest step, re-inserts at most one segment's
+keys. A block's timestamps span 2^32 - 2 ms exactly (~49.7 days); a write that
+does not fit re-bases the block in one bounded pass, and entries more than
+~37 days behind the block's newest are kept as expired. Expired only ever
+stops an entry matching, so with a window up to 37 days no decision changes;
+beyond that, coverage of the oldest identities can be lost, never turned into
+a drop.
 
 Identities introduced by requests still in flight (`_pending`, G4) are left
 out of both local and raft snapshots: they are not in the log yet, and a
@@ -661,7 +681,7 @@ STM (`dedup_stm_test.cc`, single-node raft fixture as today):
   topics only. Compressed batches are the expensive case: the walk cannot
   read identities out of a compressed batch, so every replica decompresses
   every committed batch of a dedup topic.
-- Snapshots: O(active keys), 24 bytes an entry, written in chunks with the
+- Snapshots: O(active keys), 20 bytes an entry, written in chunks with the
   reactor yielded between them.
 - Measured: `//src/v/cluster/tests:dedup_window_filter_rpbench` (per-record
   cost of each path, run in the `unit-tests` workflow) and

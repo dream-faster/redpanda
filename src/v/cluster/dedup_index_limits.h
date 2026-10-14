@@ -29,8 +29,9 @@ inline constexpr size_t MAX_DEDUP_MAX_ENTRIES_PER_PARTITION = 10'000'000;
 inline constexpr size_t DEFAULT_DEDUP_MAX_ENTRIES_PER_SHARD = 0;
 // Share of shard memory the derived limit allows the dedup indices to use.
 inline constexpr size_t DEDUP_SHARD_MEMORY_PERCENT = 15;
-// Memory one entry costs while a snapshot of it is in flight: the hash map's
-// entry and bucket (~52 bytes) plus its 24-byte serialized form.
-inline constexpr size_t DEDUP_SHARD_BYTES_PER_ENTRY = 80;
+// Memory one entry costs while a snapshot of it is in flight: the index's
+// 16-byte entry and its lookup slot (22-26 bytes, depending on how full the
+// lookup table's segments are) plus its 20-byte serialized form.
+inline constexpr size_t DEDUP_SHARD_BYTES_PER_ENTRY = 48;
 
 } // namespace cluster

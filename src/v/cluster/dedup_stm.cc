@@ -276,12 +276,13 @@ ss::future<iobuf> dedup_stm::serialize_snapshot(
                   return;
               }
               char* out = chunk.data() + staged * packed_entry_size;
-              const auto hi = ss::cpu_to_le(identity.hi);
               const auto lo = ss::cpu_to_le(identity.lo);
+              const auto hi = ss::cpu_to_le(
+                static_cast<uint32_t>(identity.hi & dedup_digest_hi_mask));
               const auto ts = ss::cpu_to_le(timestamp.value());
-              std::memcpy(out, &hi, sizeof(hi));
-              std::memcpy(out + sizeof(hi), &lo, sizeof(lo));
-              std::memcpy(out + sizeof(hi) + sizeof(lo), &ts, sizeof(ts));
+              std::memcpy(out, &lo, sizeof(lo));
+              std::memcpy(out + sizeof(lo), &hi, sizeof(hi));
+              std::memcpy(out + sizeof(lo) + sizeof(hi), &ts, sizeof(ts));
               if (++staged == chunk_entries) {
                   entries.append(chunk.data(), staged * packed_entry_size);
                   staged = 0;
@@ -305,23 +306,32 @@ ss::future<iobuf> dedup_stm::serialize_snapshot(
         .window_ms = state.window().count(),
         .generation = generation,
         .max_timestamp = state.max_timestamp(),
-        .entries = std::move(entries)});
+        .entries = std::move(entries),
+        .entry_size = packed_entry_size});
 }
 
 namespace {
 
 /// Decode the packed entries of a state_snapshot, yielding every few
-/// thousand so a large restore shares the reactor.
+/// thousand so a large restore shares the reactor. \p entry_size names the
+/// layout: dedup_stm::packed_entry_size, or the version 2 one.
 template<typename Emit>
-ss::future<> for_each_packed_entry(const iobuf& packed, Emit emit) {
+ss::future<>
+for_each_packed_entry(const iobuf& packed, size_t entry_size, Emit emit) {
     constexpr size_t entries_per_yield = 4096;
     iobuf_const_parser parser(packed);
     size_t n = 0;
     while (parser.bytes_left() > 0) {
-        const auto hi = ss::le_to_cpu(parser.consume_type<uint64_t>());
-        const auto lo = ss::le_to_cpu(parser.consume_type<uint64_t>());
+        dedup_identity_digest identity;
+        if (entry_size == dedup_stm::legacy_packed_entry_size) {
+            identity.hi = ss::le_to_cpu(parser.consume_type<uint64_t>());
+            identity.lo = ss::le_to_cpu(parser.consume_type<uint64_t>());
+        } else {
+            identity.lo = ss::le_to_cpu(parser.consume_type<uint64_t>());
+            identity.hi = ss::le_to_cpu(parser.consume_type<uint32_t>());
+        }
         const auto ts = ss::le_to_cpu(parser.consume_type<int64_t>());
-        emit(dedup_identity_digest{.hi = hi, .lo = lo}, model::timestamp{ts});
+        emit(dedup_canonical_digest(identity), model::timestamp{ts});
         if ((++n % entries_per_yield) == 0) {
             co_await ss::coroutine::maybe_yield();
         }
@@ -332,13 +342,21 @@ ss::future<> for_each_packed_entry(const iobuf& packed, Emit emit) {
 
 ss::future<> dedup_stm::restore_snapshot(
   dedup_window_filter& state, int64_t& generation, state_snapshot snapshot) {
+    const size_t entry_size = snapshot.entry_size;
+    if (
+      entry_size != packed_entry_size
+      && entry_size != legacy_packed_entry_size) {
+        throw serde::serde_exception(
+          ssx::sformat(
+            "dedup snapshot entries of unknown size {}", entry_size));
+    }
     const auto packed_bytes = snapshot.entries.size_bytes();
-    if (packed_bytes % packed_entry_size != 0) {
+    if (packed_bytes % entry_size != 0) {
         throw serde::serde_exception(
           ssx::sformat(
             "dedup snapshot entries are {} bytes, not a multiple of {}",
             packed_bytes,
-            packed_entry_size));
+            entry_size));
     }
     state.set_window(std::chrono::milliseconds{snapshot.window_ms});
     // Read straight from the packed entries -- in passes, when they must be
@@ -348,11 +366,11 @@ ss::future<> dedup_stm::restore_snapshot(
     // owns the selection of which entries to keep.
     const auto& packed = snapshot.entries;
     co_await state.restore_from(
-      packed_bytes / packed_entry_size,
+      packed_bytes / entry_size,
       snapshot.max_timestamp,
-      [&packed](auto&& emit) {
+      [&packed, entry_size](auto&& emit) {
           return for_each_packed_entry(
-            packed, std::forward<decltype(emit)>(emit));
+            packed, entry_size, std::forward<decltype(emit)>(emit));
       });
     generation = snapshot.generation;
 }
