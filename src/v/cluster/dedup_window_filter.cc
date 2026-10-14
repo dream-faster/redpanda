@@ -246,7 +246,7 @@ bool dedup_window_filter::is_duplicate(
     // Before the insert, not after: a follower's populate() sweeps at the same
     // point, and capacity trimming is decision-affecting, so the two orders
     // must match or replicas drift. See populate().
-    sweep_step(sweep_budget);
+    sweep_for_new_identity();
     if (
       (at_capacity() && !take_room_from_largest(ts) && !make_room_for_one(ts))
       || !_index.push_back(identity, ts.value())) {
@@ -475,7 +475,7 @@ void dedup_window_filter::populate(
         }
         return;
     }
-    sweep_step(sweep_budget);
+    sweep_for_new_identity();
     if (
       (at_capacity() && !take_room_from_largest(ts) && !make_room_for_one(ts))
       || !_index.push_back(identity, ts.value())) {
@@ -567,7 +567,34 @@ void dedup_window_filter::finish_pass() {
     begin_pass();
 }
 
-void dedup_window_filter::sweep_step(size_t budget) {
+void dedup_window_filter::sweep_for_new_identity() {
+    reclaim_expired_elsewhere();
+    sweep_step(sweep_budget);
+}
+
+void dedup_window_filter::reclaim_expired_elsewhere() {
+    if (
+      !_shard_budget || _shard_budget->filters.size() < 2
+      || !over_shard_soft_limit()) {
+        return;
+    }
+    auto& filters = _shard_budget->filters;
+    // Two tries, so landing on this index still reaches another one.
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        auto* other = filters[_shard_budget->reclaim_next++ % filters.size()];
+        if (other == this || other->_budget_reserved > 0) {
+            // Itself, or mid-restore: a restore's claim on the budget stands
+            // whatever its index holds, and its cursor is not running.
+            continue;
+        }
+        const auto before = other->_index.size();
+        other->sweep_step(sweep_budget, false);
+        other->_reclaimed_entries += before - other->_index.size();
+        return;
+    }
+}
+
+void dedup_window_filter::sweep_step(size_t budget, bool trim) {
     const int64_t cutoff = expiry_cutoff();
     // Only the largest indices trim themselves under shard pressure. If every
     // inserting partition trimmed itself instead, a small busy one would keep
@@ -576,7 +603,7 @@ void dedup_window_filter::sweep_step(size_t budget) {
     // still over its soft limit is checked per entry, as the own soft limit
     // is, so the step stops trimming once its own erases have brought the
     // shard back under it.
-    const bool largest_here = _shard_budget && over_shard_soft_limit()
+    const bool largest_here = trim && _shard_budget && over_shard_soft_limit()
                               && among_the_largest();
 
     for (size_t step = 0; step < budget; ++step) {
@@ -603,7 +630,7 @@ void dedup_window_filter::sweep_step(size_t budget) {
             continue;
         }
         if (
-          stamp.value() < _capacity_cutoff.value()
+          trim && stamp.value() < _capacity_cutoff.value()
           && ((largest_here && over_shard_soft_limit()) || over_own_soft_limit())) {
             // Inside the window, so this is coverage genuinely lost. Doing it
             // here, a few entries at a time from the soft limit upwards, is

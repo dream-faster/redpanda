@@ -3130,3 +3130,74 @@ TEST(DedupCompactIndexInTheFilter, FutureEntriesInASnapshotAreClamped) {
     }
     EXPECT_FALSE(f.filter(make_batch("future", "dup", now)).has_value());
 }
+
+// Under shard pressure the largest index trims its oldest live entries. A
+// neighbour's expired entries -- which its own cursor, moving only on its own
+// new identities, has not reached yet -- go first: every insert on the shard
+// reclaims a step's worth from another index while the shard is over its soft
+// limit, so the busy index keeps its whole window as long as there are
+// expired entries elsewhere to give. Driven through the leader's path and the
+// follower's, which must end in the same state.
+TEST(DedupShardBudget, ExpiredNeighboursAreReclaimedBeforeLiveEntriesTrimmed) {
+    struct side {
+        ss::lw_shared_ptr<cluster::dedup_shard_budget> budget = make_budget(
+          1'000);
+        cluster::dedup_window_filter busy{1'000s, 100'000, budget};
+        cluster::dedup_window_filter idle{1s, 100'000, budget};
+    };
+    side leader;
+    side follower;
+    for (auto* s : {&leader, &follower}) {
+        // 300 identities, all expired once a later one moves the watermark
+        // ten seconds on; only the first sweep step's worth is dropped by the
+        // idle index's own cursor.
+        populate_n(s->idle, "idle", 300, 1000, 1);
+        s->idle.populate(iobuf::from("idle-late"), ts(11'000));
+    }
+    ASSERT_GT(leader.idle.map_size(), 280u);
+    for (int i = 0; i < 650; ++i) {
+        const auto key = fmt::format("busy-{}", i);
+        const auto at = ts(1000 + static_cast<int64_t>(i) * 10);
+        ASSERT_TRUE(leader.busy.filter(make_batch(key, "v", at)).has_value());
+        follower.busy.populate(iobuf::from(key), at);
+    }
+    for (auto* s : {&leader, &follower}) {
+        EXPECT_EQ(s->busy.map_size(), 650u);
+        EXPECT_EQ(s->busy.capacity_evicted_entries(), 0u);
+        EXPECT_EQ(s->busy.unindexed_records(), 0u);
+        EXPECT_GT(s->idle.reclaimed_entries(), 0u);
+        EXPECT_EQ(s->idle.capacity_evicted_entries(), 0u);
+        EXPECT_LE(s->budget->entries, 900u);
+        EXPECT_EQ(s->budget->entries, s->busy.map_size() + s->idle.map_size());
+    }
+    EXPECT_EQ(leader.busy.snapshot(), follower.busy.snapshot());
+    EXPECT_EQ(leader.idle.snapshot(), follower.idle.snapshot());
+    // Every busy identity still deduplicates.
+    for (int i = 0; i < 650; ++i) {
+        EXPECT_FALSE(leader.busy
+                       .filter(make_batch(
+                         fmt::format("busy-{}", i),
+                         "dup",
+                         ts(1000 + static_cast<int64_t>(i) * 10)))
+                       .has_value())
+          << i;
+    }
+}
+
+// Reclaiming only ever takes expired entries: neighbours whose entries are all
+// live keep every one, and the shard trims the largest index as before.
+TEST(DedupShardBudget, LiveNeighboursAreNotReclaimed) {
+    auto budget = make_budget(1'000);
+    cluster::dedup_window_filter busy(1'000s, 100'000, budget);
+    cluster::dedup_window_filter idle(1'000s, 100'000, budget);
+    populate_n(idle, "idle", 300, 1000, 1);
+    for (int i = 0; i < 1'500; ++i) {
+        busy.populate(
+          iobuf::from(fmt::format("busy-{}", i)),
+          ts(2000 + static_cast<int64_t>(i) * 10));
+    }
+    EXPECT_EQ(idle.map_size(), 300u);
+    EXPECT_EQ(idle.reclaimed_entries(), 0u);
+    EXPECT_GT(busy.capacity_evicted_entries(), 0u);
+    EXPECT_LE(budget->entries, 1'000u);
+}

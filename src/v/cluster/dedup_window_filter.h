@@ -312,6 +312,9 @@ struct dedup_shard_budget {
     static constexpr size_t largest_refresh_interval = 256;
     dedup_window_filter* largest_cache{nullptr};
     size_t lookups_since_refresh{0};
+    /// Next filter to reclaim expired entries from under shard pressure; see
+    /// dedup_window_filter::reclaim_expired_elsewhere().
+    size_t reclaim_next{0};
 };
 
 /// \brief Write-path, first-wins deduplication.
@@ -715,6 +718,9 @@ public:
     size_t capacity_evicted_entries() const {
         return _capacity_evicted_entries;
     }
+    /// Expired entries other partitions' inserts reclaimed from this index
+    /// under shard pressure (see reclaim_expired_elsewhere()).
+    size_t reclaimed_entries() const { return _reclaimed_entries; }
     /// Bounded emergency sweep steps taken because a new identity arrived
     /// with the index exactly at the hard ceiling. Non-zero means the soft
     /// limit is not keeping ahead of the arrival rate.
@@ -751,15 +757,36 @@ private:
       model::timestamp ts,
       dedup_request_undo* undo);
 
+    /// The sweeping every new identity pays for, on the leader's path and
+    /// the follower's alike: reclaim_expired_elsewhere(), then sweep_step().
+    void sweep_for_new_identity();
+
+    /// Under shard pressure, advance one other index's cursor by a step that
+    /// drops only its expired entries, round-robin over the shard's indices.
+    ///
+    /// A cursor moves only on its own index's new identities, so an index
+    /// holding a window's worth of entries takes a sizeable fraction of that
+    /// window per pass, and the entries that expired behind its cursor wait
+    /// for it. Under shard pressure that let the largest index trim live
+    /// entries while its neighbours held more expired ones than it was short.
+    /// Reclaiming those first, from every insert on the shard, keeps the trim
+    /// for when expired entries are not enough. Like take_room_from_largest()
+    /// it changes another partition's index on this one's traffic, so its
+    /// replicas, whose neighbours differ, lay their arrays out differently:
+    /// the same best-effort divergence the shard budget already accepts. An
+    /// expired entry cannot match in the window, so no dedup decision there
+    /// changes.
+    void reclaim_expired_elsewhere();
+
     /// \brief Advance the sweep cursor over at most \p budget entries.
     ///
     /// Drops the expired ones, and -- once the index is within
-    /// capacity_soft_margin_divisor of the ceiling -- the ones below the
-    /// capacity cutoff. The cursor persists across calls and wraps at the end
-    /// of the value array, so successive calls walk the whole index in
-    /// bounded slices instead of one pass. This is the only eviction the
-    /// produce and apply paths perform.
-    void sweep_step(size_t budget);
+    /// capacity_soft_margin_divisor of the ceiling, and only when \p trim --
+    /// the ones below the capacity cutoff. The cursor persists across calls and
+    /// wraps at the end of the value array, so successive calls walk the whole
+    /// index in bounded slices instead of one pass. This is the only eviction
+    /// the produce and apply paths perform.
+    void sweep_step(size_t budget, bool trim = true);
 
     /// One bounded sweep step taken because a new identity stamped
     /// \p incoming arrived with the index at the hard ceiling. Returns whether
@@ -959,6 +986,7 @@ private:
     size_t _capacity_evicted_entries{0};
     size_t _rebuilt_requests{0};
     size_t _capacity_sweeps{0};
+    size_t _reclaimed_entries{0};
 };
 
 } // namespace cluster
