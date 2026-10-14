@@ -198,7 +198,8 @@ jobs:
             --verbose_failures \
             --lockfile_mode=update \
             '--local_resources=memory=HOST_RAM*.8' \
-            //bazel/packaging:image
+            //bazel/packaging:image \
+            //bazel/packaging:oci_image_contents
           echo "=== post-build resources ==="
           df -h
           free -h
@@ -209,7 +210,10 @@ jobs:
 
           # Copy the Bazel-built redpanda package into a staging directory
           # that serves as the Docker build context. The tarball extracts to
-          # /opt/redpanda/, /etc/redpanda/, and /var/lib/redpanda/data/.
+          # /opt/redpanda/, /etc/redpanda/, and /var/lib/redpanda/data/. It
+          # is built as a top-level target above: on a fully cached build
+          # Bazel only materializes top-level outputs, so as a mere input of
+          # :image it was missing from bazel-bin.
           STAGING=$(mktemp -d)
           cp bazel-bin/bazel/packaging/redpanda_nonroot.tar.gz "$STAGING/"
 
