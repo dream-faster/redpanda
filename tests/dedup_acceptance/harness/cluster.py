@@ -398,6 +398,9 @@ class Cluster:
         raise AssertionError("no node is running")
 
     def wait_healthy(self, timeout_s: float = 90) -> None:
+        """Healthy by the health report, with a controller leader: the report
+        can say healthy during a controller election, and the next topic
+        operation would then hit a cluster that cannot serve it."""
         deadline = time.monotonic() + timeout_s
         last = None
         while time.monotonic() < deadline:
@@ -405,7 +408,7 @@ class Cluster:
                 r = self.any_node().admin("GET", "/v1/cluster/health_overview")
                 if r.ok:
                     last = r.json()
-                    if last.get("is_healthy"):
+                    if last.get("is_healthy") and last.get("controller_id", -1) >= 0:
                         return
             except requests.RequestException:
                 pass

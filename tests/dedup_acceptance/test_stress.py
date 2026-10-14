@@ -538,13 +538,20 @@ def test_huge_header_identities_cost_the_same_as_small_ones(make_cluster, pytest
     p = kafka.producer(c.brokers, **{"message.max.bytes": 8_000_000})
     for round_ in range(2):
         for i in range(n):
-            p.produce(
-                t,
-                key=None,
-                value=b"v",
-                headers=[("x-id", pad + str(i).encode())],
-                partition=0,
-            )
+            while True:
+                try:
+                    p.produce(
+                        t,
+                        key=None,
+                        value=b"v",
+                        headers=[("x-id", pad + str(i).encode())],
+                        partition=0,
+                    )
+                    break
+                except BufferError:
+                    # 4 KiB a record fills the client's queue well before the
+                    # broker has taken a round; drain and go on.
+                    p.poll(0.1)
             if i % 2000 == 0:
                 p.poll(0)
     assert p.flush(300) == 0

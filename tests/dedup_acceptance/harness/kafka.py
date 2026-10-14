@@ -58,6 +58,34 @@ def admin(brokers: str) -> AdminClient:
     return AdminClient({"bootstrap.servers": brokers})
 
 
+# Errors a controller request gets while the cluster is electing a controller
+# or the client's metadata still names the previous one. The tests stop and
+# restart nodes without regard to which one leads the controller, so the next
+# controller request can land in that window; librdkafka does not retry it.
+_CONTROLLER_RETRIABLE = {
+    KafkaError.NOT_CONTROLLER,
+    KafkaError.LEADER_NOT_AVAILABLE,
+    KafkaError.REQUEST_TIMED_OUT,
+    KafkaError._TIMED_OUT,
+    KafkaError._TRANSPORT,
+}
+
+
+def _controller_retry(fn, timeout_s: float = 60):
+    """Run fn() until it succeeds or fails with a non-retriable error. A fresh
+    attempt refreshes the client's metadata and so its idea of the controller."""
+    deadline = time.monotonic() + timeout_s
+    while True:
+        try:
+            return fn()
+        except KafkaException as e:
+            if e.args[0].code() not in _CONTROLLER_RETRIABLE:
+                raise
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.5)
+
+
 def create_topic(
     brokers: str,
     name: str,
@@ -65,18 +93,31 @@ def create_topic(
     replicas: int = 3,
     config: dict[str, str] | None = None,
 ) -> None:
-    a = admin(brokers)
-    fut = a.create_topics(
-        [NewTopic(name, partitions, replicas, config=config or {})],
-        operation_timeout=30,
-    )
-    fut[name].result()
+    def attempt():
+        a = admin(brokers)
+        fut = a.create_topics(
+            [NewTopic(name, partitions, replicas, config=config or {})],
+            operation_timeout=30,
+        )
+        try:
+            fut[name].result()
+        except KafkaException as e:
+            # An earlier attempt that timed out on the client may have gone
+            # through on the broker.
+            if e.args[0].code() != KafkaError.TOPIC_ALREADY_EXISTS:
+                raise
+
+    _controller_retry(attempt)
     wait_for_leaders(brokers, name, partitions)
 
 
 def delete_topic(brokers: str, name: str) -> None:
-    a = admin(brokers)
-    a.delete_topics([name], operation_timeout=30)[name].result()
+    def attempt():
+        # The client has to outlive the future it returns.
+        a = admin(brokers)
+        a.delete_topics([name], operation_timeout=30)[name].result()
+
+    _controller_retry(attempt)
     deadline = time.monotonic() + 60
     while time.monotonic() < deadline:
         md = admin(brokers).list_topics(timeout=10)
@@ -215,6 +256,10 @@ _RETRIABLE = {
     KafkaError.REQUEST_TIMED_OUT,
     KafkaError._TRANSPORT,
     KafkaError._TIMED_OUT,
+    # A consumer's first metadata came from a broker that was just killed, or
+    # was fetched while the partition had no leader.
+    KafkaError._UNKNOWN_PARTITION,
+    KafkaError._UNKNOWN_TOPIC,
 }
 
 
