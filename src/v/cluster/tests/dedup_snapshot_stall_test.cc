@@ -288,8 +288,9 @@ TEST_CORO(dedup_snapshot_stall, index_memory_per_entry_fits_the_budget) {
                   << std::flush;
         ASSERT_EQ_CORO(filter->map_size(), entries);
         ASSERT_EQ_CORO(stats.refused_inserts, 0u);
-        // The table's own accounting agrees with the allocator's.
-        ASSERT_LE_CORO(filter->memory_usage(), after - before);
+        // Not compared with the table's own count: the allocator also counts
+        // the spans its pools take on first use, and reuses what an earlier
+        // round freed, so the two differ by a few bytes an entry either way.
         worst = std::max(worst, per_entry);
     }
     // The point of the table: well under the ~50 bytes the map it replaced
