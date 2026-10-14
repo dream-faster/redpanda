@@ -232,6 +232,46 @@ else
   echo "-- baseline has no dedup property; skipping the dedup leg"
 fi
 
+# expect_helm_job_endpoints <node>: every admin call the Helm chart's
+# post-install/post-upgrade job makes (the operator's sync-cluster-config)
+# succeeds against this node.
+expect_helm_job_endpoints() {
+  local c
+  c=$(name "$1")
+  for path in /v1/cluster_config/schema /v1/cluster_config/status /v1/config \
+    /v1/features /v1/features/license /v1/brokers; do
+    docker exec "$c" curl -sf "localhost:9644$path" >/dev/null ||
+      fail "GET $path on node $1"
+  done
+  docker exec "$c" curl -sf -X PUT \
+    "localhost:9644/v1/debug/restart_service?service=schema-registry" >/dev/null ||
+    fail "PUT /v1/debug/restart_service on node $1"
+}
+
+# expect_removed_route <node> <method> <path>: a route this build dropped
+# answers 404 rather than failing the request some other way.
+expect_removed_route() {
+  local code
+  code=$(docker exec "$(name "$1")" curl -s -o /dev/null -w '%{http_code}' \
+    -X "$2" "localhost:9644$3") || true
+  [[ $code == 404 ]] || fail "$2 $3 on node $1 answered $code, wanted 404"
+}
+
+# wait_user <node> <user>: users replicate through the controller log, so a
+# node other than the controller leader sees a new one a moment later.
+wait_user() {
+  for _ in $(seq 1 30); do
+    rpk "$1" security user list 2>/dev/null | grep -qw "$2" && return 0
+    sleep 1
+  done
+  return 1
+}
+
+USER_BEFORE=false
+if rpk 0 security user list 2>/dev/null | grep -qw upgrader; then
+  USER_BEFORE=true
+fi
+
 echo "== rolling upgrade to slim: $SLIM"
 for id in 2 1 0; do
   echo "-- upgrading node $id"
@@ -249,6 +289,11 @@ for id in 2 1 0; do
     fail "produce via node $id"
   got=$(count "$other" "$topic" 0)
   [[ $got == 30 ]] || fail "node $other read $got/30 from $topic"
+  expect_helm_job_endpoints "$id"
+  rpk "$id" security user create "mixed-user-$id" -p secret >/dev/null ||
+    fail "create a user via slim node $id"
+  wait_user "$other" "mixed-user-$id" ||
+    fail "node $other does not see the user created via node $id"
   wait_healthy "$id" || fail "unhealthy after node $id"
 done
 
@@ -330,6 +375,18 @@ rpk 0 cluster license set not-a-license >/dev/null || fail "license upload stub"
 license=$(rpk 0 cluster license info --format json) || fail "license info stub"
 grep -Eq '"license_status": ?"not_present"' <<<"$license" ||
   fail "license info should report no license: $license"
+
+echo "-- users and removed admin routes on slim"
+if [[ $USER_BEFORE == true ]]; then
+  wait_user 1 upgrader || fail "user created on stock lost"
+fi
+rpk 0 security user delete mixed-user-2 >/dev/null || fail "delete a user on slim"
+for route in "GET /v1/usage" "GET /v1/debug/self_test/status" \
+  "GET /v1/debug/bundle"; do
+  # shellcheck disable=SC2086
+  expect_removed_route 0 $route
+done
+wait_healthy 0 || fail "unhealthy after calling removed routes"
 
 echo "== restart the slim cluster once more"
 for id in 0 1 2; do docker restart -t 60 "$(name "$id")" >/dev/null; done

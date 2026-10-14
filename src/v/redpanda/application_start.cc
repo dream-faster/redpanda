@@ -23,12 +23,10 @@
 #include "cluster/tm_stm.h"
 #include "config/configuration.h"
 #include "config/node_config.h"
-#include "debug_bundle/debug_bundle_service.h"
 #include "kafka/server/group_manager.h"
 #include "kafka/server/group_tx_tracker_stm.h"
 #include "kafka/server/quota_manager.h"
 #include "kafka/server/snc_quota_manager.h"
-#include "kafka/server/usage_manager.h"
 #include "migrations/migrators.h"
 #include "raft/group_manager.h"
 #include "raft/service.h"
@@ -135,7 +133,6 @@ void application::start_runtime_services(::stop_signal& app_signal) {
 
     quota_mgr.invoke_on_all(&kafka::quota_manager::start).get();
     snc_quota_mgr.invoke_on_all(&kafka::snc_quota_manager::start).get();
-    usage_manager.invoke_on_all(&kafka::usage_manager::start).get();
 
     if (_await_controller_last_applied.has_value()) {
         syschecks::systemd_message(
@@ -146,8 +143,6 @@ void application::start_runtime_services(::stop_signal& app_signal) {
             _await_controller_last_applied.value(), app_signal.abort_source())
           .get();
     }
-
-    _debug_bundle_service.invoke_on_all(&debug_bundle::service::start).get();
 
     if (!config::node().admin().empty()) {
         _kafka_connections_service

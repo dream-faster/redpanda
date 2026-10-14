@@ -162,8 +162,6 @@ redpanda_cc_library(
         "rm_group_frontend.cc",
         "server.cc",
         "snc_quota_manager.cc",
-        "usage_aggregator.cc",
-        "usage_manager.cc",
     ],
     hdrs = [
         "atomic_token_bucket.h",
@@ -256,8 +254,6 @@ redpanda_cc_library(
         "sasl_probe.h",
         "server.h",
         "snc_quota_manager.h",
-        "usage_aggregator.h",
-        "usage_manager.h",
     ],
     implementation_deps = [
         "//src/v/cluster:errc",

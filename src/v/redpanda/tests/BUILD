@@ -17,7 +17,6 @@ redpanda_test_cc_library(
         "//src/v/cluster:members_table",
         "//src/v/cluster:node_status_backend",
         "//src/v/cluster:partition_leaders_table",
-        "//src/v/cluster:self_test",
         "//src/v/cluster:shard_table",
         "//src/v/cluster:topic_metrics_watcher",
         "//src/v/cluster:types",

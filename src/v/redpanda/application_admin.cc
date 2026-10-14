@@ -49,8 +49,6 @@ void application::configure_admin_server(model::node_id node_id) {
       std::ref(metadata_cache),
       std::ref(_connection_cache),
       std::ref(node_status_table),
-      std::ref(self_test_frontend),
-      std::ref(usage_manager),
       std::ref(storage_node),
       std::ref(_memory_sampling),
       std::ref(_cpu_profiler),
@@ -58,7 +56,6 @@ void application::configure_admin_server(model::node_id node_id) {
       std::ref(_tx_manager_migrator),
       std::ref(_kafka_server.ref()),
       std::ref(tx_gateway_frontend),
-      std::ref(_debug_bundle_service),
       std::ref(_kafka_connections_service))
       .get();
     _admin

@@ -60,7 +60,6 @@ class server;
 class quota_manager;
 class snc_quota_manager;
 class group_router;
-class usage_manager;
 
 class server_app {
 public:
@@ -86,7 +85,6 @@ public:
       seastar::sharded<quota_manager>&,
       seastar::sharded<snc_quota_manager>&,
       seastar::sharded<kafka::group_router>&,
-      seastar::sharded<kafka::usage_manager>&,
       seastar::sharded<cluster::shard_table>&,
       seastar::sharded<cluster::partition_manager>&,
       seastar::sharded<cluster::id_allocator_frontend>&,

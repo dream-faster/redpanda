@@ -48,7 +48,6 @@ redpanda_test_cc_library(
     deps = [
         "//src/v/cluster:leader_balancer_strategy",
         "//src/v/cluster:node_status_backend",
-        "//src/v/cluster:self_test",
         "//src/v/cluster:topic_metrics_watcher",
         "//src/v/cluster/tests:cluster_test_fixture",
         "//src/v/container:chunked_vector",
@@ -79,7 +78,6 @@ redpanda_cc_gtest(
         "//src/v/cluster:leader_balancer_strategy",
         "//src/v/cluster:node_status_backend",
         "//src/v/cluster:partition_properties_stm",
-        "//src/v/cluster:self_test",
         "//src/v/cluster:topic_metrics_watcher",
         "//src/v/cluster:topic_table",
         "//src/v/cluster:tx_manager_migrator_rpc",

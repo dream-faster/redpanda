@@ -48,11 +48,6 @@ redpanda_cc_rpc_library(
 )
 
 redpanda_cc_rpc_library(
-    name = "self_test_rpc",
-    src = "self_test_rpc.json",
-)
-
-redpanda_cc_rpc_library(
     name = "tx_manager_migrator_rpc",
     src = "migrations/tx_manager_migrator.json",
     out = "tx_manager_migrator_service.h",
@@ -485,37 +480,6 @@ redpanda_cc_library(
         "//src/v/serde:variant",
         "//src/v/strings:string_switch",
         "@abseil-cpp//absl/container:flat_hash_set",
-        "@seastar",
-    ],
-)
-
-redpanda_cc_library(
-    name = "self_test_rpc_types",
-    srcs = [
-        "self_test_rpc_types.cc",
-    ],
-    hdrs = [
-        "self_test_rpc_types.h",
-    ],
-    implementation_deps = [
-        "//src/v/base",
-        "//src/v/random:generators",
-        "//src/v/ssx:future_util",
-    ],
-    visibility = ["//visibility:public"],
-    deps = [
-        "//src/v/config",
-        "//src/v/json",
-        "//src/v/model",
-        "//src/v/serde",
-        "//src/v/serde:chrono",
-        "//src/v/serde:enum",
-        "//src/v/serde:iobuf",
-        "//src/v/serde:optional",
-        "//src/v/serde:sstring",
-        "//src/v/serde:uuid",
-        "//src/v/serde:vector",
-        "//src/v/utils:uuid",
         "@seastar",
     ],
 )
@@ -1443,54 +1407,6 @@ redpanda_cc_library(
 )
 
 redpanda_cc_library(
-    name = "self_test",
-    srcs = [
-        "self_test/diskcheck.cc",
-        "self_test/netcheck.cc",
-        "self_test_backend.cc",
-        "self_test_frontend.cc",
-        "self_test_rpc_handler.cc",
-    ],
-    hdrs = [
-        "self_test/diskcheck.h",
-        "self_test/metrics.h",
-        "self_test/netcheck.h",
-        "self_test_backend.h",
-        "self_test_frontend.h",
-        "self_test_rpc_handler.h",
-    ],
-    implementation_deps = [
-        ":logger",
-        ":members_table",
-        "//src/v/config",
-        "//src/v/json",
-        "//src/v/random:generators",
-        "//src/v/ssx:future_util",
-        "//src/v/ssx:sformat",
-        "//src/v/utils:directory_walker",
-        "@abseil-cpp//absl/container:flat_hash_map",
-        "@boost//:range",
-    ],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":fwd",
-        ":node_local_monitor",
-        ":self_test_rpc",
-        ":self_test_rpc_types",
-        "//src/v/base",
-        "//src/v/bytes:iobuf",
-        "//src/v/model",
-        "//src/v/rpc",
-        "//src/v/ssx:abort_source",
-        "//src/v/ssx:mutex",
-        "//src/v/utils:hdr_hist",
-        "//src/v/utils:retry_chain_node",
-        "//src/v/utils:uuid",
-        "@seastar",
-    ],
-)
-
-redpanda_cc_library(
     name = "topic_table",
     srcs = [
         "topic_table.cc",
@@ -1750,9 +1666,6 @@ redpanda_cc_library(
         ":rpc_utils",
         ":scheduling_allocation",
         ":security_types",
-        ":self_test",
-        ":self_test_rpc",
-        ":self_test_rpc_types",
         ":shard_table",
         ":simple_batch_builder",
         ":snapshot",
