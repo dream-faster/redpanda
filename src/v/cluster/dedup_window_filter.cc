@@ -521,7 +521,8 @@ void dedup_window_filter::sweep_step(size_t budget) {
     // still over its soft limit is checked per entry, as the own soft limit
     // is, so the step stops trimming once its own erases have brought the
     // shard back under it.
-    const bool largest_here = _shard_budget && among_the_largest();
+    const bool largest_here = _shard_budget && over_shard_soft_limit()
+                              && among_the_largest();
 
     for (size_t step = 0; step < budget; ++step) {
         if (_map.empty()) {
@@ -664,6 +665,8 @@ dedup_index_snapshot dedup_window_filter::snapshot() const {
 }
 
 void dedup_window_filter::restore(const dedup_index_snapshot& snapshot) {
+    // The walk below never yields, so the restore runs to completion before
+    // the call returns and the future is ready to take.
     restore_from(
       snapshot.entries.size(),
       snapshot.max_timestamp,
@@ -671,7 +674,9 @@ void dedup_window_filter::restore(const dedup_index_snapshot& snapshot) {
           for (const auto& entry : snapshot.entries) {
               emit(entry.identity, entry.timestamp);
           }
-      });
+          return ss::now();
+      })
+      .get();
 }
 
 size_t dedup_window_filter::begin_restore(size_t count) {

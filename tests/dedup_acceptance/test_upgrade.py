@@ -21,18 +21,26 @@ from test_startup import assert_serving
 pytestmark = [pytest.mark.slow, pytest.mark.upgrade]
 
 
+# Whether --image has the new build's features: probed once per run, not once
+# per test, since it cannot change in between.
+_image_is_new_build: bool | None = None
+
+
 @pytest.fixture
 def upgrade_cluster(old_image, image, make_cluster, pytestconfig):
     def make(**kw) -> Cluster:
         c = make_cluster(image_override=old_image, **kw)
         return c
 
-    probe = make_cluster(nodes=1, smp=1)
-    if not has_new_build_features(probe):
+    global _image_is_new_build
+    if _image_is_new_build is None:
+        probe = make_cluster(nodes=1, smp=1)
+        _image_is_new_build = has_new_build_features(probe)
+        probe.stop()
+    if not _image_is_new_build:
         if pytestconfig.getoption("--require-new-build"):
             pytest.fail("--image predates the dedup memory fixes")
         pytest.skip("--image predates the dedup memory fixes")
-    probe.stop()
     return make
 
 

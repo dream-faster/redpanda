@@ -31,6 +31,7 @@
 #include <seastar/core/metrics.hh>
 #include <seastar/core/with_timeout.hh>
 #include <seastar/coroutine/as_future.hh>
+#include <seastar/coroutine/maybe_yield.hh>
 
 #include <array>
 #include <cstring>
@@ -269,7 +270,29 @@ ss::future<iobuf> dedup_stm::serialize_snapshot(
         .entries = std::move(entries)});
 }
 
-void dedup_stm::restore_snapshot(
+namespace {
+
+/// Decode the packed entries of a state_snapshot, yielding every few
+/// thousand so a large restore shares the reactor.
+template<typename Emit>
+ss::future<> for_each_packed_entry(const iobuf& packed, Emit emit) {
+    constexpr size_t entries_per_yield = 4096;
+    iobuf_const_parser parser(packed);
+    size_t n = 0;
+    while (parser.bytes_left() > 0) {
+        const auto hi = ss::le_to_cpu(parser.consume_type<uint64_t>());
+        const auto lo = ss::le_to_cpu(parser.consume_type<uint64_t>());
+        const auto ts = ss::le_to_cpu(parser.consume_type<int64_t>());
+        emit(dedup_identity_digest{.hi = hi, .lo = lo}, model::timestamp{ts});
+        if ((++n % entries_per_yield) == 0) {
+            co_await ss::coroutine::maybe_yield();
+        }
+    }
+}
+
+} // namespace
+
+ss::future<> dedup_stm::restore_snapshot(
   dedup_window_filter& state, int64_t& generation, state_snapshot snapshot) {
     const auto packed_bytes = snapshot.entries.size_bytes();
     if (packed_bytes % packed_entry_size != 0) {
@@ -280,25 +303,18 @@ void dedup_stm::restore_snapshot(
             packed_entry_size));
     }
     state.set_window(std::chrono::milliseconds{snapshot.window_ms});
-    // Read straight from the packed entries -- twice when they must be
+    // Read straight from the packed entries -- in passes, when they must be
     // trimmed -- rather than decoded into an entry vector first: restores run
     // at startup for every partition on the shard, and one more full copy of
     // each index is memory a starting broker may not have. restore_from()
     // owns the selection of which entries to keep.
     const auto& packed = snapshot.entries;
-    state.restore_from(
+    co_await state.restore_from(
       packed_bytes / packed_entry_size,
       snapshot.max_timestamp,
       [&packed](auto&& emit) {
-          iobuf_const_parser parser(packed);
-          while (parser.bytes_left() > 0) {
-              const auto hi = ss::le_to_cpu(parser.consume_type<uint64_t>());
-              const auto lo = ss::le_to_cpu(parser.consume_type<uint64_t>());
-              const auto ts = ss::le_to_cpu(parser.consume_type<int64_t>());
-              emit(
-                dedup_identity_digest{.hi = hi, .lo = lo},
-                model::timestamp{ts});
-          }
+          return for_each_packed_entry(
+            packed, std::forward<decltype(emit)>(emit));
       });
     generation = snapshot.generation;
 }
@@ -467,11 +483,15 @@ ss::future<result<kafka_result>> dedup_stm::do_replicate(
 
     const auto original_count = batch.record_count();
     dedup_filter_result filtered;
+    // Set when the index was consulted, so do_apply() is told to skip the
+    // batch only when filter_request() has indexed it (see self_filtered_key).
+    bool indexed_here = false;
     const auto& cfg = _raft->log()->config();
     if (auto window = cfg.dedup_window_ms(); window) {
         adopt_config(*window, cfg.dedup_generation(), cfg.dedup_key_header());
         const auto unindexed_before = _state.unindexed_records();
         filtered = _state.filter_request(std::move(batch));
+        indexed_here = true;
         if (_state.unindexed_records() != unindexed_before) {
             // The index is at its ceiling, or the shard is at its own, and is
             // admitting new identities without remembering them, so their
@@ -624,8 +644,11 @@ ss::future<result<kafka_result>> dedup_stm::do_replicate(
           .replicated_record_count = 0};
     }
 
-    const auto self_key = self_filtered_key(filtered.batch->header());
-    remember_self_filtered(self_key);
+    std::optional<uint64_t> self_key;
+    if (indexed_here) {
+        self_key = self_filtered_key(filtered.batch->header());
+        remember_self_filtered(*self_key);
+    }
     auto stages = _raft->replicate_in_stages(std::move(*filtered.batch), opts);
     auto append_done = ss::make_lw_shared<ss::shared_promise<bool>>();
     _append_tail = append_done;
@@ -644,7 +667,9 @@ ss::future<result<kafka_result>> dedup_stm::do_replicate(
           _raft->ntp(),
           ex);
         _state.revert_request(filtered.undo);
-        forget_self_filtered(self_key);
+        if (self_key) {
+            forget_self_filtered(*self_key);
+        }
         co_return errc::replication_error;
     }
     enqueued->set_value();
@@ -658,13 +683,17 @@ ss::future<result<kafka_result>> dedup_stm::do_replicate(
         // The entries are reverted, so if the batch commits after all its
         // apply must index it: stop telling do_apply to skip it.
         _state.revert_request(filtered.undo);
-        forget_self_filtered(self_key);
+        if (self_key) {
+            forget_self_filtered(*self_key);
+        }
         co_return errc::replication_error;
     }
     auto result = replicated.get();
     if (!result) {
         _state.revert_request(filtered.undo);
-        forget_self_filtered(self_key);
+        if (self_key) {
+            forget_self_filtered(*self_key);
+        }
         co_return result.error();
     }
 
@@ -685,7 +714,7 @@ ss::future<iobuf> dedup_stm::take_raft_snapshot(model::offset) {
     co_return co_await serialize_snapshot(_state, _generation);
 }
 
-bool dedup_stm::try_restore_snapshot(iobuf buffer) {
+ss::future<bool> dedup_stm::try_restore_snapshot(iobuf buffer) {
     // A snapshot written before the index switched to identity digests
     // (state_snapshot version 0) carries identities this build cannot
     // re-derive digests from, so serde rejects it on compat version. The
@@ -693,11 +722,11 @@ bool dedup_stm::try_restore_snapshot(iobuf buffer) {
     // from the retained log is a correct -- if slower -- outcome, and a far
     // better one than refusing to start the partition.
     try {
-        restore_snapshot(
+        co_await restore_snapshot(
           _state,
           _generation,
           serde::from_iobuf<state_snapshot>(std::move(buffer)));
-        return true;
+        co_return true;
     } catch (const std::bad_alloc&) {
         // Not a bad snapshot either, and the worst thing to answer with: a
         // discard reports "rebuilding from the log", which allocates the
@@ -718,7 +747,7 @@ bool dedup_stm::try_restore_snapshot(iobuf buffer) {
           ex);
         _state.clear();
         _generation = 0;
-        return false;
+        co_return false;
     }
 }
 
@@ -726,9 +755,8 @@ ss::future<> dedup_stm::apply_raft_snapshot(const iobuf& buffer) {
     _state.clear();
     _generation = 0;
     if (!buffer.empty()) {
-        try_restore_snapshot(buffer.copy());
+        co_await try_restore_snapshot(buffer.copy());
     }
-    co_return;
 }
 
 ss::future<raft::local_snapshot_applied>
@@ -738,9 +766,9 @@ dedup_stm::apply_local_snapshot(raft::stm_snapshot_header, iobuf&& buffer) {
     // skips the log the snapshot covered -- when the snapshot was applied.
     // Answering `yes` here would leave the index empty *and* skip past the
     // records it should have been rebuilt from.
-    co_return try_restore_snapshot(std::move(buffer))
-      ? raft::local_snapshot_applied::yes
-      : raft::local_snapshot_applied::no;
+    const bool applied = co_await try_restore_snapshot(std::move(buffer));
+    co_return applied ? raft::local_snapshot_applied::yes
+                      : raft::local_snapshot_applied::no;
 }
 
 ss::future<raft::stm_snapshot>

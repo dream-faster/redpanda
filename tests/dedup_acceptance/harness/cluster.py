@@ -328,7 +328,11 @@ class Cluster:
     ):
         Cluster._counter += 1
         self.name = f"dedup-acc-{os.getpid()}-{Cluster._counter}"
-        self.port_base = port_base or (21000 + 200 * (Cluster._counter % 40))
+        # Never reused within a run: session- and module-scoped clusters stay
+        # up while others come and go, so a wrapped counter would hand a live
+        # cluster's ports to a new one.
+        self.port_base = port_base or (21000 + 200 * Cluster._counter)
+        assert self.port_base + 200 < 65000, "too many clusters in one run"
         self.workdir = Path(workdir or tempfile.mkdtemp(prefix=f"{self.name}-"))
         self.cluster_config = {
             "enable_leader_balancer": False,

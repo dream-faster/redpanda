@@ -30,6 +30,7 @@
 #include <seastar/core/gate.hh>
 #include <seastar/core/timer.hh>
 
+#include <optional>
 #include <vector>
 
 namespace storage {
@@ -235,7 +236,9 @@ private:
     bool is_discarded(bytes_view spaced_key) const;
     /// Restore one record of the snapshot batch into the db, unless its key is
     /// discarded.
-    void restore_snapshot_record(model::record, const ssx::semaphore_units&);
+    /// Returns the key restored, or nullopt for a discarded one.
+    std::optional<bytes>
+    restore_snapshot_record(model::record, const ssx::semaphore_units&);
 
     // Spaced key prefixes built from kvstore_config::discarded_stm_snapshots.
     std::vector<bytes> _discarded_prefixes;

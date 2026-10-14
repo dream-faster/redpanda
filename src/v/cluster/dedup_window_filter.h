@@ -538,39 +538,48 @@ public:
     /// dedup_index_snapshot in between.
     ///
     /// \p for_each_entry(emit) must call emit(identity, timestamp) once per
-    /// entry, \p count times in all, and produce the same entries each time
-    /// it is called. It runs four times: once to find the oldest entry -- or,
-    /// when they do not all fit, to find the trim point, which gives the
-    /// oldest kept entry too -- once to measure the capacity cutoff, and once
-    /// each to insert the entries older than that cutoff and the rest. Passes
-    /// over the snapshot keep the transient cost at 8 bytes per entry, and only
-    /// when trimming, rather than a full copy of the entries.
+    /// entry, \p count times in all, produce the same entries each time it is
+    /// called, and return a future that resolves once it has. It may yield
+    /// between entries: a restore of millions of entries at startup is what
+    /// stays off the reactor that way. It runs up to four times: once to find
+    /// the oldest entry -- or, when they do not all fit, to find the trim
+    /// point, which is the oldest kept entry -- once to measure the capacity
+    /// cutoff, and once each to insert the entries older than that cutoff and
+    /// the rest. Passes over the snapshot keep the transient cost at 8 bytes
+    /// per entry, and only when trimming, rather than a full copy of the
+    /// entries.
     ///
     /// The entries old enough to trim are inserted first. The sweep cursor
     /// starts at the front of the index, so after a restart that filled the
     /// shard they are the first it finds; inserted in snapshot order, they
     /// can sit anywhere, and every new identity at the limit is admitted
     /// unindexed until the cursor reaches them.
+    ///
+    /// Nothing else mutates the index while a restore yields: restores run
+    /// under the STM's apply lock, and a produce request waits for the
+    /// snapshot to be hydrated before it reaches the filter. The shard budget
+    /// is told about the entries as they go in, so a restore on another
+    /// partition measuring its headroom meanwhile sees them.
     template<typename ForEach>
-    void restore_from(
-      size_t count, model::timestamp max_timestamp, ForEach&& for_each_entry) {
+    ss::future<> restore_from(
+      size_t count, model::timestamp max_timestamp, ForEach for_each_entry) {
         const auto keep = begin_restore(count);
         // Kept: every entry newer than `keep_from`, and the first
         // `at_keep_from` entries exactly at it.
         int64_t keep_from = std::numeric_limits<int64_t>::min();
         size_t at_keep_from = 0;
-        int64_t oldest_newer_than = no_pass_oldest;
-        if (keep > 0 && keep < count) {
+        const bool trimming = keep > 0 && keep < count;
+        if (trimming) {
             // Keep the most recent identities. The index is a dense hash map
             // whose iteration is insertion order, so snapshots run roughly
             // oldest first; taking a prefix would drop exactly the entries
             // most likely to still match an incoming duplicate.
             chunked_vector<int64_t> stamps;
             stamps.reserve(count);
-            for_each_entry(
+            co_await ss::coroutine::without_preemption_check(for_each_entry(
               [&stamps](dedup_identity_digest, model::timestamp ts) {
                   stamps.push_back(ts.value());
-              });
+              }));
             const auto smallest_kept
               = stamps.begin() + static_cast<std::ptrdiff_t>(count - keep);
             std::nth_element(stamps.begin(), smallest_kept, stamps.end());
@@ -579,79 +588,72 @@ public:
               stamps.begin(), stamps.end(), [keep_from](int64_t ts) {
                   return ts > keep_from;
               }));
-            for (const auto ts : stamps) {
-                if (ts > keep_from) {
-                    oldest_newer_than = std::min(oldest_newer_than, ts);
-                }
-            }
-            stamps = chunked_vector<int64_t>{};
             // Everything newer than keep_from fits by construction; entries
-            // exactly at it fill what is left, first come first kept.
+            // exactly at it fill what is left, first come first kept. The
+            // trim point is one of the kept entries, so at least one is.
             at_keep_from = keep - newer;
         }
-
-        int64_t oldest = no_pass_oldest;
-        if (keep > 0 && keep < count) {
-            // The oldest kept entry follows from the trim point, so the pass
-            // that would find it is not needed: with ties kept it is the trim
-            // point itself, and otherwise every kept entry is newer than it.
-            oldest = at_keep_from > 0 ? keep_from : oldest_newer_than;
+        if (keep == 0) {
+            begin_restore_pass(max_timestamp, no_pass_oldest);
+            finish_restore_pass();
+            finish_restore(count);
+            co_return;
         }
-        int64_t trim_below = std::numeric_limits<int64_t>::min();
-        if (keep > 0) {
-            const bool trimming = keep < count;
-            auto kept_newer = [trimming, keep_from](int64_t ts) {
-                return !trimming || ts > keep_from;
-            };
-            if (!trimming) {
-                for_each_entry(
-                  [&oldest](dedup_identity_digest, model::timestamp ts) {
-                      oldest = std::min(oldest, ts.value());
-                  });
+        // When trimming the oldest kept entry is the trim point itself.
+        int64_t oldest = keep_from;
+        if (!trimming) {
+            oldest = no_pass_oldest;
+            co_await ss::coroutine::without_preemption_check(for_each_entry(
+              [&oldest](dedup_identity_digest, model::timestamp ts) {
+                  oldest = std::min(oldest, ts.value());
+              }));
+        }
+        begin_restore_pass(max_timestamp, oldest);
+        co_await ss::coroutine::without_preemption_check(
+          for_each_entry([this, trimming, keep_from](
+                           dedup_identity_digest, model::timestamp ts) {
+              if (!trimming || ts.value() > keep_from) {
+                  count_in_pass(ts);
+              }
+          }));
+        if (trimming) {
+            for (size_t i = 0; i < at_keep_from; ++i) {
+                count_in_pass(model::timestamp{keep_from});
             }
-            begin_restore_pass(max_timestamp, oldest);
-            for_each_entry(
-              [this, &kept_newer](dedup_identity_digest, model::timestamp ts) {
-                  if (kept_newer(ts.value())) {
-                      count_in_pass(ts);
+        }
+        const int64_t trim_below = finish_restore_pass();
+
+        size_t ties_left = at_keep_from;
+        size_t inserted = 0;
+        auto insert_part = [&](bool older_part) {
+            return for_each_entry(
+              [this,
+               trimming,
+               keep_from,
+               trim_below,
+               older_part,
+               &ties_left,
+               &inserted](dedup_identity_digest identity, model::timestamp ts) {
+                  if ((ts.value() < trim_below) != older_part) {
+                      return;
+                  }
+                  if (!trimming || ts.value() > keep_from) {
+                      restore_entry(identity, ts);
+                  } else if (ts.value() == keep_from && ties_left > 0) {
+                      restore_entry(identity, ts);
+                      --ties_left;
+                  } else {
+                      return;
+                  }
+                  if ((++inserted & (restore_sync_interval - 1)) == 0) {
+                      sync_shard_budget();
                   }
               });
-            if (trimming) {
-                for (size_t i = 0; i < at_keep_from; ++i) {
-                    count_in_pass(model::timestamp{keep_from});
-                }
-            }
-            trim_below = finish_restore_pass();
-
-            size_t ties_left = at_keep_from;
-            auto insert_part = [&](bool older_part) {
-                for_each_entry(
-                  [this,
-                   trimming,
-                   keep_from,
-                   trim_below,
-                   older_part,
-                   &ties_left](
-                    dedup_identity_digest identity, model::timestamp ts) {
-                      if ((ts.value() < trim_below) != older_part) {
-                          return;
-                      }
-                      if (!trimming || ts.value() > keep_from) {
-                          restore_entry(identity, ts);
-                      } else if (ts.value() == keep_from && ties_left > 0) {
-                          restore_entry(identity, ts);
-                          --ties_left;
-                      }
-                  });
-            };
-            if (trim_below > oldest) {
-                insert_part(true);
-            }
-            insert_part(false);
-        } else {
-            begin_restore_pass(max_timestamp, oldest);
-            finish_restore_pass();
+        };
+        if (trim_below > oldest) {
+            co_await ss::coroutine::without_preemption_check(insert_part(true));
         }
+        co_await ss::coroutine::without_preemption_check(insert_part(false));
         finish_restore(count - keep);
     }
 
@@ -799,6 +801,8 @@ private:
     /// Entries emitted between preemption checks. 24 bytes each on the wire,
     /// so about 100 KiB of snapshot per check.
     static constexpr size_t walk_chunk = 4096;
+    /// Restored entries between reports to the shard budget. A power of two.
+    static constexpr size_t restore_sync_interval = 4096;
 
     /// Report the map's size change since the last call to the shard budget.
     /// Called after every insert or erase, so the budget is exact whenever a

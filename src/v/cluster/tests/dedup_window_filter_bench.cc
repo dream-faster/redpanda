@@ -42,9 +42,9 @@ struct dedup_stm_test_accessor {
     serialize(dedup_window_filter& state, int64_t generation) {
         return dedup_stm::serialize_snapshot(state, generation);
     }
-    static void
+    static ss::future<>
     restore(dedup_window_filter& state, int64_t& generation, iobuf buffer) {
-        dedup_stm::restore_snapshot(
+        return dedup_stm::restore_snapshot(
           state,
           generation,
           serde::from_iobuf<dedup_stm::state_snapshot>(std::move(buffer)));
@@ -353,7 +353,7 @@ PERF_TEST_CN(dedup_snapshot, restore_1m_entries) {
     cluster::dedup_window_filter target(1h, 2 * snapshot_entries);
     int64_t generation = 0;
     perf_tests::start_measuring_time();
-    cluster::dedup_stm_test_accessor::restore(
+    co_await cluster::dedup_stm_test_accessor::restore(
       target, generation, std::move(buffer));
     perf_tests::stop_measuring_time();
     perf_tests::do_not_optimize(target.map_size());

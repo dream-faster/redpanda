@@ -154,11 +154,14 @@ private:
     /// read once the entries are written, so the two describe the same index.
     static ss::future<iobuf>
     serialize_snapshot(dedup_window_filter&, const int64_t& generation);
-    static void
+    /// Install a snapshot, yielding between chunks of its entries: a restore
+    /// of millions of entries at startup would otherwise hold the reactor,
+    /// and every other partition on the shard waiting to restore behind it.
+    static ss::future<>
     restore_snapshot(dedup_window_filter&, int64_t& generation, state_snapshot);
     /// Deserialize and install a snapshot, or reset to an empty index if the
     /// buffer cannot be read. Returns whether the snapshot was applied.
-    bool try_restore_snapshot(iobuf);
+    ss::future<bool> try_restore_snapshot(iobuf);
 
     void setup_metrics();
 

@@ -63,7 +63,8 @@ struct dedup_stm_test_accessor {
         dedup_stm::restore_snapshot(
           state,
           generation,
-          serde::from_iobuf<dedup_stm::state_snapshot>(std::move(buffer)));
+          serde::from_iobuf<dedup_stm::state_snapshot>(std::move(buffer)))
+          .get();
     }
 
     static iobuf state_snapshot_with_entry_bytes(size_t bytes) {

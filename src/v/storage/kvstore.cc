@@ -13,6 +13,7 @@
 #include "bytes/iobuf.h"
 #include "bytes/iostream.h"
 #include "config/configuration.h"
+#include "container/chunked_vector.h"
 #include "metrics/prometheus_sanitize.h"
 #include "model/adl_serde.h"
 #include "model/async_adl_serde.h"
@@ -41,20 +42,7 @@ static ss::logger lg("kvstore");
 
 namespace storage {
 
-namespace {
-
-bytes make_spaced_key_prefix(kvstore::key_space ks, std::string_view prefix) {
-    auto ks_native = static_cast<std::underlying_type_t<kvstore::key_space>>(
-      ks);
-    auto ks_le = ss::cpu_to_le(ks_native);
-    bytes spaced(bytes::initialized_later{}, sizeof(ks_le) + prefix.size());
-    auto out = std::copy_n(
-      reinterpret_cast<const char*>(&ks_le), sizeof(ks_le), spaced.begin());
-    std::copy_n(prefix.begin(), prefix.size(), out);
-    return spaced;
-}
-
-} // namespace
+static inline bytes make_spaced_key(kvstore::key_space ks, bytes_view key);
 
 kvstore::kvstore(
   kvstore_config kv_conf,
@@ -72,8 +60,8 @@ kvstore::kvstore(
     for (const auto& name : _conf.discarded_stm_snapshots) {
         // persisted_stm keys stm snapshots "<name>/<ntp>"; see
         // raft::kvstore_backed_stm_snapshot::snapshot_key().
-        _discarded_prefixes.push_back(
-          make_spaced_key_prefix(key_space::stms, ssx::sformat("{}/", name)));
+        _discarded_prefixes.push_back(make_spaced_key(
+          key_space::stms, bytes::from_string(ssx::sformat("{}/", name))));
     }
     if (_conf.sanitizer_config) {
         _ntp_sanitizer_config = _conf.sanitizer_config->get_config_for_ntp(
@@ -630,10 +618,19 @@ ss::future<> kvstore::load_snapshot_from_reader(snapshot_reader& reader) {
     crc::crc32c batch_crc;
     model::crc_record_batch_header(batch_crc, hdr.bhdr);
     auto lock = co_await _db_mut.get_units();
+    // Values are kept as shares of the buffer read off disk, which costs no
+    // copy. A share pins whole fragments of that buffer, including the bytes
+    // of any discarded value next to it, so when the snapshot turns out to
+    // hold discarded entries the kept values are copied once it is read and
+    // the buffer can go; a store without any (the steady state) pays nothing.
+    chunked_vector<bytes> restored_keys;
+    const auto discarded_before = _discarded_entries;
     for (int32_t i = 0; i < hdr.bhdr.record_count; ++i) {
         auto r = reflection::adl<model::record>{}.from(records);
         model::crc_extend_record(batch_crc, r);
-        restore_snapshot_record(std::move(r), lock);
+        if (auto key = restore_snapshot_record(std::move(r), lock); key) {
+            restored_keys.push_back(std::move(*key));
+        }
         co_await ss::coroutine::maybe_yield();
     }
     if (hdr.bhdr.crc != batch_crc.value()) {
@@ -643,22 +640,28 @@ ss::future<> kvstore::load_snapshot_from_reader(snapshot_reader& reader) {
             batch_crc.value(),
             hdr.bhdr.crc));
     }
+    if (_discarded_entries != discarded_before) {
+        for (const auto& key : restored_keys) {
+            if (auto it = _db.find(key); it != _db.end()) {
+                it->second = it->second.copy();
+            }
+            co_await ss::coroutine::maybe_yield();
+        }
+    }
     _next_offset = last_offset + model::offset(1);
 }
 
-void kvstore::restore_snapshot_record(
-  model::record r, const ssx::semaphore_units&) {
+std::optional<bytes>
+kvstore::restore_snapshot_record(model::record r, const ssx::semaphore_units&) {
     auto key = iobuf_to_bytes(r.release_key());
     if (is_discarded(key)) {
         ++_discarded_entries;
         _discarded_bytes += key.size() + r.value().size_bytes();
-        return;
+        return std::nullopt;
     }
-    // Copied rather than kept as a share of the buffer read off disk: a share
-    // would pin whole fragments of that buffer, including the bytes of every
-    // discarded value next to it, for as long as the entry lives.
-    auto value = r.value().copy();
+    auto value = r.release_value();
     const auto entry_bytes = key.size() + value.size_bytes();
+    auto restored = key;
     auto res = _db.emplace(std::move(key), std::move(value));
     if (!res.second) {
         // Records go into _db as they stream in, before the batch crc can be
@@ -673,6 +676,7 @@ void kvstore::restore_snapshot_record(
       "Load snapshot: restoring key={} value={}",
       res.first->first,
       res.first->second);
+    return restored;
 }
 
 ss::future<> kvstore::replay_segments(segment_set segs) {
