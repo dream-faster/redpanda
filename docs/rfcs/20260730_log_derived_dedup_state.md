@@ -71,15 +71,23 @@ Guarantees:
 - **G3** — Log consistency and Kafka offset translation never depend on
   filter state. There are no dedup batches in the log at all.
 - **G4** — Classification order does not imply log order (an introducing
-  request inserts into the map before its batch is appended), so any request
-  that observed a duplicate first waits on the **append-order fence**: a
-  shared promise resolved when the most recently admitted request's batch has
-  been appended. This is a conservative global fence, not per-key tracking.
-  After it, a *partially* deduplicated request replicates its own batch,
-  whose offset now follows the introducing appends — the Raft prefix
-  property makes its quorum ack cover them.
+  request inserts into the map before its batch is appended), so the
+  identities a request introduces are **pending** -- `_pending` maps each to
+  the in-flight request that introduced it -- until raft confirms the batch
+  appended. A request that drops a record against a pending identity waits
+  for exactly that introducer to resolve: appended, and it proceeds (its own
+  batch, if any, is replicated after the introducing append, so the Raft
+  prefix property makes its quorum ack cover it); never appended (the
+  introducer's entries are reverted), or unresolved within the sync timeout,
+  and it fails with a retriable error after reverting its own insertions, so
+  the producer's retry is classified fresh. A request that drops nothing
+  waits on nobody. A raft timeout leaves a batch's fate open -- the batcher
+  may have appended it before the timer fired -- so its identities stay
+  pending until this replica has applied past the dirty offset read at that
+  point, and whether `do_apply()` saw the batch decides. Snapshots leave
+  pending identities out (see Snapshots).
 - **G5** — A request that is *entirely* deduplicated (nothing to replicate)
-  and requests `quorum_ack` waits, after the append fence, for the committed
+  and requests `quorum_ack` waits, once its introducers are appended, for the committed
   offset to reach the current dirty offset before acking. The introducing
   entries are therefore durable when the duplicate is acknowledged. This
   closes the "acked duplicate, introducing write lost" hole without per-key
@@ -371,9 +379,17 @@ Best-effort boundaries (all bounded by one dedup window, all documented):
    occurrence of the configured header, digested straight from the batch's
    buffer, and the timestamp -- and skips the rest of each record by its
    length. Nothing is copied or shared per record. For each identity:
-   `populate(digest, first_timestamp + timestamp_delta)`. `populate()` never
-   lets the index exceed its hard per-partition entry limit; when a bounded
-   step cannot free a slot, the identity remains unindexed.
+   `populate(digest, first_timestamp + timestamp_delta)` (a saturating add:
+   the delta is client-controlled). `populate()` never lets the index exceed
+   its hard per-partition entry limit; when a bounded step cannot free a
+   slot, the identity remains unindexed.
+6. A batch whose records cannot be read -- the walk or the decompression
+   throws -- is skipped and counted (`batches_skipped`), with a rate-limited
+   warning. The STM manager treats an exception from apply as transient and
+   retries the batch forever, which would also hold up every raft snapshot
+   on the partition and with it the log's prefix truncation; the index is
+   advisory, and an unreadable batch is one the leader could not have
+   filtered either. `std::bad_alloc` is the exception: it propagates.
 
 `populate()` advances the same sweep cursor the leader's classification path
 does, at the same point relative to its insert, so follower maps stay bounded
@@ -402,24 +418,38 @@ read**.
    filtered batch (or `nullopt` if everything was a duplicate) and this
    request's undo list: `{key, applied_timestamp, previous_timestamp}` per
    admitted key.
-4. If the request observed any duplicate, wait on the append-order fence
-   (`_append_tail`, G4) with the sync timeout, so everything below is ordered
-   after the appends that introduced the observed keys.
+4. Look the dropped identities up in `_pending` (G4) and, if anything was
+   admitted, register this request's insertions there under a fresh
+   `inflight_request` -- before the first suspension, so a request classified
+   behind this one finds them. Then wait on each distinct introducer with the
+   sync timeout: one that never appended fails this request with
+   `replication_error`, one that does not resolve in time with `timeout`,
+   either after reverting its own insertions.
 5. **All-duplicate**: resolve `enqueued` immediately. If
    `opts.consistency == quorum_ack`, capture `fence = dirty_offset()` (which
    now covers the introducing appends) and wait on
-   `visible_offset_monitor().wait(fence, now + sync_timeout, as)` (G5); on
-   timeout return `errc::timeout`. Ack with the committed offset and
-   `replicated_record_count = 0`.
+   `events().wait(fence, now + sync_timeout, as)` (G5); on timeout return
+   `errc::timeout`; if the term changed meanwhile return `errc::not_leader`.
+   Ack with the committed offset and `replicated_record_count = 0`.
 6. Otherwise `_raft->replicate_in_stages(std::move(*res.batch), opts)` — the
    data batch alone; there is no metadata batch to keep ordered, so Raft
    batching and pipelining across produce requests work exactly as for
-   non-dedup topics. Install a fresh `_append_tail` promise and resolve it
-   when `request_enqueued` completes (success or failure), so later
-   duplicate-observers never hang.
-7. On enqueue or replication failure: `_state.revert_request(res.undo)` and
-   return the error. **No step-down** — the map is repaired locally, and
-   log-derived state means the next leader is correct by construction.
+   non-dedup topics.
+7. On enqueue or replication failure, `settle(appended = false)`:
+   `_state.revert_request(res.undo)`, forget the self-filtered key, drop the
+   request's `_pending` registrations and resolve its promise with `false`,
+   so requests waiting on it fail for retry. **No step-down** — the map is
+   repaired locally, and log-derived state means the next leader is correct
+   by construction. `raft::errc::timeout` is the one result that says
+   nothing about the batch: `resolve_after_timeout()` keeps its identities
+   pending, waits until this replica has applied past the dirty offset (or
+   leadership is lost), and settles by whether `do_apply()` saw the batch --
+   its key moved out of the bounded self-filtered set for the duration, so
+   load cannot age it out. If the key was already gone and the set did age
+   entries out meanwhile, the answer is unknowable and the request settles
+   as never appended: the retry may then land beside an appended batch (a
+   duplicate, which is what a timed-out produce means to a Kafka client
+   anyway) rather than be acknowledged against a write that may not exist.
 8. On success: ack with `replicated_record_count = admitted` when records
    were dropped (feeding the existing `produce.cc` base-offset correction).
 
@@ -446,6 +476,16 @@ of 24-byte records (digest hi, digest lo, timestamp; little-endian), written
 straight from the index. A snapshot therefore costs one serialized copy of the
 live entries. Earlier versions are refused on compat version, and the index is
 rebuilt from the log, in both upgrade directions.
+
+Identities introduced by requests still in flight (`_pending`, G4) are left
+out of both local and raft snapshots: they are not in the log yet, and a
+snapshot holding one would, after a crash, drop the producer's retry of a
+record no replica ever wrote. The next snapshot carries them once their
+batches have applied.
+
+Raft snapshot installs take the shard's `restore_one_at_a_time` semaphore,
+as startup restores do: a node rejoining after a long absence installs one
+for every partition it fell behind on.
 
 The write yields. `for_each_live_entry_async()` walks the map's value array in
 chunks of 4096 entries with a preemption check between them, while the produce
@@ -519,11 +559,16 @@ The branch is unmerged, so the checkpoint/undo local-snapshot formats
 ## Recovery
 
 `get_initial_recovery_policy()` returns `read_everything` when the partition's
-config has dedup enabled at STM start and `skip_to_end` otherwise. First boot
-of a dedup-enabled partition replays the log through `do_apply` (bounded
-thereafter by local snapshot cadence). Follow-up (not in this change): seek
-the initial replay to the timequery offset of `max_ts − window`, since older
-entries are expired by definition.
+config has dedup enabled at STM start and `skip_to_end` otherwise, and
+`get_initial_recovery_start_offset()` bounds the first boot of a dedup-enabled
+partition to one window: the timequery offset of `now − window`, since older
+entries are expired by definition. The STM manager applies that bound only on
+the partition's first start and afterwards resumes from the offset it recorded
+then, so `dedup_stm::start()` applies the same bound itself whenever no local
+snapshot was restored (the file was lost, or discarded on a version break);
+otherwise such a restart would replay the whole retained log, with produce
+requests waiting on `sync()` meanwhile. The manager clamps with `max`, so the
+two agree.
 
 # File-by-file changes
 

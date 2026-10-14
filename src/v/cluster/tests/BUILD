@@ -1637,6 +1637,7 @@ redpanda_cc_gtest(
         "//src/v/cluster:logger",
         "//src/v/cluster:snapshot",
         "//src/v/config",
+        "//src/v/model",
         "//src/v/model:batch_builder",
         "//src/v/raft",
         "//src/v/raft/tests:raft_fixture",

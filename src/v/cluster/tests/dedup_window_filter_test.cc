@@ -27,6 +27,7 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <random>
@@ -296,6 +297,62 @@ TEST(DedupWindowFilter, FilterRequestReturnsUndoForAdmittedKeys) {
     ASSERT_EQ(readmitted.undo.entries.size(), 1);
     EXPECT_EQ(readmitted.undo.entries[0].applied_timestamp, ts(2500));
     EXPECT_EQ(readmitted.undo.entries[0].previous_timestamp, ts(1000));
+}
+
+// The identities of the dropped records come back with the result, so the
+// caller can find the in-flight requests that introduced them.
+TEST(DedupWindowFilter, FilterRequestReportsDroppedIdentities) {
+    cluster::dedup_window_filter f(1000ms);
+
+    auto fresh = f.filter_request(
+      make_multi_batch({{"a", "1"}, {"b", "2"}}, ts(1000)));
+    ASSERT_TRUE(fresh.batch.has_value());
+    EXPECT_TRUE(fresh.dropped.empty());
+
+    // "a" and "b" are duplicates and "c" is new: the batch is rebuilt.
+    auto partial = f.filter_request(
+      make_multi_batch({{"a", "3"}, {"c", "4"}, {"b", "5"}}, ts(1100)));
+    ASSERT_TRUE(partial.batch.has_value());
+    EXPECT_EQ(record_count(*partial.batch), 1);
+    ASSERT_EQ(partial.dropped.size(), 2u);
+    EXPECT_EQ(partial.dropped[0], cluster::dedup_digest_of(iobuf::from("a")));
+    EXPECT_EQ(partial.dropped[1], cluster::dedup_digest_of(iobuf::from("b")));
+
+    // Everything a duplicate: no batch, every identity reported in order.
+    auto all = f.filter_request(
+      make_multi_batch({{"c", "6"}, {"a", "7"}}, ts(1200)));
+    EXPECT_FALSE(all.batch.has_value());
+    ASSERT_EQ(all.dropped.size(), 2u);
+    EXPECT_EQ(all.dropped[0], cluster::dedup_digest_of(iobuf::from("c")));
+    EXPECT_EQ(all.dropped[1], cluster::dedup_digest_of(iobuf::from("a")));
+}
+
+// A record's timestamp delta is client-controlled. One that carries the
+// batch's base timestamp past the int64 range saturates instead of wrapping,
+// and the record is admitted like any other with a timestamp from the future.
+TEST(DedupWindowFilter, TimestampDeltaOverflowSaturates) {
+    cluster::dedup_window_filter f(1000ms);
+
+    model::batch_builder builder;
+    builder.set_batch_type(model::record_batch_type::raft_data);
+    builder.set_batch_timestamp(
+      model::timestamp_type::create_time, model::timestamp{1000});
+    builder.add_record(
+      model::record({}, 100, 0, iobuf::from("k"), iobuf::from("v"), {}));
+    auto built = std::move(builder).build_sync();
+    // The builder would overflow computing max_timestamp itself, so the
+    // header is patched after the fact; the filter reads the records.
+    auto header = built.header();
+    header.first_timestamp = model::timestamp{
+      std::numeric_limits<int64_t>::max() - 10};
+    header.max_timestamp = model::timestamp::max();
+    model::record_batch batch(
+      header, built.data().copy(), model::record_batch::tag_ctor_ng{});
+
+    auto result = f.filter_request(std::move(batch));
+    ASSERT_TRUE(result.batch.has_value());
+    EXPECT_EQ(record_count(*result.batch), 1);
+    EXPECT_EQ(f.map_size(), 1u);
 }
 
 TEST(DedupWindowFilter, RevertRequestRestoresPreRequestState) {

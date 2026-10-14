@@ -20,6 +20,7 @@
 #include "model/namespace.h"
 #include "model/record_batch_types.h"
 #include "raft/consensus.h"
+#include "raft/errc.h"
 #include "serde/serde_exception.h"
 #include "ssx/future-util.h"
 #include "ssx/sformat.h"
@@ -33,9 +34,11 @@
 #include <seastar/coroutine/as_future.hh>
 #include <seastar/coroutine/maybe_yield.hh>
 
+#include <algorithm>
 #include <array>
 #include <cstring>
 #include <new>
+#include <vector>
 
 namespace cluster {
 
@@ -126,6 +129,14 @@ void dedup_stm::setup_metrics() {
             "dropped as duplicates. This is the rate that drives the dedup "
             "feature's cost on the produce path."),
           labels),
+        sm::make_counter(
+          "batches_skipped",
+          [this] { return _batches_skipped; },
+          sm::description(
+            "Number of committed batches whose records could not be read "
+            "while indexing them. Their identities are not in the index, so "
+            "their duplicates are not detected."),
+          labels),
         sm::make_gauge(
           "index_entries",
           [this] { return _state.map_size(); },
@@ -162,6 +173,28 @@ ss::future<> dedup_stm::start() {
               budget->restore_one_at_a_time, 1);
         }
         co_await raft::persisted_stm<>::start();
+    }
+    if (!_local_snapshot_applied) {
+        // The STM manager bounds recovery to the dedup window only on the
+        // partition's first start; afterwards it resumes from the offset it
+        // recorded then. Without a local snapshot to resume from (the file
+        // was lost, or discarded on a version break) that would replay the
+        // whole retained log before the partition answers a produce request.
+        // Everything before the bounded offset is older than the window and
+        // could not cause a drop, so skip to it; the manager only ever moves
+        // this forward.
+        if (
+          auto bounded = co_await get_initial_recovery_start_offset();
+          bounded && *bounded > next()) {
+            vlog(
+              clusterlog.info,
+              "{} dedup index has no snapshot to resume from, rebuilding "
+              "from offset {} (one window) rather than {}",
+              _raft->ntp(),
+              *bounded,
+              next());
+            set_next(*bounded);
+        }
     }
     setup_metrics();
 }
@@ -226,7 +259,9 @@ dedup_stm::get_initial_recovery_start_offset() {
 }
 
 ss::future<iobuf> dedup_stm::serialize_snapshot(
-  dedup_window_filter& state, const int64_t& generation) {
+  dedup_window_filter& state,
+  const int64_t& generation,
+  const pending_identities* pending) {
     // Entries are staged in a fixed local buffer and appended a chunk at a
     // time, so the pass costs a memcpy per entry rather than an iobuf append
     // per entry.
@@ -237,6 +272,9 @@ ss::future<iobuf> dedup_stm::serialize_snapshot(
         size_t staged = 0;
         const bool complete = co_await state.for_each_live_entry_async(
           [&](dedup_identity_digest identity, model::timestamp timestamp) {
+              if (pending && pending->contains(identity)) {
+                  return;
+              }
               char* out = chunk.data() + staged * packed_entry_size;
               const auto hi = ss::cpu_to_le(identity.hi);
               const auto lo = ss::cpu_to_le(identity.lo);
@@ -378,7 +416,15 @@ ss::future<> dedup_stm::do_apply(const model::record_batch& batch) {
         co_return;
     }
     adopt_config(*window, cfg.dedup_generation(), cfg.dedup_key_header());
-    if (take_self_filtered(self_filtered_key(batch.header()))) {
+    const auto key = self_filtered_key(batch.header());
+    if (auto it = _resolving.find(key); it != _resolving.end()) {
+        // A batch raft timed out on has applied after all; its request's
+        // identities are already in the index. resolve_after_timeout() is
+        // waiting to hear so.
+        it->second = true;
+        co_return;
+    }
+    if (take_self_filtered(key)) {
         // This leader indexed the batch's identities when it filtered the
         // request, with these timestamps (max-wins makes the two the same
         // state), so applying it again would only cost the parse. Followers,
@@ -386,27 +432,50 @@ ss::future<> dedup_stm::do_apply(const model::record_batch& batch) {
         co_return;
     }
 
-    std::optional<model::record_batch> decompressed;
-    if (batch.compressed()) {
-        decompressed = model::decompress_batch_sync(batch);
+    // A batch this replica cannot read is skipped, not retried: the STM
+    // manager treats an exception from apply as transient and retries the
+    // batch forever, which also holds up every raft snapshot and so the
+    // log's prefix truncation. The index is advisory, and an unreadable
+    // batch is one the leader could not have filtered either.
+    try {
+        std::optional<model::record_batch> decompressed;
+        if (batch.compressed()) {
+            decompressed = model::decompress_batch_sync(batch);
+        }
+        const model::record_batch& readable = decompressed ? *decompressed
+                                                           : batch;
+        // The header identity source can change after this batch was
+        // already validated and committed under an older config, so a
+        // record here may lack the *current* header; it is left unindexed
+        // rather than rejecting an already committed batch.
+        for_each_dedup_identity(
+          readable,
+          _state.key_header(),
+          [this](
+            dedup_identity_lookup lookup,
+            dedup_identity_digest digest,
+            model::timestamp ts) {
+              if (lookup == dedup_identity_lookup::identity) {
+                  _state.populate(digest, ts);
+              }
+              return true;
+          });
+    } catch (const std::bad_alloc&) {
+        throw;
+    } catch (...) {
+        ++_batches_skipped;
+        thread_local static ss::logger::rate_limit rate(
+          std::chrono::minutes(1));
+        auto ex = std::current_exception();
+        clusterlog.log(
+          ss::log_level::warn,
+          rate,
+          "{} dedup could not read the records of the batch at {}, its "
+          "identities are not indexed: {}",
+          _raft->ntp(),
+          batch.base_offset(),
+          ex);
     }
-    const model::record_batch& readable = decompressed ? *decompressed : batch;
-    // The header identity source can change after this batch was already
-    // validated and committed under an older config, so a record here may
-    // lack the *current* header; it is left unindexed rather than rejecting
-    // an already committed batch.
-    for_each_dedup_identity(
-      readable,
-      _state.key_header(),
-      [this](
-        dedup_identity_lookup lookup,
-        dedup_identity_digest digest,
-        model::timestamp ts) {
-          if (lookup == dedup_identity_lookup::identity) {
-              _state.populate(digest, ts);
-          }
-          return true;
-      });
 }
 
 kafka::offset dedup_stm::from_log_offset(model::offset offset) const {
@@ -427,21 +496,26 @@ uint64_t dedup_stm::self_filtered_key(const model::record_batch_header& h) {
 
 void dedup_stm::remember_self_filtered(uint64_t key) {
     if (_self_filtered_order.size() >= self_filtered_max) {
-        forget_self_filtered(_self_filtered_order.front());
+        // Most entries in the order are stale: their key was taken or
+        // forgotten already. Only a live one counts as evicted.
+        if (forget_self_filtered(_self_filtered_order.front())) {
+            ++_self_filtered_evictions;
+        }
         _self_filtered_order.pop_front();
     }
     _self_filtered_order.push_back(key);
     ++_self_filtered.try_emplace(key, 0U).first->second;
 }
 
-void dedup_stm::forget_self_filtered(uint64_t key) {
+bool dedup_stm::forget_self_filtered(uint64_t key) {
     auto it = _self_filtered.find(key);
     if (it == _self_filtered.end()) {
-        return;
+        return false;
     }
     if (--it->second == 0) {
         _self_filtered.erase(it);
     }
+    return true;
 }
 
 bool dedup_stm::take_self_filtered(uint64_t key) {
@@ -536,50 +610,58 @@ ss::future<result<kafka_result>> dedup_stm::do_replicate(
     const auto admitted_count = filtered.batch ? filtered.batch->record_count()
                                                : 0;
 
-    if (admitted_count != original_count && _append_tail) {
-        // This request observed at least one duplicate. The map entries that
-        // caused the drops may belong to requests whose batches are not yet
-        // appended to the log, so classification order alone does not imply
-        // log order. Waiting for the latest admitted append (a conservative,
-        // global fence) orders everything this request does after the appends
-        // that introduced its keys.
-        auto tail_wait = co_await ss::coroutine::as_future(
+    // The requests this one depends on: those still in flight whose
+    // identities made it drop records. Until each is known appended, the
+    // dropped records have no durable copy, and acknowledging this request
+    // -- or replicating its remaining records under the same acknowledgment
+    // -- would tell the producer otherwise. Looked up before this request's
+    // own identities go in, which happens before its first suspension, so a
+    // request classified behind it finds them pending in turn.
+    std::vector<inflight_ptr> depends_on;
+    for (const auto& identity : filtered.dropped) {
+        if (auto it = _pending.find(identity); it != _pending.end()) {
+            if (std::ranges::find(depends_on, it->second) == depends_on.end()) {
+                depends_on.push_back(it->second);
+            }
+        }
+    }
+    inflight_ptr mine;
+    if (filtered.batch) {
+        mine = ss::make_lw_shared<inflight_request>();
+        for (const auto& entry : filtered.undo.entries) {
+            _pending.insert_or_assign(entry.identity, mine);
+        }
+    }
+
+    for (const auto& dep : depends_on) {
+        auto waited = co_await ss::coroutine::as_future(
           ss::with_timeout(
             model::timeout_clock::now() + _sync_timeout(),
-            _append_tail->get_shared_future()));
-        if (tail_wait.failed()) {
-            auto ex = tail_wait.get_exception();
+            dep->appended.get_shared_future()));
+        if (waited.failed() || !waited.get()) {
+            // Either the introducer never appended -- its entry is reverted,
+            // so nothing in the log holds the identity this request dropped
+            // against -- or its fate is still unknown. Fail this request so
+            // the producer retries the whole batch; by then it is classified
+            // fresh. Its own insertions go first, so the retry is not fenced
+            // on itself.
+            const bool unknown = waited.failed();
             vlog(
               clusterlog.debug,
-              "{} dedup append fence wait failed: {}",
+              "{} dedup request waited on an introducing request that {}, "
+              "failing it for retry",
               _raft->ntp(),
-              ex);
-            _state.revert_request(filtered.undo);
-            co_return errc::timeout;
-        }
-        if (!tail_wait.get()) {
-            // The introducing request's enqueue failed: no copy of the key
-            // that made this request observe a duplicate ever reached the
-            // log. Proceeding here would risk acknowledging a duplicate of
-            // a write that doesn't exist. Revert this request's own
-            // mutations and fail it so the producer retries the whole
-            // batch -- by then the introducer's reverted entry is gone, so
-            // the retry is classified fresh.
-            vlog(
-              clusterlog.debug,
-              "{} dedup append fence observed a failed introducing enqueue, "
-              "failing this request for retry",
-              _raft->ntp());
-            _state.revert_request(filtered.undo);
-            co_return errc::replication_error;
+              unknown ? "did not resolve in time" : "never appended");
+            settle(mine, filtered.undo, false, std::nullopt);
+            co_return unknown ? errc::timeout : errc::replication_error;
         }
     }
 
     if (!filtered.batch) {
-        // Every record was a duplicate: nothing to replicate. A quorum-ack
-        // request must not acknowledge more strongly than the entries that
-        // introduced its keys, so wait for everything appended so far — which
-        // now includes those entries — to commit first.
+        // Every record was a duplicate: nothing to replicate. Its
+        // introducers are appended; a quorum-ack request must not
+        // acknowledge more strongly than they were, so wait for everything
+        // appended so far -- which includes them -- to commit first.
         enqueued->set_value();
         if (opts.consistency == raft::consistency_level::quorum_ack) {
             const auto fence = _raft->dirty_offset();
@@ -649,16 +731,11 @@ ss::future<result<kafka_result>> dedup_stm::do_replicate(
         self_key = self_filtered_key(filtered.batch->header());
         remember_self_filtered(*self_key);
     }
+    const auto evictions_before = _self_filtered_evictions;
+    const auto term = _insync_term;
     auto stages = _raft->replicate_in_stages(std::move(*filtered.batch), opts);
-    auto append_done = ss::make_lw_shared<ss::shared_promise<bool>>();
-    _append_tail = append_done;
     auto enqueued_result = co_await ss::coroutine::as_future(
       std::move(stages.request_enqueued));
-    // Resolve the fence unconditionally so waiters never hang, but carry
-    // whether the enqueue actually succeeded: a waiter must not treat this
-    // introducer's failure as proof its own duplicate has a durable copy
-    // (see the check after the wait above).
-    append_done->set_value(!enqueued_result.failed());
     if (enqueued_result.failed()) {
         auto ex = enqueued_result.get_exception();
         vlog(
@@ -666,10 +743,7 @@ ss::future<result<kafka_result>> dedup_stm::do_replicate(
           "{} dedup replicate enqueue failed: {}",
           _raft->ntp(),
           ex);
-        _state.revert_request(filtered.undo);
-        if (self_key) {
-            forget_self_filtered(*self_key);
-        }
+        settle(mine, filtered.undo, false, self_key);
         co_return errc::replication_error;
     }
     enqueued->set_value();
@@ -680,22 +754,38 @@ ss::future<result<kafka_result>> dedup_stm::do_replicate(
         auto ex = replicated.get_exception();
         vlog(
           clusterlog.debug, "{} dedup replicate failed: {}", _raft->ntp(), ex);
-        // The entries are reverted, so if the batch commits after all its
-        // apply must index it: stop telling do_apply to skip it.
-        _state.revert_request(filtered.undo);
-        if (self_key) {
-            forget_self_filtered(*self_key);
-        }
+        settle(mine, filtered.undo, false, self_key);
         co_return errc::replication_error;
     }
     auto result = replicated.get();
     if (!result) {
-        _state.revert_request(filtered.undo);
-        if (self_key) {
-            forget_self_filtered(*self_key);
+        if (result.error() == raft::errc::timeout) {
+            // The batch may or may not have been appended; see
+            // resolve_after_timeout(). Its identities stay pending until
+            // that is known, so a retry of one of them neither gets
+            // acknowledged against a write that may not exist nor admitted
+            // next to one that does.
+            ssx::spawn_with_gate(
+              _gate,
+              [this,
+               mine,
+               undo = std::move(filtered.undo),
+               self_key,
+               term,
+               evictions_before]() mutable {
+                  return resolve_after_timeout(
+                    std::move(mine),
+                    std::move(undo),
+                    self_key,
+                    term,
+                    evictions_before);
+              });
+            co_return result.error();
         }
+        settle(mine, filtered.undo, false, self_key);
         co_return result.error();
     }
+    settle(mine, filtered.undo, true, std::nullopt);
 
     kafka_result response{
       .last_offset = from_log_offset(result.value().last_offset),
@@ -706,12 +796,95 @@ ss::future<result<kafka_result>> dedup_stm::do_replicate(
     co_return response;
 }
 
+void dedup_stm::settle(
+  const inflight_ptr& mine,
+  const dedup_request_undo& undo,
+  bool appended,
+  std::optional<uint64_t> self_key) {
+    if (!mine) {
+        // Nothing was admitted, so nothing is pending.
+        return;
+    }
+    for (const auto& entry : undo.entries) {
+        // Only this request's own registrations: a later request may have
+        // written a newer timestamp for the same identity and registered
+        // itself in its place.
+        if (
+          auto it = _pending.find(entry.identity);
+          it != _pending.end() && it->second == mine) {
+            _pending.erase(it);
+        }
+    }
+    if (!appended) {
+        _state.revert_request(undo);
+        if (self_key) {
+            forget_self_filtered(*self_key);
+        }
+    }
+    mine->appended.set_value(appended);
+}
+
+ss::future<> dedup_stm::resolve_after_timeout(
+  inflight_ptr mine,
+  dedup_request_undo undo,
+  std::optional<uint64_t> self_key,
+  model::term_id term,
+  uint64_t evictions_before) {
+    // Whether the batch was appended shows in whether do_apply() sees it.
+    // Three cases at this point:
+    //  - its key is still remembered: not applied yet. Move the key where
+    //    load cannot age it out and wait.
+    //  - its key is gone and nothing aged out meanwhile: do_apply() took it,
+    //    the batch is in the log.
+    //  - its key is gone and keys did age out: unknowable. Treat it as never
+    //    appended and release its identities. If it was appended after all,
+    //    the producer's retry is admitted beside it -- a duplicate, which is
+    //    what a timed-out produce means to a Kafka client anyway -- rather
+    //    than acknowledged against a write that might not exist.
+    bool appended = false;
+    bool watch = false;
+    if (self_key && take_self_filtered(*self_key)) {
+        watch = _resolving.try_emplace(*self_key, false).second;
+    } else if (self_key && _self_filtered_evictions == evictions_before) {
+        appended = true;
+    }
+    if (watch) {
+        // If the batch was appended it sits at or below the dirty offset read
+        // here: the batcher only appends an item it has not expired, and an
+        // expired one is dropped. Once this replica has applied everything
+        // up to that offset the batch has applied too, if it ever was.
+        const auto fence = _raft->dirty_offset();
+        while (!_gate.is_closed()) {
+            if (
+              co_await wait_no_throw(
+                fence, model::timeout_clock::now() + _sync_timeout())) {
+                break;
+            }
+            if (!_raft->is_leader() || _raft->term() != term) {
+                // The question is open, and closed another way: a follower
+                // does not filter, and indexes whatever commits through
+                // do_apply() -- after this key is forgotten below.
+                break;
+            }
+        }
+        auto it = _resolving.find(*self_key);
+        appended = it->second;
+        _resolving.erase(it);
+    }
+    vlog(
+      clusterlog.debug,
+      "{} dedup request that timed out resolved as {}",
+      _raft->ntp(),
+      appended ? "appended" : "never appended");
+    settle(mine, undo, appended, self_key);
+}
+
 ss::future<iobuf> dedup_stm::take_raft_snapshot(model::offset) {
     // Convergent snapshot: serialize the current state regardless of the
     // target offset. populate() is idempotent (max-timestamp-wins), so a
     // replica installing this snapshot and replaying the remaining log
     // converges to exactly this state; see the log-derived dedup RFC.
-    co_return co_await serialize_snapshot(_state, _generation);
+    co_return co_await serialize_snapshot(_state, _generation, &_pending);
 }
 
 ss::future<bool> dedup_stm::try_restore_snapshot(iobuf buffer) {
@@ -752,8 +925,23 @@ ss::future<bool> dedup_stm::try_restore_snapshot(iobuf buffer) {
 }
 
 ss::future<> dedup_stm::apply_raft_snapshot(const iobuf& buffer) {
+    // One at a time per shard, as at startup: a node rejoining after a long
+    // absence installs raft snapshots for every partition it fell behind on,
+    // and each restore holds its snapshot's entries twice over while it runs.
+    std::optional<ssx::semaphore_units> one_at_a_time;
+    if (auto budget = _state.shard_budget(); budget) {
+        one_at_a_time = co_await ss::get_units(
+          budget->restore_one_at_a_time, 1);
+    }
     _state.clear();
     _generation = 0;
+    // Whatever this replica filtered is behind the snapshot now; the batches
+    // after it must be indexed when they apply. Keys under resolution stay:
+    // a snapshot only installs on a replica that fell behind, which is no
+    // longer the leader those requests ran on, so they resolve as never
+    // appended either way.
+    _self_filtered.clear();
+    _self_filtered_order.clear();
     if (!buffer.empty()) {
         co_await try_restore_snapshot(buffer.copy());
     }
@@ -767,6 +955,7 @@ dedup_stm::apply_local_snapshot(raft::stm_snapshot_header, iobuf&& buffer) {
     // Answering `yes` here would leave the index empty *and* skip past the
     // records it should have been rebuilt from.
     const bool applied = co_await try_restore_snapshot(std::move(buffer));
+    _local_snapshot_applied = applied;
     co_return applied ? raft::local_snapshot_applied::yes
                       : raft::local_snapshot_applied::no;
 }
@@ -775,7 +964,7 @@ ss::future<raft::stm_snapshot>
 dedup_stm::take_local_snapshot(ssx::semaphore_units apply_units) {
     // The walk yields, but the apply lock is held throughout, so the offset
     // read after it is the one the entries cover.
-    auto buffer = co_await serialize_snapshot(_state, _generation);
+    auto buffer = co_await serialize_snapshot(_state, _generation, &_pending);
     auto offset = last_applied_offset();
     apply_units.return_all();
     // The 0 here is stm_snapshot_header::version, a channel this STM does

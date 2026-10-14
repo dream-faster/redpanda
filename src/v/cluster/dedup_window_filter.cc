@@ -305,11 +305,14 @@ dedup_window_filter::filter_request(model::record_batch batch) {
     // requests.
     dedup_request_undo undo;
     undo.entries.reserve(static_cast<size_t>(total));
+    chunked_vector<dedup_identity_digest> dropped;
     int32_t kept = 0;
     for (auto& c : records) {
         c.dropped = c.has_identity
                     && is_duplicate(c.identity, c.timestamp, &undo);
-        if (!c.dropped) {
+        if (c.dropped) {
+            dropped.push_back(c.identity);
+        } else {
             ++kept;
         }
     }
@@ -320,7 +323,10 @@ dedup_window_filter::filter_request(model::record_batch batch) {
         return {.batch = std::move(batch), .undo = std::move(undo)};
     }
     if (kept == 0) {
-        return {.batch = std::nullopt, .undo = std::move(undo)};
+        return {
+          .batch = std::nullopt,
+          .undo = std::move(undo),
+          .dropped = std::move(dropped)};
     }
 
     ++_rebuilt_requests;
@@ -349,25 +355,37 @@ dedup_window_filter::filter_request(model::record_batch batch) {
     // Second sharing pass, taken only when something was actually dropped.
     // Re-parsing is cheap next to holding every record's iobufs alive across
     // the classification above, and the fast path above never reaches here.
-    int32_t output_offset_delta = 0;
-    size_t idx = 0;
-    auto rebuild = model::record_batch_iterator::create(readable.share());
-    while (rebuild.has_next()) {
-        auto r = rebuild.next();
-        if (records[idx++].dropped) {
-            continue;
+    //
+    // This pass decodes fields the identity walk skipped (values, headers in
+    // key mode), so a malformed record can fail here after the index was
+    // already mutated above. The insertions are undone before the error
+    // propagates: the request fails and nothing of it stays behind.
+    try {
+        int32_t output_offset_delta = 0;
+        size_t idx = 0;
+        auto rebuild = model::record_batch_iterator::create(readable.share());
+        while (rebuild.has_next()) {
+            auto r = rebuild.next();
+            if (records[idx++].dropped) {
+                continue;
+            }
+            builder.add_record(
+              model::record(
+                r.attributes(),
+                r.timestamp_delta(),
+                output_offset_delta++,
+                r.share_key_opt(),
+                r.share_value_opt(),
+                std::move(r.headers())));
         }
-        builder.add_record(
-          model::record(
-            r.attributes(),
-            r.timestamp_delta(),
-            output_offset_delta++,
-            r.share_key_opt(),
-            r.share_value_opt(),
-            std::move(r.headers())));
+        return {
+          .batch = std::move(builder).build_sync(),
+          .undo = std::move(undo),
+          .dropped = std::move(dropped)};
+    } catch (...) {
+        revert_request(undo);
+        throw;
     }
-
-    return {.batch = std::move(builder).build_sync(), .undo = std::move(undo)};
 }
 
 void dedup_window_filter::revert_request(const dedup_request_undo& undo) {

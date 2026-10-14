@@ -13,6 +13,7 @@
 #include "cluster/snapshot.h"
 #include "config/mock_property.h"
 #include "model/batch_builder.h"
+#include "model/record_utils.h"
 #include "raft/tests/raft_fixture.h"
 #include "serde/envelope.h"
 #include "serde/rw/envelope.h"
@@ -54,8 +55,29 @@ struct dedup_stm_test_accessor {
         co_await stm.apply_raft_snapshot(buffer);
     }
 
-    static iobuf serialize(dedup_window_filter& state, int64_t generation) {
-        return dedup_stm::serialize_snapshot(state, generation).get();
+    using pending_identities = dedup_stm::pending_identities;
+
+    static iobuf serialize(
+      dedup_window_filter& state,
+      int64_t generation,
+      const pending_identities* pending = nullptr) {
+        return dedup_stm::serialize_snapshot(state, generation, pending).get();
+    }
+
+    static dedup_stm::inflight_ptr make_inflight() {
+        return ss::make_lw_shared<dedup_stm::inflight_request>();
+    }
+
+    static size_t pending_size(const dedup_stm& stm) {
+        return stm._pending.size();
+    }
+
+    static size_t resolving_size(const dedup_stm& stm) {
+        return stm._resolving.size();
+    }
+
+    static uint64_t batches_skipped(const dedup_stm& stm) {
+        return stm._batches_skipped;
     }
 
     static void
@@ -157,6 +179,43 @@ TEST(dedup_stm_snapshot, packed_entries_round_trip) {
 // A blob that is not a whole number of entries is corrupt, and must fail the
 // read -- which try_restore_snapshot() turns into a discard and rebuild --
 // rather than restore a partial last entry.
+// Identities introduced by requests raft has not yet confirmed appended are
+// left out of a snapshot: after a crash, a snapshot holding one would drop
+// the producer's retry of a record no replica ever wrote.
+TEST(dedup_stm_snapshot, pending_identities_are_left_out) {
+    dedup_window_filter state(1000ms);
+    state.populate(iobuf::from("a"), model::timestamp{1000});
+    state.populate(iobuf::from("b"), model::timestamp{1000});
+    state.populate(iobuf::from("c"), model::timestamp{1000});
+
+    dedup_stm_test_accessor::pending_identities pending;
+    pending.emplace(
+      dedup_digest_of(iobuf::from("b")),
+      dedup_stm_test_accessor::make_inflight());
+    auto with_pending = dedup_stm_test_accessor::serialize(state, 1, &pending);
+    ASSERT_EQ(
+      dedup_stm_test_accessor::snapshot_size(std::move(with_pending)), 2);
+
+    int64_t generation = 0;
+    dedup_window_filter restored(1000ms);
+    dedup_stm_test_accessor::restore(
+      restored,
+      generation,
+      dedup_stm_test_accessor::serialize(state, 1, &pending));
+    ASSERT_EQ(restored.map_size(), 2);
+    // "b" is not in the restored index, so a retry of it is admitted.
+    auto retry = restored.filter_request(
+      make_batch("b", "value", model::timestamp{1000}));
+    ASSERT_TRUE(retry.batch.has_value());
+
+    // Nothing pending: everything is written.
+    auto all = dedup_stm_test_accessor::serialize(state, 1);
+    ASSERT_EQ(dedup_stm_test_accessor::snapshot_size(std::move(all)), 3);
+    // The pending request's promise is never resolved here; dropping it
+    // with no waiter is fine.
+    pending.clear();
+}
+
 TEST(dedup_stm_snapshot, misaligned_entries_are_rejected) {
     dedup_window_filter target(1h);
     int64_t generation = 0;
@@ -910,6 +969,52 @@ TEST_F_CORO(dedup_stm_fixture, concurrent_same_key_is_admitted_once) {
     // Exactly one data batch reaches the log; the duplicate writes nothing.
     ASSERT_EQ_CORO(
       node(leader).raft()->dirty_offset(), before + model::offset{1});
+    // The duplicate waited on the introducer; once both are acknowledged
+    // nothing is in flight any more.
+    auto stm = get_stm<0>(node(leader));
+    ASSERT_EQ_CORO(dedup_stm_test_accessor::pending_size(*stm), 0);
+    ASSERT_EQ_CORO(dedup_stm_test_accessor::resolving_size(*stm), 0);
+}
+
+// A committed batch whose records cannot be read is skipped, not retried:
+// the STM manager would otherwise retry it forever, and with it hold up every
+// raft snapshot of the partition and the log's prefix truncation.
+TEST_F_CORO(dedup_stm_fixture, unreadable_batch_is_skipped_not_retried) {
+    co_await initialize_state_machines();
+    set_dedup_config(1000ms);
+    auto leader = co_await wait_for_leader(10s);
+
+    // Cut the record short and seal the header over the result, so storage
+    // accepts the batch but its one record cannot be parsed.
+    auto good = make_batch("key", "value", model::timestamp{1000});
+    auto header = good.header();
+    auto data = good.data().copy();
+    data.trim_back(4);
+    header.size_bytes = static_cast<int32_t>(
+      model::packed_record_batch_header_size + data.size_bytes());
+    header.crc = model::crc_record_batch(header, data);
+    header.header_crc = model::internal_header_only_crc(header);
+    model::record_batch broken(
+      header, std::move(data), model::record_batch::tag_ctor_ng{});
+
+    auto result = co_await node(leader).raft()->replicate(
+      std::move(broken),
+      raft::replicate_options(raft::consistency_level::quorum_ack));
+    ASSERT_TRUE_CORO(result.has_value());
+    // Applies past it on every replica, within the wait's timeout.
+    co_await wait_for_stms(node(leader).raft()->committed_offset());
+    for (auto& [_, n] : nodes()) {
+        auto stm = get_stm<0>(*n);
+        ASSERT_EQ_CORO(dedup_stm_test_accessor::batches_skipped(*stm), 1);
+        ASSERT_EQ_CORO(stm->map_size(), 0);
+    }
+
+    // And indexing continues behind it.
+    co_await produce(leader, "key", "value", model::timestamp{1000});
+    co_await wait_for_stms(node(leader).raft()->committed_offset());
+    for (auto& [_, n] : nodes()) {
+        ASSERT_EQ_CORO(get_stm<0>(*n)->map_size(), 1);
+    }
 }
 
 TEST_F_CORO(dedup_stm_fixture, concurrent_independent_keys_are_admitted) {

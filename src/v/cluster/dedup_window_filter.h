@@ -254,7 +254,14 @@ void for_each_dedup_identity(
                 at - record_end));
         }
         parser.skip(record_end - at);
-        if (!emit(lookup, digest, model::timestamp{base_ts + ts_delta})) {
+        // Saturating: the delta is client-controlled and validation does not
+        // check it against the base for every batch shape.
+        int64_t ts{};
+        if (__builtin_add_overflow(base_ts, ts_delta, &ts)) [[unlikely]] {
+            ts = ts_delta < 0 ? std::numeric_limits<int64_t>::min()
+                              : std::numeric_limits<int64_t>::max();
+        }
+        if (!emit(lookup, digest, model::timestamp{ts})) {
             return;
         }
     }
@@ -282,6 +289,10 @@ struct dedup_request_undo {
 struct dedup_filter_result {
     std::optional<model::record_batch> batch;
     dedup_request_undo undo;
+    /// The identity of every record dropped as a duplicate, in record order.
+    /// The caller uses them to find the requests that introduced those
+    /// identities and are still in flight (see dedup_stm::do_replicate()).
+    chunked_vector<dedup_identity_digest> dropped;
     /// True iff header mode is active and some record in the request lacked
     /// the configured header: the caller must fail the whole request rather
     /// than replicate anything. batch and undo carry no state in this case;

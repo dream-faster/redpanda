@@ -147,13 +147,35 @@ private:
       raft::replicate_options,
       ss::lw_shared_ptr<available_promise<>>);
 
+    /// A request whose batch this leader admitted but raft has not yet
+    /// confirmed appended. The identities it introduced are in the index, so
+    /// the requests behind it see them, but not yet in the log. A request
+    /// that drops a record against one of them waits for the outcome before
+    /// it is acknowledged, and a snapshot leaves them out. `appended` resolves
+    /// true once the batch is appended at the request's consistency level,
+    /// false once it is known never to have been and its entries are reverted.
+    struct inflight_request {
+        ss::shared_promise<bool> appended;
+    };
+    using inflight_ptr = ss::lw_shared_ptr<inflight_request>;
+    using pending_identities = chunked_hash_map<
+      dedup_identity_digest,
+      inflight_ptr,
+      dedup_identity_digest_hash>;
+
     /// Serialize the index's live entries, yielding between chunks. The
     /// produce path mutates the index meanwhile; the filter's walk accounts
     /// for that (dedup_window_filter::for_each_live_entry_async()), and a walk
     /// the index was cleared or replaced under starts over. \p generation is
     /// read once the entries are written, so the two describe the same index.
-    static ss::future<iobuf>
-    serialize_snapshot(dedup_window_filter&, const int64_t& generation);
+    /// Identities in \p pending -- introduced by requests still in flight --
+    /// are left out: they are not in the log yet, and a snapshot that held one
+    /// of them would, after a crash, drop the producer's retry of a record no
+    /// replica ever wrote.
+    static ss::future<iobuf> serialize_snapshot(
+      dedup_window_filter&,
+      const int64_t& generation,
+      const pending_identities* pending = nullptr);
     /// Install a snapshot, yielding between chunks of its entries: a restore
     /// of millions of entries at startup would otherwise hold the reactor,
     /// and every other partition on the shard waiting to restore behind it.
@@ -164,6 +186,25 @@ private:
     ss::future<bool> try_restore_snapshot(iobuf);
 
     void setup_metrics();
+
+    /// Resolve an in-flight request: drop its identities from the pending
+    /// set, revert its insertions if the batch was never appended, and
+    /// release the requests waiting on it.
+    void settle(
+      const inflight_ptr&,
+      const dedup_request_undo&,
+      bool appended,
+      std::optional<uint64_t> self_key);
+    /// Raft reported a timeout for the request's batch, which says nothing
+    /// about whether the batch was appended: the batcher may have flushed it
+    /// before the timer fired. Keep its identities pending until the question
+    /// settles, then settle() accordingly.
+    ss::future<> resolve_after_timeout(
+      inflight_ptr,
+      dedup_request_undo,
+      std::optional<uint64_t> self_key,
+      model::term_id,
+      uint64_t evictions_before);
 
     void adopt_config(
       std::chrono::milliseconds window,
@@ -179,27 +220,35 @@ private:
     /// before raft reports it) ages out.
     static uint64_t self_filtered_key(const model::record_batch_header&);
     void remember_self_filtered(uint64_t key);
-    void forget_self_filtered(uint64_t key);
+    /// Returns whether the key was still remembered.
+    bool forget_self_filtered(uint64_t key);
     bool take_self_filtered(uint64_t key);
     static constexpr size_t self_filtered_max = 4096;
     chunked_hash_map<uint64_t, uint32_t> _self_filtered;
     ss::circular_buffer<uint64_t> _self_filtered_order;
+    /// Keys aged out of _self_filtered while their batch was still in flight.
+    /// A key that is gone was either taken by do_apply() -- its batch applied
+    /// -- or aged out; this count tells the two apart.
+    uint64_t _self_filtered_evictions{0};
+    /// Keys of batches raft timed out on, mapped to whether do_apply() has
+    /// seen the batch since. Unlike _self_filtered these never age out, so a
+    /// resolution that waits on them cannot be fooled by load; see
+    /// resolve_after_timeout(). Bounded by the timed-out requests still
+    /// unresolved.
+    chunked_hash_map<uint64_t, bool> _resolving;
 
     /// Only to drop the snapshot an earlier build kept in the kvstore.
     storage::kvstore& _kvstore;
     config::binding<std::chrono::milliseconds> _sync_timeout;
     dedup_window_filter _state;
     int64_t _generation{0};
-    // Append-order fence: resolves once the most recently admitted request's
-    // batch has been appended to the leader log. A request that observed a
-    // duplicate waits on it before proceeding, so its own (possibly empty)
-    // replication is ordered after the append that introduced its keys and
-    // the Raft prefix property makes its acknowledgment safe.
-    // Resolved with true once the fenced request's batch is durably
-    // enqueued to the local log, false if that enqueue failed -- so a
-    // waiter fenced on it can tell "safe to proceed" apart from "the
-    // introducing write never landed" instead of treating both as success.
-    ss::lw_shared_ptr<ss::shared_promise<bool>> _append_tail;
+    /// Identities introduced by requests still in flight on this leader; see
+    /// inflight_request. Bounded by the records in flight.
+    pending_identities _pending;
+    /// Committed batches do_apply() could not read; see do_apply().
+    uint64_t _batches_skipped{0};
+    /// Whether start() applied a local snapshot; see start().
+    bool _local_snapshot_applied{false};
     metrics::internal_metric_groups _metrics;
 };
 
