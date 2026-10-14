@@ -246,7 +246,7 @@ bool dedup_window_filter::is_duplicate(
     // Before the insert, not after: a follower's populate() sweeps at the same
     // point, and capacity trimming is decision-affecting, so the two orders
     // must match or replicas drift. See populate().
-    sweep_step(sweep_budget);
+    sweep_for_new_identity();
     if (
       (at_capacity() && !take_room_from_largest(ts) && !make_room_for_one(ts))
       || !_index.push_back(identity, ts.value())) {
@@ -475,7 +475,7 @@ void dedup_window_filter::populate(
         }
         return;
     }
-    sweep_step(sweep_budget);
+    sweep_for_new_identity();
     if (
       (at_capacity() && !take_room_from_largest(ts) && !make_room_for_one(ts))
       || !_index.push_back(identity, ts.value())) {
@@ -565,6 +565,47 @@ void dedup_window_filter::finish_pass() {
           _pass_lo + static_cast<int64_t>(bucket) * _pass_width};
     }
     begin_pass();
+}
+
+void dedup_window_filter::sweep_for_new_identity() {
+    reclaim_expired_elsewhere();
+    sweep_step(sweep_budget);
+}
+
+void dedup_window_filter::reclaim_expired_elsewhere() {
+    if (
+      !_shard_budget || _shard_budget->filters.size() < 2
+      || !over_shard_soft_limit()) {
+        return;
+    }
+    auto& filters = _shard_budget->filters;
+    // Two tries, so landing on this index still reaches another one.
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        auto* other = filters[_shard_budget->reclaim_next++ % filters.size()];
+        if (other == this || other->_budget_reserved > 0) {
+            // Itself, or mid-restore: a restore's claim on the budget stands
+            // whatever its index holds, and its cursor is not running.
+            continue;
+        }
+        other->reclaim_expired_step(sweep_budget);
+        return;
+    }
+}
+
+void dedup_window_filter::reclaim_expired_step(size_t budget) {
+    const int64_t cutoff = expiry_cutoff();
+    for (size_t step = 0; step < budget && !_index.empty(); ++step) {
+        if (_reclaim_pos >= _index.size()) {
+            _reclaim_pos = 0;
+        }
+        if (!is_live(_index.timestamp_at(_reclaim_pos), cutoff)) {
+            // As in sweep_step(), the erase moved an unvisited entry here.
+            erase_at(_reclaim_pos);
+            ++_reclaimed_entries;
+            continue;
+        }
+        ++_reclaim_pos;
+    }
 }
 
 void dedup_window_filter::sweep_step(size_t budget) {
@@ -808,6 +849,7 @@ void dedup_window_filter::begin_restore_pass(
     // unindexed for a whole pass -- hundreds of thousands of records on a
     // large index. The frame starts at the oldest restored entry.
     _sweep_pos = 0;
+    _reclaim_pos = 0;
     _pass_oldest = oldest;
     begin_pass();
 }
@@ -836,6 +878,7 @@ void dedup_window_filter::clear() {
     stop_being_largest();
     _max_ts = model::timestamp::min();
     _sweep_pos = 0;
+    _reclaim_pos = 0;
     _capacity_cutoff = model::timestamp::min();
     _pass_oldest = no_pass_oldest;
     begin_pass();

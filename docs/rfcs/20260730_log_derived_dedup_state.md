@@ -145,7 +145,14 @@ Guarantees:
   the shard reports its size into one shared `dedup_shard_budget`; the same
   cursor trims a partition that inserts while the shard is within a tenth of
   its limit, and at the limit a new identity with nothing freeable in its own
-  partition is admitted unindexed. The shard total is exported as the
+  partition is admitted unindexed. Before anything live is trimmed, expired
+  entries elsewhere go: while the shard is within that tenth, every new
+  identity on it also advances another index's cursor, round-robin, by a step
+  that drops only expired entries (`expired_entries_reclaimed`). A cursor
+  moves only on its own index's inserts, so without this an index takes a
+  sizeable fraction of its window per pass, and the shard trimmed live
+  entries from the largest index while its neighbours held more expired ones
+  than it was short. The shard total is exported as the
   `dedup:shard` gauges `index_entries` and `max_index_entries`. Effective
   capacity now depends on which partitions share a shard, which differs per
   replica, so under shard pressure replicas trim differently -- the same
@@ -156,6 +163,7 @@ Guarantees:
   are both counted per partition, alongside the drop count that makes them
   readable. The `dedup:partition` metric group carries `records_dropped`,
   `records_skew_clamped`, `records_unindexed`, `capacity_evicted_entries`,
+  `expired_entries_reclaimed`,
   `snapshot_entries_truncated` and `requests_rebuilt` counters plus an
   `index_entries` gauge, labelled by namespace/topic/partition like
   `tx:partition`. Internal metrics only; per-partition cardinality is too high
