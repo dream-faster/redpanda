@@ -45,7 +45,9 @@ fedora_deps=(
   gettext-devel
   git
   libtool
+  make
   perl
+  pkgconf-pkg-config
   xorg-x11-util-macros
   sudo
 )
