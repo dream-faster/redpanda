@@ -1663,6 +1663,7 @@ redpanda_cc_gtest(
         "//src/v/cluster",
         "//src/v/model",
         "//src/v/serde",
+        "//src/v/serde:iobuf",
         "//src/v/serde:vector",
         "//src/v/test_utils:gtest",
         "@googletest//:gtest",
