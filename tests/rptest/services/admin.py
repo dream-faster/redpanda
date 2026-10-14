@@ -931,6 +931,20 @@ class Admin:
     def put_feature(self, feature_name: str, body: dict[str, Any]) -> Response:
         return self._request("PUT", f"features/{feature_name}", json=body)
 
+    def get_upgrade_status(self, node: MaybeNode = None) -> dict[str, Any]:
+        """
+        The controller leader's view of upgrade finalization: `state` is one of
+        "finalized", "ready_to_finalize" or "upgrade_in_progress".
+        """
+        return self._request("GET", "features/upgrade_status", node=node).json()
+
+    def finalize_upgrade(self, node: MaybeNode = None) -> Response:
+        """
+        Advance the cluster's logical version. Answers 400 while
+        `features_auto_finalization` is enabled.
+        """
+        return self._request("POST", "features/finalize_upgrade", node=node)
+
     def get_license(self, node: MaybeNode = None, timeout: int | None = None):
         return self._request(
             "GET", "features/license", node=node, timeout=timeout
@@ -1578,6 +1592,28 @@ class Admin:
 
     def get_controller_status(self, node: MaybeNode = None) -> dict[str, Any]:
         return self._request("GET", "debug/controller_status", node=node).json()
+
+    def controller_forced_reconfiguration(
+        self,
+        dead_node_ids: list[int],
+        surviving_node_count: int,
+        node: ClusterNode,
+        **kwargs: Any,
+    ) -> Response:
+        """
+        Start forced reconfiguration of the controller on `node`, excluding
+        `dead_node_ids`. Issue it on every surviving broker.
+        """
+        return self._request(
+            "POST",
+            "debug/controller_forced_reconfiguration",
+            node=node,
+            json={
+                "dead_node_ids": dead_node_ids,
+                "surviving_node_count": surviving_node_count,
+            },
+            **kwargs,
+        )
 
     def get_cluster_uuid(self, node: MaybeNode = None) -> str | None:
         try:

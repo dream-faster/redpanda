@@ -7,12 +7,10 @@
 # the Business Source License, use of this software will be governed
 # by the Apache License, Version 2.0
 
-import time
+from typing import Any
 
-from connectrpc.errors import ConnectError, ConnectErrorCode
 from ducktape.utils.util import wait_until
 
-from rptest.clients.admin.proto.redpanda.core.admin.v2 import features_pb2
 from rptest.services.redpanda_installer import RedpandaInstaller
 from rptest.util import wait_until_result
 
@@ -21,7 +19,7 @@ class UnfinalizedUpgradeMixin:
     """Reusable driver for the manual-finalization (unfinalized upgrade) flow:
     roll a cluster's binaries forward with `features_auto_finalization=false`
     so the active (downgrade-floor) version is held back, observe/finalize via
-    the admin v2 RPCs, and roll back before finalizing.
+    the v1 admin features routes, and roll back before finalizing.
 
     These primitives were factored out of ManualFinalizationUpgradeTest so a
     second test can drive the same flow against a different cluster topology
@@ -32,7 +30,6 @@ class UnfinalizedUpgradeMixin:
       - ``self.installer``  -- its RedpandaInstaller (usually
                                ``self.redpanda._installer``),
       - ``self.admin``      -- a v1 Admin against that cluster,
-      - ``self.admin_v2``   -- an admin v2 client against that cluster,
       - ``self.old_logical``-- the logical version of the pre-upgrade binary
                                (set by the test's own "start at old" step).
     ``_restart_at_new`` sets ``self.new_logical``.
@@ -119,38 +116,18 @@ class UnfinalizedUpgradeMixin:
     def _disable_auto_finalization(self):
         self.redpanda.set_cluster_config({"features_auto_finalization": False})
 
-    def _call_with_leader_retry(self, call, timeout_sec=30):
-        """Retry a controller-leader-routed admin v2 call through the transient
-        UNAVAILABLE window after restarts/leadership changes. The v2 connect
-        client does not retry leadership itself; only UNAVAILABLE is retried,
-        other errors (e.g. FAILED_PRECONDITION) propagate immediately."""
-        deadline = time.time() + timeout_sec
-        while True:
-            try:
-                return call()
-            except ConnectError as e:
-                if e.code != ConnectErrorCode.UNAVAILABLE or time.time() >= deadline:
-                    raise
-                time.sleep(1)
-
     def _finalize(self):
-        return self._call_with_leader_retry(
-            lambda: self.admin_v2.features().finalize_upgrade(
-                features_pb2.FinalizeUpgradeRequest()
-            )
-        )
+        """Finalize through the controller leader. Admin follows the redirect
+        to the leader and retries the 503s answered while it is unknown."""
+        return self.admin.finalize_upgrade()
 
-    def _get_upgrade_status(self):
-        return self._call_with_leader_retry(
-            lambda: self.admin_v2.features().get_upgrade_status(
-                features_pb2.GetUpgradeStatusRequest()
-            )
-        )
+    def _get_upgrade_status(self) -> dict[str, Any]:
+        return self.admin.get_upgrade_status()
 
-    def _wait_for_status_state(self, state, timeout_sec=30):
-        """Wait until GetUpgradeStatus reports `state`; return that status."""
+    def _wait_for_status_state(self, state: str, timeout_sec=30) -> dict[str, Any]:
+        """Wait until upgrade_status reports `state`; return that status."""
         wait_until(
-            lambda: self._get_upgrade_status().state == state,
+            lambda: self._get_upgrade_status()["state"] == state,
             timeout_sec=timeout_sec,
             backoff_sec=1,
         )

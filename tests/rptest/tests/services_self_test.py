@@ -19,7 +19,6 @@ from ducktape.mark import matrix, ignore
 from ducktape.mark.resource import cluster as dt_cluster
 from ducktape.tests.test import Test, TestContext
 
-from rptest.clients.admin.v2 import Admin as AdminV2, debug_pb
 from rptest.clients.rpk import RpkTool
 from rptest.clients.types import TopicSpec
 from rptest.services.admin import CrashType
@@ -666,21 +665,21 @@ class RedpandaClusteredServiceSelfTest(RedpandaTest):
     @cluster(num_nodes=3, check_allowed_error_logs=False)
     def test_raise_on_bad_logs(self):
         """
-        Test that the LogMessage admin API correctly logs messages and that
-        ERROR level logs are caught by raise_on_bad_logs.
+        Test that ERROR level lines in a broker's log are caught by
+        raise_on_bad_logs.
         """
-        admin_v2 = AdminV2(self.redpanda)
         # use the last node for a slightly better test
         node = self.redpanda.nodes[2]
 
         # Create a unique error message that we can search for
         test_error_msg = "TEST_LOG_MESSAGE_API_ERROR_MARKER_12345"
 
-        # Use the new LogMessage API to log an error
-        request = debug_pb.LogMessageRequest(
-            message=test_error_msg, level=debug_pb.LOG_LEVEL_ERROR
+        # The broker appends to its log (>>), so a single short write from
+        # printf lands as one whole line.
+        node.account.ssh(
+            f"printf 'ERROR 1970-01-01 00:00:00,000 [shard 0:main] selftest - %s\\n' "
+            f"'{test_error_msg}' >> {self.redpanda.STDOUT_STDERR_CAPTURE}"
         )
-        admin_v2.debug(node=node).log_message(request)
 
         # Verify the error message was logged
         _assert_log_content(self, node, test_error_msg)

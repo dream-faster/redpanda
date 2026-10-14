@@ -7,11 +7,8 @@
 # the Business Source License, use of this software will be governed
 # by the Apache License, Version 2.0
 
-from connectrpc.errors import ConnectErrorCode
 from ducktape.utils.util import wait_until
 
-from rptest.clients.admin.v2 import Admin as AdminV2
-from rptest.clients.admin.v2 import broker_pb, debug_pb
 from rptest.clients.rpk import RpkTool
 from rptest.services.admin import Admin
 from rptest.services.cluster import cluster
@@ -112,96 +109,28 @@ class AdminApiAuthTest(RedpandaTest):
         charles_admin.get_cluster_config()
 
     @cluster(num_nodes=3)
-    def test_admin_v2(self):
+    def test_brokers_auth(self):
         """
-        Check that admin v2 works, as well as auth for it.
+        Check that the user-level brokers routes reject anonymous requests
+        and serve authenticated ones.
         """
 
-        charles = SaslCredentials("charles", "highEntropyHipster", "SCRAM-SHA-512")
-        create_user_and_wait(self.redpanda, self.superuser_admin, charles)
-        self.redpanda.set_cluster_config(
-            {
-                "superusers": [
-                    charles.username,
-                    self.redpanda.SUPERUSER_CREDENTIALS.username,
-                ]
-            }
-        )
+        # An anonymous user may not access user-level endpoints
+        with expect_http_error(401):
+            self.anonymous_admin.get_brokers()
 
-        unauthed = AdminV2(self.redpanda)
-        resp = unauthed.broker().call_list_brokers(broker_pb.ListBrokersRequest())
-        assert resp.error() is not None, f"expected an error response, got {resp}"
-        assert resp.error().code == ConnectErrorCode.PERMISSION_DENIED, (
-            f"Expected unauthenticated admin v2 request to be denied, got: {resp.error()}"
-        )
-
-        for protocol in ["json", "proto"]:
-            admin_v2 = AdminV2(
-                self.redpanda,
-                auth=(charles.username, charles.password),
-                protocol=protocol,
+        for admin in [self.superuser_admin, self.regular_user_admin]:
+            brokers = admin.get_brokers()
+            assert len(brokers) == self.redpanda.num_nodes, (
+                f"Expected to get broker info for all nodes, got: {brokers}"
             )
-            resp = admin_v2.broker().list_brokers(broker_pb.ListBrokersRequest())
-            assert len(resp.brokers) == self.redpanda.num_nodes, (
-                "Expected to get broker info for all nodes"
-            )
-            self.logger.info(f"Brokers={resp}")
+            self.logger.info(f"Brokers={brokers}")
             for node in self.redpanda.nodes:
                 id = self.redpanda.node_id(node)
-                resp = admin_v2.broker().get_broker(
-                    broker_pb.GetBrokerRequest(node_id=id)
+                broker = admin.get_broker(id)
+                assert broker["node_id"] == id, (
+                    f"expected to get back the right node_id={id}, got: {broker['node_id']}"
                 )
-                assert resp.broker.node_id == id, (
-                    f"expected to get back the right node_id={id}, got: {resp.broker.node_id}"
-                )
-
-    @cluster(num_nodes=3)
-    def test_admin_v2_errors(self):
-        """
-        Check that admin v2 structured error returning works.
-        """
-
-        charles = SaslCredentials("charles", "highEntropyHipster", "SCRAM-SHA-512")
-        create_user_and_wait(self.redpanda, self.superuser_admin, charles)
-        self.redpanda.set_cluster_config(
-            {
-                "superusers": [
-                    charles.username,
-                    self.redpanda.SUPERUSER_CREDENTIALS.username,
-                ]
-            }
-        )
-
-        for protocol in ["json", "proto"]:
-            admin_v2 = AdminV2(
-                self.redpanda,
-                auth=(charles.username, charles.password),
-                protocol=protocol,
-            )
-            resp = admin_v2.debug().call_throw_structured_exception(
-                debug_pb.ThrowStructuredExceptionRequest(
-                    node_id=self.redpanda.node_id(self.redpanda.nodes[0]),
-                    reason="FOOBAR",
-                    metadata={"detail": "something"},
-                )
-            )
-            assert resp.error() is not None, "Expected an error in this RPC"
-            err = resp.error()
-            assert err.code == ConnectErrorCode.UNKNOWN, (
-                f"Expected UNKNOWN error code, got: {err}"
-            )
-            assert err.message == "test exception", (
-                f"Expected 'test exception' message, got: {err}"
-            )
-            assert len(err.details) == 1, f"Expected 1 detail, got: {err.details}"
-            detail = err.details[0].message()
-            assert detail.reason == "FOOBAR", f"Expected reason=FOOBAR, got: {detail}"
-            assert detail.domain == "redpanda.com/core", (
-                f"Expected domain=redpanda.com/core, got: {detail}"
-            )
-            assert detail.metadata == {"detail": "something"}, (
-                f"Expected metadata.detail=something, got: {detail}"
-            )
 
     @cluster(num_nodes=3)
     def test_public_get_license(self):
