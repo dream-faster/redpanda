@@ -249,6 +249,9 @@ redpanda_cc_library(
     hdrs = [
         "dedup_compact_index.h",
     ],
+    implementation_deps = [
+        "//src/v/base",
+    ],
     visibility = ["//visibility:public"],
 )
 

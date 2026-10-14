@@ -111,6 +111,7 @@ struct dedup_stm_test_accessor {
             .window_ms = 1000, .generation = 1, .entries = std::move(entries)});
     }
 
+    /// \p entries in the version 2 layout (digest hi, digest lo, timestamp).
     static iobuf
     state_snapshot_with_entries(iobuf entries, model::timestamp max_timestamp) {
         return serde::to_iobuf(
@@ -118,7 +119,8 @@ struct dedup_stm_test_accessor {
             .window_ms = 3'600'000,
             .generation = 1,
             .max_timestamp = max_timestamp,
-            .entries = std::move(entries)});
+            .entries = std::move(entries),
+            .entry_size = dedup_stm::legacy_packed_entry_size});
     }
 
     static bytes legacy_kvstore_key(const model::ntp& ntp) {

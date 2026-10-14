@@ -410,14 +410,14 @@ TEST(DedupCompactIndex, APrefixBeyondTheDirectorysReachIsRefusedCheaply) {
 }
 
 TEST(DedupCompactIndex, AnySharedPrefixSplitsStraightPastIt) {
-    // The top 8 bits the same for every key: a split goes straight to the
-    // first bit that tells them apart instead of eight splits that each move
+    // The top 4 bits the same for every key: a split goes straight to the
+    // first bit that tells them apart instead of four splits that each move
     // every key and leave an empty half behind.
     index_t idx;
     uint64_t keys = 6;
     constexpr size_t n = 200'000;
     for (size_t i = 0; i < n; ++i) {
-        const uint64_t lo = splitmix(keys) & ((uint64_t{1} << 56) - 1);
+        const uint64_t lo = splitmix(keys) & ((uint64_t{1} << 60) - 1);
         const auto before = idx.work();
         ASSERT_TRUE(idx.push_back({.hi = splitmix(keys), .lo = lo}, 1000));
         // A split or two -- a lopsided one can leave the fuller half past
@@ -429,6 +429,30 @@ TEST(DedupCompactIndex, AnySharedPrefixSplitsStraightPastIt) {
     idx.check_invariants();
     const double per_entry = static_cast<double>(idx.memory_usage()) / n;
     EXPECT_LT(per_entry, 30.0);
+}
+
+TEST(DedupCompactIndex, TheDirectoryGrowsOnlyWithTheIndex) {
+    // Keys sharing their top 12 bits all want the same corner of the
+    // directory: following them there would make it 2^13 slots deep for a
+    // few thousand entries. It deepens only with the entries behind it, so
+    // most of them are refused while the index is small.
+    index_t idx;
+    uint64_t keys = 12;
+    size_t refused = 0;
+    for (size_t i = 0; i < 20'000; ++i) {
+        const uint64_t lo = splitmix(keys) & ((uint64_t{1} << 52) - 1);
+        if (!idx.push_back({.hi = splitmix(keys), .lo = lo}, 1000)) {
+            ++refused;
+        }
+        ASSERT_LE(
+          size_t{1} << idx.stats().directory_depth,
+          std::max(
+            index_t::min_directory_slots,
+            idx.size() / index_t::entries_per_directory_slot));
+    }
+    EXPECT_GT(refused, 0u);
+    idx.check_invariants();
+    EXPECT_LT(idx.memory_usage(), 64 * idx.size() + 64 * 1024);
 }
 
 TEST(DedupCompactIndex, NoOperationDoesWorkProportionalToTheIndex) {
@@ -659,7 +683,14 @@ int64_t select_kth(const std::vector<int64_t>& values, size_t k, int* passes) {
         select.finish_pass();
         ++*passes;
     }
-    return select.value();
+    const auto value = select.value();
+    EXPECT_EQ(
+      select.greater(),
+      static_cast<size_t>(
+        std::count_if(values.begin(), values.end(), [value](int64_t v) {
+            return v > value;
+        })));
+    return value;
 }
 
 int64_t reference_kth(std::vector<int64_t> values, size_t k) {

@@ -9,6 +9,8 @@
 
 #include "cluster/dedup_compact_index.h"
 
+#include "base/vassert.h"
+
 #include <algorithm>
 #include <bit>
 #include <cstdio>
@@ -98,22 +100,13 @@ int64_t jittered_base(i128 lowest, i128 slack, size_t block, int64_t salt) {
     return clamp_base(lowest - slack / 8 - jitter);
 }
 
-// Room for \p more elements, growing geometrically: reserve() of an exact
-// size would reallocate on every call.
+// Room for \p more elements, growing geometrically, but never past \p cap:
+// reserve() of an exact size would reallocate on every call.
 template<typename V>
-void reserve_more(V& v, size_t more) {
+void reserve_more(V& v, size_t more, size_t cap) {
     if (v.capacity() < v.size() + more) {
-        v.reserve(std::max(v.size() + more, 2 * v.capacity()));
+        v.reserve(std::max(v.size() + more, std::min(2 * v.capacity(), cap)));
     }
-}
-
-[[noreturn]] void corrupted(const char* what) {
-    // Unreachable unless the table is corrupt; there is no way to go on that
-    // does not risk answering lookups wrongly.
-    std::fputs("dedup_compact_index: ", stderr);
-    std::fputs(what, stderr);
-    std::fputs("\n", stderr);
-    std::abort();
 }
 
 } // namespace
@@ -140,6 +133,9 @@ void dedup_timestamp_selector::finish_pass() noexcept {
     while (bucket + 1 < _counts.size() && _k >= _counts[bucket]) {
         _k -= _counts[bucket];
         ++bucket;
+    }
+    for (size_t above = bucket + 1; above < _counts.size(); ++above) {
+        _greater += _counts[above];
     }
     const uint64_t width = uint64_t{1} << _shift;
     _lo += static_cast<uint64_t>(bucket) << _shift;
@@ -228,9 +224,9 @@ void dedup_compact_index::rebase(size_t b, int64_t ts) {
         }
     }
     // Keep everything if it fits with room to spare, and otherwise the newest
-    // retained_span. What is left of the block's span is split a quarter
-    // below, for a write older than anything kept, and three quarters above,
-    // since timestamps mostly move forward.
+    // retained_span. Of what is left of the block's span, 1/8 to 3/8 goes
+    // below, for a write older than anything kept, and the rest above, since
+    // timestamps mostly move forward (see jittered_base()).
     const i128 keep_from = std::max<i128>(lo, hi - retained_span);
     const i128 slack = block_span - (hi - keep_from);
     const int64_t base = jittered_base(keep_from, slack, b, m.base);
@@ -318,7 +314,8 @@ uint32_t dedup_compact_index::slot_of(
         }
         i = (i + 1) & seg.mask;
     }
-    corrupted("an entry has no lookup slot");
+    vassert(false, "dedup_compact_index: an entry has no lookup slot");
+    __builtin_unreachable();
 }
 
 void dedup_compact_index::slot_erase(segment& seg, uint32_t i) const noexcept {
@@ -410,6 +407,16 @@ bool dedup_compact_index::grow_for(uint64_t h) {
     }
     const auto bit = static_cast<uint32_t>(63 - std::countl_zero(differing));
     const uint32_t depth = 64 - bit;
+    if (
+      depth > _depth
+      && (size_t{1} << depth) > std::max(
+           min_directory_slots, _size / entries_per_directory_slot)) {
+        // A directory this deep needs more entries behind it first: only
+        // keys sharing a prefix longer than the index's size accounts for get
+        // here, and they are refused rather than let the directory outgrow
+        // the entries it indexes.
+        return false;
+    }
     const uint64_t split = uint64_t{1} << bit;
     size_t high_keys = 0;
     for (const auto& [key, pos] : keys) {
@@ -439,7 +446,7 @@ bool dedup_compact_index::grow_for(uint64_t h) {
         empty.push_back(
           std::make_unique<segment>(make_segment(min_segment_slots, level)));
     }
-    reserve_more(_segments, empty.size() + 1);
+    reserve_more(_segments, empty.size() + 1, size_t{1} << max_directory_depth);
     if (depth > _depth) {
         // More bits of the hash pick the directory entry, so every entry
         // becomes a run of adjacent ones naming the same segment.
@@ -504,7 +511,7 @@ bool dedup_compact_index::push_back(
         }
         _first_block_capacity = capacity;
     } else if (b == _blocks.size()) {
-        reserve_more(_meta, 1);
+        reserve_more(_meta, 1, (max_size >> block_shift) + 1);
         _blocks.push_back(
           std::make_unique_for_overwrite<packed_entry[]>(block_entries));
         _meta.emplace_back();

@@ -147,8 +147,10 @@ private:
         int64_t generation{0};
         model::timestamp max_timestamp{model::timestamp::min()};
         iobuf entries;
-        /// Bytes per record in `entries`.
-        uint32_t entry_size{legacy_packed_entry_size};
+        /// Bytes per record in `entries`. Always packed_entry_size when this
+        /// build writes it; decode_snapshot() sets legacy_packed_entry_size
+        /// for a version 2 snapshot.
+        uint32_t entry_size{packed_entry_size};
 
         auto serde_fields() {
             return std::tie(

@@ -3096,3 +3096,37 @@ TEST(DedupCompactIndexInTheFilter, RefusedIdentitiesAreAdmittedUnindexed) {
     EXPECT_EQ(f.unindexed_records(), refused);
     EXPECT_EQ(f.map_size() + refused, 1000u);
 }
+
+// A snapshot written before the broker-time clamp can carry entries from the
+// future as well as a future watermark. Restored as they are, one of them
+// would hold its block's newest timestamp decades ahead, and the index could
+// keep none of the block's real entries beside it: every one would read as
+// expired, and stay so. They are clamped to the restored watermark instead.
+TEST(DedupCompactIndexInTheFilter, FutureEntriesInASnapshotAreClamped) {
+    cluster::dedup_window_filter f(5min);
+    const auto now = broker_now();
+    cluster::dedup_index_snapshot snap;
+    snap.max_timestamp = model::timestamp{4'102'444'800'000}; // 2100-01-01
+    snap.entries.push_back(
+      {.identity = cluster::dedup_digest_of(iobuf::from("future")),
+       .timestamp = snap.max_timestamp});
+    for (int i = 0; i < 100; ++i) {
+        snap.entries.push_back(
+          {.identity = cluster::dedup_digest_of(
+             iobuf::from(fmt::format("real-{}", i))),
+           .timestamp = now});
+    }
+    f.restore(snap);
+    ASSERT_EQ(f.map_size(), 101u);
+    EXPECT_LE(f.max_timestamp().value(), broker_now().value());
+    for (const auto& entry : f.snapshot().entries) {
+        EXPECT_LE(entry.timestamp.value(), f.max_timestamp().value());
+    }
+    // The real entries still deduplicate, and so does the clamped one.
+    for (int i = 0; i < 100; ++i) {
+        EXPECT_FALSE(f.filter(make_batch(fmt::format("real-{}", i), "dup", now))
+                       .has_value())
+          << i;
+    }
+    EXPECT_FALSE(f.filter(make_batch("future", "dup", now)).has_value());
+}

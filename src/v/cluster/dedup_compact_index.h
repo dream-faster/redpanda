@@ -98,6 +98,8 @@ public:
     int64_t value() const noexcept {
         return static_cast<int64_t>(static_cast<uint64_t>(_base) + _lo);
     }
+    /// Once done(): how many of the values are greater than value().
+    size_t greater() const noexcept { return _greater; }
 
 private:
     static constexpr uint32_t radix_bits = 12;
@@ -109,6 +111,8 @@ private:
     uint64_t _hi;
     // Rank of the value sought within that range.
     size_t _k;
+    // Values above the range.
+    size_t _greater{0};
     uint32_t _shift{0};
     std::array<size_t, size_t{1} << radix_bits> _counts{};
 };
@@ -133,11 +137,12 @@ private:
 /// positions: 32 bits, of which 0 means expired and the rest cover a span of
 /// 2^32 - 2 milliseconds, about 49.7 days. A write that does not fit its block
 /// re-bases the block: one bounded pass over its 4096 entries, which leaves
-/// at least 2^28 ms (3 days) of room below the oldest entry and three times
-/// that above the newest, so it happens at most once per few days of
-/// timestamp movement per block. When the block's entries cannot all be kept
-/// together with room above them, those more than retained_span behind the
-/// block's newest are stored as expired.
+/// between 1/8 and 3/8 of the block's spare span below the oldest entry and
+/// the rest above the newest -- at least 2^27 ms (1.5 days) below and 5 * 2^27
+/// ms (7.8 days) above when the spare span is at its smallest, 2^30 ms -- so
+/// it happens at most once per day or so of timestamp movement per block. When
+/// the block's entries cannot all be kept together with room above them, those
+/// more than retained_span behind the block's newest are stored as expired.
 ///
 /// Expired is the only lossy outcome, and it can only make an entry stop
 /// matching -- a duplicate admitted, never a record dropped. With a dedup
@@ -193,8 +198,14 @@ public:
     static constexpr uint32_t max_segment_slots = 4096;
     /// Slots a segment starts with, so a small index stays small.
     static constexpr uint32_t min_segment_slots = 8;
-    /// Directory depth cap: 2^15 segments, far beyond what max_size needs.
-    static constexpr uint32_t max_directory_depth = 15;
+    /// Directory depth cap: 2^13 segments, room for max_size at about half
+    /// load, and a directory of at most 64 KiB.
+    static constexpr uint32_t max_directory_depth = 13;
+    /// Entries each directory slot past the first min_directory_slots needs:
+    /// the directory deepens only as the index grows, so keys that share a
+    /// long prefix cannot make it large while the index is small.
+    static constexpr size_t entries_per_directory_slot = 64;
+    static constexpr size_t min_directory_slots = 512;
     /// Longest probe distance a slot can record.
     static constexpr uint32_t max_probe_distance = 255;
 
@@ -291,13 +302,13 @@ private:
         uint32_t count{0};
         uint32_t depth{0};
         /// Bumped by every insert and erase, so the agreement below can tell
-        /// it still describes the segment's keys.
-        uint32_t changes{0};
+        /// it still describes the segment's keys. 64 bits: it never wraps.
+        uint64_t changes{0};
         /// As of `agreement_at` changes: bits set in some key, and bits clear
         /// in some key. A split the keys refused once is refused again for an
         /// incoming key that agrees with them too, without reading them all
         /// back each time.
-        uint32_t agreement_at{std::numeric_limits<uint32_t>::max()};
+        uint64_t agreement_at{std::numeric_limits<uint64_t>::max()};
         uint64_t ones{0};
         uint64_t zeros{0};
     };

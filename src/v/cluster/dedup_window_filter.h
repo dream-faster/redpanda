@@ -581,15 +581,10 @@ public:
                 select.finish_pass();
             }
             keep_from = select.value();
-            size_t newer = 0;
-            co_await ss::coroutine::without_preemption_check(for_each_entry(
-              [&newer, keep_from](dedup_identity_digest, model::timestamp ts) {
-                  newer += ts.value() > keep_from ? 1 : 0;
-              }));
             // Everything newer than keep_from fits by construction; entries
             // exactly at it fill what is left, first come first kept. The
             // trim point is one of the kept entries, so at least one is.
-            at_keep_from = keep - newer;
+            at_keep_from = keep - select.greater();
         }
         if (keep == 0) {
             begin_restore_pass(max_timestamp, no_pass_oldest);
@@ -836,7 +831,14 @@ private:
     /// Insert one restored entry. A snapshot taken while the index was being
     /// mutated can hold an identity twice (see for_each_live_entry_async());
     /// the newer timestamp wins, as it does in populate().
+    ///
+    /// No entry is newer than the watermark, which begin_restore_pass() has
+    /// clamped to broker time: a snapshot written before the clamp can carry
+    /// future-dated entries, and one of those would hold its block's newest
+    /// timestamp far ahead, so the index could keep nothing else in that
+    /// block (see dedup_compact_index) for as long as it stayed.
     void restore_entry(dedup_identity_digest identity, model::timestamp ts) {
+        ts = std::min(ts, _max_ts);
         const auto pos = _index.find(identity);
         if (pos != dedup_compact_index::npos) {
             if (ts.value() > _index.timestamp_at(pos)) {
@@ -917,6 +919,15 @@ private:
     // ceiling, and which live entry goes is already best-effort -- but it is
     // a divergence the whole-map passes this replaced did not have, and it is
     // inherent to doing bounded work: a cursor is a position in a layout.
+    //
+    // A reverted request's writes also stay in the leader's timestamp blocks
+    // (dedup_compact_index): their newest-timestamp bounds and bases are
+    // where those writes put them, so the leader can store as expired an
+    // entry a follower keeps exactly. Such an entry is more than
+    // retained_span behind a timestamp the leader's watermark already holds
+    // -- the watermark is not reverted either -- so with a window up to that
+    // span the leader treats it as expired regardless: the same divergence
+    // the unreverted watermark already causes.
     size_t _sweep_pos{0};
     // Walks in progress; one per snapshot being taken, so at most a few.
     std::vector<live_walk*> _walks;
