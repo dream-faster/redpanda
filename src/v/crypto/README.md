@@ -6,7 +6,6 @@ implementation (OpenSSL).
 
 This library provides the following implementations:
 
-* RSA PKCSv1.5 signature verification
 * HMAC
 * MD5, SHA256 and SHA512 digest generation
 * Cryptographically secure DRBG
@@ -68,75 +67,6 @@ bytes msg = {...};
 crypto::hmac_ctx ctx(crypto::digest_type::SHA256, key);
 ctx.update(msg);
 auto sig = std::move(ctx).final();
-```
-
-## Asymmetric Key Handling
-
-Currently, this library only supports RSA keys.  There are two ways of loading a
-key from a buffer.
-
-First, if the key is held within a buffer in PKCS8 format, you can use
-`crypto::load_key`:
-
-```c++
-#include "crypto/crypto.h"
-
-bytes rsa_priv_key {...};
-
-auto key = crypto::key::load_key(
-  rsa_priv_key,
-  crypto::format_type::PEM,
-  crypto::is_private_key_t::yes);
-```
-
-The above function can determine the type of key held in the buffer but the
-caller is responsible for indicating the format the key is in (PEM or DER) and
-whether or not it's the public half of the key or the private key.
-
-The other way of loading a key is by its parts.  Currently only RSA public key
-loading is available:
-
-```c++
-#include "crypto/crypto.h"
-bytes modulus {...};
-bytes public_exponent {...};
-
-auto key = crypto::key::load_rsa_public_key(modulus, public_exponent);
-```
-
-## Signature Verification
-
-Performing signature verification can be done either one-shot or multi part.
-
-One-shot:
-
-```c++
-#include "crypto/crypto.h"
-
-auto key = {...};
-bytes msg {...};
-bytes sig {...};
-
-auto sig_verified = crypto::verify_signature(
-  crypto::digest_type::SHA256,
-  key,
-  msg,
-  sig
-);
-```
-
-For multi-part:
-
-```c++
-#include "crypto/crypto.h"
-
-auto key = {...};
-bytes msg {...};
-bytes sig {...};
-
-crypto::verify_ctx ctx(crypto::digest_type::SHA256, key);
-ctx.update(msg);
-bool verified = std::move(ctx).final(sig);
 ```
 
 ## RNG Generation

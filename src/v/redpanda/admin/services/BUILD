@@ -15,6 +15,7 @@ redpanda_cc_library(
         "//src/v/features",
         "//src/v/model",
         "//src/v/serde/protobuf:rpc",
+        "//src/v/ssx:sformat",
     ],
 )
 

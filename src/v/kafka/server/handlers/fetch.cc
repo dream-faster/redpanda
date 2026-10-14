@@ -16,7 +16,6 @@
 #include "cluster/shard_table.h"
 #include "config/configuration.h"
 #include "container/chunked_vector.h"
-#include "features/enterprise_feature_messages.h"
 #include "kafka/data/partition_proxy.h"
 #include "kafka/protocol/batch_consumer.h"
 #include "kafka/protocol/errors.h"
@@ -1352,24 +1351,6 @@ class simple_fetch_planner final : public fetch_planner::impl {
                   audit_on_success{octx.initial_fetch}))) {
                   return fail_all_partitions(
                     error_code::topic_authorization_failed);
-              }
-
-              /**
-               * in sanction mode (without an enterprise license), the audit
-               * log topic is not consumable
-               */
-              if (
-                unlikely(
-                  topic == model::kafka_audit_logging_topic
-                  && octx.rctx.feature_table().local().should_sanction())) {
-                  thread_local static ss::logger::rate_limit rate(1s);
-                  vloglr(
-                    klog,
-                    ss::log_level::warn,
-                    rate,
-                    "{}",
-                    features::enterprise_error_message::audit_log_fetch());
-                  return fail_all_partitions(error_code::unknown_server_error);
               }
 
               const auto& topic_md = metadata_cache.get_topic_metadata_ref(

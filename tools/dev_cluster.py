@@ -87,7 +87,6 @@ class RedpandaConfig:
     iceberg_enabled: bool = False
     cloud_topics_enabled: bool = False
     enable_developmental_unrecoverable_data_corrupting_features: int = int(time.time())
-    enable_metrics_reporter: bool = False
 
 
 @dataclasses.dataclass

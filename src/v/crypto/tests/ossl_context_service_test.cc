@@ -160,46 +160,6 @@ TEST_P_CORO(ossl_context_test_framework_param, hmac) {
     return ss::make_ready_future();
 }
 
-TEST_P_CORO(ossl_context_test_framework_param, keys) {
-    auto key = crypto::key::load_key(
-      example_pem_rsa_private_key,
-      crypto::format_type::PEM,
-      crypto::is_private_key_t::yes);
-    EXPECT_EQ(key.get_type(), crypto::key_type::RSA);
-    EXPECT_TRUE(key.is_private_key());
-
-    key = crypto::key::load_key(
-      example_pem_rsa_public_key,
-      crypto::format_type::PEM,
-      crypto::is_private_key_t::no);
-
-    EXPECT_EQ(key.get_type(), crypto::key_type::RSA);
-    EXPECT_FALSE(key.is_private_key());
-
-    EXPECT_THROW(
-      crypto::key::load_key(
-        example_pem_ec_public_key,
-        crypto::format_type::PEM,
-        crypto::is_private_key_t::no),
-      crypto::exception);
-
-    EXPECT_NO_THROW(
-      crypto::key::load_rsa_public_key(rsa_pub_key_n, rsa_pub_key_e));
-    return ss::make_ready_future();
-}
-
-TEST_P_CORO(ossl_context_test_framework_param, sigver) {
-    auto key = crypto::key::load_rsa_public_key(
-      sig_test_rsa_pub_key_n, sig_test_rsa_pub_key_e);
-    EXPECT_NO_THROW(EXPECT_TRUE(
-      crypto::verify_signature(
-        crypto::digest_type::SHA256, key, sig_good_msg, sig_good_sig)));
-    EXPECT_NO_THROW(EXPECT_FALSE(
-      crypto::verify_signature(
-        crypto::digest_type::SHA256, key, sig_bad_msg, sig_bad_sig)));
-    return ss::make_ready_future();
-}
-
 TEST_P_CORO(ossl_context_test_framework_param, hmac_key) {
     auto& param = GetParam();
 

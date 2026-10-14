@@ -606,34 +606,6 @@ redpanda_cc_btest(
 )
 
 redpanda_cc_btest(
-    name = "create_partition_test",
-    timeout = "short",
-    srcs = [
-        "create_partition_test.cc",
-    ],
-    deps = [
-        "//src/v/cluster:client_quota_backend",
-        "//src/v/cluster:controller_log_limiter",
-        "//src/v/cluster:feature_backend",
-        "//src/v/cluster:leader_balancer_strategy",
-        "//src/v/cluster:node_status_backend",
-        "//src/v/cluster:self_test",
-        "//src/v/cluster:topic_metrics_watcher",
-        "//src/v/cluster:types",
-        "//src/v/config",
-        "//src/v/kafka/protocol",
-        "//src/v/kafka/server:topic_config_utils",
-        "//src/v/kafka/server/tests:topic_properties_helpers",
-        "//src/v/model",
-        "//src/v/test_utils:seastar_boost",
-        "@abseil-cpp//absl/container:flat_hash_map",
-        "@boost//:test",
-        "@seastar",
-        "@seastar//:testing",
-    ],
-)
-
-redpanda_cc_btest(
     name = "group_metadata_serialization_test",
     timeout = "short",
     srcs = [

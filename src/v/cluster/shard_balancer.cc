@@ -14,9 +14,8 @@
 #include "cluster/controller_utils.h"
 #include "cluster/logger.h"
 #include "cluster/types.h"
+#include "config/configuration.h"
 #include "config/node_config.h"
-#include "features/enterprise_feature_messages.h"
-#include "features/enterprise_features.h"
 #include "random/generators.h"
 #include "ssx/async_algorithm.h"
 
@@ -62,8 +61,7 @@ shard_balancer::shard_balancer(
   , _self(*config::node().node_id())
   , _balancing_on_core_count_change(std::move(balancing_on_core_count_change))
   , _balancing_continuous(
-      features::make_sanctioning_binding<
-        features::license_required_feature::core_balancing_continuous>())
+      config::shard_local_cfg().core_balancing_continuous.bind())
   , _debounce_timeout(std::move(debounce_timeout))
   , _debounce_jitter(_debounce_timeout())
   , _partitions_per_shard(std::move(partitions_per_shard))
@@ -480,19 +478,9 @@ void shard_balancer::maybe_assign(
         // partition is removed from this node, this will likely disrupt the
         // counts balance, so we set up the balancing timer.
 
-        const bool should_sanction = _features.should_sanction();
-        const auto [balancing_continuous, is_sanctioned]
-          = _balancing_continuous(should_sanction);
-        if (is_sanctioned) {
-            vlog(
-              clusterlog.warn,
-              "{}",
-              features::enterprise_error_message::core_balancing_continuous());
-        }
-
         if (
           _features.is_active(features::feature::node_local_core_assignment)
-          && balancing_continuous && !_balance_timer.armed()) {
+          && _balancing_continuous() && !_balance_timer.armed()) {
             // Add jitter so that different nodes don't move replicas of the
             // same partition in unison.
             auto debounce_interval = _debounce_jitter.next_duration();

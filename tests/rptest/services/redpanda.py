@@ -91,7 +91,6 @@ from rptest.util import (
     get_fips_mode,
 )
 from rptest.utils.mode_checks import in_fips_environment
-from rptest.utils.rpenv import sample_license
 
 T = TypeVar("T")
 U = TypeVar("U")
@@ -1111,8 +1110,6 @@ class RedpandaService(Service, RedpandaServiceABC):
     COV_KEY = "enable_cov"
     DEFAULT_COV_OPT = "OFF"
 
-    ENTERPRISE_LICENSE_NAG = "A Redpanda Enterprise Edition license is required"
-
     # Where we put a compressed binary if saving it after failure
     EXECUTABLE_SAVE_PATH = "/tmp/redpanda.gz"
 
@@ -1139,7 +1136,6 @@ class RedpandaService(Service, RedpandaServiceABC):
     CLUSTER_CONFIG_DEFAULTS: dict[str, Any] = {
         "join_retry_timeout_ms": 200,
         "default_topic_partitions": 4,
-        "enable_metrics_reporter": False,
         "superusers": [RedpandaServiceConstants.SUPERUSER_CREDENTIALS[0]],
         # Disable segment size jitter to make tests more deterministic if they rely on
         # inspecting storage internals (e.g. number of segments after writing a certain
@@ -4170,36 +4166,6 @@ class RedpandaService(Service, RedpandaServiceABC):
                 continue
 
             return
-
-    def install_license(self):
-        """Install a sample Enterprise License for testing Enterprise features during upgrades"""
-        self.logger.debug("Installing an Enterprise License")
-        license = sample_license(assert_exists=True)
-        assert license is not None, "License must exist"
-        assert self._admin.put_license(license).status_code == 200, (
-            "Configuring the Enterprise license failed (required for feature upgrades)"
-        )
-
-        def license_observable():
-            for node in self.started_nodes():
-                license = self._admin.get_license(node)
-                if not self._admin.is_sample_license(license):
-                    return False
-            return True
-
-        self.logger.debug(
-            f"Waiting for license to be observable by {len(self.started_nodes())} nodes"
-        )
-        wait_until(
-            license_observable,
-            timeout_sec=15,
-            backoff_sec=1,
-            err_msg="Inserted license not observable in time",
-        )
-        self.logger.debug("Enterprise License installed successfully")
-
-    def has_license_nag(self):
-        return self.search_log_any(self.ENTERPRISE_LICENSE_NAG)
 
 
 def make_redpanda_service(

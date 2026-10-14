@@ -1,6 +1,11 @@
 ---
 name: docker-build
 on:
+  # Every commit gets an image and a rolling-upgrade test, so a change that
+  # breaks the upgrade from the deployed build shows up on its own push.
+  push:
+    branches:
+      - '**'
   workflow_dispatch:
     inputs:
       image_tag:
@@ -32,8 +37,8 @@ env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
 
-# A cold build takes ~3h of runner time; don't let pushes pile up overlapping
-# runs. Newer pushes to the same ref cancel the in-flight build.
+# A cold build is slow; don't let pushes pile up overlapping runs. Newer
+# pushes to the same ref cancel the in-flight build.
 concurrency:
   group: docker-build-${{ github.ref }}
   cancel-in-progress: true
@@ -180,6 +185,11 @@ jobs:
           # cache useless. unity compiles each library as a few multi-file
           # translation units (see redpanda_cc_library in bazel/build.bzl);
           # scheduled-default-build.yml covers the default build.
+          #
+          # oci_image_contents is named as a target of its own because the
+          # next step copies its tarball out of bazel-bin. With a disk cache,
+          # Bazel only writes top-level outputs to disk, so a build made
+          # entirely of cache hits would otherwise leave no tarball behind.
           bazel \
             --output_base=/mnt/bazel-output \
             build \
@@ -191,7 +201,8 @@ jobs:
             --verbose_failures \
             --lockfile_mode=update \
             '--local_resources=memory=HOST_RAM*.8' \
-            //bazel/packaging:image
+            //bazel/packaging:image \
+            //bazel/packaging:oci_image_contents
           echo "=== post-build resources ==="
           df -h
           free -h
@@ -274,4 +285,7 @@ jobs:
     uses: ./.github/workflows/upgrade-test.yml
     with:
       slim_image: ${{ needs.build.outputs.image_ref }}
-      stock_image: ${{ inputs.stock_image }}
+      # A push has no inputs, and an empty stock_image would quietly switch
+      # the baseline to public v26.2.x, so pushes get the dispatch default.
+      # Keep this in step with the stock_image defaults above.
+      stock_image: ${{ github.event_name == 'push' && 'ghcr.io/dream-faster/redpanda:085657d38360db6808462a096274b4aabb23b1df' || inputs.stock_image }}

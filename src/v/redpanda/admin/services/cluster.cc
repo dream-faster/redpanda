@@ -11,7 +11,6 @@
 
 #include "redpanda/admin/services/cluster.h"
 
-#include "features/feature_table.h"
 #include "proto/redpanda/core/admin/v2/cluster.proto.h"
 #include "redpanda/admin/kafka_connections_service.h"
 #include "redpanda/admin/proxy/context.h"
@@ -36,19 +35,15 @@ ss::logger brlog{"admin_api_server/cluster_service"};
 
 cluster_service_impl::cluster_service_impl(
   admin::proxy::client client,
-  ss::sharded<kafka_connections_service>& kafka_connections_service,
-  ss::sharded<features::feature_table>& feature_table)
+  ss::sharded<kafka_connections_service>& kafka_connections_service)
   : _proxy_client(std::move(client))
-  , _kafka_connections_service(kafka_connections_service)
-  , _feature_table(feature_table) {}
+  , _kafka_connections_service(kafka_connections_service) {}
 
 ss::future<proto::admin::list_kafka_connections_response>
 cluster_service_impl::list_kafka_connections(
   serde::pb::rpc::context ctx,
   proto::admin::list_kafka_connections_request req) {
     vlog(brlog.trace, "list_kafka_connections: {}", req);
-
-    utils::check_license(_feature_table.local());
 
     auto& kcs = _kafka_connections_service.local();
 

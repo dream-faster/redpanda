@@ -66,7 +66,6 @@ public:
       ss::sharded<partition_manager>&,
       ss::sharded<shard_table>&,
       ss::sharded<shard_balancer>&,
-      metadata_cache&,
       config::binding<unsigned> hard_max_disk_usage_ratio,
       config::binding<int16_t> minimum_topic_replication,
       config::binding<bool> partition_autobalancing_topic_aware,
@@ -304,7 +303,6 @@ private:
     ss::sharded<ss::abort_source>& _as;
     ss::sharded<features::feature_table>& _features;
     ss::sharded<shard_balancer>& _shard_balancer;
-    metadata_cache& _metadata_cache;
 
     ss::sharded<cluster::members_table>& _members_table;
     ss::sharded<partition_manager>& _pm;

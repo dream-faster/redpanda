@@ -190,9 +190,6 @@ constexpr cluster::cluster_version to_cluster_version(release_version rv) {
 
 constexpr cluster::cluster_version TEST_VERSION{2001};
 
-bool is_major_version_upgrade(
-  cluster::cluster_version from, cluster::cluster_version to);
-
 /**
  * The definition of a feature specifies rules for when it should
  * be activated,
@@ -619,28 +616,13 @@ public:
 
     std::optional<feature> resolve_name(std::string_view feature_name) const;
 
+    /// Stores a license applied by a stock Redpanda node. It is never
+    /// interpreted; it is kept only so that the controller log and the
+    /// feature table snapshot round-trip it unchanged for stock nodes.
     void set_license(security::license license);
-
-    /// Sets the builtin trial license based on the cluster creation time
-    void set_builtin_trial_license(model::timestamp cluster_creation_timestamp);
-
-    void revoke_license();
-
-    /// Returns the user-configured license or if not set, a built in trial
-    /// license. The built in trial license is initialized async on cluster
-    /// bootstrap and during startup on subsequent starts, so consider using
-    /// `should_sanction` instead for a general, permissive check on whether
-    /// to act on a missing valid license.
-    const std::optional<security::license>& get_license() const;
-
-    /// Returns the user-configured license without falling back to the
-    /// evaluation period license
-    const std::optional<security::license>& get_configured_license() const;
-
-    /// Whether to act on an expired license or evaluation period by restricting
-    /// enterprise feature usage. Always false: this fork does not enforce
-    /// licenses.
-    bool should_sanction() const;
+    const std::optional<security::license>& get_license() const {
+        return _license;
+    }
 
     /**
      * For use in unit tests: activate all features that would
@@ -730,15 +712,7 @@ public:
     // Assert out on startup if we appear to have upgraded too far
     void assert_compatible_version(bool);
 
-    // Visible for testing
-    static long long calculate_expiry_metric(
-      const std::optional<security::license>& license,
-      security::license::clock::time_point now
-      = security::license::clock::now());
-
 private:
-    class probe;
-
     // Only for use by our friends feature backend & manager
     void set_active_version(
       cluster::cluster_version,
@@ -770,11 +744,8 @@ private:
     // Waiting for a particular feature to be preparing
     waiter_queue<feature> _waiters_preparing;
 
-    // Currently loaded redpanda license details
+    // See set_license()
     std::optional<security::license> _license;
-
-    // Built in trial license to fall back to if there is no license set
-    std::optional<security::license> _builtin_trial_license;
 
     model::offset _applied_offset{};
 
@@ -797,7 +768,6 @@ private:
 
     ss::gate _gate;
     ss::abort_source _as;
-    std::unique_ptr<probe> _probe;
 };
 
 } // namespace features

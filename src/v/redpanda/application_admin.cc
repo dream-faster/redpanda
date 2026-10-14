@@ -74,9 +74,7 @@ void application::configure_admin_server(model::node_id node_id) {
               create_client(), stress_fiber_manager));
           s.add_service(
             std::make_unique<admin::cluster_service_impl>(
-              create_client(),
-              std::ref(_kafka_connections_service),
-              controller->get_feature_table()));
+              create_client(), std::ref(_kafka_connections_service)));
           s.add_service(
             std::make_unique<admin::features_service_impl>(
               create_client(), controller.get(), std::ref(metadata_cache)));

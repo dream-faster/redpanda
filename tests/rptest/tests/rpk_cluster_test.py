@@ -8,24 +8,13 @@
 # by the Apache License, Version 2.0
 
 import json
-import tempfile
 
 from ducktape.utils.util import wait_until
 
 from rptest.clients.rpk import RpkException, RpkTool
 from rptest.services.cluster import cluster
-from rptest.services.redpanda import (
-    RESTART_LOG_ALLOW_LIST,
-    MetricSamples,
-    MetricsEndpoint,
-)
+from rptest.services.redpanda import RESTART_LOG_ALLOW_LIST
 from rptest.tests.redpanda_test import RedpandaTest
-from rptest.util import (
-    expect_exception,
-    get_cluster_license,
-    get_second_cluster_license,
-)
-from rptest.utils.mode_checks import in_fips_environment
 
 
 class RpkClusterTest(RedpandaTest):
@@ -138,181 +127,15 @@ class RpkClusterTest(RedpandaTest):
         else:
             assert False, f"Unexpected success: '{r}'"
 
-    def _get_license_expiry(self) -> int:
-        METRICS_NAME = "cluster_features_enterprise_license_expiry_sec"
-
-        def get_metrics_value(metrics_endpoint: MetricsEndpoint) -> int:
-            metrics = self.redpanda.metrics_sample(
-                sample_pattern=METRICS_NAME, metrics_endpoint=metrics_endpoint
-            )
-            assert isinstance(metrics, MetricSamples), (
-                f"Failed to get metrics for {METRICS_NAME}"
-            )
-
-            samples = [sample for sample in metrics.samples]
-            assert len(samples) == len(self.redpanda.nodes), (
-                f"Invalid number of samples: {len(samples)}"
-            )
-            return int(samples[0].value)
-
-        internal_val = get_metrics_value(MetricsEndpoint.METRICS)
-        public_val = get_metrics_value(MetricsEndpoint.PUBLIC_METRICS)
-        # generous slop. only a very large difference here would suggest a
-        # logic error on the backend (e.g. approaching a calendar day).
-        threshold_s = 30
-        assert abs(internal_val - public_val) <= threshold_s, (
-            f"Mismatch: abs({internal_val} - {public_val}) > {threshold_s}"
-        )
-        return internal_val
-
     @cluster(num_nodes=3)
-    def test_upload_and_query_cluster_license_rpk(self):
+    def test_cluster_license_stubs(self):
         """
-        Test uploading and retrieval of license via rpk
-        using --path option
+        This build does not use licenses: rpk can still upload one, which
+        is ignored, and license info always reports no license.
         """
-        license = get_cluster_license()
-        if license is None:
-            self.logger.info("Skipping test, REDPANDA_SAMPLE_LICENSE env var not found")
-            return
+        output = self._rpk.license_set("", "not-a-license")
+        assert "Successfully uploaded license" in output, output
 
-        evaluation_period = 2592000  # 30 days
-        wait_until(
-            lambda: self._get_license_expiry() <= evaluation_period,
-            timeout_sec=10,
-            backoff_sec=1,
-            retry_on_exc=True,
-            err_msg="Without a license we should observe the built in evaluation period trial license",
-        )
-
-        with tempfile.NamedTemporaryFile() as tf:
-            tf.write(bytes(license, "UTF-8"))
-            tf.seek(0)
-            output = self._rpk.license_set(tf.name)
-            assert "Successfully uploaded license" in output
-
-        wait_until(
-            lambda: self._get_license_expiry() > evaluation_period,
-            timeout_sec=10,
-            backoff_sec=1,
-            retry_on_exc=True,
-            err_msg="The expiry metric should be positive with a valid license",
-        )
-
-        expected_features = ["fips"] if in_fips_environment() else []
-        expected_features.extend(
-            ["core_balancing_continuous", "partition_auto_balancing_continuous"]
-        )
-        expected_features.sort()
-        expected_license = {
-            "expires": "Jul 11 2122",
-            "organization": "redpanda-testing",
-            "type": "enterprise",
-            "checksum_sha256": "2730125070a934ca1067ed073d7159acc9975dc61015892308aae186f7455daf",
-            "expires_unix": 4813252273,
-            "license_expired": False,
-            "license_status": "valid",
-            "license_violation": False,
-            "enterprise_features_in_use": expected_features,
-        }
-
-        def compare_license():
-            license = self._rpk.license_info()
-            self.redpanda.logger.debug(f"License response: {license}")
-            if license is None or license == "{}":
-                return False
-
-            license_json = json.loads(license)
-            if "enterprise_features_in_use" in license_json:
-                license_json["enterprise_features_in_use"].sort()
-            return license_json == expected_license
-
-        wait_until(
-            compare_license,
-            timeout_sec=10,
-            backoff_sec=1,
-            retry_on_exc=True,
-            err_msg="unable to retrieve and compare license information",
-        )
-
-        # Assert that a second put takes license
-        license = get_second_cluster_license()
-        output = self._rpk.license_set(None, license)
-        assert "Successfully uploaded license" in output
-
-        def obtain_new_license():
-            lic = self._rpk.license_info()
-            if lic is None or lic == "{}":
-                return False
-            result = json.loads(lic)
-            return result["organization"] == "redpanda-testing-2"
-
-        wait_until(
-            obtain_new_license,
-            timeout_sec=10,
-            backoff_sec=1,
-            retry_on_exc=True,
-            err_msg="unable to retrieve new license information",
-        )
-
-    @cluster(num_nodes=3)
-    def test_upload_cluster_license_rpk(self):
-        """
-        Test uploading of license via rpk
-        using inline license option
-        """
-        license = get_cluster_license()
-        if license is None:
-            self.logger.info("Skipping test, REDPANDA_SAMPLE_LICENSE env var not found")
-            return
-
-        output = self._rpk.license_set("", license)
-        assert "Successfully uploaded license" in output
-
-    @cluster(num_nodes=3)
-    def test_upload_cluster_license_error(self):
-        license = get_cluster_license()
-        if license is None:
-            self.logger.info("Skipping test, REDPANDA_SAMPLE_LICENSE env var not found")
-            return
-
-        with expect_exception(RpkException, lambda e: "License is malformed" in str(e)):
-            with tempfile.NamedTemporaryFile() as tf:
-                tf.write(bytes(license + "r", "UTF-8"))
-                tf.seek(0)
-
-                self._rpk.license_set(tf.name)
-
-    @cluster(num_nodes=3)
-    def test_expired_evaluation_period(self):
-        """
-        Test that once the eval period license expires, it is not observable
-        """
-        self.logger.debug("Ensure the eval period license is expired")
-        self.redpanda.set_environment(
-            dict(__REDPANDA_DISABLE_BUILTIN_TRIAL_LICENSE="1")
-        )
-        self.redpanda.rolling_restart_nodes(
-            self.redpanda.nodes, use_maintenance_mode=False
-        )
-        self.redpanda.wait_until(
-            self.redpanda.healthy,
-            timeout_sec=15,
-            backoff_sec=1,
-            err_msg="The cluster failed to stabilize after restart",
-        )
-
-        wait_until(
-            lambda: self._get_license_expiry() == -1,
-            timeout_sec=10,
-            backoff_sec=1,
-            retry_on_exc=True,
-            err_msg="After the trial period expired, the license metric should show no license (-1)",
-        )
-
-        resp = self._rpk.license_info()
-        self.logger.debug(f"Response: {resp}")
-        resp_json = json.loads(resp)
-        assert resp_json["license_status"] == "not_present", (
-            f"Expected: not_present. Got: {resp_json['license_status']}"
-        )
+        resp_json = json.loads(self._rpk.license_info())
+        assert resp_json["license_status"] == "not_present", resp_json
+        assert resp_json["license_violation"] is False, resp_json

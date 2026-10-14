@@ -16,8 +16,6 @@
 #include "cluster/version.h"
 #include "config/configuration.h"
 #include "features/logger.h"
-#include "metrics/metrics.h"
-#include "metrics/prometheus_sanitize.h"
 #include "model/timestamp.h"
 #include "security/license.h"
 #include "version/version.h"
@@ -185,54 +183,6 @@ static_assert(
   "Consider upgrading the earliest_version in lockstep whenever you increment "
   "the latest_version");
 
-namespace {
-bool is_major_version_release(cluster::cluster_version version) {
-    if (
-      version < to_cluster_version(release_version::MIN)
-      || version > to_cluster_version(release_version::MAX)) {
-        // Unknown versions default to being a major version release
-        return true;
-    }
-    switch (static_cast<release_version>(version())) {
-    case release_version::v22_1_1:
-        return true;
-    case release_version::v22_1_5:
-        return false;
-    case release_version::v22_2_1:
-        return true;
-    case release_version::v22_2_6:
-        return false;
-    case release_version::v22_3_1:
-        return true;
-    case release_version::v22_3_6:
-        return false;
-    case release_version::v23_1_1:
-    case release_version::v23_2_1:
-    case release_version::v23_3_1:
-    case release_version::v24_1_1:
-    case release_version::v24_2_1:
-    case release_version::v24_3_1:
-    case release_version::v25_1_1:
-    case release_version::v25_2_1:
-    case release_version::v25_3_1:
-    case release_version::v26_1_1:
-    case release_version::v26_2_1:
-        return true;
-    }
-    __builtin_unreachable();
-}
-} // namespace
-
-bool is_major_version_upgrade(
-  cluster::cluster_version from, cluster::cluster_version to) {
-    for (cluster::cluster_version i = from + 1L; i <= to; ++i) {
-        if (is_major_version_release(i)) {
-            return true;
-        }
-    }
-    return false;
-}
-
 // Extra features that will be wired into the feature table if a special
 // environment variable is set
 static std::array test_extra_schema{
@@ -260,85 +210,6 @@ static std::array test_extra_schema{
     feature_spec::available_policy::new_clusters_only,
     feature_spec::prepare_policy::always},
 };
-
-class feature_table::probe {
-public:
-    explicit probe(const feature_table& parent)
-      : _parent(parent) {}
-
-    probe(const probe&) = delete;
-    probe& operator=(const probe&) = delete;
-    probe(probe&&) = delete;
-    probe& operator=(probe&&) = delete;
-    ~probe() noexcept = default;
-
-    void setup_metrics() {
-        if (ss::this_shard_id() != 0) {
-            return;
-        }
-
-        if (!config::shard_local_cfg().disable_metrics()) {
-            setup_metrics_for(_metrics);
-        }
-
-        if (!config::shard_local_cfg().disable_public_metrics()) {
-            setup_metrics_for(_public_metrics);
-        }
-    }
-
-    void setup_metrics_for(metrics::metric_groups_base& metrics) {
-        namespace sm = ss::metrics;
-
-        static_assert(
-          !std::is_move_constructible_v<feature_table>
-            && !std::is_move_assignable_v<feature_table>
-            && !std::is_copy_constructible_v<feature_table>
-            && !std::is_copy_assignable_v<feature_table>,
-          "The probe captures a reference to this");
-
-        metrics.add_group(
-          prometheus_sanitize::metrics_name("cluster:features"),
-          {
-            sm::make_gauge(
-              "enterprise_license_expiry_sec",
-              [&ft = _parent]() {
-                  return calculate_expiry_metric(ft.get_license());
-              },
-              sm::description(
-                "Number of seconds remaining until the "
-                "Enterprise license expires"))
-              .aggregate({sm::shard_label}),
-          });
-    }
-
-    const feature_table& _parent;
-    metrics::internal_metric_groups _metrics;
-    metrics::public_metric_groups _public_metrics;
-};
-
-namespace {
-
-security::license
-make_builtin_trial_license(security::license::clock::time_point start_time) {
-    auto expiry_time = start_time + std::chrono::days{30};
-    auto expiry = std::chrono::duration_cast<std::chrono::seconds>(
-      expiry_time.time_since_epoch());
-
-    if (std::getenv("__REDPANDA_DISABLE_BUILTIN_TRIAL_LICENSE") != nullptr) {
-        // For testing, use an expired trial license
-        expiry = 0s;
-    }
-
-    return security::license{
-      .format_version = 0,
-      ._type = security::license_type::free_trial,
-      .organization = "Redpanda Built-In Evaluation Period",
-      .expiry = expiry,
-      .checksum = "",
-    };
-}
-
-} // namespace
 
 feature_table::feature_table() {
     // Intentionally undocumented environment variable, only for use
@@ -372,15 +243,11 @@ feature_table::feature_table() {
             }
         }
     }
-
-    _probe = std::make_unique<probe>(*this);
-    _probe->setup_metrics();
 }
 
 feature_table::~feature_table() noexcept = default;
 
 ss::future<> feature_table::stop() {
-    _probe.reset();
     _as.request_abort();
 
     // Don't trust callers to have fired their abort source in the right
@@ -729,49 +596,6 @@ void feature_table::set_license(security::license license) {
     _license = std::move(license);
 }
 
-void feature_table::set_builtin_trial_license(
-  model::timestamp cluster_creation_timestamp) {
-    _builtin_trial_license = make_builtin_trial_license(
-      model::to_time_point(cluster_creation_timestamp));
-
-    if (ss::this_shard_id() == 0) {
-        vlog(
-          featureslog.debug,
-          "Initialized builtin trial license expirying at "
-          "{}",
-          _builtin_trial_license->expiry);
-    }
-}
-
-void feature_table::revoke_license() {
-    _license = std::nullopt;
-    _builtin_trial_license = std::nullopt;
-}
-
-const std::optional<security::license>& feature_table::get_license() const {
-    static const std::optional<security::license> no_license = std::nullopt;
-    if (_license) {
-        return _license;
-    } else if (
-      _builtin_trial_license && !_builtin_trial_license->is_expired()) {
-        // Don't not show the evaluation period license after it expired
-        return _builtin_trial_license;
-    } else {
-        return no_license;
-    }
-}
-
-const std::optional<security::license>&
-feature_table::get_configured_license() const {
-    return _license;
-}
-
-bool feature_table::should_sanction() const {
-    // This fork does not enforce licenses: enterprise features are never
-    // restricted, regardless of license or trial state.
-    return false;
-}
-
 void feature_table::testing_activate_all() {
     for (auto& s : _feature_state) {
         if (
@@ -879,18 +703,6 @@ void feature_table::assert_compatible_version(bool override) {
             }
         }
     }
-}
-
-long long feature_table::calculate_expiry_metric(
-  const std::optional<security::license>& license,
-  security::license::clock::time_point now) {
-    if (!license) {
-        return -1;
-    }
-
-    auto rem = license->expiration() - now;
-    auto rem_capped = std::max(rem.zero(), rem);
-    return rem_capped / 1s;
 }
 
 } // namespace features

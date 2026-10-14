@@ -19,10 +19,10 @@
 #include "config/tls_config.h"
 #include "config/types.h"
 #include "container/intrusive_list_helpers.h"
-#include "features/enterprise_feature_messages.h"
 #include "json/stringbuffer.h"
 #include "json/writer.h"
 #include "model/metadata.h"
+#include "ssx/sformat.h"
 #include "utils/to_string.h"
 
 #include <seastar/util/noncopyable_function.hh>
@@ -130,8 +130,8 @@ public:
     }
 
     /// Return the pending value if one exists, otherwise the active value.
-    /// Use this to check the user's configured intent (e.g. for enterprise
-    /// feature enforcement) rather than the currently active runtime value.
+    /// Use this to check the user's configured intent rather than the
+    /// currently active runtime value.
     const value_type& configured_value() const {
         if (_pending_value.has_value()) {
             return *_pending_value;
@@ -243,16 +243,6 @@ public:
     std::optional<validation_error> validate(YAML::Node n) const override {
         auto v = std::move(n.as<value_type>());
         return validate(v);
-    }
-
-    std::optional<validation_error>
-    check_restricted(YAML::Node) const override {
-        // Config properties are unrestricted by default
-        return std::nullopt;
-    }
-
-    bool check_restricted(const T& value) const {
-        return do_check_restricted(value);
     }
 
     void reset() override {
@@ -387,11 +377,6 @@ protected:
     const std::optional<legacy_default<value_type>> _legacy_default;
 
 private:
-    virtual bool do_check_restricted(const T&) const {
-        // Config properties are unrestricted by default
-        return false;
-    }
-
     validator _validator;
 
     friend class binding_base<value_type>;
@@ -1131,193 +1116,4 @@ public:
         return this->value() == this->default_value();
     }
 };
-namespace detail {
-
-template<typename P>
-concept Property = requires() {
-    std::derived_from<P, base_property>;
-    typename P::value_type;
-};
-
-template<typename T>
-concept Array = detail::is_array<T>() && !reflection::is_std_optional<T>;
-
-} // namespace detail
-
-/**
- * config::enterprise is a wrapper template logically comprising
- *   - a config::property<T>
- *   - a predicate check_restricted(T)
- *
- * The intended usage of this class is to attach metadata to a
- * config property, allowing clients of the config subsystem to
- * determine whether some config setting should be restricted to
- * enterprise licensed clusters.
- *
- * Note that config::enterprise does not do any _enforcement_ of
- * that restriction - it only provides the interface for clients
- * to determine whether some value satisfies the predicate.
- * Checking the license and/or applying any corrective action is
- * left entirely to the API consumer.
- *
- */
-template<detail::Property P>
-class enterprise : public P {
-    template<typename T, typename = void>
-    struct value_type {
-        using type = T;
-    };
-    template<detail::Array T>
-    struct value_type<T, std::void_t<typename T::value_type>> {
-        using type = T::value_type;
-    };
-    template<reflection::is_std_optional T>
-    struct value_type<T, std::void_t<typename T::value_type>> {
-        using type = T::value_type;
-    };
-
-    // The value type of the wrapped property. Could be a container, or
-    // an optional, primitive type, aggregate, etc.
-    using T = typename P::value_type;
-
-    /**
-     * val_t is the unwrapped value type of the property
-     *   - If T is an array, val_t is the element type
-     *   - If T is an optional, val_t is the value type
-     *   - otherwise val_t is T
-     *
-     * This allows us to express restrictions on array-properties by describing
-     * which potential values for _elements_ of the array are 'restricted'
-     * without enumerating all possible values for the array itself.
-     *
-     * e.g. given an array A<T>, where T={w, x, y, z}, we can say that T::x is
-     * 'restricted' such that
-     *   - A = [x]  is restricted
-     *   - A = [z, y, x] is restricted
-     *   - A = [z, x, y] is restricted
-     *   - A = [y, z] is NOT restricted
-     *
-     */
-    using val_t = typename value_type<T>::type;
-    using val_container_t = std::vector<val_t>;
-    using restrict_check_t = std::function<bool(const val_t&)>;
-    using restrict_variant_t
-      = std::variant<val_t, val_container_t, restrict_check_t>;
-
-public:
-    /**
-     * Construct an enterprise property.
-     *
-     * Largely a pass-through to the wrapped property's constructor, with the
-     * addition of a variant parameter describing restricted values, which may
-     * take the type
-     *   - val_t: that value is restricted
-     *   - vector<val_t>: each element is restricted
-     *   - std::function<bool(val_t)>: predicate for whether some val_t is
-     *     restricted
-     *
-     */
-    template<typename... Args>
-    enterprise(
-      config_store& conf, restrict_variant_t restricted, Args&&... args)
-      : P(conf, std::forward<Args>(args)...)
-      , _restriction(std::move(restricted))
-      , _sanctioned_value{this->default_value()} {
-        assert_no_sanctioned_conflict();
-    }
-
-    /**
-     * Construct an enterprise property.
-     *
-     * Largely a pass-through to the wrapped property's constructor, with the
-     * addition of a variant parameter describing restricted values, which may
-     * take the type
-     *   - val_t: that value is restricted
-     *   - vector<val_t>: each element is restricted
-     *   - std::function<bool(val_t)>: predicate for whether some val_t is
-     *     restricted
-     *  and a sanctioned value to be used, instead of the default value, when
-     * the property is set to an enterprise value, but there is no valid active
-     * license.
-     *
-     */
-    template<typename... Args>
-    enterprise(
-      config_store& conf,
-      restrict_variant_t restricted,
-      T sanctioned_value,
-      Args&&... args)
-      : P(conf, std::forward<Args>(args)...)
-      , _restriction(std::move(restricted))
-      , _sanctioned_value{sanctioned_value} {
-        assert_no_sanctioned_conflict();
-    }
-
-    // Needed because the following override shadows the rest of the overloads
-    using P::check_restricted;
-
-    /**
-     * Decodes the given YAML node into the underlying property's value_type and
-     * checks whether that value should be restricted to enterprise clusters
-     * based on the unwrapped value restrictions described at construction.
-     */
-    std::optional<validation_error> check_restricted(YAML::Node n) const final {
-        auto v = std::move(n.as<T>());
-        if (do_check_restricted(v)) {
-            return std::make_optional<validation_error>(
-              P::name().data(),
-              features::enterprise_error_message::cluster_property(
-                P::name().data(), v));
-        }
-        return std::nullopt;
-    }
-
-    /**
-     * @brief Checks current value of property to see if it is restricted
-     */
-    bool is_restricted() const { return do_check_restricted(this->value()); }
-
-    /**
-     * @brief Returns the sanctioned value of this property
-     */
-    const T& sanctioned_value() const { return _sanctioned_value; }
-
-private:
-    bool do_check_restricted(const T& setting) const final {
-        // depending on how the restriction was defined, construct an applicable
-        // check function for bare instances of the underlying value type
-        auto restriction_check = [this](const val_t& v) -> bool {
-            return ss::visit(
-              _restriction,
-              [&v](const val_t& val) { return v == val; },
-              [&v](const val_container_t& vals) {
-                  return std::ranges::find(vals, v) != std::ranges::end(vals);
-              },
-              [&v](const restrict_check_t& check) { return check(v); });
-        };
-
-        if constexpr (detail::Array<T>) {
-            return std::ranges::any_of(setting, restriction_check);
-        }
-
-        if constexpr (reflection::is_std_optional<T>) {
-            return setting.has_value() && restriction_check(setting.value());
-        }
-
-        if constexpr (std::is_same_v<T, val_t>) {
-            return restriction_check(setting);
-        }
-    }
-
-    void assert_no_sanctioned_conflict() const {
-        vassert(
-          !do_check_restricted(_sanctioned_value),
-          "Enterprise properties must not restrict the sanctioned value of the "
-          "property!");
-    }
-
-    restrict_variant_t _restriction;
-    T _sanctioned_value;
-};
-
 }; // namespace config

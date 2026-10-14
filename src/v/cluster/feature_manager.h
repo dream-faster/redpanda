@@ -15,13 +15,12 @@
 #include "cluster/feature_barrier.h"
 #include "cluster/fwd.h"
 #include "cluster/types.h"
-#include "features/enterprise_features.h"
 #include "raft/notification.h"
-#include "security/fwd.h"
-#include "ssx/semaphore.h"
 
 #include <seastar/core/abort_source.hh>
+#include <seastar/core/condition-variable.hh>
 #include <seastar/core/future.hh>
+#include <seastar/core/gate.hh>
 
 namespace cluster {
 
@@ -66,8 +65,6 @@ public:
       ss::sharded<health_monitor_backend>& hm_backend,
       ss::sharded<features::feature_table>& table,
       ss::sharded<rpc::connection_cache>& connection_cache,
-      ss::sharded<security::role_store>& role_store,
-      ss::sharded<topic_table>&,
       raft::group_id raft0_group);
 
     /**
@@ -98,8 +95,6 @@ public:
     ss::future<> barrier(feature_barrier_tag tag) {
         return _barrier_state.barrier(tag);
     }
-
-    ss::future<std::error_code> update_license(security::license&& license);
 
     /// Outcome of \ref submit_manual_finalize_request.
     enum class finalize_status {
@@ -168,16 +163,6 @@ public:
     /// \c backend_shard.
     ss::future<upgrade_status> get_upgrade_status();
 
-    features::enterprise_feature_report report_enterprise_features() const;
-
-    /**
-     * This method is always called during startup to verify that the cluster is
-     * only upgraded with a valid enterprise license if enterprise features are
-     * enabled. It throws if the cluster is non-compliant during an upgrade or
-     * unblocks the advancement of the active_version otherwise.
-     */
-    void verify_enterprise_license();
-
 private:
     void update_node_version(model::node_id, cluster_version v);
 
@@ -214,9 +199,7 @@ private:
     }
 
     ss::future<> maybe_log_periodic_reminders();
-    void maybe_log_license_nag();
     void maybe_log_security_nag();
-    bool need_to_verify_enterprise_license();
 
     // Compose a command struct, replicate it via raft and wait for apply.
     // Silently swallow not_leader errors, raise on other errors;
@@ -240,8 +223,6 @@ private:
     ss::sharded<health_monitor_backend>& _hm_backend;
     ss::sharded<features::feature_table>& _feature_table;
     ss::sharded<rpc::connection_cache>& _connection_cache;
-    ss::sharded<security::role_store>& _role_store;
-    ss::sharded<topic_table>& _topic_table;
     raft::group_id _raft0_group;
 
     version_map _updates;
@@ -296,10 +277,6 @@ private:
     // and the active version stays pinned to the just-removed node's
     // version.
     bool _members_changed{false};
-
-    // Blocks cluster upgrades until the enterprise license has been verified
-    ssx::semaphore _verified_enterprise_license{
-      0, "feature_manager/enterprise-license-verified"};
 };
 
 } // namespace cluster

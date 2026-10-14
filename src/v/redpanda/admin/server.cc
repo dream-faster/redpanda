@@ -47,7 +47,6 @@
 #include "config/validators.h"
 #include "container/chunked_vector.h"
 #include "container/lw_shared_container.h"
-#include "features/enterprise_features.h"
 #include "features/feature_table.h"
 #include "finjector/hbadger.h"
 #include "finjector/stress_fiber.h"
@@ -1827,13 +1826,6 @@ void config_multi_property_validation(
 }
 } // namespace
 
-void admin_server::check_license(const ss::sstring& msg) const {
-    if (_controller->get_feature_table().local().should_sanction()) {
-        throw ss::httpd::base_exception(
-          msg, ss::http::reply::status_type::forbidden);
-    }
-}
-
 void admin_server::register_cluster_config_routes() {
     register_route<superuser>(
       ss::httpd::cluster_config_json::get_cluster_config_status,
@@ -1978,9 +1970,6 @@ admin_server::patch_cluster_config_handler(
               tmp_p = p;
           });
 
-        auto should_sanction
-          = _controller->get_feature_table().local().should_sanction();
-
         // Configuration properties cannot do multi-property validation
         // themselves, so there is some special casing here for critical
         // properties.
@@ -2009,16 +1998,6 @@ admin_server::patch_cluster_config_handler(
                       yaml_name,
                       property.format_raw(yaml_value),
                       validation_err.value().error_message());
-                } else if (
-                  auto restricted_err = property.check_restricted(val);
-                  restricted_err.has_value() && should_sanction) {
-                    errors[yaml_name] = restricted_err.value().error_message();
-                    vlog(
-                      adminlog.warn,
-                      "Rejected {}: '{}' ({})",
-                      yaml_name,
-                      property.format_raw(yaml_value),
-                      restricted_err.value().error_message());
                 } else {
                     // In case any property subclass might throw
                     // from it's value setter even after a non-throwing
@@ -2398,105 +2377,6 @@ admin_server::put_feature_handler(std::unique_ptr<ss::http::request> req) {
     }
 }
 
-ss::future<ss::json::json_return_type>
-admin_server::put_license_handler(std::unique_ptr<ss::http::request> req) {
-    auto raw_license = co_await ss::util::read_entire_stream_contiguous(
-      *req->content_stream);
-    if (raw_license.empty()) {
-        throw ss::httpd::bad_request_exception(
-          "Missing redpanda license from request body");
-    }
-
-    try {
-        boost::trim_if(raw_license, boost::is_any_of(" \n\r"));
-        auto license = security::make_license(raw_license);
-        if (license.is_expired()) {
-            throw ss::httpd::bad_request_exception(
-              fmt::format("License is expired: {}", license));
-        }
-
-        if (need_redirect_to_leader(model::controller_ntp, _metadata_cache)) {
-            // In order that we can do a reliable idempotence check, run on the
-            // controller leader
-            throw co_await redirect_to_leader(*req, model::controller_ntp);
-        }
-
-        const auto& ft = _controller->get_feature_table().local();
-        const auto& loaded_license = ft.get_license();
-        if (loaded_license && (*loaded_license == license)) {
-            /// Loaded license is idential to license in request, do
-            /// nothing and return 200(OK) for idempotence
-            vlog(
-              adminlog.debug,
-              "Attempted to load identical license, doing nothing: {}",
-              license);
-            co_return ss::json::json_void();
-        }
-        auto& fm = _controller->get_feature_manager();
-        auto err = co_await fm.invoke_on(
-          cluster::feature_manager::backend_shard,
-          [license = std::move(license)](cluster::feature_manager& fm) mutable {
-              return fm.update_license(std::move(license));
-          });
-        co_await throw_on_error(*req, err, model::controller_ntp);
-    } catch (const security::license_malformed_exception& ex) {
-        throw ss::httpd::bad_request_exception(
-          fmt::format("License is malformed: {}", ex.what()));
-    } catch (const security::license_invalid_exception& ex) {
-        throw ss::httpd::bad_request_exception(
-          fmt::format("License is invalid: {}", ex.what()));
-    }
-    co_return ss::json::json_void();
-}
-
-ss::future<ss::json::json_return_type>
-admin_server::get_enterprise_handler(std::unique_ptr<ss::http::request>) {
-    using status = ss::httpd::features_json::enterprise_response::
-      enterprise_response_license_status;
-
-    const auto& license
-      = _controller->get_feature_table().local().get_license();
-    auto license_status = [&license]() {
-        auto present = license.has_value();
-        auto exp = present && license.value().is_expired();
-        if (exp) {
-            return status::expired;
-        }
-        if (present) {
-            return status::valid;
-        }
-        return status::not_present;
-    }();
-
-    auto& mgr = _controller->get_feature_manager();
-    const auto report = co_await mgr.invoke_on(
-      cluster::feature_manager::backend_shard,
-      [](const cluster::feature_manager& fm) {
-          return fm.report_enterprise_features();
-      });
-
-    ss::httpd::features_json::enterprise_response res;
-    res.license_status = license_status;
-    res.violation = license_status != status::valid && report.any();
-    auto insert_feature =
-      [&res](features::license_required_feature feat, bool enabled) {
-          ss::httpd::features_json::enterprise_feature elt;
-          elt.name = fmt::format("{}", feat);
-          elt.enabled = enabled;
-          res.features.push(elt);
-      };
-
-    for (auto feat : report.enabled()) {
-        insert_feature(feat, true);
-    }
-
-    for (auto feat : report.disabled()) {
-        insert_feature(feat, false);
-    }
-
-    co_return ss::json::json_return_type{res};
-}
-
 void admin_server::register_features_routes() {
     register_route<user>(
       ss::httpd::features_json::get_features,
@@ -2559,41 +2439,39 @@ void admin_server::register_features_routes() {
           return put_feature_handler(std::move(req));
       });
 
-    register_route<publik, true>(
+    // This build does not use licenses. The license routes stay registered,
+    // reporting no license and no enterprise features, because rpk and the
+    // Helm chart's post-upgrade job call them and fail on a 404.
+    register_route<publik>(
       ss::httpd::features_json::get_license,
-      [this](
-        std::unique_ptr<ss::http::request>,
-        const request_auth_result& auth_result) {
+      [](std::unique_ptr<ss::http::request>) {
           ss::httpd::features_json::license_response res;
           res.loaded = false;
-          const auto& ft = _controller->get_feature_table().local();
-          const auto& license = ft.get_license();
-          if (license) {
-              res.loaded = true;
-              ss::httpd::features_json::license_contents lc;
-              if (auth_result.is_authenticated()) {
-                  lc.format_version = license->format_version;
-                  lc.org = license->organization;
-              }
-              lc.type = license->get_type();
-              lc.expires = license->expiry.count();
-              lc.sha256 = license->checksum;
-              lc.products = license->products;
-              res.license = lc;
-          }
           return ss::make_ready_future<ss::json::json_return_type>(
             std::move(res));
       });
 
     register_route<superuser>(
       ss::httpd::features_json::put_license,
-      [this](std::unique_ptr<ss::http::request> req) {
-          return put_license_handler(std::move(req));
+      [](std::unique_ptr<ss::http::request> req)
+        -> ss::future<ss::json::json_return_type> {
+          std::ignore = co_await ss::util::read_entire_stream_contiguous(
+            *req->content_stream);
+          vlog(
+            adminlog.info,
+            "Ignoring license upload: this build does not use licenses");
+          co_return ss::json::json_void();
       });
+
     register_route<user>(
       ss::httpd::features_json::get_enterprise,
-      [this](std::unique_ptr<ss::http::request> req) {
-          return get_enterprise_handler(std::move(req));
+      [](std::unique_ptr<ss::http::request>) {
+          ss::httpd::features_json::enterprise_response res;
+          res.license_status = ss::httpd::features_json::enterprise_response::
+            enterprise_response_license_status::not_present;
+          res.violation = false;
+          return ss::make_ready_future<ss::json::json_return_type>(
+            std::move(res));
       });
 }
 

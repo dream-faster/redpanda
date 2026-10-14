@@ -16,7 +16,6 @@
 #include "cluster/partition_balancer_types.h"
 #include "cluster/types.h"
 #include "config/property.h"
-#include "features/enterprise_features.h"
 #include "model/fundamental.h"
 #include "raft/consensus.h"
 #include "ssx/minimum_interval_timer.h"
@@ -37,7 +36,6 @@ public:
     partition_balancer_backend(
       consensus_ptr raft0,
       ss::sharded<controller_stm>&,
-      ss::sharded<features::feature_table>&,
       ss::sharded<partition_balancer_state>&,
       ss::sharded<health_monitor_backend>&,
       ss::sharded<partition_allocator>&,
@@ -96,16 +94,13 @@ private:
     consensus_ptr _raft0;
 
     controller_stm& _controller_stm;
-    features::feature_table& _feature_table;
     partition_balancer_state& _state;
     health_monitor_backend& _health_monitor;
     partition_allocator& _partition_allocator;
     topics_frontend& _topics_frontend;
     members_frontend& _members_frontend;
 
-    features::sanctioning_binding<
-      config::enum_property<model::partition_autobalancing_mode>>
-      _mode;
+    config::binding<model::partition_autobalancing_mode> _mode;
     config::binding<std::chrono::seconds> _availability_timeout;
     config::binding<std::optional<std::chrono::seconds>>
       _autodecommission_timeout;

@@ -26,7 +26,6 @@
 #include "config/configuration.h"
 #include "config/node_config.h"
 #include "container/chunked_vector.h"
-#include "features/enterprise_feature_messages.h"
 #include "model/metadata.h"
 #include "model/namespace.h"
 #include "random/generators.h"
@@ -68,8 +67,7 @@ leader_balancer::leader_balancer(
   , _transfer_limit_per_shard(std::move(transfer_limit_per_shard))
   , _enable_rack_awareness(std::move(enable_rack_awareness))
   , _default_preference(
-      features::make_sanctioning_binding<
-        features::license_required_feature::leadership_pinning>())
+      config::shard_local_cfg().default_leaders_preference.bind())
   , _metadata_dissemination_interval(metadata_dissemination_interval)
   , _topics(topics)
   , _leaders(leaders)
@@ -314,8 +312,7 @@ ss::future<> leader_balancer::start() {
     }
 
     _enabled.watch([this]() { on_enable_changed(); });
-    _default_preference.binding().watch(
-      [this]() { on_default_preference_changed(); });
+    _default_preference.watch([this]() { on_default_preference_changed(); });
 
     co_return;
 }
@@ -468,30 +465,6 @@ bool leader_balancer::should_stop_balance() const {
 }
 
 bool leader_balancer::leadership_pinning_enabled() const {
-    const auto should_print_warning = [this]() {
-        const auto& [_, is_sanctioned] = _default_preference(true);
-        return is_sanctioned
-               || std::ranges::any_of(
-                 _topics.topics_map(), [](const auto& topic) {
-                     const auto& preference = topic.second.get_configuration()
-                                                .properties.leaders_preference;
-                     return preference.has_value()
-                            && config::shard_local_cfg()
-                                 .default_leaders_preference.check_restricted(
-                                   preference.value());
-                 });
-    };
-
-    if (_feature_table.should_sanction()) {
-        if (should_print_warning()) {
-            vlog(
-              clusterlog.warn,
-              "{}",
-              features::enterprise_error_message::default_leaders_preference());
-        }
-        return false;
-    }
-
     return _enable_rack_awareness();
 }
 
@@ -909,13 +882,8 @@ leader_balancer_types::preference_index
 leader_balancer::build_preference_index() {
     leader_balancer_types::preference_index ret;
 
-    vassert(
-      !_feature_table.should_sanction(),
-      "this path should be unreachable on sanctioned execution");
-    // we can bypass the sanctioning binding as this should never
-    // be reachable in a sanctioned execution
     ret.default_preference = leader_balancer_types::leaders_preference{
-      _default_preference.binding()()};
+      _default_preference()};
 
     if (_last_seen_preferences) {
         _last_seen_preferences->clear();

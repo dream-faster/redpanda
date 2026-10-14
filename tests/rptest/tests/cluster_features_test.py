@@ -25,9 +25,8 @@ from rptest.services.redpanda import RESTART_LOG_ALLOW_LIST
 from rptest.services.redpanda_installer import RedpandaInstaller, wait_for_num_versions
 from rptest.tests.redpanda_test import RedpandaTest
 from rptest.tests.unfinalized_upgrade_mixin import UnfinalizedUpgradeMixin
-from rptest.util import expect_exception, wait_until_result
+from rptest.util import expect_exception
 from rptest.utils.node_operations import NodeDecommissionWaiter
-from rptest.utils.rpenv import sample_license, sample_license_v1
 
 FEATURE_ALPHA_NAME = "__test_alpha"
 FEATURE_BRAVO_NAME = "__test_bravo"
@@ -212,83 +211,22 @@ class FeaturesMultiNodeTest(FeaturesTestBase):
         assert state["state"] == "disabled"
         assert state["was_active"] == True
 
-    @cluster(num_nodes=3, log_allow_list=RESTART_LOG_ALLOW_LIST)
-    def test_license_upload_and_query(self):
+    @cluster(num_nodes=3)
+    def test_license_routes_are_stubs(self):
         """
-        Test uploading and retrieval of license
+        This build does not use licenses. The license routes accept and
+        ignore an upload and always report no license and no enterprise
+        features, so rpk and the Helm chart's post-upgrade job keep working.
         """
-        license = sample_license()
-        if license is None:
-            self.logger.info("Skipping test, REDPANDA_SAMPLE_LICENSE env var not found")
-            return
-        expected_license_contents = {
-            "expires": 4813252273,
-            "format_version": 0,
-            "org": "redpanda-testing",
-            "type": "enterprise",
-            "sha256": "2730125070a934ca1067ed073d7159acc9975dc61015892308aae186f7455daf",
-        }
+        assert self.admin.put_license("not-a-license").status_code == 200
 
-        assert self.admin.put_license(license).status_code == 200
+        for node in self.redpanda.started_nodes():
+            assert self.admin.get_license(node=node) == {"loaded": False}
 
-        def check_license(is_matching_license):
-            # Wait for all of the nodes to see the next license to ensure that
-            # we don't get idempotent 200's when updating the license on a
-            # stale node in the face of leadership changes
-            licenses = [
-                self.admin.get_license(node=node)
-                for node in self.redpanda.started_nodes()
-            ]
-            if any(not is_matching_license(lic) for lic in licenses):
-                return False, None
-            return (True, licenses[0])
-
-        resp = wait_until_result(
-            lambda: check_license(self.admin.is_sample_license),
-            timeout_sec=20,
-            backoff_sec=1,
-        )
-        assert resp["license"] is not None
-        assert expected_license_contents == resp["license"], resp["license"]
-
-        license_v1 = sample_license_v1()
-        if license_v1 is None:
-            self.logger.info(
-                "Skipping test, REDPANDA_SAMPLE_LICENSE_V1_PRODUCTS env var not found"
-            )
-            return
-        expected_license_contents_v1 = {
-            "format_version": 1,
-            "org": "redpanda-testing",
-            "type": "testing_license",
-            "products": ["some_prod", "some_other_prod"],
-            "expires": 4344165449,
-            "sha256": "0937a2d8e4437a63373c1c1cb0f5f62c5cae9366fea1b00467b4c4eaab8ca4cf",
-        }
-
-        assert self.admin.put_license(license_v1).status_code == 200
-
-        def is_v1_license(lic):
-            if lic is None or "license" not in lic:
-                return False
-            return lic["license"]["format_version"] == 1
-
-        resp = wait_until_result(
-            lambda: check_license(is_v1_license), timeout_sec=20, backoff_sec=1
-        )
-        assert resp["license"] is not None
-        assert expected_license_contents_v1 == resp["license"], resp["license"]
-
-        # Set back to v0 for sanity check
-        assert self.admin.put_license(license).status_code == 200
-
-        resp = wait_until_result(
-            lambda: check_license(self.admin.is_sample_license),
-            timeout_sec=20,
-            backoff_sec=1,
-        )
-        assert resp["license"] is not None
-        assert expected_license_contents == resp["license"], resp["license"]
+        enterprise = self.admin.get_enterprise_features().json()
+        assert enterprise["license_status"] == "not_present", enterprise
+        assert enterprise["violation"] is False, enterprise
+        assert enterprise.get("features", []) == [], enterprise
 
 
 class FeaturesMultiNodeUpgradeTest(FeaturesTestBase):

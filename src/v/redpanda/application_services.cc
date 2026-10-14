@@ -191,7 +191,6 @@ void application::wire_up_redpanda_services(
       std::ref(raft_group_manager),
       std::ref(feature_table),
       std::ref(node_status_table),
-      std::ref(metadata_cache),
       scheduling_groups::instance().cluster_sg());
     controller->wire_up().get();
 
