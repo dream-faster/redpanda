@@ -11,7 +11,6 @@
 
 #pragma once
 #include "base/format_to.h"
-#include "config/configuration.h"
 #include "model/fundamental.h"
 #include "model/metadata.h"
 #include "model/namespace.h"
@@ -19,7 +18,10 @@
 #include "utils/tristate.h"
 
 #include <seastar/core/sstring.hh>
+#include <seastar/util/bool_class.hh>
 
+#include <chrono>
+#include <memory>
 #include <optional>
 
 namespace storage {
@@ -174,148 +176,32 @@ public:
         _overrides = std::make_unique<default_overrides>(o);
     }
 
-    std::optional<size_t> retention_bytes() const {
-        if (_overrides) {
-            // Handle the special "-1" case.
-            if (_overrides->retention_bytes.is_disabled()) {
-                return std::nullopt;
-            }
-            if (_overrides->retention_bytes.has_optional_value()) {
-                return _overrides->retention_bytes.value();
-            }
-            // If no value set, fall through and use the cluster-wide default.
-        }
-        return config::shard_local_cfg().retention_bytes();
-    }
+    std::optional<size_t> retention_bytes() const;
 
-    std::optional<std::chrono::milliseconds> retention_duration() const {
-        if (_overrides) {
-            // Handle the special "-1" case.
-            if (_overrides->retention_time.is_disabled()) {
-                return std::nullopt;
-            }
-            if (_overrides->retention_time.has_optional_value()) {
-                return _overrides->retention_time.value();
-            }
-            // If no value set, fall through and use the cluster-wide default.
-        }
+    std::optional<std::chrono::milliseconds> retention_duration() const;
 
-        return config::shard_local_cfg().log_retention_ms();
-    }
+    auto segment_ms() const -> std::optional<std::chrono::milliseconds>;
 
-    auto segment_ms() const -> std::optional<std::chrono::milliseconds> {
-        if (_overrides) {
-            if (_overrides->segment_ms.is_disabled()) {
-                return std::nullopt;
-            }
-            if (_overrides->segment_ms.has_optional_value()) {
-                return _overrides->segment_ms.value();
-            }
-            // fall through to server config
-        }
+    bool write_caching() const;
 
-        return config::shard_local_cfg().log_segment_ms;
-    }
+    std::chrono::milliseconds flush_ms() const;
 
-    bool write_caching() const {
-        if (!model::is_user_topic(_ntp)) {
-            return false;
-        }
-        auto cluster_default
-          = config::shard_local_cfg().write_caching_default();
-        if (cluster_default == model::write_caching_mode::disabled) {
-            return false;
-        }
-        auto value = _overrides
-                       ? _overrides->write_caching.value_or(cluster_default)
-                       : cluster_default;
-        return value == model::write_caching_mode::default_true;
-    }
+    size_t flush_bytes() const;
 
-    std::chrono::milliseconds flush_ms() const {
-        auto cluster_default
-          = config::shard_local_cfg().raft_replica_max_flush_delay_ms();
-        return _overrides ? _overrides->flush_ms.value_or(cluster_default)
-                          : cluster_default;
-    }
-
-    size_t flush_bytes() const {
-        const auto& conf
-          = config::shard_local_cfg().raft_replica_max_pending_flush_bytes();
-        auto cluster_default = conf.value_or(
-          std::numeric_limits<size_t>::max());
-        return _overrides ? _overrides->flush_bytes.value_or(cluster_default)
-                          : cluster_default;
-    }
-
-    std::optional<std::chrono::milliseconds> delete_retention_ms() const {
-        if (_overrides) {
-            // Tombstone (or tx end marker) deletion should not be enabled at
-            // the same time as tiered storage.
-            // This is because of a race condition:
-            // 1) a prefix of a log is uploaded to TS with a value record (or a
-            // tx fence batch or a transactional data record)
-            // 2) this prefix is truncated away locally
-            // 3) correspondent tombstone (or tx end marker) is compacted away
-            // locally.
-        }
-        auto& cluster_default
-          = config::shard_local_cfg().tombstone_retention_ms();
-        if (_overrides) {
-            // If the tristate is disabled, return nullopt.
-            if (_overrides->delete_retention_ms.is_disabled()) {
-                return std::nullopt;
-            }
-            // If the tristate has a value, use it.
-            if (_overrides->delete_retention_ms.has_optional_value()) {
-                return _overrides->delete_retention_ms.value();
-            }
-
-            // If the tristate holds an empty optional, fall back to cluster
-            // default.
-            return cluster_default;
-        }
-
-        // Fall back to cluster default
-        return cluster_default;
-    }
+    std::optional<std::chrono::milliseconds> delete_retention_ms() const;
 
     std::optional<model::cleanup_policy_bitflags>
     cleanup_policy_override() const {
         return _overrides ? _overrides->cleanup_policy_bitflags : std::nullopt;
     }
 
-    model::cleanup_policy_bitflags cleanup_policy() const {
-        const auto& cluster_default
-          = config::shard_local_cfg().log_cleanup_policy();
-        return cleanup_policy_override().value_or(cluster_default);
-    }
+    model::cleanup_policy_bitflags cleanup_policy() const;
 
-    std::optional<double> min_cleanable_dirty_ratio() const {
-        if (_overrides) {
-            if (_overrides->min_cleanable_dirty_ratio.is_disabled()) {
-                return std::nullopt;
-            }
-            if (_overrides->min_cleanable_dirty_ratio.has_optional_value()) {
-                return _overrides->min_cleanable_dirty_ratio.value();
-            }
-        }
-        return config::shard_local_cfg().min_cleanable_dirty_ratio();
-    }
+    std::optional<double> min_cleanable_dirty_ratio() const;
 
-    std::chrono::milliseconds min_compaction_lag_ms() const {
-        if (_overrides && _overrides->min_compaction_lag_ms.has_value()) {
-            return _overrides->min_compaction_lag_ms.value();
-        }
-        return config::shard_local_cfg().min_compaction_lag_ms();
-    }
+    std::chrono::milliseconds min_compaction_lag_ms() const;
 
-    std::chrono::milliseconds max_compaction_lag_ms() const {
-        if (_overrides && _overrides->max_compaction_lag_ms.has_value()) {
-            return _overrides->max_compaction_lag_ms.value();
-        }
-        return config::shard_local_cfg().max_compaction_lag_ms();
-    }
+    std::chrono::milliseconds max_compaction_lag_ms() const;
 
     std::optional<std::chrono::milliseconds> dedup_window_ms() const {
         if (_overrides) {

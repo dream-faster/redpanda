@@ -14,6 +14,7 @@
 #include "kafka/protocol/errors.h"
 #include "kafka/protocol/find_coordinator.h"
 #include "kafka/server/coordinator_ntp_mapper.h"
+#include "kafka/server/group_initializer.h"
 #include "model/metadata.h"
 #include "model/namespace.h"
 

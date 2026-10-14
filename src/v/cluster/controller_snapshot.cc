@@ -14,6 +14,8 @@
 #include "cluster/legacy_wire.h"
 #include "serde/rw/rw.h"
 
+#include <seastar/core/loop.hh>
+
 namespace cluster {
 
 namespace controller_snapshot_parts {

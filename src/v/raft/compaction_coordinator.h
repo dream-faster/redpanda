@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include "config/property.h"
 #include "model/fundamental.h"
 #include "raft/consensus_client_protocol.h"
 #include "raft/follower_states.h"

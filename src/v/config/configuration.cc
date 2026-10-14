@@ -16,6 +16,7 @@
 #include "config/base_property.h"
 #include "config/bounded_property.h"
 #include "config/sasl_mechanisms.h"
+#include "config/tls_config.h"
 #include "config/types.h"
 #include "config/validators.h"
 #include "model/metadata.h"

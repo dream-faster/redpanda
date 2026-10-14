@@ -9,6 +9,7 @@
 
 #include "config/rjson_serialization.h"
 
+#include "config/endpoint_tls_config.h"
 #include "config/tls_config.h"
 #include "config/types.h"
 #include "json/stringbuffer.h"

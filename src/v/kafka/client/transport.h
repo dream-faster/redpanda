@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include "absl/container/btree_map.h"
 #include "base/outcome.h"
 #include "base/seastarx.h"
 #include "bytes/iobuf.h"

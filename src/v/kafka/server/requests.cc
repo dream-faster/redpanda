@@ -12,6 +12,7 @@
 #include "kafka/protocol/schemata/fetch_request.h"
 #include "kafka/protocol/schemata/produce_request.h"
 #include "kafka/server/connection_context.h"
+#include "kafka/server/group_router.h"
 #include "kafka/server/handlers/api_versions.h"
 #include "kafka/server/handlers/handler_interface.h"
 #include "kafka/server/handlers/sasl_authenticate.h"
@@ -22,6 +23,10 @@
 #include <seastar/util/log.hh>
 
 namespace kafka {
+
+group_initializer& request_context::group_initializer() {
+    return _conn->server().group_router().group_initializer();
+}
 
 /**
  * Dispatch request with version bounds checking.

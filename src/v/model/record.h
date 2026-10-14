@@ -28,7 +28,7 @@
 #include "serde/rw/rw.h"
 
 #include <seastar/core/loop.hh>
-#include <seastar/core/smp.hh>
+#include <seastar/core/shard_id.hh>
 #include <seastar/util/optimized_optional.hh>
 
 #include <boost/iterator/counting_iterator.hpp>

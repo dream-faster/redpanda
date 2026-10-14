@@ -15,9 +15,11 @@
 #include "config/config_store.h"
 #include "config/convert.h"
 #include "config/data_directory_path.h"
+#include "config/endpoint_tls_config.h"
 #include "config/node_overrides.h"
 #include "config/property.h"
 #include "config/seed_server.h"
+#include "config/tls_config.h"
 #include "model/fundamental.h"
 
 #include <algorithm>

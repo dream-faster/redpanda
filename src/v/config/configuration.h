@@ -16,12 +16,10 @@
 #include "config/config_store.h"
 #include "config/convert.h"
 #include "config/data_directory_path.h"
-#include "config/endpoint_tls_config.h"
 #include "config/leaders_preference.h"
 #include "config/property.h"
 #include "config/sasl_mechanisms.h"
 #include "config/throughput_control_group.h"
-#include "config/tls_config.h"
 #include "config/types.h"
 #include "model/compression.h"
 #include "model/fundamental.h"
@@ -32,7 +30,6 @@
 
 #include <seastar/core/sstring.hh>
 #include <seastar/net/inet_address.hh>
-#include <seastar/net/ip.hh>
 #include <seastar/net/socket_defs.hh>
 
 #include <cctype>

@@ -12,6 +12,7 @@
 #pragma once
 #include "base/seastarx.h"
 #include "cluster/metadata_cache.h"
+#include "cluster/topic_configuration.h"
 #include "hashing/jump_consistent_hash.h"
 #include "hashing/xx.h"
 #include "kafka/protocol/types.h"

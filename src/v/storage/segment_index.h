@@ -11,6 +11,7 @@
 
 #pragma once
 #include "base/format_to.h"
+#include "config/configuration.h"
 #include "features/feature_table.h"
 #include "model/fundamental.h"
 #include "model/record.h"

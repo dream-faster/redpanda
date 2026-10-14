@@ -13,6 +13,7 @@
 
 #include "cluster/logger.h"
 #include "cluster/producer_state.h"
+#include "config/configuration.h"
 #include "config/property.h"
 #include "metrics/prometheus_sanitize.h"
 
