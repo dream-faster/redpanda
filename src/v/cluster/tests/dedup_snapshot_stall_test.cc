@@ -17,6 +17,7 @@
 #include "serde/rw/vector.h"
 #include "test_utils/test.h"
 
+#include <seastar/core/coroutine.hh>
 #include <seastar/core/future.hh>
 #include <seastar/core/memory.hh>
 #include <seastar/util/later.hh>
@@ -38,13 +39,16 @@ namespace cluster {
 // a different struct in a different binary rather than a redefinition of this
 // one.
 struct dedup_stm_test_accessor {
+    // Coroutines, not plain forwarders: serialize_snapshot() reads the
+    // generation by reference after its last yield, so the referent has to
+    // outlive the call, and a forwarder's parameter does not.
     static ss::future<iobuf>
     serialize(dedup_window_filter& state, int64_t generation) {
-        return dedup_stm::serialize_snapshot(state, generation);
+        co_return co_await dedup_stm::serialize_snapshot(state, generation);
     }
     static ss::future<>
     restore(dedup_window_filter& state, int64_t& generation, iobuf buffer) {
-        return dedup_stm::restore_snapshot(
+        co_await dedup_stm::restore_snapshot(
           state,
           generation,
           serde::from_iobuf<dedup_stm::state_snapshot>(std::move(buffer)));
@@ -302,11 +306,14 @@ TEST_CORO(dedup_snapshot_stall, restore_yields_however_large_the_index) {
     {
         dedup_window_filter target(1h, entries);
         int64_t generation = 0;
+        // Copied before the probe starts: a 144 MB memcpy is a stall of its
+        // own, and not the restore's.
+        auto buffer = packed.copy();
         stall_probe probe;
         probe.start();
         const auto start = clock::now();
         co_await dedup_stm_test_accessor::restore(
-          target, generation, packed.copy());
+          target, generation, std::move(buffer));
         const auto total = clock::now() - start;
         const auto stall = co_await probe.stop();
         std::cout << "\nrestore of " << entries << " entries: worst stall "

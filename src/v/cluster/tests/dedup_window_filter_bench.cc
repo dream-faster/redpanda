@@ -38,13 +38,15 @@ namespace cluster {
 
 // Reaches dedup_stm's private snapshot functions; see dedup_stm.h.
 struct dedup_stm_test_accessor {
+    // Coroutines, not plain forwarders: serialize_snapshot() reads the
+    // generation by reference after its last yield.
     static ss::future<iobuf>
     serialize(dedup_window_filter& state, int64_t generation) {
-        return dedup_stm::serialize_snapshot(state, generation);
+        co_return co_await dedup_stm::serialize_snapshot(state, generation);
     }
     static ss::future<>
     restore(dedup_window_filter& state, int64_t& generation, iobuf buffer) {
-        return dedup_stm::restore_snapshot(
+        co_await dedup_stm::restore_snapshot(
           state,
           generation,
           serde::from_iobuf<dedup_stm::state_snapshot>(std::move(buffer)));
