@@ -100,9 +100,7 @@ struct dedup_stm_test_accessor {
     static void
     restore(dedup_window_filter& state, int64_t& generation, iobuf buffer) {
         dedup_stm::restore_snapshot(
-          state,
-          generation,
-          serde::from_iobuf<dedup_stm::state_snapshot>(std::move(buffer)))
+          state, generation, dedup_stm::decode_snapshot(std::move(buffer)))
           .get();
     }
 

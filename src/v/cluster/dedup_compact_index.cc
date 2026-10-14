@@ -55,6 +55,58 @@ int64_t clamp_base(i128 base) {
     return static_cast<int64_t>(std::clamp(base, lowest, highest));
 }
 
+// A fixed, well mixed function of its argument (the murmur3 finalizer), for
+// the per-segment and per-block choices below: deterministic, so replicas
+// that apply the same operations still lay the table out identically.
+constexpr uint64_t mix(uint64_t x) {
+    x ^= x >> 33;
+    x *= 0xff51'afd7'ed55'8ccdULL;
+    x ^= x >> 33;
+    x *= 0xc4ce'b9fe'1a85'ec53ULL;
+    x ^= x >> 33;
+    return x;
+}
+
+// Keys a segment holding key hash \p h may take before it grows or splits.
+// A full-size segment splits somewhere between 5/8 and 7/8 full, at a point
+// picked by where it sits in the directory. With a uniform hash every segment
+// fills at the same rate, so a threshold they all shared had every one of them
+// split within a few thousand inserts of the others: each split bounded, but
+// together a whole-table rehash inside a single task. Spread over a quarter of
+// a segment, the splits of one generation are spread over a fifth of the
+// inserts that double the index, and the next generation drifts further apart.
+uint32_t key_limit(uint32_t slots, uint32_t depth, uint64_t h) {
+    constexpr uint32_t full = dedup_compact_index::max_segment_slots;
+    if (slots < full) {
+        return max_keys(slots);
+    }
+    constexpr uint32_t spread = full / 4;
+    const uint64_t prefix = depth == 0 ? 0 : h >> (64 - depth);
+    return max_keys(full)
+           - static_cast<uint32_t>(
+             mix(prefix ^ (uint64_t{depth} << 56)) % spread);
+}
+
+// Where a block's span starts below the timestamps it must hold: somewhere in
+// [slack / 8, 3 * slack / 8) below \p lowest, picked by the block. Blocks
+// filled together (a restore, a burst) would otherwise run out of room
+// together, and every one of them re-base in the same few thousand writes.
+int64_t jittered_base(i128 lowest, i128 slack, size_t block, int64_t salt) {
+    const auto jitter = static_cast<i128>(
+      mix(block ^ (static_cast<uint64_t>(salt) * 0x9e37'79b9'7f4a'7c15ULL))
+      % static_cast<uint64_t>(slack / 4 + 1));
+    return clamp_base(lowest - slack / 8 - jitter);
+}
+
+// Room for \p more elements, growing geometrically: reserve() of an exact
+// size would reallocate on every call.
+template<typename V>
+void reserve_more(V& v, size_t more) {
+    if (v.capacity() < v.size() + more) {
+        v.reserve(std::max(v.size() + more, 2 * v.capacity()));
+    }
+}
+
 [[noreturn]] void corrupted(const char* what) {
     // Unreachable unless the table is corrupt; there is no way to go on that
     // does not risk answering lookups wrongly.
@@ -181,7 +233,7 @@ void dedup_compact_index::rebase(size_t b, int64_t ts) {
     // since timestamps mostly move forward.
     const i128 keep_from = std::max<i128>(lo, hi - retained_span);
     const i128 slack = block_span - (hi - keep_from);
-    const int64_t base = clamp_base(keep_from - slack / 4);
+    const int64_t base = jittered_base(keep_from, slack, b, m.base);
     for (size_t i = 0; i < n; ++i) {
         auto& e = entries[i];
         const auto t = decode(m.base, e.rel);
@@ -387,7 +439,7 @@ bool dedup_compact_index::grow_for(uint64_t h) {
         empty.push_back(
           std::make_unique<segment>(make_segment(min_segment_slots, level)));
     }
-    _segments.reserve(_segments.size() + empty.size() + 1);
+    reserve_more(_segments, empty.size() + 1);
     if (depth > _depth) {
         // More bits of the hash pick the directory entry, so every entry
         // becomes a run of adjacent ones naming the same segment.
@@ -452,7 +504,7 @@ bool dedup_compact_index::push_back(
         }
         _first_block_capacity = capacity;
     } else if (b == _blocks.size()) {
-        _meta.reserve(b + 1);
+        reserve_more(_meta, 1);
         _blocks.push_back(
           std::make_unique_for_overwrite<packed_entry[]>(block_entries));
         _meta.emplace_back();
@@ -473,7 +525,9 @@ bool dedup_compact_index::push_back(
     // splitting it one directory level deeper. Both are capped, so this ends.
     for (;;) {
         segment& seg = segment_for(h);
-        if (seg.count < max_keys(seg.mask + 1) && slot_insert(seg, h, pos)) {
+        if (
+          seg.count < key_limit(seg.mask + 1, seg.depth, h)
+          && slot_insert(seg, h, pos)) {
             break;
         }
         if (!grow_for(h)) {
@@ -486,7 +540,7 @@ bool dedup_compact_index::push_back(
         // The block's first entry: centre its span on this timestamp, as a
         // re-base of a block holding only it would.
         _meta[b] = block_meta{
-          .base = ts == expired ? 0 : clamp_base(i128{ts} - block_span / 4),
+          .base = ts == expired ? 0 : jittered_base(ts, block_span, b, 0),
           .newest = expired,
           .writes = 0};
     }

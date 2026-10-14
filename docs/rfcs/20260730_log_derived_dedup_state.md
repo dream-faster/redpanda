@@ -141,7 +141,7 @@ Guarantees:
   The per-partition ceiling does not bound a shard: partitions are placed on
   shards by count, not by index size, so several saturated indices can share
   one shard's memory. `dedup_max_entries_per_shard` (0, the default, derives it
-  from 15% of shard memory at ~48 bytes an entry) caps the sum. Every index on
+  from 15% of shard memory at ~52 bytes an entry) caps the sum. Every index on
   the shard reports its size into one shared `dedup_shard_budget`; the same
   cursor trims a partition that inserts while the shard is within a tenth of
   its limit, and at the limit a new identity with nothing freeable in its own

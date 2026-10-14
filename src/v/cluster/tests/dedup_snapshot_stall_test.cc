@@ -50,9 +50,7 @@ struct dedup_stm_test_accessor {
     static ss::future<>
     restore(dedup_window_filter& state, int64_t& generation, iobuf buffer) {
         co_await dedup_stm::restore_snapshot(
-          state,
-          generation,
-          serde::from_iobuf<dedup_stm::state_snapshot>(std::move(buffer)));
+          state, generation, dedup_stm::decode_snapshot(std::move(buffer)));
     }
 };
 
@@ -272,6 +270,7 @@ ss::future<> compare_at(size_t entries) {
 // table's load moves with its size: right after its segments split it is at
 // its emptiest, just before at its fullest. The sizes below land on both.
 TEST_CORO(dedup_snapshot_stall, index_memory_per_entry_fits_the_budget) {
+    size_t worst = 0;
     for (size_t entries : {460'000ul, 920'000ul, 1'000'000ul, 1'800'000ul}) {
         const auto before = ss::memory::stats().allocated_memory();
         auto filter = std::make_unique<dedup_window_filter>(1h, entries);
@@ -280,7 +279,8 @@ TEST_CORO(dedup_snapshot_stall, index_memory_per_entry_fits_the_budget) {
         const auto per_entry = (after - before) / entries;
         const auto stats = filter->index_stats();
         std::cout << "\nindex memory: " << per_entry << " bytes per entry at "
-                  << entries << " entries, lookup table "
+                  << entries << " entries (table's own count "
+                  << filter->memory_usage() / entries << "), lookup table "
                   << static_cast<double>(entries)
                        / static_cast<double>(stats.slots)
                   << " full (budget assumes " << DEDUP_SHARD_BYTES_PER_ENTRY
@@ -290,15 +290,15 @@ TEST_CORO(dedup_snapshot_stall, index_memory_per_entry_fits_the_budget) {
         ASSERT_EQ_CORO(stats.refused_inserts, 0u);
         // The table's own accounting agrees with the allocator's.
         ASSERT_LE_CORO(filter->memory_usage(), after - before);
-        // The point of the table: well under the 50-64 bytes the map it
-        // replaced took.
-        ASSERT_LE_CORO(per_entry, 28u);
-        // The packed snapshot adds dedup_stm::packed_entry_size on top while
-        // it is written; the budget's figure must cover both.
-        ASSERT_LE_CORO(
-          per_entry + dedup_stm::packed_entry_size,
-          DEDUP_SHARD_BYTES_PER_ENTRY);
+        worst = std::max(worst, per_entry);
     }
+    // The point of the table: well under the ~50 bytes the map it replaced
+    // took, measured the same way.
+    ASSERT_LE_CORO(worst, 32u);
+    // The packed snapshot adds dedup_stm::packed_entry_size on top while it
+    // is written; the budget's figure must cover both.
+    ASSERT_LE_CORO(
+      worst + dedup_stm::packed_entry_size, DEDUP_SHARD_BYTES_PER_ENTRY);
 }
 
 // Growing an index never stops the reactor for long: the lookup table grows a

@@ -420,10 +420,11 @@ TEST(DedupCompactIndex, AnySharedPrefixSplitsStraightPastIt) {
         const uint64_t lo = splitmix(keys) & ((uint64_t{1} << 56) - 1);
         const auto before = idx.work();
         ASSERT_TRUE(idx.push_back({.hi = splitmix(keys), .lo = lo}, 1000));
-        // One split's worth, and the directory deepened by up to 8 levels at
-        // once (2^14 entries at most here).
+        // A split or two -- a lopsided one can leave the fuller half past
+        // its own threshold -- and the directory deepened by up to 8 levels
+        // at once (2^14 entries at most here).
         ASSERT_LT(
-          idx.work() - before, 6 * index_t::max_segment_slots + (1u << 14));
+          idx.work() - before, 12 * index_t::max_segment_slots + (1u << 14));
     }
     idx.check_invariants();
     const double per_entry = static_cast<double>(idx.memory_usage()) / n;
@@ -493,6 +494,68 @@ TEST(DedupCompactIndex, NoOperationDoesWorkProportionalToTheIndex) {
     EXPECT_LT(large.erase, 2 * index_t::block_entries + 1024);
     EXPECT_LE(small.find, index_t::max_probe_distance + 1);
     EXPECT_LE(large.find, index_t::max_probe_distance + 1);
+}
+
+// Per call is not enough: the produce path and a restore make thousands of
+// calls between preemption points, so the work of a task's worth of calls has
+// to stay bounded too. With a uniform hash every segment fills at the same
+// rate; segments that all split at the same fill would all split within one
+// such stretch -- a whole-table rehash in one task, which is what this table
+// exists to avoid.
+TEST(DedupCompactIndex, SplitsDoNotComeInWaves) {
+    constexpr size_t per_task = 4096;
+    auto worst_task = [](auto&& digest) {
+        index_t idx;
+        size_t worst = 0;
+        for (size_t task = 0; task < 2'000'000 / per_task; ++task) {
+            const auto before = idx.work();
+            for (size_t i = task * per_task; i < (task + 1) * per_task; ++i) {
+                EXPECT_TRUE(idx.push_back(digest(i), 1));
+            }
+            worst = std::max(worst, idx.work() - before);
+        }
+        return worst;
+    };
+    uint64_t keys = 99;
+    const auto random = worst_task(
+      [&keys](size_t) { return random_digest(keys); });
+    // The synthetic digests the stall tests use: odd multiples.
+    const auto multiplicative = worst_task([](size_t i) {
+        return dedup_identity_digest{
+          .hi = 0xbf58'476d'1ce4'e5b9ULL * (i + 1),
+          .lo = 0x9e37'79b9'7f4a'7c15ULL * (i + 1)};
+    });
+    // A task's own inserts cost a few units each; splits add ~16K apiece.
+    // Thirty of them is under a millisecond, where every segment of a 2M-entry
+    // index splitting at once was ~500.
+    constexpr size_t bound = per_task * 8 + 30 * 16'384;
+    EXPECT_LT(random, bound);
+    EXPECT_LT(multiplicative, bound);
+}
+
+// The same for re-bases: blocks filled together (a restore) run out of room as
+// the clock moves on, and if they all ran out at once, the first writes after
+// that would each re-base a block.
+TEST(DedupCompactIndex, RebasesDoNotComeInWaves) {
+    index_t idx;
+    uint64_t keys = 7;
+    const int64_t start = 1'700'000'000'000;
+    for (size_t i = 0; i < 1'000'000; ++i) {
+        ASSERT_TRUE(idx.push_back(random_digest(keys), start));
+    }
+    std::mt19937_64 rng(5);
+    size_t worst = 0;
+    // Sixty days, a write of 64 records every minute.
+    for (int64_t t = start; t < start + 60 * day_ms; t += 60'000) {
+        const auto before = idx.work();
+        for (int r = 0; r < 64; ++r) {
+            idx.set_timestamp_at(rng() % idx.size(), t);
+        }
+        worst = std::max(worst, idx.work() - before);
+    }
+    EXPECT_GT(idx.stats().rebases, 0u);
+    // At most a few blocks re-based by any one write.
+    EXPECT_LE(worst, 4 * 2 * index_t::block_entries + 64 * 8);
 }
 
 TEST(DedupCompactIndex, MemoryPerEntry) {

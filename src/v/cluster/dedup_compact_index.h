@@ -153,7 +153,12 @@ private:
 /// segment that fills up splits on its own: growth never rehashes the whole
 /// table, which at millions of entries would hold the reactor for tens of
 /// milliseconds. Every operation does work bounded by a segment or a block,
-/// whatever the size of the index.
+/// whatever the size of the index -- and so does every task's worth of
+/// operations: a full-size segment splits at a fill between 5/8 and 7/8 that
+/// depends on its place in the directory, and a block's base is placed
+/// within its slack by its position, so segments filling at the same rate,
+/// or blocks filled at the same time, do not all split or re-base in the
+/// same few thousand calls.
 ///
 /// A split goes straight to the first bit that tells the segment's keys apart,
 /// so keys sharing a long prefix cost one split, not one per shared bit. A

@@ -156,6 +156,28 @@ private:
         }
     };
 
+    /// Version 2 of state_snapshot, read only. Its own envelope because a
+    /// reader refuses data older than its compat version, and version 3's is
+    /// 3 so that version 2 binaries refuse it.
+    struct state_snapshot_v2
+      : serde::envelope<
+          state_snapshot_v2,
+          serde::version<2>,
+          serde::compat_version<2>> {
+        int64_t window_ms{0};
+        int64_t generation{0};
+        model::timestamp max_timestamp{model::timestamp::min()};
+        iobuf entries;
+
+        auto serde_fields() {
+            return std::tie(window_ms, generation, max_timestamp, entries);
+        }
+    };
+
+    /// Deserialize a snapshot of any version this build reads: 3, or 2 in
+    /// its legacy entry layout. Throws serde_exception for anything else.
+    static state_snapshot decode_snapshot(iobuf);
+
     ss::future<result<kafka_result>> do_replicate(
       model::record_batch,
       raft::replicate_options,

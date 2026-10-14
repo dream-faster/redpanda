@@ -340,6 +340,25 @@ for_each_packed_entry(const iobuf& packed, size_t entry_size, Emit emit) {
 
 } // namespace
 
+dedup_stm::state_snapshot dedup_stm::decode_snapshot(iobuf buffer) {
+    // An envelope starts with its version.
+    if (buffer.size_bytes() > 0) {
+        iobuf_const_parser peek(buffer);
+        if (
+          peek.consume_type<serde::version_t>()
+          == state_snapshot_v2::redpanda_serde_version) {
+            auto v2 = serde::from_iobuf<state_snapshot_v2>(std::move(buffer));
+            return state_snapshot{
+              .window_ms = v2.window_ms,
+              .generation = v2.generation,
+              .max_timestamp = v2.max_timestamp,
+              .entries = std::move(v2.entries),
+              .entry_size = legacy_packed_entry_size};
+        }
+    }
+    return serde::from_iobuf<state_snapshot>(std::move(buffer));
+}
+
 ss::future<> dedup_stm::restore_snapshot(
   dedup_window_filter& state, int64_t& generation, state_snapshot snapshot) {
     const size_t entry_size = snapshot.entry_size;
@@ -914,9 +933,7 @@ ss::future<bool> dedup_stm::try_restore_snapshot(iobuf buffer) {
     // better one than refusing to start the partition.
     try {
         co_await restore_snapshot(
-          _state,
-          _generation,
-          serde::from_iobuf<state_snapshot>(std::move(buffer)));
+          _state, _generation, decode_snapshot(std::move(buffer)));
         co_return true;
     } catch (const std::bad_alloc&) {
         // Not a bad snapshot either, and the worst thing to answer with: a
