@@ -446,3 +446,54 @@ TEST_F(RecordBatchTest, ForEachRecordKeyAsyncStops) {
 
     EXPECT_EQ(seen, (std::vector<int32_t>{0, 1, 2}));
 }
+
+// crc_extend_record() checksums a record without encoding it, and has to agree
+// with the encoding append_record_to_buffer() produces byte for byte: kvstore
+// recovery uses it to verify a batch it never re-encodes.
+TEST(RecordUtils, CrcExtendRecordMatchesTheEncodedRecord) {
+    for (int i = 0; i < 50; ++i) {
+        model::test::record_batch_spec spec{
+          .allow_compression = false,
+          .count = 1,
+          .records = 1 + (i % 7),
+          .headers_per_record = i % 4};
+        if (i % 5 == 0) {
+            // Large values span many iobuf fragments.
+            spec.record_sizes = std::vector<size_t>(
+              static_cast<size_t>(*spec.records), 300'000);
+        }
+        auto batch = model::test::make_random_batch(spec);
+        crc::crc32c whole;
+        crc::crc32c streamed;
+        for (const auto& r : batch.copy_records()) {
+            iobuf encoded;
+            model::append_record_to_buffer(encoded, r);
+            crc_extend_iobuf(whole, encoded);
+            model::crc_extend_record(streamed, r);
+        }
+        ASSERT_EQ(whole.value(), streamed.value()) << "batch " << i;
+        // And so the batch-level checksum built from it matches the one the
+        // batch carries.
+        crc::crc32c batch_crc;
+        model::crc_record_batch_header(batch_crc, batch.header());
+        for (const auto& r : batch.copy_records()) {
+            model::crc_extend_record(batch_crc, r);
+        }
+        ASSERT_EQ(batch_crc.value(), model::crc_record_batch(batch))
+          << "batch " << i;
+    }
+}
+
+// A record with a null key, null value and no headers encodes the sizes as -1,
+// and neither payload is read.
+TEST(RecordUtils, CrcExtendRecordHandlesNullKeyAndValue) {
+    model::record r(
+      model::record_attributes{}, 0, 0, std::nullopt, std::nullopt, {});
+    iobuf encoded;
+    model::append_record_to_buffer(encoded, r);
+    crc::crc32c whole;
+    crc_extend_iobuf(whole, encoded);
+    crc::crc32c streamed;
+    model::crc_extend_record(streamed, r);
+    EXPECT_EQ(whole.value(), streamed.value());
+}

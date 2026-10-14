@@ -41,6 +41,18 @@ public:
           _kv_config, ss::this_shard_id(), resources, _feature_table);
     }
 
+    /// A kvstore over the same directory that drops the named stm snapshots
+    /// during recovery.
+    std::unique_ptr<storage::kvstore>
+    make_kvstore(std::vector<ss::sstring> discarded_stm_snapshots) {
+        auto conf = _kv_config;
+        conf.discarded_stm_snapshots = std::move(discarded_stm_snapshots);
+        return std::make_unique<storage::kvstore>(
+          std::move(conf), ss::this_shard_id(), resources, _feature_table);
+    }
+
+    const ss::sstring& test_dir() const { return _test_dir; }
+
     ~kvstore_test_fixture() {
         _feature_table.stop().get();
         resources.stop().get();

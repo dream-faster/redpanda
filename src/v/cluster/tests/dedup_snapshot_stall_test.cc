@@ -11,10 +11,15 @@
 #include "cluster/dedup_stm.h"
 #include "cluster/dedup_window_filter.h"
 #include "model/timestamp.h"
-#include "serde/async.h"
+#include "serde/envelope.h"
+#include "serde/rw/envelope.h"
+#include "serde/rw/iobuf.h"
+#include "serde/rw/vector.h"
 #include "test_utils/test.h"
 
+#include <seastar/core/coroutine.hh>
 #include <seastar/core/future.hh>
+#include <seastar/core/memory.hh>
 #include <seastar/util/later.hh>
 
 #include <gtest/gtest.h>
@@ -23,57 +28,90 @@
 #include <chrono>
 #include <cstdint>
 #include <iostream>
+#include <memory>
 
 using namespace std::chrono_literals;
 
 namespace cluster {
 
-// Reaches dedup_stm::state_snapshot and to_snapshot(), both private. Each
-// test binary links its own definition of this friend, so the one in
-// dedup_stm_test.cc is a different struct in a different binary rather than a
-// redefinition of this one.
+// Reaches dedup_stm::serialize_snapshot(), which is private. Each test binary
+// links its own definition of this friend, so the one in dedup_stm_test.cc is
+// a different struct in a different binary rather than a redefinition of this
+// one.
 struct dedup_stm_test_accessor {
-    /// The snapshot path as it stood before it learned to yield: build the
-    /// intermediate dedup_index_snapshot, copy that into the wire entries,
-    /// then serialize -- three walks of the index with no preemption point
-    /// anywhere between them.
-    ///
-    /// The original did a fourth ahead of these: evict_expired()'s erase_if
-    /// over the whole index. That method is gone, so it cannot be reproduced
-    /// here, which makes every "before" number below an understatement of
-    /// what the change removed.
-    static iobuf
-    legacy_snapshot(const dedup_window_filter& state, int64_t generation) {
-        auto snapshot = state.snapshot();
-        dedup_stm::state_snapshot result{
-          .window_ms = state.window().count(),
-          .generation = generation,
-          .max_timestamp = snapshot.max_timestamp};
-        result.entries.reserve(snapshot.entries.size());
-        for (const auto& entry : snapshot.entries) {
-            result.entries.push_back(
-              {.identity_hi = entry.identity.hi,
-               .identity_lo = entry.identity.lo,
-               .timestamp = entry.timestamp});
-        }
-        return serde::to_iobuf(std::move(result));
+    // Coroutines, not plain forwarders: serialize_snapshot() reads the
+    // generation by reference after its last yield, so the referent has to
+    // outlive the call, and a forwarder's parameter does not.
+    static ss::future<iobuf>
+    serialize(dedup_window_filter& state, int64_t generation) {
+        co_return co_await dedup_stm::serialize_snapshot(state, generation);
     }
-
-    /// The first half of the path in the tree, and the half that still cannot
-    /// yield: it is what hands the serializer a view of the index the produce
-    /// path cannot move underneath it.
-    static dedup_stm::state_snapshot
-    wire_entries(const dedup_window_filter& state, int64_t generation) {
-        return dedup_stm::to_snapshot(state, generation);
-    }
-
-    /// The second half: a serialization that yields every 1024 entries.
-    static ss::future<iobuf> serialize(dedup_stm::state_snapshot snapshot) {
-        iobuf out;
-        co_await serde::write_async(out, std::move(snapshot));
-        co_return std::move(out);
+    static ss::future<>
+    restore(dedup_window_filter& state, int64_t& generation, iobuf buffer) {
+        co_await dedup_stm::restore_snapshot(
+          state,
+          generation,
+          serde::from_iobuf<dedup_stm::state_snapshot>(std::move(buffer)));
     }
 };
+
+namespace {
+
+/// The version 1 wire layout, reproduced here because the STM no longer
+/// carries it: one serde envelope per entry.
+struct legacy_wire_entry
+  : serde::
+      envelope<legacy_wire_entry, serde::version<1>, serde::compat_version<1>> {
+    uint64_t identity_hi{0};
+    uint64_t identity_lo{0};
+    model::timestamp timestamp;
+
+    auto serde_fields() {
+        return std::tie(identity_hi, identity_lo, timestamp);
+    }
+};
+
+struct legacy_state_snapshot
+  : serde::envelope<
+      legacy_state_snapshot,
+      serde::version<1>,
+      serde::compat_version<1>> {
+    int64_t window_ms{0};
+    int64_t generation{0};
+    model::timestamp max_timestamp{model::timestamp::min()};
+    uint64_t legacy_inserts_since_evict{0};
+    chunked_vector<legacy_wire_entry> entries;
+
+    auto serde_fields() {
+        return std::tie(
+          window_ms,
+          generation,
+          max_timestamp,
+          legacy_inserts_since_evict,
+          entries);
+    }
+};
+
+/// The snapshot path before the packed format, without its yields: build the
+/// intermediate dedup_index_snapshot, copy that into wire entries, then
+/// serialize. Three walks of the index and three copies of it.
+iobuf legacy_snapshot(const dedup_window_filter& state, int64_t generation) {
+    auto snapshot = state.snapshot();
+    legacy_state_snapshot result{
+      .window_ms = state.window().count(),
+      .generation = generation,
+      .max_timestamp = snapshot.max_timestamp};
+    result.entries.reserve(snapshot.entries.size());
+    for (const auto& entry : snapshot.entries) {
+        result.entries.push_back(
+          {.identity_hi = entry.identity.hi,
+           .identity_lo = entry.identity.lo,
+           .timestamp = entry.timestamp});
+    }
+    return serde::to_iobuf(std::move(result));
+}
+
+} // namespace
 
 namespace {
 
@@ -126,8 +164,8 @@ struct measurement {
 
 // Far enough in the past that restore()'s clamp to broker_now() leaves the
 // watermark alone, and spread narrowly enough that an hour-long window keeps
-// every entry -- so neither path filters anything and their output has to
-// match byte for byte.
+// every entry -- so neither path filters anything and both serialize the same
+// entries.
 constexpr int64_t base_timestamp = 1'000'000'000;
 
 void fill(dedup_window_filter& filter, size_t entries) {
@@ -163,77 +201,153 @@ ss::future<> compare_at(size_t entries) {
     ASSERT_EQ_CORO(filter.map_size(), entries);
 
     measurement legacy_m;
-    iobuf legacy;
+    size_t legacy_bytes = 0;
     {
         stall_probe probe;
         probe.start();
         const auto start = clock::now();
-        legacy = dedup_stm_test_accessor::legacy_snapshot(filter, 7);
+        legacy_bytes = legacy_snapshot(filter, 7).size_bytes();
         legacy_m.total = clock::now() - start;
         legacy_m.stall = co_await probe.stop();
     }
 
-    // Measured in its two halves, because they are no longer the same kind
-    // of work: the copy is one indivisible pass, the serialization yields.
+    // The indivisible part of the snapshot before this format: a copy of
+    // every live entry into a vector, which the serializer then walked with
+    // yields.
     measurement copy_m;
-    measurement serialize_m;
-    iobuf current;
     {
         stall_probe probe;
         probe.start();
         const auto start = clock::now();
-        auto wire = dedup_stm_test_accessor::wire_entries(filter, 7);
+        const auto copy = filter.snapshot();
         copy_m.total = clock::now() - start;
         copy_m.stall = co_await probe.stop();
-
-        stall_probe serialize_probe;
-        serialize_probe.start();
-        const auto serialize_start = clock::now();
-        current = co_await dedup_stm_test_accessor::serialize(std::move(wire));
-        serialize_m.total = clock::now() - serialize_start;
-        serialize_m.stall = co_await serialize_probe.stop();
+        ASSERT_EQ_CORO(copy.entries.size(), entries);
     }
 
-    // One answer produced two ways, so the comparison is between two costs
-    // and not between two different amounts of work. Compared as a bool: on
-    // a mismatch gtest would otherwise try to print both buffers.
-    ASSERT_EQ_CORO(legacy.size_bytes(), current.size_bytes());
-    ASSERT_TRUE_CORO(legacy == current);
+    measurement packed_m;
+    iobuf packed;
+    {
+        stall_probe probe;
+        probe.start();
+        const auto start = clock::now();
+        packed = co_await dedup_stm_test_accessor::serialize(filter, 7);
+        packed_m.total = clock::now() - start;
+        packed_m.stall = co_await probe.stop();
+    }
 
-    const auto worst_now = std::max(copy_m.stall, serialize_m.stall);
-    std::cout << "\ndedup snapshot of " << entries << " entries ("
-              << legacy.size_bytes() << " wire bytes)\n"
-              << "  before  worst stall " << us(legacy_m.stall) << "us   total "
-              << us(legacy_m.total) << "us\n"
-              << "  after   worst stall " << us(worst_now) << "us   total "
-              << us(copy_m.total + serialize_m.total) << "us\n"
-              << "    of which index copy (cannot yield) stall "
-              << us(copy_m.stall) << "us   total " << us(copy_m.total) << "us\n"
-              << "    of which serialization (yields)     stall "
-              << us(serialize_m.stall) << "us   total " << us(serialize_m.total)
+    std::cout << "\ndedup snapshot of " << entries << " entries\n"
+              << "  version 1  " << legacy_bytes << " bytes   worst stall "
+              << us(legacy_m.stall) << "us   total " << us(legacy_m.total)
               << "us\n"
+              << "  version 2  " << packed.size_bytes()
+              << " bytes   worst stall " << us(packed_m.stall) << "us   total "
+              << us(packed_m.total) << "us\n"
+              << "  plain copy of the entries   worst stall "
+              << us(copy_m.stall) << "us   total " << us(copy_m.total) << "us\n"
               << std::flush;
 
-    // The claim under test is that the work is no longer one indivisible
-    // task. Half rather than the factor actually observed, because the
-    // baseline here is three of the original four passes while the copy pass
-    // survives in full -- and because a loaded runner must not be able to
-    // turn a real improvement into a red build.
-    ASSERT_LT_CORO(us(worst_now) * 2, us(legacy_m.stall));
+    // The serialized copy is the snapshot's whole memory cost: 24 bytes per
+    // entry plus a fixed header, against the 30 of a per-entry envelope.
+    ASSERT_LE_CORO(
+      packed.size_bytes(), entries * dedup_stm::packed_entry_size + 64);
+    ASSERT_LT_CORO(packed.size_bytes(), legacy_bytes);
 
-    // The yielding half is the part that should have stopped mattering: its
-    // stall is bounded by the task quota plus one 1024-entry batch, whatever
-    // the index size, so it must no longer scale with the index.
-    ASSERT_LT_CORO(us(serialize_m.stall), 10'000);
+    // The packed write yields between chunks of the index, so its longest
+    // stretch without a preemption point is a task quota's worth of work
+    // plus whatever the runner's scheduler adds, however large the index --
+    // where the passes it replaced ran for hundreds of milliseconds at this
+    // size. The bound is loose enough that a loaded runner cannot turn a
+    // real improvement into a red build.
+    ASSERT_LT_CORO(us(packed_m.stall), us(legacy_m.stall));
+    ASSERT_LT_CORO(us(packed_m.stall), 20'000);
 }
 
 } // namespace
+
+// The shard budget turns memory into an entry limit at
+// DEDUP_SHARD_BYTES_PER_ENTRY, which has to cover what the index itself takes
+// per entry (map storage and bucket array, at the map's worst load) with room
+// for the snapshot's packed copy. Measured rather than derived, since the map
+// implementation decides it.
+TEST_CORO(dedup_snapshot_stall, index_memory_per_entry_fits_the_budget) {
+    constexpr size_t entries = 1'000'000;
+    const auto before = ss::memory::stats().allocated_memory();
+    auto filter = std::make_unique<dedup_window_filter>(1h, entries);
+    fill(*filter, entries);
+    const auto after = ss::memory::stats().allocated_memory();
+    const auto per_entry = (after - before) / entries;
+    std::cout << "\nindex memory: " << per_entry << " bytes per entry at "
+              << entries << " entries (budget assumes "
+              << DEDUP_SHARD_BYTES_PER_ENTRY << ")\n"
+              << std::flush;
+    ASSERT_EQ_CORO(filter->map_size(), entries);
+    // The packed snapshot adds dedup_stm::packed_entry_size on top while it
+    // is written; the budget's figure must cover both.
+    ASSERT_LE_CORO(
+      per_entry + dedup_stm::packed_entry_size, DEDUP_SHARD_BYTES_PER_ENTRY);
+    co_return;
+}
+
+// The restore is the other half: at startup every dedup partition on the
+// shard restores in turn, and one that held the reactor for its whole
+// snapshot would hold the others behind the restore semaphore with it. Its
+// passes over the packed entries yield, so the longest stretch is bounded
+// however large the index. A restore that has to trim selects the newest
+// entries with one nth_element over the timestamps, which does not yield; at
+// this size that is tens of milliseconds, once, which is bounded separately.
+TEST_CORO(dedup_snapshot_stall, restore_yields_however_large_the_index) {
+    constexpr size_t entries = 6'000'000;
+    auto source = std::make_unique<dedup_window_filter>(1h, entries);
+    fill(*source, entries);
+    auto packed = co_await dedup_stm_test_accessor::serialize(*source, 7);
+    source.reset();
+
+    {
+        dedup_window_filter target(1h, entries);
+        int64_t generation = 0;
+        // Copied before the probe starts: a 144 MB memcpy is a stall of its
+        // own, and not the restore's.
+        auto buffer = packed.copy();
+        stall_probe probe;
+        probe.start();
+        const auto start = clock::now();
+        co_await dedup_stm_test_accessor::restore(
+          target, generation, std::move(buffer));
+        const auto total = clock::now() - start;
+        const auto stall = co_await probe.stop();
+        std::cout << "\nrestore of " << entries << " entries: worst stall "
+                  << us(stall) << "us   total " << us(total) << "us\n"
+                  << std::flush;
+        ASSERT_EQ_CORO(target.map_size(), entries);
+        ASSERT_EQ_CORO(generation, 7);
+        ASSERT_LT_CORO(us(stall), 20'000);
+    }
+    {
+        // Into half the room: the trimming restore.
+        dedup_window_filter target(1h, entries / 2);
+        int64_t generation = 0;
+        stall_probe probe;
+        probe.start();
+        const auto start = clock::now();
+        co_await dedup_stm_test_accessor::restore(
+          target, generation, std::move(packed));
+        const auto total = clock::now() - start;
+        const auto stall = co_await probe.stop();
+        std::cout << "trimming restore of " << entries << " entries into "
+                  << entries / 2 << ": worst stall " << us(stall)
+                  << "us   total " << us(total) << "us\n"
+                  << std::flush;
+        ASSERT_EQ_CORO(target.map_size(), entries / 2);
+        ASSERT_LT_CORO(us(stall), 250'000);
+    }
+}
 
 // An index this size is what put 123-124ms reactor stalls in the produce and
 // raft_recv scheduling groups: request_make_snapshot_in_background() spawns
 // the write from whichever append crossed the segment or dirty-byte
 // threshold, so it runs in that fiber's scheduling group.
-TEST_CORO(dedup_snapshot_stall, yielding_write_bounds_the_stall) {
+TEST_CORO(dedup_snapshot_stall, packed_write_is_smaller_and_stalls_less) {
     co_await compare_at(1'000'000);
     co_await compare_at(6'000'000);
 }

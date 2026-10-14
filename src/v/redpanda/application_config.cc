@@ -8,6 +8,7 @@
 // by the Apache License, Version 2.0
 
 #include "base/vlog.h"
+#include "cluster/snapshot.h"
 #include "config/configuration.h"
 #include "config/node_config.h"
 #include "kafka/client/configuration.h"
@@ -147,7 +148,12 @@ storage::kvstore_config kvstore_config_from_global_config(
       config::shard_local_cfg().kvstore_max_segment_size(),
       config::shard_local_cfg().kvstore_flush_interval.bind(),
       config::node().data_directory().as_sstring(),
-      sanitizer_config);
+      sanitizer_config,
+      // Earlier builds stored dedup snapshots in the kvstore; they are now
+      // files. Dropping them during kvstore recovery, rather than when the
+      // partition starts, keeps them from being loaded at all -- loading them
+      // is what can stop a broker from starting.
+      {cluster::dedup_stm_snapshot});
 }
 
 storage::log_config manager_config_from_global_config(

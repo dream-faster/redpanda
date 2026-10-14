@@ -22,4 +22,15 @@ namespace cluster {
 inline constexpr size_t DEFAULT_DEDUP_MAX_ENTRIES_PER_PARTITION = 1'000'000;
 inline constexpr size_t MAX_DEDUP_MAX_ENTRIES_PER_PARTITION = 10'000'000;
 
+// `dedup_max_entries_per_shard`: 0 derives the limit from the shard's memory.
+// Partitions are placed on shards by count, not by index size, so a shard can
+// host several saturated indices at once; the per-partition ceiling alone does
+// not bound what one shard holds.
+inline constexpr size_t DEFAULT_DEDUP_MAX_ENTRIES_PER_SHARD = 0;
+// Share of shard memory the derived limit allows the dedup indices to use.
+inline constexpr size_t DEDUP_SHARD_MEMORY_PERCENT = 15;
+// Memory one entry costs while a snapshot of it is in flight: the hash map's
+// entry and bucket (~52 bytes) plus its 24-byte serialized form.
+inline constexpr size_t DEDUP_SHARD_BYTES_PER_ENTRY = 80;
+
 } // namespace cluster

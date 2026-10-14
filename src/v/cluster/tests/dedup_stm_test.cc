@@ -10,16 +10,28 @@
 #include "bytes/bytes.h"
 #include "cluster/dedup_stm.h"
 #include "cluster/logger.h"
+#include "cluster/snapshot.h"
 #include "config/mock_property.h"
 #include "model/batch_builder.h"
+#include "model/record_utils.h"
 #include "raft/tests/raft_fixture.h"
-#include "serde/async.h"
+#include "serde/envelope.h"
+#include "serde/rw/envelope.h"
+#include "serde/rw/vector.h"
+#include "serde/serde_exception.h"
+#include "storage/kvstore.h"
 #include "storage/record_batch_builder.h"
 #include "test_utils/test.h"
 
+#include <seastar/core/byteorder.hh>
+
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <iterator>
+#include <map>
 #include <optional>
+#include <string>
 #include <string_view>
 
 using namespace std::chrono_literals;
@@ -29,7 +41,8 @@ namespace cluster {
 struct dedup_stm_test_accessor {
     static size_t snapshot_size(iobuf snapshot) {
         return serde::from_iobuf<dedup_stm::state_snapshot>(std::move(snapshot))
-          .entries.size();
+                 .entries.size_bytes()
+               / dedup_stm::packed_entry_size;
     }
 
     static ss::future<raft::local_snapshot_applied>
@@ -42,27 +55,61 @@ struct dedup_stm_test_accessor {
         co_await stm.apply_raft_snapshot(buffer);
     }
 
-    /// Built twice rather than copied: the entry vector is move-only.
-    static dedup_stm::state_snapshot state_snapshot_with(size_t entries) {
-        dedup_stm::state_snapshot snapshot{
-          .window_ms = 300'000,
-          .generation = 7,
-          .max_timestamp = model::timestamp{1'699'000'000'000},
-          .legacy_inserts_since_evict = 4'096};
-        snapshot.entries.reserve(entries);
-        for (size_t i = 0; i < entries; ++i) {
-            snapshot.entries.push_back(
-              {.identity_hi = 0x0123'4567'89ab'cdefULL + i,
-               .identity_lo = ~uint64_t{i},
-               .timestamp = model::timestamp{static_cast<int64_t>(i)}});
-        }
-        return snapshot;
+    using pending_identities = dedup_stm::pending_identities;
+
+    static iobuf serialize(
+      dedup_window_filter& state,
+      int64_t generation,
+      const pending_identities* pending = nullptr) {
+        return dedup_stm::serialize_snapshot(state, generation, pending).get();
     }
 
-    static ss::future<iobuf> write_async(dedup_stm::state_snapshot snapshot) {
-        iobuf out;
-        co_await serde::write_async(out, std::move(snapshot));
-        co_return std::move(out);
+    static dedup_stm::inflight_ptr make_inflight() {
+        return ss::make_lw_shared<dedup_stm::inflight_request>();
+    }
+
+    static size_t pending_size(const dedup_stm& stm) {
+        return stm._pending.size();
+    }
+
+    static size_t resolving_size(const dedup_stm& stm) {
+        return stm._resolving.size();
+    }
+
+    static uint64_t batches_skipped(const dedup_stm& stm) {
+        return stm._batches_skipped;
+    }
+
+    static void
+    restore(dedup_window_filter& state, int64_t& generation, iobuf buffer) {
+        dedup_stm::restore_snapshot(
+          state,
+          generation,
+          serde::from_iobuf<dedup_stm::state_snapshot>(std::move(buffer)))
+          .get();
+    }
+
+    static iobuf state_snapshot_with_entry_bytes(size_t bytes) {
+        auto entries = iobuf::from(std::string(bytes, 'x'));
+        return serde::to_iobuf(
+          dedup_stm::state_snapshot{
+            .window_ms = 1000, .generation = 1, .entries = std::move(entries)});
+    }
+
+    static iobuf
+    state_snapshot_with_entries(iobuf entries, model::timestamp max_timestamp) {
+        return serde::to_iobuf(
+          dedup_stm::state_snapshot{
+            .window_ms = 3'600'000,
+            .generation = 1,
+            .max_timestamp = max_timestamp,
+            .entries = std::move(entries)});
+    }
+
+    static bytes legacy_kvstore_key(const model::ntp& ntp) {
+        return bytes::from_string(
+          raft::kvstore_backed_stm_snapshot::snapshot_key(
+            dedup_stm_snapshot, ntp));
     }
 };
 
@@ -98,23 +145,426 @@ model::record_batch make_batch_with_header(
     return std::move(builder).build_sync();
 }
 
-// The snapshot paths serialize with serde::write_async() so a saturated index
-// does not hold the reactor for the whole walk. That path is a hand-written
-// field walk, so nothing but a test keeps it in step with the serde_fields()
-// layout that every reader -- including a broker running an older build of
-// this branch -- expects. Sizes straddle the yield boundary so a batching bug
-// cannot hide between them.
-TEST_CORO(dedup_stm_snapshot, async_write_matches_the_serde_layout) {
-    for (const size_t count : {0UL, 1UL, 1023UL, 1024UL, 1025UL, 4097UL}) {
+// The packed entry encoding is hand-written rather than serde's, so a test is
+// what keeps the writer and reader in step. Sizes include zero and enough
+// entries to span several iobuf fragments.
+TEST(dedup_stm_snapshot, packed_entries_round_trip) {
+    for (const size_t count : {0UL, 1UL, 5461UL, 5462UL, 100'000UL}) {
         SCOPED_TRACE(count);
-        auto expected = serde::to_iobuf(
-          dedup_stm_test_accessor::state_snapshot_with(count));
-        auto actual = co_await dedup_stm_test_accessor::write_async(
-          dedup_stm_test_accessor::state_snapshot_with(count));
-        ASSERT_EQ_CORO(expected, actual);
-        ASSERT_EQ_CORO(
-          dedup_stm_test_accessor::snapshot_size(std::move(actual)), count);
+        dedup_window_filter source(1h);
+        dedup_index_snapshot seed{
+          .max_timestamp = model::timestamp{1'000'000'000 + 999}};
+        for (size_t i = 0; i < count; ++i) {
+            seed.entries.push_back(
+              {.identity
+               = {.hi = 0xbf58'476d'1ce4'e5b9ULL * (i + 1), .lo = 0x9e37'79b9'7f4a'7c15ULL * (i + 1)},
+               .timestamp = model::timestamp{
+                 1'000'000'000 + static_cast<int64_t>(i % 1000)}});
+        }
+        source.restore(seed);
+        ASSERT_EQ(source.map_size(), count);
+
+        auto buffer = dedup_stm_test_accessor::serialize(source, 7);
+        ASSERT_EQ(dedup_stm_test_accessor::snapshot_size(buffer.copy()), count);
+
+        dedup_window_filter target(1ms);
+        int64_t generation = 0;
+        dedup_stm_test_accessor::restore(target, generation, std::move(buffer));
+        ASSERT_EQ(generation, 7);
+        ASSERT_EQ(target.window(), source.window());
+        ASSERT_EQ(target.snapshot(), source.snapshot());
     }
+}
+
+// A blob that is not a whole number of entries is corrupt, and must fail the
+// read -- which try_restore_snapshot() turns into a discard and rebuild --
+// rather than restore a partial last entry.
+// Identities introduced by requests raft has not yet confirmed appended are
+// left out of a snapshot: after a crash, a snapshot holding one would drop
+// the producer's retry of a record no replica ever wrote.
+TEST(dedup_stm_snapshot, pending_identities_are_left_out) {
+    dedup_window_filter state(1000ms);
+    state.populate(iobuf::from("a"), model::timestamp{1000});
+    state.populate(iobuf::from("b"), model::timestamp{1000});
+    state.populate(iobuf::from("c"), model::timestamp{1000});
+
+    dedup_stm_test_accessor::pending_identities pending;
+    pending.emplace(
+      dedup_digest_of(iobuf::from("b")),
+      dedup_stm_test_accessor::make_inflight());
+    auto with_pending = dedup_stm_test_accessor::serialize(state, 1, &pending);
+    ASSERT_EQ(
+      dedup_stm_test_accessor::snapshot_size(std::move(with_pending)), 2);
+
+    int64_t generation = 0;
+    dedup_window_filter restored(1000ms);
+    dedup_stm_test_accessor::restore(
+      restored,
+      generation,
+      dedup_stm_test_accessor::serialize(state, 1, &pending));
+    ASSERT_EQ(restored.map_size(), 2);
+    // "b" is not in the restored index, so a retry of it is admitted.
+    auto retry = restored.filter_request(
+      make_batch("b", "value", model::timestamp{1000}));
+    ASSERT_TRUE(retry.batch.has_value());
+
+    // Nothing pending: everything is written.
+    auto all = dedup_stm_test_accessor::serialize(state, 1);
+    ASSERT_EQ(dedup_stm_test_accessor::snapshot_size(std::move(all)), 3);
+    // The pending request's promise is never resolved here; dropping it
+    // with no waiter is fine.
+    pending.clear();
+}
+
+TEST(dedup_stm_snapshot, misaligned_entries_are_rejected) {
+    dedup_window_filter target(1h);
+    int64_t generation = 0;
+    EXPECT_THROW(
+      dedup_stm_test_accessor::restore(
+        target,
+        generation,
+        dedup_stm_test_accessor::state_snapshot_with_entry_bytes(
+          dedup_stm::packed_entry_size + 1)),
+      serde::serde_exception);
+    EXPECT_EQ(target.map_size(), 0u);
+}
+
+namespace {
+
+/// The version 1 layout, which the STM no longer carries: one serde envelope
+/// per entry. Reproduced to prove such a snapshot is refused, not misread.
+struct v1_wire_entry
+  : serde::
+      envelope<v1_wire_entry, serde::version<1>, serde::compat_version<1>> {
+    uint64_t identity_hi{0};
+    uint64_t identity_lo{0};
+    model::timestamp timestamp;
+
+    auto serde_fields() {
+        return std::tie(identity_hi, identity_lo, timestamp);
+    }
+};
+
+struct v1_state_snapshot
+  : serde::
+      envelope<v1_state_snapshot, serde::version<1>, serde::compat_version<1>> {
+    int64_t window_ms{0};
+    int64_t generation{0};
+    model::timestamp max_timestamp{model::timestamp::min()};
+    uint64_t legacy_inserts_since_evict{0};
+    chunked_vector<v1_wire_entry> entries;
+
+    auto serde_fields() {
+        return std::tie(
+          window_ms,
+          generation,
+          max_timestamp,
+          legacy_inserts_since_evict,
+          entries);
+    }
+};
+
+iobuf v1_snapshot_with(size_t entries) {
+    v1_state_snapshot snapshot{
+      .window_ms = 300'000,
+      .generation = 0,
+      .max_timestamp = model::timestamp{1'000'000}};
+    for (size_t i = 0; i < entries; ++i) {
+        snapshot.entries.push_back(
+          {.identity_hi = i + 1,
+           .identity_lo = ~uint64_t{i},
+           .timestamp = model::timestamp{1'000'000}});
+    }
+    return serde::to_iobuf(std::move(snapshot));
+}
+
+} // namespace
+
+TEST(dedup_stm_snapshot, version_1_snapshot_is_refused) {
+    dedup_window_filter target(1h);
+    int64_t generation = 0;
+    EXPECT_THROW(
+      dedup_stm_test_accessor::restore(target, generation, v1_snapshot_with(3)),
+      serde::serde_exception);
+    EXPECT_EQ(target.map_size(), 0u);
+}
+
+// Entries outside the window are left out of the snapshot: they could never
+// match again, so persisting them would only cost memory and disk.
+TEST(dedup_stm_snapshot, expired_entries_are_not_serialized) {
+    dedup_window_filter source(1000ms);
+    dedup_index_snapshot seed{.max_timestamp = model::timestamp{1'000'000}};
+    for (size_t i = 0; i < 10; ++i) {
+        seed.entries.push_back(
+          {.identity = {.hi = i + 1, .lo = (i + 1) * 0x9e37'79b9'7f4a'7c15ULL},
+           .timestamp = model::timestamp{i < 4 ? 1'000 : 999'500}});
+    }
+    source.restore(seed);
+    ASSERT_EQ(source.map_size(), 10u);
+    auto buffer = dedup_stm_test_accessor::serialize(source, 0);
+    EXPECT_EQ(dedup_stm_test_accessor::snapshot_size(std::move(buffer)), 6u);
+}
+
+// A snapshot from a broker with a larger per-partition ceiling is cut to this
+// broker's ceiling on restore, keeping the newest identities.
+TEST(dedup_stm_snapshot, restore_into_a_smaller_ceiling_keeps_the_newest) {
+    dedup_window_filter source(1h);
+    dedup_index_snapshot seed{.max_timestamp = model::timestamp{1'000'100}};
+    for (size_t i = 0; i < 100; ++i) {
+        seed.entries.push_back(
+          {.identity = {.hi = i + 1, .lo = (i + 1) * 0x9e37'79b9'7f4a'7c15ULL},
+           .timestamp = model::timestamp{1'000'000 + static_cast<int64_t>(i)}});
+    }
+    source.restore(seed);
+
+    dedup_window_filter target(1h, 10);
+    int64_t generation = 0;
+    dedup_stm_test_accessor::restore(
+      target, generation, dedup_stm_test_accessor::serialize(source, 3));
+    EXPECT_EQ(target.map_size(), 10u);
+    EXPECT_EQ(target.truncated_entries(), 90u);
+    for (const auto& entry : target.snapshot().entries) {
+        EXPECT_GE(entry.timestamp.value(), 1'000'090);
+    }
+}
+
+// The serialized size is the format's whole point: a fixed header plus 24
+// bytes an entry, against 30 for the version 1 envelope-per-entry layout.
+TEST(dedup_stm_snapshot, packed_format_is_smaller_than_version_1) {
+    constexpr size_t count = 10'000;
+    dedup_window_filter source(1h);
+    dedup_index_snapshot seed{.max_timestamp = model::timestamp{1'000'000}};
+    for (size_t i = 0; i < count; ++i) {
+        seed.entries.push_back(
+          {.identity = {.hi = i + 1, .lo = (i + 1) * 0x9e37'79b9'7f4a'7c15ULL},
+           .timestamp = model::timestamp{1'000'000}});
+    }
+    source.restore(seed);
+    const auto packed
+      = dedup_stm_test_accessor::serialize(source, 0).size_bytes();
+    EXPECT_LE(packed, count * dedup_stm::packed_entry_size + 64);
+    EXPECT_LT(packed, v1_snapshot_with(count).size_bytes());
+}
+
+// --- The yielding walk the snapshot is written from ---
+//
+// for_each_live_entry_async() suspends between chunks of the index while the
+// produce path keeps mutating it. These tests mutate from inside emit(), which
+// is the same thing: the walk's view of the array changes under it.
+
+namespace {
+
+constexpr int64_t walk_base_ts = 1'000'000'000;
+
+std::string bulk_key(size_t i) { return "bulk-" + std::to_string(i); }
+
+void populate_bulk(dedup_window_filter& f, size_t count) {
+    for (size_t i = 0; i < count; ++i) {
+        f.populate(iobuf::from(bulk_key(i)), model::timestamp{walk_base_ts});
+    }
+}
+
+// Admit `count` distinct keys through filter_request(), whose undo is the only
+// way to erase chosen entries from the middle of the array.
+dedup_filter_result admit_victims(dedup_window_filter& f, size_t count) {
+    storage::record_batch_builder builder(
+      model::record_batch_type::raft_data, model::offset{0});
+    builder.set_timestamp(model::timestamp{walk_base_ts});
+    for (size_t i = 0; i < count; ++i) {
+        builder.add_raw_kv(
+          iobuf::from("victim-" + std::to_string(i)), iobuf::from("v"));
+    }
+    return f.filter_request(std::move(builder).build());
+}
+
+std::vector<dedup_identity_digest>
+sorted(std::vector<dedup_identity_digest> v) {
+    std::ranges::sort(v, [](const auto& a, const auto& b) {
+        return std::tie(a.hi, a.lo) < std::tie(b.hi, b.lo);
+    });
+    return v;
+}
+
+std::vector<dedup_identity_digest> bulk_digests(size_t count) {
+    std::vector<dedup_identity_digest> out;
+    for (size_t i = 0; i < count; ++i) {
+        out.push_back(dedup_digest_of(iobuf::from(bulk_key(i))));
+    }
+    return sorted(std::move(out));
+}
+
+// Every digest in `expected` occurs in `seen` at least `at_least` times and at
+// most once more; nothing else does.
+void expect_covers(
+  std::vector<dedup_identity_digest> seen,
+  const std::vector<dedup_identity_digest>& expected) {
+    seen = sorted(std::move(seen));
+    std::vector<dedup_identity_digest> missing;
+    std::ranges::set_difference(
+      expected, seen, std::back_inserter(missing), [](auto& a, auto& b) {
+          return std::tie(a.hi, a.lo) < std::tie(b.hi, b.lo);
+      });
+    EXPECT_TRUE(missing.empty()) << missing.size() << " entries missing";
+}
+
+size_t duplicates_in(std::vector<dedup_identity_digest> seen) {
+    seen = sorted(std::move(seen));
+    const auto [first, last] = std::ranges::unique(
+      seen, [](const auto& a, const auto& b) { return a == b; });
+    return static_cast<size_t>(std::distance(first, last));
+}
+
+} // namespace
+
+// Erasing entries the walk has passed moves the array's last entries, not yet
+// walked, into their slots. Those must still be emitted.
+TEST_CORO(dedup_live_walk, erases_behind_the_cursor_lose_nothing) {
+    dedup_window_filter f(1h);
+    // The victims come first, so they sit at the front of the array.
+    auto request = admit_victims(f, 50);
+    ASSERT_EQ_CORO(request.undo.entries.size(), 50u);
+    populate_bulk(f, 10'000);
+    ASSERT_EQ_CORO(f.map_size(), 10'050u);
+
+    std::vector<dedup_identity_digest> seen;
+    bool reverted = false;
+    const bool complete = co_await f.for_each_live_entry_async(
+      [&](dedup_identity_digest identity, model::timestamp) {
+          seen.push_back(identity);
+          if (!reverted && seen.size() == 100) {
+              // The cursor is past the victims; each erase pulls one of the
+              // last 50 bulk entries behind it.
+              reverted = true;
+              f.revert_request(request.undo);
+          }
+      });
+    ASSERT_TRUE_CORO(complete);
+    ASSERT_TRUE_CORO(reverted);
+    EXPECT_EQ(f.map_size(), 10'000u);
+    expect_covers(seen, bulk_digests(10'000));
+    // The victims were emitted before they were erased; nothing was emitted
+    // twice.
+    EXPECT_EQ(seen.size(), 10'050u);
+    EXPECT_EQ(duplicates_in(seen), 0u);
+}
+
+// Erasing entries the walk has not reached needs no bookkeeping: whatever
+// moves into their slots is still ahead of the cursor.
+TEST_CORO(dedup_live_walk, erases_ahead_of_the_cursor_are_simply_gone) {
+    dedup_window_filter f(1h);
+    populate_bulk(f, 10'000);
+    auto request = admit_victims(f, 50);
+    ASSERT_EQ_CORO(f.map_size(), 10'050u);
+
+    std::vector<dedup_identity_digest> seen;
+    bool reverted = false;
+    const bool complete = co_await f.for_each_live_entry_async(
+      [&](dedup_identity_digest identity, model::timestamp) {
+          seen.push_back(identity);
+          if (!reverted) {
+              reverted = true;
+              f.revert_request(request.undo);
+          }
+      });
+    ASSERT_TRUE_CORO(complete);
+    EXPECT_EQ(f.map_size(), 10'000u);
+    EXPECT_EQ(seen.size(), 10'000u);
+    expect_covers(seen, bulk_digests(10'000));
+}
+
+// Inserts during the walk append to the array: they are emitted at most once,
+// and everything already there is still emitted.
+TEST_CORO(dedup_live_walk, inserts_during_the_walk_are_emitted_at_most_once) {
+    dedup_window_filter f(1h);
+    populate_bulk(f, 1'000);
+
+    std::vector<dedup_identity_digest> seen;
+    bool inserted = false;
+    const bool complete = co_await f.for_each_live_entry_async(
+      [&](dedup_identity_digest identity, model::timestamp) {
+          seen.push_back(identity);
+          if (!inserted && seen.size() == 10) {
+              inserted = true;
+              for (size_t i = 0; i < 100; ++i) {
+                  f.populate(
+                    iobuf::from("late-" + std::to_string(i)),
+                    model::timestamp{walk_base_ts + 1});
+              }
+          }
+      });
+    ASSERT_TRUE_CORO(complete);
+    EXPECT_EQ(f.map_size(), 1'100u);
+    expect_covers(seen, bulk_digests(1'000));
+    EXPECT_EQ(duplicates_in(seen), 0u);
+    EXPECT_EQ(seen.size(), 1'100u);
+}
+
+// An index cleared or replaced under the walk invalidates it: the caller is
+// told, and a fresh walk describes the new index.
+TEST_CORO(dedup_live_walk, a_replaced_index_invalidates_the_walk) {
+    dedup_window_filter f(1h);
+    populate_bulk(f, 10'000);
+
+    size_t seen = 0;
+    bool complete = co_await f.for_each_live_entry_async(
+      [&](dedup_identity_digest, model::timestamp) {
+          if (++seen == 5) {
+              f.clear();
+          }
+      });
+    EXPECT_FALSE(complete);
+    EXPECT_EQ(f.map_size(), 0u);
+
+    populate_bulk(f, 10'000);
+    dedup_index_snapshot replacement{
+      .max_timestamp = model::timestamp{walk_base_ts}};
+    for (size_t i = 0; i < 3; ++i) {
+        replacement.entries.push_back(
+          {.identity = {.hi = i + 1, .lo = (i + 1) * 0x9e37'79b9'7f4a'7c15ULL},
+           .timestamp = model::timestamp{walk_base_ts}});
+    }
+    seen = 0;
+    complete = co_await f.for_each_live_entry_async(
+      [&](dedup_identity_digest, model::timestamp) {
+          if (++seen == 5) {
+              f.restore(replacement);
+          }
+      });
+    EXPECT_FALSE(complete);
+
+    seen = 0;
+    complete = co_await f.for_each_live_entry_async(
+      [&](dedup_identity_digest, model::timestamp) { ++seen; });
+    EXPECT_TRUE(complete);
+    EXPECT_EQ(seen, 3u);
+}
+
+// A snapshot can carry an identity twice when it was erased and admitted
+// again during the walk; the restore keeps the newer timestamp, as populate()
+// would.
+TEST(dedup_stm_snapshot, a_repeated_identity_restores_to_the_newer_timestamp) {
+    dedup_window_filter target(1h);
+    int64_t generation = 0;
+    const dedup_identity_digest id{.hi = 1, .lo = 2};
+    auto entries = iobuf{};
+    for (const int64_t ts :
+         {walk_base_ts + 5, walk_base_ts + 9, walk_base_ts}) {
+        const auto hi = ss::cpu_to_le(id.hi);
+        const auto lo = ss::cpu_to_le(id.lo);
+        const auto le_ts = ss::cpu_to_le(ts);
+        entries.append(reinterpret_cast<const char*>(&hi), sizeof(hi));
+        entries.append(reinterpret_cast<const char*>(&lo), sizeof(lo));
+        entries.append(reinterpret_cast<const char*>(&le_ts), sizeof(le_ts));
+    }
+    dedup_stm_test_accessor::restore(
+      target,
+      generation,
+      dedup_stm_test_accessor::state_snapshot_with_entries(
+        std::move(entries), model::timestamp{walk_base_ts + 9}));
+    ASSERT_EQ(target.map_size(), 1u);
+    const auto restored = target.snapshot().entries;
+    ASSERT_EQ(restored.size(), 1u);
+    EXPECT_EQ(restored[0].timestamp, model::timestamp{walk_base_ts + 9});
 }
 
 struct dedup_stm_fixture : raft::stm_raft_fixture<dedup_stm> {
@@ -133,8 +583,14 @@ struct dedup_stm_fixture : raft::stm_raft_fixture<dedup_stm> {
           clusterlog,
           node.get_kvstore(),
           sync_timeout.bind(),
-          dedup_window_filter::default_max_entries);
+          dedup_window_filter::default_max_entries,
+          _shard_budget);
     }
+
+    /// Shared by every STM the fixture creates. All replicas run on one shard
+    /// here, so they count against one budget -- which is what lets a test
+    /// observe that a stopped STM gives its entries back.
+    ss::lw_shared_ptr<dedup_shard_budget> _shard_budget;
 
     // The STM apply path reads the dedup window, generation, and key header
     // from the partition's ntp_config; in production these arrive via topic
@@ -317,6 +773,49 @@ TEST_F_CORO(dedup_stm_fixture, state_survives_local_snapshot_restart) {
     ASSERT_EQ_CORO(get_stm<0>(node(leader))->map_size(), 1);
 }
 
+// Local snapshots go to a file in the partition directory, and the copy an
+// earlier build left in the kvstore -- which the kvstore would otherwise hold
+// in memory indefinitely -- is removed when the STM starts.
+TEST_F_CORO(
+  dedup_stm_fixture, snapshot_is_a_file_and_legacy_kvstore_copy_is_dropped) {
+    co_await initialize_state_machines();
+    set_dedup_config(1000ms);
+    auto leader = co_await wait_for_leader(10s);
+
+    co_await produce(leader, "key", "value-1", model::timestamp{1000});
+    co_await wait_for_stms(node(leader).raft()->committed_offset());
+    // Each fixture node runs its own ntp, so each has its own legacy key.
+    std::map<model::node_id, bytes> legacy_keys;
+    for (auto& [id, n] : nodes()) {
+        const auto& legacy_key = legacy_keys[id]
+          = dedup_stm_test_accessor::legacy_kvstore_key(n->raft()->ntp());
+        auto stm = get_stm<0>(*n);
+        co_await stm->write_local_snapshot();
+        // The kvstore backend reports 0 here; the file backend reports the
+        // file's size.
+        ASSERT_GT_CORO(stm->get_local_snapshot_size(), 0);
+        co_await n->get_kvstore().put(
+          storage::kvstore::key_space::stms, legacy_key, iobuf::from("stale"));
+        ASSERT_TRUE_CORO(n->get_kvstore()
+                           .get(storage::kvstore::key_space::stms, legacy_key)
+                           .has_value());
+    }
+
+    co_await restart_nodes();
+    set_dedup_config(1000ms);
+    leader = co_await wait_for_leader(10s);
+    for (auto& [id, n] : nodes()) {
+        ASSERT_FALSE_CORO(
+          n->get_kvstore()
+            .get(storage::kvstore::key_space::stms, legacy_keys.at(id))
+            .has_value());
+    }
+    // And the index came back from the file snapshot.
+    auto duplicate = co_await produce(
+      leader, "key", "value-2", model::timestamp{1500});
+    ASSERT_EQ_CORO(duplicate.replicated_record_count, 0);
+}
+
 // get_initial_recovery_start_offset() resolves a bounded recovery offset via
 // timequery(), which can land in the middle of a multi-record batch (see
 // storage::batch_timequery, which walks into a batch looking for the first
@@ -470,6 +969,52 @@ TEST_F_CORO(dedup_stm_fixture, concurrent_same_key_is_admitted_once) {
     // Exactly one data batch reaches the log; the duplicate writes nothing.
     ASSERT_EQ_CORO(
       node(leader).raft()->dirty_offset(), before + model::offset{1});
+    // The duplicate waited on the introducer; once both are acknowledged
+    // nothing is in flight any more.
+    auto stm = get_stm<0>(node(leader));
+    ASSERT_EQ_CORO(dedup_stm_test_accessor::pending_size(*stm), 0);
+    ASSERT_EQ_CORO(dedup_stm_test_accessor::resolving_size(*stm), 0);
+}
+
+// A committed batch whose records cannot be read is skipped, not retried:
+// the STM manager would otherwise retry it forever, and with it hold up every
+// raft snapshot of the partition and the log's prefix truncation.
+TEST_F_CORO(dedup_stm_fixture, unreadable_batch_is_skipped_not_retried) {
+    co_await initialize_state_machines();
+    set_dedup_config(1000ms);
+    auto leader = co_await wait_for_leader(10s);
+
+    // Cut the record short and seal the header over the result, so storage
+    // accepts the batch but its one record cannot be parsed.
+    auto good = make_batch("key", "value", model::timestamp{1000});
+    auto header = good.header();
+    auto data = good.data().copy();
+    data.trim_back(4);
+    header.size_bytes = static_cast<int32_t>(
+      model::packed_record_batch_header_size + data.size_bytes());
+    header.crc = model::crc_record_batch(header, data);
+    header.header_crc = model::internal_header_only_crc(header);
+    model::record_batch broken(
+      header, std::move(data), model::record_batch::tag_ctor_ng{});
+
+    auto result = co_await node(leader).raft()->replicate(
+      std::move(broken),
+      raft::replicate_options(raft::consistency_level::quorum_ack));
+    ASSERT_TRUE_CORO(result.has_value());
+    // Applies past it on every replica, within the wait's timeout.
+    co_await wait_for_stms(node(leader).raft()->committed_offset());
+    for (auto& [_, n] : nodes()) {
+        auto stm = get_stm<0>(*n);
+        ASSERT_EQ_CORO(dedup_stm_test_accessor::batches_skipped(*stm), 1);
+        ASSERT_EQ_CORO(stm->map_size(), 0);
+    }
+
+    // And indexing continues behind it.
+    co_await produce(leader, "key", "value", model::timestamp{1000});
+    co_await wait_for_stms(node(leader).raft()->committed_offset());
+    for (auto& [_, n] : nodes()) {
+        ASSERT_EQ_CORO(get_stm<0>(*n)->map_size(), 1);
+    }
 }
 
 TEST_F_CORO(dedup_stm_fixture, concurrent_independent_keys_are_admitted) {
@@ -814,4 +1359,100 @@ TEST_F_CORO(dedup_stm_fixture, partial_filter_converges_across_replicas) {
 }
 
 } // namespace
+// A version 1 snapshot -- what a not-yet-upgraded peer sends as a raft
+// snapshot during a rolling upgrade -- is discarded and the index rebuilt,
+// never misread and never a failed partition.
+TEST_F_CORO(dedup_stm_fixture, version_1_snapshot_is_discarded) {
+    co_await initialize_state_machines();
+    set_dedup_config(1000ms);
+    auto leader = co_await wait_for_leader(10s);
+    auto stm = get_stm<0>(node(leader));
+
+    co_await produce(leader, "a", "value-a", model::timestamp{1000});
+    co_await stm->wait(
+      node(leader).raft()->committed_offset(),
+      model::timeout_clock::now() + 10s);
+    ASSERT_EQ_CORO(stm->map_size(), 1);
+
+    auto applied = co_await dedup_stm_test_accessor::apply_local_snapshot(
+      *stm, v1_snapshot_with(5));
+    ASSERT_EQ_CORO(applied, raft::local_snapshot_applied::no);
+    ASSERT_EQ_CORO(stm->map_size(), 0);
+
+    co_await dedup_stm_test_accessor::apply_raft_snapshot(
+      *stm, v1_snapshot_with(5));
+    ASSERT_EQ_CORO(stm->map_size(), 0);
+}
+
+// Every replica's index is counted in the shard budget, and an STM that stops
+// gives its entries back: after a restart the budget equals exactly what the
+// new STMs restored, not that plus what the old ones held.
+TEST_F_CORO(
+  dedup_stm_fixture, shard_budget_counts_replicas_and_survives_restart) {
+    _shard_budget = ss::make_lw_shared<dedup_shard_budget>(1'000);
+    co_await initialize_state_machines();
+    set_dedup_config(1000ms);
+    auto leader = co_await wait_for_leader(10s);
+
+    co_await produce(leader, "a", "value-a", model::timestamp{1000});
+    co_await produce(leader, "b", "value-b", model::timestamp{1100});
+    co_await wait_for_stms(node(leader).raft()->committed_offset());
+
+    auto total_entries = [this] {
+        size_t total = 0;
+        for (auto& [_, n] : nodes()) {
+            total += get_stm<0>(*n)->map_size();
+        }
+        return total;
+    };
+    ASSERT_EQ_CORO(total_entries(), 2 * nodes().size());
+    ASSERT_EQ_CORO(_shard_budget->entries, total_entries());
+
+    for (auto& [_, n] : nodes()) {
+        co_await get_stm<0>(*n)->write_local_snapshot();
+    }
+    co_await restart_nodes();
+    set_dedup_config(1000ms);
+    leader = co_await wait_for_leader(10s);
+    co_await wait_for_stms(node(leader).raft()->committed_offset());
+
+    ASSERT_EQ_CORO(total_entries(), 2 * nodes().size());
+    ASSERT_EQ_CORO(_shard_budget->entries, total_entries());
+
+    // The restored index still catches duplicates.
+    auto duplicate = co_await produce(
+      leader, "a", "value-a2", model::timestamp{1500});
+    ASSERT_EQ_CORO(duplicate.replicated_record_count, 0);
+}
+
+// With the shard budget exhausted, produce keeps working and never grows the
+// indices past the limit. Each new identity replaces the oldest one its replica
+// holds -- the newest identities are the ones a retry is most likely to repeat
+// -- rather than being admitted unindexed.
+TEST_F_CORO(dedup_stm_fixture, exhausted_shard_budget_keeps_the_newest) {
+    // Three replicas share the budget here, so a limit of three lets each of
+    // them hold one identity.
+    _shard_budget = ss::make_lw_shared<dedup_shard_budget>(3);
+    co_await initialize_state_machines();
+    set_dedup_config(1000s);
+    auto leader = co_await wait_for_leader(10s);
+
+    co_await produce(leader, "first", "v", model::timestamp{1000});
+    co_await wait_for_stms(node(leader).raft()->committed_offset());
+    ASSERT_EQ_CORO(_shard_budget->entries, 3u);
+
+    for (int i = 0; i < 5; ++i) {
+        auto admitted = co_await produce(
+          leader, fmt::format("later-{}", i), "v", model::timestamp{2000 + i});
+        ASSERT_EQ_CORO(admitted.replicated_record_count, -1);
+    }
+    co_await wait_for_stms(node(leader).raft()->committed_offset());
+    ASSERT_LE_CORO(_shard_budget->entries, 3u);
+
+    // The newest identity is still deduplicated.
+    auto duplicate = co_await produce(
+      leader, "later-4", "v2", model::timestamp{2004});
+    ASSERT_EQ_CORO(duplicate.replicated_record_count, 0);
+}
+
 } // namespace cluster

@@ -260,6 +260,45 @@ void append_record_to_buffer(iobuf& a, const model::record& r) {
     }
 }
 
+// Must stay in step with append_record_to_buffer() above, field for field;
+// record_utils_test pins the two against each other.
+void crc_extend_record(crc::crc32c& crc, const model::record& r) {
+    const auto extend_vint = [&crc](int64_t v) {
+        auto vb = vint::to_bytes(v);
+        crc.extend(vb.data(), vb.size());
+    };
+    extend_vint(r.size_bytes());
+
+    const auto attrs = ss::cpu_to_be(r.attributes().value());
+    // NOLINTNEXTLINE
+    crc.extend(reinterpret_cast<const char*>(&attrs), sizeof(attrs));
+
+    extend_vint(r.timestamp_delta());
+    extend_vint(r.offset_delta());
+
+    extend_vint(r.key_size());
+    if (r.key_size() > 0) {
+        crc_extend_iobuf(crc, r.key());
+    }
+    extend_vint(r.value_size());
+    if (r.value_size() > 0) {
+        crc_extend_iobuf(crc, r.value());
+    }
+
+    const auto& hdrs = r.headers();
+    extend_vint(static_cast<int64_t>(hdrs.size()));
+    for (const auto& h : hdrs) {
+        extend_vint(h.key_size());
+        if (h.key_size() > 0) {
+            crc_extend_iobuf(crc, h.key());
+        }
+        extend_vint(h.value_size());
+        if (h.value_size() > 0) {
+            crc_extend_iobuf(crc, h.value());
+        }
+    }
+}
+
 model::record_key_metadata parse_record_key_from_buffer(iobuf_const_parser& p) {
     [[maybe_unused]] auto [record_size, attr] = parse_record_meta_from_buffer(
       p);

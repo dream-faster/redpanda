@@ -27,7 +27,10 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <limits>
+#include <memory>
 #include <optional>
+#include <random>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -294,6 +297,62 @@ TEST(DedupWindowFilter, FilterRequestReturnsUndoForAdmittedKeys) {
     ASSERT_EQ(readmitted.undo.entries.size(), 1);
     EXPECT_EQ(readmitted.undo.entries[0].applied_timestamp, ts(2500));
     EXPECT_EQ(readmitted.undo.entries[0].previous_timestamp, ts(1000));
+}
+
+// The identities of the dropped records come back with the result, so the
+// caller can find the in-flight requests that introduced them.
+TEST(DedupWindowFilter, FilterRequestReportsDroppedIdentities) {
+    cluster::dedup_window_filter f(1000ms);
+
+    auto fresh = f.filter_request(
+      make_multi_batch({{"a", "1"}, {"b", "2"}}, ts(1000)));
+    ASSERT_TRUE(fresh.batch.has_value());
+    EXPECT_TRUE(fresh.dropped.empty());
+
+    // "a" and "b" are duplicates and "c" is new: the batch is rebuilt.
+    auto partial = f.filter_request(
+      make_multi_batch({{"a", "3"}, {"c", "4"}, {"b", "5"}}, ts(1100)));
+    ASSERT_TRUE(partial.batch.has_value());
+    EXPECT_EQ(record_count(*partial.batch), 1);
+    ASSERT_EQ(partial.dropped.size(), 2u);
+    EXPECT_EQ(partial.dropped[0], cluster::dedup_digest_of(iobuf::from("a")));
+    EXPECT_EQ(partial.dropped[1], cluster::dedup_digest_of(iobuf::from("b")));
+
+    // Everything a duplicate: no batch, every identity reported in order.
+    auto all = f.filter_request(
+      make_multi_batch({{"c", "6"}, {"a", "7"}}, ts(1200)));
+    EXPECT_FALSE(all.batch.has_value());
+    ASSERT_EQ(all.dropped.size(), 2u);
+    EXPECT_EQ(all.dropped[0], cluster::dedup_digest_of(iobuf::from("c")));
+    EXPECT_EQ(all.dropped[1], cluster::dedup_digest_of(iobuf::from("a")));
+}
+
+// A record's timestamp delta is client-controlled. One that carries the
+// batch's base timestamp past the int64 range saturates instead of wrapping,
+// and the record is admitted like any other with a timestamp from the future.
+TEST(DedupWindowFilter, TimestampDeltaOverflowSaturates) {
+    cluster::dedup_window_filter f(1000ms);
+
+    model::batch_builder builder;
+    builder.set_batch_type(model::record_batch_type::raft_data);
+    builder.set_batch_timestamp(
+      model::timestamp_type::create_time, model::timestamp{1000});
+    builder.add_record(
+      model::record({}, 100, 0, iobuf::from("k"), iobuf::from("v"), {}));
+    auto built = std::move(builder).build_sync();
+    // The builder would overflow computing max_timestamp itself, so the
+    // header is patched after the fact; the filter reads the records.
+    auto header = built.header();
+    header.first_timestamp = model::timestamp{
+      std::numeric_limits<int64_t>::max() - 10};
+    header.max_timestamp = model::timestamp::max();
+    model::record_batch batch(
+      header, built.data().copy(), model::record_batch::tag_ctor_ng{});
+
+    auto result = f.filter_request(std::move(batch));
+    ASSERT_TRUE(result.batch.has_value());
+    EXPECT_EQ(record_count(*result.batch), 1);
+    EXPECT_EQ(f.map_size(), 1u);
 }
 
 TEST(DedupWindowFilter, RevertRequestRestoresPreRequestState) {
@@ -1221,6 +1280,242 @@ TEST(DedupIdentityDigest, IsPinnedForSnapshotCompatibility) {
     EXPECT_EQ(d.lo, 0x68a86e30b386534dULL);
 }
 
+// --- Reading identities straight from the batch buffer ---
+//
+// for_each_dedup_identity() decodes the record layout itself instead of
+// parsing each record into a model::record. Its reference is that parse: the
+// two must agree on which records have an identity, on the identity's digest
+// and on the timestamp, under both identity sources and for every edge of the
+// format (null and empty keys, missing, repeated and null-valued headers).
+
+namespace {
+
+struct walked {
+    cluster::dedup_identity_lookup lookup;
+    cluster::dedup_identity_digest digest;
+    model::timestamp timestamp;
+
+    friend bool operator==(const walked&, const walked&) = default;
+};
+
+std::vector<walked> walk(
+  const model::record_batch& b, const std::optional<ss::sstring>& key_header) {
+    std::vector<walked> out;
+    cluster::for_each_dedup_identity(
+      b,
+      key_header,
+      [&out](
+        cluster::dedup_identity_lookup lookup,
+        cluster::dedup_identity_digest digest,
+        model::timestamp ts) {
+          out.push_back({lookup, digest, ts});
+          return true;
+      });
+    return out;
+}
+
+// The model::record based lookup the walk replaced, kept here as the oracle.
+std::vector<walked> parse(
+  const model::record_batch& b, const std::optional<ss::sstring>& key_header) {
+    std::vector<walked> out;
+    const auto base_ts = b.header().first_timestamp.value();
+    b.copy().for_each_record([&](model::record r) {
+        walked w{
+          .lookup = cluster::dedup_identity_lookup::no_identity,
+          .digest = {},
+          .timestamp = model::timestamp{base_ts + r.timestamp_delta()}};
+        if (key_header) {
+            w.lookup = cluster::dedup_identity_lookup::missing_header;
+            for (auto& h : r.headers()) {
+                if (iobuf_string(h.key()) == *key_header) {
+                    if (h.value_size() >= 0) {
+                        w.lookup = cluster::dedup_identity_lookup::identity;
+                        w.digest = cluster::dedup_digest_of(h.value());
+                    }
+                    break;
+                }
+            }
+        } else if (r.has_key()) {
+            w.lookup = cluster::dedup_identity_lookup::identity;
+            w.digest = cluster::dedup_digest_of(r.key());
+        }
+        out.push_back(w);
+    });
+    return out;
+}
+
+// A record whose headers may carry a null value, which record_spec cannot
+// express.
+model::record_batch make_batch_with_nullable_headers(
+  std::optional<std::string_view> key,
+  std::vector<std::pair<std::string_view, std::optional<std::string_view>>>
+    headers,
+  model::timestamp base_ts) {
+    model::batch_builder builder;
+    builder.set_batch_type(model::record_batch_type::raft_data);
+    builder.set_batch_timestamp(model::timestamp_type::create_time, base_ts);
+    chunked_vector<model::record_header> hdrs;
+    for (const auto& [hk, hv] : headers) {
+        hdrs.emplace_back(
+          iobuf::from(hk),
+          hv ? std::make_optional(iobuf::from(*hv)) : std::nullopt);
+    }
+    builder.add_record(
+      model::record(
+        {},
+        0,
+        0,
+        key ? std::make_optional(iobuf::from(*key)) : std::nullopt,
+        iobuf::from("value"),
+        std::move(hdrs)));
+    return std::move(builder).build_sync();
+}
+
+} // namespace
+
+TEST(DedupIdentityWalk, MatchesRecordParsingInKeyMode) {
+    const std::string big(100'000, 'k');
+    auto batch = make_batch_of(
+      {
+        {.key = "plain", .value = "v", .timestamp_delta = 0},
+        {.key = std::nullopt, .value = "null key", .timestamp_delta = 7},
+        {.key = "", .value = "empty key", .timestamp_delta = 11},
+        {.key = ss::sstring(big), .value = "", .timestamp_delta = 13},
+        {.key = "with headers",
+         .value = "v",
+         .timestamp_delta = 17,
+         .headers = {{"h1", "x"}, {"", ""}, {"h3", ss::sstring(5000, 'y')}}},
+      },
+      ts(1000));
+    const auto expected = parse(batch, std::nullopt);
+    ASSERT_EQ(expected.size(), 5u);
+    EXPECT_EQ(walk(batch, std::nullopt), expected);
+
+    // The identities a record parse yields are what the walk yields.
+    EXPECT_EQ(expected[0].lookup, cluster::dedup_identity_lookup::identity);
+    EXPECT_EQ(
+      expected[0].digest, cluster::dedup_digest_of(iobuf::from("plain")));
+    EXPECT_EQ(expected[1].lookup, cluster::dedup_identity_lookup::no_identity);
+    EXPECT_EQ(expected[2].lookup, cluster::dedup_identity_lookup::identity);
+    EXPECT_EQ(expected[2].digest, cluster::dedup_digest_of(iobuf{}));
+    EXPECT_EQ(expected[3].digest, cluster::dedup_digest_of(iobuf::from(big)));
+    EXPECT_EQ(expected[4].timestamp, ts(1017));
+}
+
+TEST(DedupIdentityWalk, MatchesRecordParsingInHeaderMode) {
+    const std::optional<ss::sstring> header{"dedup-id"};
+    auto batch = make_batch_of(
+      {
+        {.key = "k", .value = "v", .headers = {{"dedup-id", "first"}}},
+        {.key = std::nullopt, .value = "v", .headers = {}},
+        {.key = "k",
+         .value = "v",
+         .timestamp_delta = 3,
+         .headers = {{"other", "x"}, {"dedup-id", "second"}}},
+        {.key = "k",
+         .value = "v",
+         .headers = {{"dedup-id", "wins"}, {"dedup-id", "ignored"}}},
+        {.key = "k", .value = "v", .headers = {{"dedup-i", "prefix"}}},
+        {.key = "k", .value = "v", .headers = {{"dedup-idx", "longer"}}},
+        {.key = "k", .value = "v", .headers = {{"dedup-id", ""}}},
+      },
+      ts(1000));
+    const auto expected = parse(batch, header);
+    ASSERT_EQ(expected.size(), 7u);
+    EXPECT_EQ(walk(batch, header), expected);
+
+    using lookup = cluster::dedup_identity_lookup;
+    EXPECT_EQ(expected[0].lookup, lookup::identity);
+    EXPECT_EQ(
+      expected[0].digest, cluster::dedup_digest_of(iobuf::from("first")));
+    EXPECT_EQ(expected[1].lookup, lookup::missing_header);
+    EXPECT_EQ(expected[2].lookup, lookup::identity);
+    EXPECT_EQ(expected[2].timestamp, ts(1003));
+    EXPECT_EQ(
+      expected[3].digest, cluster::dedup_digest_of(iobuf::from("wins")));
+    EXPECT_EQ(expected[4].lookup, lookup::missing_header);
+    EXPECT_EQ(expected[5].lookup, lookup::missing_header);
+    EXPECT_EQ(expected[6].lookup, lookup::identity);
+    EXPECT_EQ(expected[6].digest, cluster::dedup_digest_of(iobuf{}));
+}
+
+// A header carrying a null value is not an identity, and a later header of
+// the same name does not get a second chance: the first occurrence decides.
+TEST(DedupIdentityWalk, NullHeaderValueIsNotAnIdentity) {
+    const std::optional<ss::sstring> header{"dedup-id"};
+    auto null_only = make_batch_with_nullable_headers(
+      "k", {{"dedup-id", std::nullopt}}, ts(1000));
+    auto null_then_value = make_batch_with_nullable_headers(
+      "k", {{"dedup-id", std::nullopt}, {"dedup-id", "late"}}, ts(1000));
+
+    for (const auto* b : {&null_only, &null_then_value}) {
+        const auto expected = parse(*b, header);
+        ASSERT_EQ(expected.size(), 1u);
+        EXPECT_EQ(
+          expected[0].lookup, cluster::dedup_identity_lookup::missing_header);
+        EXPECT_EQ(walk(*b, header), expected);
+    }
+    // In key mode the same records are keyed as usual; the headers are
+    // skipped over, null values included.
+    EXPECT_EQ(
+      walk(null_then_value, std::nullopt),
+      parse(null_then_value, std::nullopt));
+}
+
+TEST(DedupIdentityWalk, StopsWhenAskedTo) {
+    auto batch = make_multi_batch(
+      {{"a", "1"}, {"b", "2"}, {"c", "3"}, {"d", "4"}}, ts(1000));
+    int seen = 0;
+    cluster::for_each_dedup_identity(
+      batch,
+      std::nullopt,
+      [&seen](
+        cluster::dedup_identity_lookup,
+        cluster::dedup_identity_digest,
+        model::timestamp) { return ++seen < 2; });
+    EXPECT_EQ(seen, 2);
+}
+
+// Batches reach the walk validated, but a buffer shorter than its record
+// count claims must still fail loudly rather than be read past its end.
+TEST(DedupIdentityWalk, RejectsATruncatedBatch) {
+    auto batch = make_multi_batch(
+      {{"key-one", "value-one"}, {"key-two", "value-two"}}, ts(1000));
+    auto header = batch.header();
+    auto data = batch.data().copy();
+    // Leaves less than one record, so the first record's size overruns.
+    data.trim_back(data.size_bytes() - 10);
+    header.size_bytes = static_cast<int32_t>(
+      model::packed_record_batch_header_size + data.size_bytes());
+    model::record_batch truncated(
+      header, std::move(data), model::record_batch::tag_ctor_ng{});
+    EXPECT_THROW(walk(truncated, std::nullopt), std::out_of_range);
+    EXPECT_THROW(
+      walk(truncated, std::optional<ss::sstring>{"h"}), std::out_of_range);
+}
+
+// Identities that reach the index as digests (the apply path) land in the
+// same entries as identities that reach it as bytes.
+TEST(DedupWindowFilter, PopulateByDigestMatchesPopulateByKey) {
+    cluster::dedup_window_filter by_key(1000ms);
+    cluster::dedup_window_filter by_digest(1000ms);
+    by_key.populate(iobuf::from("same"), ts(1000));
+    by_digest.populate(cluster::dedup_digest_of(iobuf::from("same")), ts(1000));
+
+    EXPECT_FALSE(
+      by_key.filter(make_batch("same", "dup", ts(1500))).has_value());
+    EXPECT_FALSE(
+      by_digest.filter(make_batch("same", "dup", ts(1500))).has_value());
+    EXPECT_TRUE(
+      by_digest.filter(make_batch("other", "v", ts(1500))).has_value());
+    // The same max-wins idempotence: a later timestamp moves the entry, an
+    // older one does not.
+    by_digest.populate(cluster::dedup_digest_of(iobuf::from("same")), ts(2500));
+    by_digest.populate(cluster::dedup_digest_of(iobuf::from("same")), ts(1200));
+    EXPECT_FALSE(
+      by_digest.filter(make_batch("same", "dup", ts(3400))).has_value());
+}
+
 // --- Record payload integrity across the sharing rewrite ---
 
 // filter_request() iterates records by sharing them out of the batch rather
@@ -1880,4 +2175,740 @@ TEST(DedupWindowFilter, NullValuedIdentityHeaderIsRejected) {
     EXPECT_FALSE(result.batch.has_value());
     // Nothing was indexed, so a later well-formed record is unaffected.
     EXPECT_EQ(f.map_size(), 0u);
+}
+
+// ---------------------------------------------------------------------------
+// Shard budget
+//
+// Every dedup index on a shard reports its size into one dedup_shard_budget,
+// and new identities are refused or trimmed against the shard total as well
+// as against the partition's own ceiling. These tests pin the accounting --
+// the budget must equal the sum of the indices on every path that changes an
+// index's size -- and the capacity behaviour built on it.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+ss::lw_shared_ptr<cluster::dedup_shard_budget> make_budget(size_t limit) {
+    return ss::make_lw_shared<cluster::dedup_shard_budget>(limit);
+}
+
+void populate_n(
+  cluster::dedup_window_filter& f,
+  std::string_view prefix,
+  size_t n,
+  int64_t first_ts = 1000,
+  int64_t step_ms = 1) {
+    for (size_t i = 0; i < n; ++i) {
+        f.populate(
+          iobuf::from(fmt::format("{}-{}", prefix, i)),
+          ts(first_ts + static_cast<int64_t>(i) * step_ms));
+    }
+}
+
+} // namespace
+
+TEST(DedupShardBudget, WithoutABudgetNothingIsShared) {
+    cluster::dedup_window_filter f(100s, 50);
+    EXPECT_EQ(f.shard_budget(), nullptr);
+    populate_n(f, "k", 40);
+    EXPECT_EQ(f.map_size(), 40u);
+    EXPECT_EQ(f.unindexed_records(), 0u);
+}
+
+TEST(DedupShardBudget, CountsEveryFilterOnTheShard) {
+    auto budget = make_budget(1'000);
+    cluster::dedup_window_filter a(100s, 1'000, budget);
+    cluster::dedup_window_filter b(100s, 1'000, budget);
+    populate_n(a, "a", 10);
+    populate_n(b, "b", 5);
+    EXPECT_EQ(budget->entries, 15u);
+    EXPECT_EQ(a.shard_budget(), budget.get());
+
+    // A repeated identity updates in place and costs nothing more.
+    populate_n(a, "a", 10, 2000);
+    EXPECT_EQ(budget->entries, 15u);
+}
+
+TEST(DedupShardBudget, ProducePathInsertsAreCounted) {
+    auto budget = make_budget(1'000);
+    cluster::dedup_window_filter f(100s, 1'000, budget);
+    ASSERT_TRUE(
+      f.filter(make_multi_batch({{"a", "1"}, {"b", "2"}, {"c", "3"}}, ts(1000)))
+        .has_value());
+    EXPECT_EQ(budget->entries, 3u);
+    // Duplicates are dropped without touching the index.
+    EXPECT_FALSE(f.filter(make_batch("a", "dup", ts(1100))).has_value());
+    EXPECT_EQ(budget->entries, 3u);
+}
+
+TEST(DedupShardBudget, RevertedRequestGivesItsEntriesBack) {
+    auto budget = make_budget(1'000);
+    cluster::dedup_window_filter f(100s, 1'000, budget);
+    populate_n(f, "kept", 4);
+    auto result = f.filter_request(
+      make_multi_batch({{"x", "1"}, {"y", "2"}, {"kept-0", "3"}}, ts(5000)));
+    ASSERT_TRUE(result.batch.has_value());
+    EXPECT_EQ(budget->entries, 6u);
+    f.revert_request(result.undo);
+    EXPECT_EQ(f.map_size(), 4u);
+    EXPECT_EQ(budget->entries, 4u);
+}
+
+TEST(DedupShardBudget, ExpirySweepsGiveEntriesBack) {
+    auto budget = make_budget(1'000);
+    cluster::dedup_window_filter f(1000ms, 1'000, budget);
+    populate_n(f, "old", 64, 1000, 0);
+    ASSERT_EQ(budget->entries, 64u);
+    // Each new identity far past the window sweeps eight expired entries.
+    populate_n(f, "new", 4, 1'000'000, 0);
+    EXPECT_LT(f.map_size(), 64u);
+    EXPECT_EQ(budget->entries, f.map_size());
+}
+
+TEST(DedupShardBudget, ClearRestoreAndDestructionKeepTheTotalExact) {
+    auto budget = make_budget(1'000);
+    cluster::dedup_window_filter a(100s, 1'000, budget);
+    populate_n(a, "a", 20);
+    {
+        cluster::dedup_window_filter b(100s, 1'000, budget);
+        populate_n(b, "b", 30);
+        EXPECT_EQ(budget->entries, 50u);
+
+        auto snap = b.snapshot();
+        b.clear();
+        EXPECT_EQ(budget->entries, 20u);
+        b.restore(snap);
+        EXPECT_EQ(budget->entries, 50u);
+        // Restoring over a populated index replaces, not adds.
+        b.restore(snap);
+        EXPECT_EQ(budget->entries, 50u);
+    }
+    // b's entries go back when it is destroyed.
+    EXPECT_EQ(budget->entries, 20u);
+    a.clear();
+    EXPECT_EQ(budget->entries, 0u);
+}
+
+// The bug this guards against: four saturated partitions on one shard, each
+// within its own ceiling, together far over what the shard can hold.
+TEST(DedupShardBudget, CombinedSizeStaysWithinTheShardLimit) {
+    constexpr size_t shard_limit = 200;
+    auto budget = make_budget(shard_limit);
+    std::vector<std::unique_ptr<cluster::dedup_window_filter>> filters;
+    for (int i = 0; i < 4; ++i) {
+        filters.push_back(
+          std::make_unique<cluster::dedup_window_filter>(100s, 1'000, budget));
+    }
+    for (size_t i = 0; i < 2'000; ++i) {
+        auto& f = *filters[i % filters.size()];
+        f.populate(
+          iobuf::from(fmt::format("id-{}", i)),
+          ts(1000 + static_cast<int64_t>(i)));
+        ASSERT_LE(budget->entries, shard_limit) << "after " << i;
+    }
+    size_t total = 0;
+    size_t trimmed = 0;
+    for (auto& f : filters) {
+        total += f->map_size();
+        trimmed += f->capacity_evicted_entries() + f->unindexed_records();
+        // Far below its own ceiling: the shard is what bound it.
+        EXPECT_LT(f->map_size(), f->max_entries());
+    }
+    EXPECT_EQ(total, budget->entries);
+    EXPECT_GT(trimmed, 0u);
+}
+
+// Shard pressure trims a partition that is nowhere near its own soft limit,
+// through the same oldest-quarter cursor the per-partition ceiling uses, so
+// the partition keeps its most recent identities rather than going blind.
+TEST(DedupShardBudget, PressureTrimsTheOldestEntriesOfTheInsertingPartition) {
+    constexpr size_t shard_limit = 100;
+    auto budget = make_budget(shard_limit);
+    // Timestamps spread across many of the cursor's histogram buckets: an
+    // index packed into one narrow range is deliberately never trimmed for
+    // capacity (see finish_pass()), which is not what this test is about.
+    cluster::dedup_window_filter f(100s, 10'000, budget);
+    constexpr size_t identities = 2'000;
+    constexpr int64_t step_ms = 100;
+    populate_n(f, "id", identities, 1000, step_ms);
+
+    EXPECT_LE(f.map_size(), shard_limit);
+    EXPECT_GT(f.capacity_evicted_entries(), 0u);
+    EXPECT_EQ(budget->entries, f.map_size());
+    // The newest identity is still indexed, so its duplicate is caught.
+    const auto newest = fmt::format("id-{}", identities - 1);
+    EXPECT_FALSE(
+      f.filter(make_batch(newest, "dup", ts(1000 + (identities - 1) * step_ms)))
+        .has_value());
+}
+
+// At the hard shard limit with nothing of its own to free, a partition admits
+// new identities unindexed rather than exceeding the limit. Once the space is
+// released elsewhere, it indexes again.
+TEST(DedupShardBudget, AtTheLimitAPartitionWithNothingToFreeAdmitsUnindexed) {
+    constexpr size_t shard_limit = 50;
+    auto budget = make_budget(shard_limit);
+    cluster::dedup_window_filter idle(100s, 1'000, budget);
+    {
+        auto full = std::make_unique<cluster::dedup_window_filter>(
+          100s, 1'000, budget);
+        // One timestamp for every entry, so the full index has no oldest
+        // quarter its cursor could give up: nothing anywhere on the shard is
+        // freeable, which is the case this test is about. (With spread
+        // timestamps the idle partition would get room from it instead; see
+        // AnIdlePartitionCannotStarveABusyOne.)
+        populate_n(*full, "full", shard_limit, 1000, 0);
+        ASSERT_EQ(budget->entries, shard_limit);
+
+        EXPECT_TRUE(idle.filter(make_batch("new", "v", ts(1000))).has_value());
+        EXPECT_EQ(idle.map_size(), 0u);
+        EXPECT_EQ(idle.unindexed_records(), 1u);
+        EXPECT_GT(idle.capacity_sweeps(), 0u);
+        EXPECT_EQ(budget->entries, shard_limit);
+    }
+    // The full partition went away (moved or deleted) and took its entries
+    // with it.
+    EXPECT_EQ(budget->entries, 0u);
+    EXPECT_TRUE(idle.filter(make_batch("new", "v", ts(2000))).has_value());
+    EXPECT_EQ(idle.map_size(), 1u);
+    EXPECT_FALSE(idle.filter(make_batch("new", "v", ts(2100))).has_value());
+}
+
+// The starvation case: one partition filled the shard's budget and then went
+// quiet, so it never inserts and never trims itself. A partition that starts
+// receiving new identities must still get room -- from the largest index's
+// cursor, a bounded step at a time -- or it would stay without coverage for
+// as long as the idle one sits there.
+TEST(DedupShardBudget, AnIdlePartitionCannotStarveABusyOne) {
+    constexpr size_t shard_limit = 200;
+    auto budget = make_budget(shard_limit);
+    cluster::dedup_window_filter hog(1'000s, 10'000, budget);
+    populate_n(hog, "hog", shard_limit, 1000, 1000);
+    // Shard pressure trims the hog's own oldest entries as it nears the
+    // limit, so it settles just under it rather than exactly at it.
+    const auto hog_full = hog.map_size();
+    ASSERT_GE(budget->entries, shard_limit * 9 / 10);
+    ASSERT_LE(budget->entries, shard_limit);
+
+    cluster::dedup_window_filter busy(1'000s, 10'000, budget);
+    populate_n(busy, "busy", 2'000, 300'000, 100);
+    EXPECT_LE(budget->entries, shard_limit);
+    EXPECT_EQ(budget->entries, hog.map_size() + busy.map_size());
+    EXPECT_GT(busy.map_size(), shard_limit / 4);
+    // The room came out of the hog.
+    EXPECT_LT(hog.map_size(), hog_full);
+    // The busy partition's newest identity is remembered.
+    EXPECT_FALSE(
+      busy.filter(make_batch("busy-1999", "dup", ts(300'000 + 1999 * 100)))
+        .has_value());
+}
+
+// A partition at its own ceiling makes room only from itself: the shard
+// budget never lets one partition grow past dedup_max_entries_per_partition.
+TEST(DedupShardBudget, OwnCeilingStillApplies) {
+    auto budget = make_budget(1'000);
+    cluster::dedup_window_filter big(1'000s, 10'000, budget);
+    populate_n(big, "big", 900, 1000, 1000);
+    cluster::dedup_window_filter capped(1'000s, 50, budget);
+    populate_n(capped, "c", 500, 300'000, 100);
+    EXPECT_LE(capped.map_size(), 50u);
+    EXPECT_EQ(big.map_size(), 900u);
+}
+
+// Filters leave the budget's registry when destroyed, so a later filter never
+// takes a step on one that is gone.
+TEST(DedupShardBudget, DestroyedFiltersLeaveTheRegistry) {
+    auto budget = make_budget(100);
+    {
+        cluster::dedup_window_filter a(100s, 1'000, budget);
+        cluster::dedup_window_filter b(100s, 1'000, budget);
+        EXPECT_EQ(budget->filters.size(), 2u);
+    }
+    EXPECT_TRUE(budget->filters.empty());
+    cluster::dedup_window_filter c(100s, 1'000, budget);
+    populate_n(c, "c", 150);
+    EXPECT_LE(c.map_size(), 100u);
+}
+
+// restore() is bounded by what the shard budget has left, not only by the
+// partition's own ceiling: restores happen at startup, and a broker whose
+// partitions each restored in full could run out of memory before it served
+// anything. What is kept is the newest identities.
+TEST(DedupShardBudget, RestoreIsBoundedByShardHeadroom) {
+    constexpr size_t shard_limit = 50;
+    auto budget = make_budget(shard_limit);
+    cluster::dedup_window_filter source(1'000s, 1'000);
+    populate_n(source, "r", 100, 1000, 1000);
+    const auto snap = source.snapshot();
+
+    cluster::dedup_window_filter first(1'000s, 1'000, budget);
+    first.restore(snap);
+    EXPECT_EQ(first.map_size(), shard_limit);
+    EXPECT_EQ(first.truncated_entries(), 50u);
+    EXPECT_EQ(budget->entries, shard_limit);
+    for (const auto& entry : first.snapshot().entries) {
+        // r-50..r-99, stamped 1000 + i*1000.
+        EXPECT_GE(entry.timestamp.value(), 1000 + 50 * 1000);
+    }
+
+    // The shard is full, so a second partition restores nothing.
+    cluster::dedup_window_filter second(1'000s, 1'000, budget);
+    second.restore(snap);
+    EXPECT_EQ(second.map_size(), 0u);
+    EXPECT_EQ(second.truncated_entries(), 100u);
+    EXPECT_EQ(budget->entries, shard_limit);
+
+    // Restoring a partition again replaces its own share first, so it gets
+    // that share back rather than being counted against itself.
+    first.restore(snap);
+    EXPECT_EQ(first.map_size(), shard_limit);
+    EXPECT_EQ(budget->entries, shard_limit);
+}
+
+// Entries at the trim cutoff timestamp fill exactly the room that is left, so
+// a restore keeps exactly what it may and never more.
+TEST(DedupShardBudget, RestoreTrimsTiesAtTheCutoffExactly) {
+    cluster::dedup_index_snapshot snap{.max_timestamp = ts(5000)};
+    for (uint64_t i = 0; i < 40; ++i) {
+        snap.entries.push_back(
+          {.identity = {.hi = i + 1, .lo = (i + 1) * 0x9e37'79b9'7f4a'7c15ULL},
+           .timestamp = ts(i < 30 ? 4000 : 5000)});
+    }
+    auto budget = make_budget(25);
+    cluster::dedup_window_filter f(1'000s, 1'000, budget);
+    f.restore(snap);
+    EXPECT_EQ(f.map_size(), 25u);
+    EXPECT_EQ(f.truncated_entries(), 15u);
+    size_t newest = 0;
+    for (const auto& entry : f.snapshot().entries) {
+        newest += entry.timestamp == ts(5000) ? 1 : 0;
+    }
+    EXPECT_EQ(newest, 10u);
+}
+
+// With no shard budget, restore keeps everything up to the partition ceiling,
+// as it always did.
+TEST(DedupShardBudget, RestoreWithoutABudgetKeepsUpToTheCeiling) {
+    cluster::dedup_window_filter source(1'000s, 1'000);
+    populate_n(source, "r", 100, 1000, 1000);
+    cluster::dedup_window_filter f(1'000s, 60);
+    f.restore(source.snapshot());
+    EXPECT_EQ(f.map_size(), 60u);
+    EXPECT_EQ(f.truncated_entries(), 40u);
+}
+
+// A restart that fills the shard from snapshots must not leave dedup off until
+// the cursor has walked the whole restored index: restore computes the
+// capacity cutoff from what it restored, so the very first new identities
+// already find something old enough to trim.
+TEST(DedupShardBudget, ARestoredFullShardIndexesNewIdentitiesAtOnce) {
+    constexpr size_t shard_limit = 5'000;
+    auto budget = make_budget(shard_limit);
+    cluster::dedup_window_filter source(1'000s, 100'000);
+    populate_n(source, "old", shard_limit, 1000, 10);
+    const auto snap = source.snapshot();
+
+    cluster::dedup_window_filter f(1'000s, 100'000, budget);
+    f.restore(snap);
+    ASSERT_EQ(budget->entries, shard_limit);
+
+    populate_n(f, "new", 200, 1000 + 10 * shard_limit);
+    EXPECT_EQ(f.unindexed_records(), 0u);
+    EXPECT_LE(budget->entries, shard_limit);
+    for (size_t i = 0; i < 200; ++i) {
+        EXPECT_FALSE(
+          f.filter(make_batch(fmt::format("new-{}", i), "dup", ts(60'000)))
+            .has_value())
+          << i;
+    }
+}
+
+// Two partitions filling the shard, one idle at half of it and one still
+// receiving new identities. Neither is far larger, so the busy one trims
+// itself rather than waiting for the idle one to give up room -- and it trims
+// down into the shard's soft zone, as it would below its own ceiling, so its
+// cursor always has headroom to find the next entries old enough to drop.
+TEST(DedupShardBudget, TiedIndicesAtTheShardLimitKeepIndexing) {
+    constexpr size_t shard_limit = 2'000;
+    auto budget = make_budget(shard_limit);
+    cluster::dedup_window_filter a(1'000s, 100'000, budget);
+    cluster::dedup_window_filter b(1'000s, 100'000, budget);
+    populate_n(a, "a", shard_limit / 2, 1000, 10);
+    populate_n(b, "b", shard_limit / 2, 1000, 10);
+    ASSERT_GE(budget->entries, shard_limit * 9 / 10);
+    ASSERT_LE(budget->entries, shard_limit);
+    ASSERT_EQ(b.unindexed_records(), 0u);
+
+    populate_n(b, "b-new", 400, 1000 + 10 * shard_limit);
+    EXPECT_EQ(b.unindexed_records(), 0u);
+    EXPECT_LE(budget->entries, shard_limit);
+    EXPECT_FALSE(
+      b.filter(
+         make_batch("b-new-399", "dup", ts(1000 + 10 * shard_limit + 399)))
+        .has_value());
+}
+
+// Four partitions filled past the shard's budget, one after another, so the
+// earlier ones were trimmed while full and their oldest survivors are
+// scattered through their indices. After a restart restores them into a full
+// shard, every new identity on every partition is indexed: the restore puts
+// the entries old enough to trim at the front, where the cursor starts.
+TEST(DedupShardBudget, PartitionsRestoredIntoAFullShardKeepIndexing) {
+    constexpr size_t shard_limit = 40'000;
+    constexpr size_t per_partition = shard_limit * 2 / 5;
+    constexpr auto window = std::chrono::milliseconds{3'600'000};
+    constexpr size_t no_ceiling = 1'000'000'000;
+    auto budget = make_budget(shard_limit);
+    std::vector<cluster::dedup_index_snapshot> snaps;
+    int64_t clock = 1'000'000;
+    {
+        std::vector<std::unique_ptr<cluster::dedup_window_filter>> filters;
+        for (int p = 0; p < 4; ++p) {
+            filters.push_back(
+              std::make_unique<cluster::dedup_window_filter>(
+                window, no_ceiling, budget));
+        }
+        for (size_t p = 0; p < filters.size(); ++p) {
+            for (size_t i = 0; i < per_partition; ++i) {
+                filters[p]->populate(
+                  iobuf::from(fmt::format("p{}-{}", p, i)),
+                  ts(clock + static_cast<int64_t>(i / 50)));
+            }
+            clock += static_cast<int64_t>(per_partition / 50);
+        }
+        ASSERT_GE(budget->entries, shard_limit * 9 / 10);
+        for (auto& f : filters) {
+            snaps.push_back(f->snapshot());
+        }
+    }
+    ASSERT_EQ(budget->entries, 0u);
+
+    std::vector<std::unique_ptr<cluster::dedup_window_filter>> restored;
+    for (const auto& snap : snaps) {
+        restored.push_back(
+          std::make_unique<cluster::dedup_window_filter>(
+            window, no_ceiling, budget));
+        restored.back()->restore(snap);
+    }
+    ASSERT_GE(budget->entries, shard_limit * 9 / 10);
+
+    for (size_t p = 0; p < restored.size(); ++p) {
+        for (int64_t i = 0; i < 1'000; ++i) {
+            restored[p]->populate(
+              iobuf::from(fmt::format("probe{}-{}", p, i)),
+              ts(clock + 1'000 + i));
+        }
+        EXPECT_EQ(restored[p]->unindexed_records(), 0u) << "partition " << p;
+        EXPECT_LE(budget->entries, shard_limit);
+    }
+}
+
+// Indices built on a larger shard, restarted into one with half the budget:
+// some partitions restore in full, later ones are cut short, and each then
+// replays the log past its snapshot. That replay takes its room from the
+// largest index, which drives the largest one's cursor through all its entries
+// below the capacity cutoff long before the pass ends. New identities that
+// arrive afterwards still get indexed -- each replaces the oldest entry the
+// bounded step walked past -- instead of being admitted unindexed until the
+// cursor wraps.
+TEST(DedupShardBudget, AfterReplayIntoASmallerShardNewIdentitiesAreIndexed) {
+    constexpr size_t big_limit = 40'000;
+    constexpr size_t per_partition = big_limit * 22 / 100;
+    constexpr std::array<double, 4> snapshot_at{0.65, 1.0, 0.9, 1.0};
+    constexpr auto window = std::chrono::milliseconds{3'600'000};
+    constexpr size_t no_ceiling = 1'000'000'000;
+    auto key = [](size_t p, size_t i) {
+        return iobuf::from(fmt::format("p{}-{}", p, i));
+    };
+    struct partition {
+        cluster::dedup_index_snapshot snap;
+        size_t snapshotted;
+        int64_t first_ts;
+    };
+    std::vector<partition> parts;
+    int64_t clock = 1'000'000;
+    {
+        auto budget = make_budget(big_limit);
+        for (size_t p = 0; p < snapshot_at.size(); ++p) {
+            cluster::dedup_window_filter f(window, no_ceiling, budget);
+            const auto cut = static_cast<size_t>(
+              static_cast<double>(per_partition) * snapshot_at[p]);
+            for (size_t i = 0; i < per_partition; ++i) {
+                if (i == cut) {
+                    parts.push_back({f.snapshot(), cut, clock});
+                }
+                f.populate(key(p, i), ts(clock + static_cast<int64_t>(i / 50)));
+            }
+            if (cut == per_partition) {
+                parts.push_back({f.snapshot(), cut, clock});
+            }
+            clock += static_cast<int64_t>(per_partition / 50);
+        }
+    }
+
+    auto budget = make_budget(big_limit / 2);
+    std::array<std::unique_ptr<cluster::dedup_window_filter>, 4> restored;
+    for (const size_t p : {0UL, 2UL, 1UL, 3UL}) {
+        restored[p] = std::make_unique<cluster::dedup_window_filter>(
+          window, no_ceiling, budget);
+        restored[p]->restore(parts[p].snap);
+        for (size_t i = parts[p].snapshotted; i < per_partition; ++i) {
+            restored[p]->populate(
+              key(p, i), ts(parts[p].first_ts + static_cast<int64_t>(i / 50)));
+        }
+    }
+    ASSERT_LE(budget->entries, big_limit / 2);
+
+    for (size_t p = 0; p < restored.size(); ++p) {
+        const auto before = restored[p]->unindexed_records();
+        for (int64_t i = 0; i < 500; ++i) {
+            restored[p]->populate(
+              iobuf::from(fmt::format("new{}-{}", p, i)),
+              ts(clock + 10'000 + i));
+        }
+        EXPECT_EQ(restored[p]->unindexed_records(), before)
+          << "partition " << p;
+        EXPECT_LE(budget->entries, big_limit / 2);
+    }
+}
+
+// Many small idle indices filling the shard between them, none larger than a
+// tenth of the shard: a partition that starts receiving new identities must
+// still take room from them and grow, rather than count as one of the largest
+// because they are all small and so only ever trim its own few entries.
+TEST(DedupShardBudget, ManySmallIdleIndicesCannotStarveABusyOne) {
+    constexpr size_t shard_limit = 20'000;
+    constexpr size_t idle_count = 20;
+    constexpr auto window = std::chrono::milliseconds{3'600'000};
+    constexpr size_t no_ceiling = 1'000'000'000;
+    auto budget = make_budget(shard_limit);
+    std::vector<std::unique_ptr<cluster::dedup_window_filter>> idle;
+    for (size_t j = 0; j < idle_count; ++j) {
+        idle.push_back(
+          std::make_unique<cluster::dedup_window_filter>(
+            window, no_ceiling, budget));
+        populate_n(
+          *idle.back(),
+          fmt::format("idle{}", j),
+          shard_limit / idle_count,
+          1000 + static_cast<int64_t>(j) * 1000);
+    }
+    ASSERT_GE(budget->entries, shard_limit * 9 / 10);
+
+    cluster::dedup_window_filter busy(window, no_ceiling, budget);
+    populate_n(busy, "busy", 2'000, 1'000'000);
+    EXPECT_LE(budget->entries, shard_limit);
+    EXPECT_GT(busy.map_size(), shard_limit / idle_count / 2);
+    EXPECT_FALSE(
+      busy.filter(make_batch("busy-1999", "dup", ts(1'000'000 + 1'999)))
+        .has_value());
+}
+
+// An index that is emptied stops being the shard's largest at once, rather
+// than being offered as the one to take room from until the next refresh.
+TEST(DedupShardBudget, AnEmptiedIndexIsNoLongerTheLargest) {
+    auto budget = make_budget(1'000);
+    cluster::dedup_window_filter big(1'000s, 10'000, budget);
+    cluster::dedup_window_filter small(1'000s, 10'000, budget);
+    populate_n(big, "big", 500, 1000, 10);
+    populate_n(small, "small", 50, 1000, 10);
+    ASSERT_EQ(budget->largest(), &big);
+
+    big.clear();
+    EXPECT_EQ(budget->largest(), &small);
+
+    populate_n(big, "big-again", 500, 10'000, 10);
+    budget->largest_cache = &big;
+    big.restore(cluster::dedup_index_snapshot{});
+    EXPECT_EQ(budget->largest(), &small);
+}
+
+// An index written in a burst covers a sliver of a long window. The capacity
+// cutoff is measured against the timestamps the index holds rather than the
+// whole window, so it still marks the oldest quarter instead of nothing.
+TEST(DedupWindowFilter, CapacityCutoffResolvesABurstInALongWindow) {
+    constexpr size_t cap = 1'000;
+    cluster::dedup_window_filter f(24h, cap);
+    // 1000 identities over one second of a 24 hour window: all of them fall
+    // in one bucket of a window-wide frame.
+    populate_n(f, "burst", cap, 1'000'000, 1);
+    populate_n(f, "more", 400, 1'001'000, 1);
+    EXPECT_LE(f.unindexed_records(), cap / 64);
+    EXPECT_GT(f.capacity_evicted_entries(), 0u);
+    EXPECT_LE(f.map_size(), cap);
+}
+
+// The same after a restart, where both restore as far as the shard allows.
+TEST(DedupShardBudget, RestoredPartitionsSharingAFullShardKeepIndexing) {
+    constexpr size_t shard_limit = 4'000;
+    auto budget = make_budget(shard_limit);
+    std::vector<cluster::dedup_index_snapshot> snaps;
+    size_t held = 0;
+    {
+        cluster::dedup_window_filter a(1'000s, 100'000, budget);
+        cluster::dedup_window_filter b(1'000s, 100'000, budget);
+        populate_n(a, "a", shard_limit / 2, 1000, 10);
+        populate_n(b, "b", shard_limit / 2, 1000, 10);
+        snaps.push_back(a.snapshot());
+        snaps.push_back(b.snapshot());
+        held = budget->entries;
+    }
+    ASSERT_EQ(budget->entries, 0u);
+    ASSERT_GE(held, shard_limit * 4 / 5);
+    cluster::dedup_window_filter a(1'000s, 100'000, budget);
+    cluster::dedup_window_filter b(1'000s, 100'000, budget);
+    a.restore(snaps[0]);
+    b.restore(snaps[1]);
+    ASSERT_EQ(budget->entries, held);
+
+    for (auto* f : {&a, &b}) {
+        populate_n(*f, fmt::format("new-{}", f == &a ? "a" : "b"), 300, 50'000);
+        EXPECT_EQ(f->unindexed_records(), 0u);
+        EXPECT_LE(budget->entries, shard_limit);
+    }
+}
+
+// The leader's and the follower's paths must still agree with each other when
+// the shard budget is what is doing the trimming, given the same shard state.
+TEST(DedupShardBudget, LeaderAndFollowerPathsAgreeUnderShardPressure) {
+    constexpr size_t shard_limit = 40;
+    auto leader_budget = make_budget(shard_limit);
+    auto follower_budget = make_budget(shard_limit);
+    cluster::dedup_window_filter leader(100s, 1'000, leader_budget);
+    cluster::dedup_window_filter follower(100s, 1'000, follower_budget);
+
+    for (size_t i = 0; i < 500; ++i) {
+        const auto key = fmt::format("id-{}", i);
+        const auto stamp = ts(1000 + static_cast<int64_t>(i) * 150);
+        ASSERT_TRUE(leader.filter(make_batch(key, "v", stamp)).has_value());
+        follower.populate(iobuf::from(key), stamp);
+    }
+    ASSERT_GT(leader.capacity_evicted_entries(), 0u);
+    EXPECT_EQ(leader.snapshot(), follower.snapshot());
+    EXPECT_EQ(leader_budget->entries, follower_budget->entries);
+    EXPECT_EQ(
+      leader.capacity_evicted_entries(), follower.capacity_evicted_entries());
+}
+
+// The same, when the room comes from replacing the oldest entry of another
+// index: an idle index whose entries share one timestamp never forms a
+// capacity cutoff, so every slot the busy partition gets is a replacement.
+// The leader's produce path and the follower's apply path must still make
+// the same choice on both indices.
+TEST(DedupShardBudget, LeaderAndFollowerAgreeWhenReplacing) {
+    constexpr size_t shard_limit = 50;
+    auto leader_budget = make_budget(shard_limit);
+    auto follower_budget = make_budget(shard_limit);
+    cluster::dedup_window_filter leader_idle(100s, 1'000, leader_budget);
+    cluster::dedup_window_filter leader_busy(100s, 1'000, leader_budget);
+    cluster::dedup_window_filter follower_idle(100s, 1'000, follower_budget);
+    cluster::dedup_window_filter follower_busy(100s, 1'000, follower_budget);
+    populate_n(leader_idle, "idle", 40, 1000, 0);
+    populate_n(follower_idle, "idle", 40, 1000, 0);
+
+    for (size_t i = 0; i < 200; ++i) {
+        const auto key = fmt::format("busy-{}", i);
+        const auto stamp = ts(2000 + static_cast<int64_t>(i));
+        ASSERT_TRUE(
+          leader_busy.filter(make_batch(key, "v", stamp)).has_value());
+        follower_busy.populate(iobuf::from(key), stamp);
+    }
+    ASSERT_GT(leader_idle.capacity_evicted_entries(), 0u);
+    EXPECT_EQ(leader_busy.unindexed_records(), 0u);
+    EXPECT_EQ(leader_idle.snapshot(), follower_idle.snapshot());
+    EXPECT_EQ(leader_busy.snapshot(), follower_busy.snapshot());
+    EXPECT_EQ(leader_budget->entries, follower_budget->entries);
+    EXPECT_LE(leader_budget->entries, shard_limit);
+}
+
+// Replacement keeps the newer identity, never an older one: an identity older
+// than everything in the full shard is admitted unindexed, and nothing is
+// evicted for it.
+TEST(DedupShardBudget, ReplacementNeverDropsANewerEntry) {
+    constexpr size_t shard_limit = 50;
+    auto budget = make_budget(shard_limit);
+    cluster::dedup_window_filter full(100s, 1'000, budget);
+    cluster::dedup_window_filter late(100s, 1'000, budget);
+    populate_n(full, "full", shard_limit, 5000, 0);
+    ASSERT_EQ(budget->entries, shard_limit);
+
+    late.populate(iobuf::from("older"), ts(1000));
+    EXPECT_EQ(late.unindexed_records(), 1u);
+    EXPECT_EQ(late.map_size(), 0u);
+    EXPECT_EQ(full.capacity_evicted_entries(), 0u);
+    EXPECT_EQ(full.map_size(), shard_limit);
+}
+
+// Shard pressure trims down to the shard's soft limit and no further: the
+// condition is re-checked as each entry is dropped, so a sweep step does not
+// keep trimming live identities once its own erases have brought the shard
+// back under it.
+TEST(DedupShardBudget, ShardPressureTrimsNoFurtherThanTheSoftLimit) {
+    constexpr size_t shard_limit = 1'000;
+    auto budget = make_budget(shard_limit);
+    cluster::dedup_window_filter f(1'000s, 100'000, budget);
+    bool reached = false;
+    size_t lowest = shard_limit;
+    for (size_t i = 0; i < 3'000; ++i) {
+        f.populate(
+          iobuf::from(fmt::format("k{}", i)),
+          ts(1000 + static_cast<int64_t>(i) * 10));
+        reached = reached || f.map_size() >= shard_limit;
+        if (reached) {
+            lowest = std::min(lowest, f.map_size());
+        }
+    }
+    ASSERT_TRUE(reached);
+    EXPECT_GE(lowest, shard_limit * 9 / 10);
+    EXPECT_EQ(f.unindexed_records(), 0u);
+}
+
+// Randomized: whatever mix of operations runs against several filters, the
+// budget equals the sum of their sizes after every one of them.
+TEST(DedupShardBudget, TotalMatchesTheIndicesUnderRandomOperations) {
+    auto budget = make_budget(300);
+    std::vector<std::unique_ptr<cluster::dedup_window_filter>> filters;
+    for (int i = 0; i < 3; ++i) {
+        filters.push_back(
+          std::make_unique<cluster::dedup_window_filter>(5s, 150, budget));
+    }
+    std::mt19937 rng(20261013); // NOLINT(cert-msc51-cpp): reproducible
+    int64_t clock = 1000;
+    std::vector<cluster::dedup_request_undo> pending;
+    for (int step = 0; step < 20'000; ++step) {
+        auto& f = *filters[rng() % filters.size()];
+        clock += static_cast<int64_t>(rng() % 50);
+        const auto key = fmt::format("k-{}", rng() % 700);
+        switch (rng() % 100) {
+        case 0:
+            f.clear();
+            break;
+        case 1:
+            f.restore(f.snapshot());
+            break;
+        case 2:
+            if (!pending.empty()) {
+                f.revert_request(pending.back());
+                pending.pop_back();
+            }
+            break;
+        default:
+            if (rng() % 2 == 0) {
+                f.populate(iobuf::from(key), ts(clock));
+            } else {
+                auto result = f.filter_request(make_batch(key, "v", ts(clock)));
+                if (rng() % 10 == 0) {
+                    pending.push_back(std::move(result.undo));
+                }
+            }
+        }
+        size_t total = 0;
+        for (auto& g : filters) {
+            total += g->map_size();
+        }
+        ASSERT_EQ(budget->entries, total) << "step " << step;
+    }
+    filters.clear();
+    EXPECT_EQ(budget->entries, 0u);
 }

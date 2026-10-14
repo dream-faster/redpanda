@@ -34,6 +34,12 @@ model::record parse_one_record_from_buffer(iobuf_parser& parser);
 model::record parse_one_record_copy_from_buffer(iobuf_const_parser& parser);
 void append_record_to_buffer(iobuf& a, const model::record& r);
 
+/// Extend \p crc with exactly the bytes append_record_to_buffer() would write
+/// for \p r, without materializing them: the key, value and header payloads
+/// are read in place. For checksumming a batch whose records are too large to
+/// encode into a second buffer.
+void crc_extend_record(crc::crc32c& crc, const model::record& r);
+
 // \brief Parses record metadata
 // If `fully_parse_record` is false then only a few fields are parsed from the
 // record. Otherwise all fields are fully parsed and validated.

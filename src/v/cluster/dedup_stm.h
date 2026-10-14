@@ -12,13 +12,17 @@
 #include "cluster/dedup_window_filter.h"
 #include "cluster/state_machine_registry.h"
 #include "cluster/types.h"
+#include "container/chunked_hash_map.h"
 #include "metrics/metrics.h"
 #include "model/fundamental.h"
 #include "raft/persisted_stm.h"
 #include "serde/envelope.h"
-#include "serde/rw/vector.h"
+#include "serde/rw/envelope.h"
+#include "serde/rw/iobuf.h"
+#include "serde/rw/scalar.h"
 #include "utils/available_promise.h"
 
+#include <seastar/core/circular_buffer.hh>
 #include <seastar/core/future.hh>
 #include <seastar/core/shared_future.hh>
 #include <seastar/core/shared_ptr.hh>
@@ -39,17 +43,27 @@ struct dedup_stm_test_accessor;
 /// are therefore convergent rather than byte-exact — serializing the current
 /// state for an older target offset is safe because populate() is idempotent
 /// (max-timestamp-wins), so snapshot-plus-replay converges to the same state.
-class dedup_stm
-  : public raft::persisted_stm<raft::kvstore_backed_stm_snapshot> {
+///
+/// Local snapshots are files in the partition directory, not kvstore values.
+/// A saturated index snapshots to tens of MiB, and the kvstore holds every
+/// value in memory for as long as it exists and copies all of them each time
+/// it rolls a segment -- which a value larger than kvstore_max_segment_size
+/// forces on nearly every write. On a shard hosting several saturated indices
+/// that cost several times the indices themselves.
+class dedup_stm : public raft::persisted_stm<> {
 public:
     static constexpr std::string_view name = "dedup_stm";
+    /// Bytes one index entry occupies in a snapshot: digest hi, digest lo,
+    /// timestamp. See state_snapshot.
+    static constexpr size_t packed_entry_size = 3 * sizeof(uint64_t);
 
     dedup_stm(
       raft::consensus*,
       ss::logger&,
       storage::kvstore&,
       config::binding<std::chrono::milliseconds> sync_timeout,
-      size_t max_entries);
+      size_t max_entries,
+      ss::lw_shared_ptr<dedup_shard_budget> shard_budget = nullptr);
 
     /// Filter and replicate one plain produce batch. The dedup window and
     /// generation are read from the partition's ntp_config, the same source
@@ -95,77 +109,37 @@ protected:
 private:
     friend struct dedup_stm_test_accessor;
 
-    /// The identity digest is written as its two halves rather than as a
-    /// nested envelope, which would add a second serde header per entry.
+    /// Version history, each a compat break the reader handles by discarding
+    /// the snapshot and rebuilding the index from the log (see
+    /// try_restore_snapshot()); the index is advisory and log-derived, so that
+    /// is correct, only slower:
     ///
-    /// Version 1 replaced the full identity bytes with the digest. The
-    /// compat version moves with it: a version 0 snapshot cannot be
-    /// re-derived into digests without the identities it no longer carries.
-    /// Discarding such a snapshot is safe -- the index is advisory and
-    /// log-derived, so it rebuilds on replay -- and apply_local_snapshot()
-    /// does exactly that, reporting local_snapshot_applied::no so the
-    /// rebuild actually happens, rather than failing to start.
+    /// - 0: full identity bytes per entry.
+    /// - 1: a 128-bit digest per entry, each its own serde envelope.
+    /// - 2: the entries as one packed blob of fixed packed_entry_size records
+    ///   (digest hi, digest lo, timestamp; each little-endian). Written in one
+    ///   pass straight from the index, so a snapshot costs one serialized copy
+    ///   -- 24 bytes per entry -- instead of an entry vector plus a 30-byte
+    ///   per-entry encoding of it.
     ///
-    /// That tolerance only runs forward, and only matters for clusters
-    /// running an in-flight build of this branch: dedup is unreleased, so no
-    /// released version can hold a version 0 snapshot. Downgrading past this
-    /// commit is the direction that is not safe -- an older binary reading a
-    /// version 1 snapshot throws out of its own apply_local_snapshot(),
-    /// which persisted_stm does not guard, and the STM fails to start.
-    /// Removing the local snapshot lets such a node rebuild from the log.
-    struct wire_entry
-      : serde::
-          envelope<wire_entry, serde::version<1>, serde::compat_version<1>> {
-        uint64_t identity_hi{0};
-        uint64_t identity_lo{0};
-        model::timestamp timestamp;
-
-        auto serde_fields() {
-            return std::tie(identity_hi, identity_lo, timestamp);
-        }
-    };
-
+    /// The break runs both ways: an older binary rejects a version 2 snapshot
+    /// on compat version and rebuilds the same way, so a raft snapshot crossing
+    /// a rolling upgrade in either direction costs a rebuild, not a failed
+    /// partition. Version 1 snapshots only ever lived in the kvstore, which
+    /// this STM no longer reads.
     struct state_snapshot
       : serde::envelope<
           state_snapshot,
-          serde::version<1>,
-          serde::compat_version<1>> {
+          serde::version<2>,
+          serde::compat_version<2>> {
         int64_t window_ms{0};
         int64_t generation{0};
         model::timestamp max_timestamp{model::timestamp::min()};
-        /// New-identity attempts since the last eviction sweep, back when
-        /// eviction ran on an interval counted in them. The cursor now sweeps
-        /// on every attempt, so nothing reads this -- and nothing should: the
-        /// leader counted an identity twice (once speculatively, once on
-        /// apply) where a follower counted it once, and revert_request() never
-        /// gave one back, so replicas never agreed on it anyway.
-        ///
-        /// Kept in its slot because serde envelopes are positional: dropping
-        /// it would change the bytes a broker already running this branch
-        /// wrote. Written as zero, and whatever a peer wrote is parsed and
-        /// dropped -- see cluster/legacy_wire.h for the same treatment of
-        /// removed topic_properties fields.
-        uint64_t legacy_inserts_since_evict{0};
-        chunked_vector<wire_entry> entries;
+        iobuf entries;
 
         auto serde_fields() {
-            return std::tie(
-              window_ms,
-              generation,
-              max_timestamp,
-              legacy_inserts_since_evict,
-              entries);
+            return std::tie(window_ms, generation, max_timestamp, entries);
         }
-
-        /// Writes exactly the layout serde_fields() produces, yielding
-        /// between batches of entries. A saturated index holds millions of
-        /// them, and serializing the lot in one task stalls the reactor for
-        /// as long as it takes -- the snapshot is written from whichever
-        /// scheduling group appended the bytes that triggered it, so the
-        /// stall lands on the produce or Raft path. Only serde::write_async()
-        /// picks this up; the plain serde::write() path still walks
-        /// serde_fields(), and the two must stay byte-identical.
-        ss::future<> serde_async_write(iobuf& out);
     };
 
     ss::future<result<kafka_result>> do_replicate(
@@ -173,15 +147,64 @@ private:
       raft::replicate_options,
       ss::lw_shared_ptr<available_promise<>>);
 
-    static state_snapshot
-    to_snapshot(const dedup_window_filter&, int64_t generation);
-    static void restore_snapshot(
-      dedup_window_filter&, int64_t& generation, const state_snapshot&);
+    /// A request whose batch this leader admitted but raft has not yet
+    /// confirmed appended. The identities it introduced are in the index, so
+    /// the requests behind it see them, but not yet in the log. A request
+    /// that drops a record against one of them waits for the outcome before
+    /// it is acknowledged, and a snapshot leaves them out. `appended` resolves
+    /// true once the batch is appended at the request's consistency level,
+    /// false once it is known never to have been and its entries are reverted.
+    struct inflight_request {
+        ss::shared_promise<bool> appended;
+    };
+    using inflight_ptr = ss::lw_shared_ptr<inflight_request>;
+    using pending_identities = chunked_hash_map<
+      dedup_identity_digest,
+      inflight_ptr,
+      dedup_identity_digest_hash>;
+
+    /// Serialize the index's live entries, yielding between chunks. The
+    /// produce path mutates the index meanwhile; the filter's walk accounts
+    /// for that (dedup_window_filter::for_each_live_entry_async()), and a walk
+    /// the index was cleared or replaced under starts over. \p generation is
+    /// read once the entries are written, so the two describe the same index.
+    /// Identities in \p pending -- introduced by requests still in flight --
+    /// are left out: they are not in the log yet, and a snapshot that held one
+    /// of them would, after a crash, drop the producer's retry of a record no
+    /// replica ever wrote.
+    static ss::future<iobuf> serialize_snapshot(
+      dedup_window_filter&,
+      const int64_t& generation,
+      const pending_identities* pending = nullptr);
+    /// Install a snapshot, yielding between chunks of its entries: a restore
+    /// of millions of entries at startup would otherwise hold the reactor,
+    /// and every other partition on the shard waiting to restore behind it.
+    static ss::future<>
+    restore_snapshot(dedup_window_filter&, int64_t& generation, state_snapshot);
     /// Deserialize and install a snapshot, or reset to an empty index if the
     /// buffer cannot be read. Returns whether the snapshot was applied.
-    bool try_restore_snapshot(iobuf);
+    ss::future<bool> try_restore_snapshot(iobuf);
 
     void setup_metrics();
+
+    /// Resolve an in-flight request: drop its identities from the pending
+    /// set, revert its insertions if the batch was never appended, and
+    /// release the requests waiting on it.
+    void settle(
+      const inflight_ptr&,
+      const dedup_request_undo&,
+      bool appended,
+      std::optional<uint64_t> self_key);
+    /// Raft reported a timeout for the request's batch, which says nothing
+    /// about whether the batch was appended: the batcher may have flushed it
+    /// before the timer fired. Keep its identities pending until the question
+    /// settles, then settle() accordingly.
+    ss::future<> resolve_after_timeout(
+      inflight_ptr,
+      dedup_request_undo,
+      std::optional<uint64_t> self_key,
+      model::term_id,
+      uint64_t evictions_before);
 
     void adopt_config(
       std::chrono::milliseconds window,
@@ -189,28 +212,55 @@ private:
       const std::optional<ss::sstring>& key_header);
     kafka::offset from_log_offset(model::offset) const;
 
+    /// Batches this leader filtered and handed to raft, by their record crc
+    /// and count, so do_apply() can skip indexing what filter_request()
+    /// already indexed; see self_filtered_key(). Bounded: an entry is
+    /// removed when its batch applies or its request fails, and a batch that
+    /// never does either (a request still in flight at a leadership change,
+    /// before raft reports it) ages out.
+    static uint64_t self_filtered_key(const model::record_batch_header&);
+    void remember_self_filtered(uint64_t key);
+    /// Returns whether the key was still remembered.
+    bool forget_self_filtered(uint64_t key);
+    bool take_self_filtered(uint64_t key);
+    static constexpr size_t self_filtered_max = 4096;
+    chunked_hash_map<uint64_t, uint32_t> _self_filtered;
+    ss::circular_buffer<uint64_t> _self_filtered_order;
+    /// Keys aged out of _self_filtered while their batch was still in flight.
+    /// A key that is gone was either taken by do_apply() -- its batch applied
+    /// -- or aged out; this count tells the two apart.
+    uint64_t _self_filtered_evictions{0};
+    /// Keys of batches raft timed out on, mapped to whether do_apply() has
+    /// seen the batch since. Unlike _self_filtered these never age out, so a
+    /// resolution that waits on them cannot be fooled by load; see
+    /// resolve_after_timeout(). Bounded by the timed-out requests still
+    /// unresolved.
+    chunked_hash_map<uint64_t, bool> _resolving;
+
+    /// Only to drop the snapshot an earlier build kept in the kvstore.
+    storage::kvstore& _kvstore;
     config::binding<std::chrono::milliseconds> _sync_timeout;
     dedup_window_filter _state;
     int64_t _generation{0};
-    // Append-order fence: resolves once the most recently admitted request's
-    // batch has been appended to the leader log. A request that observed a
-    // duplicate waits on it before proceeding, so its own (possibly empty)
-    // replication is ordered after the append that introduced its keys and
-    // the Raft prefix property makes its acknowledgment safe.
-    // Resolved with true once the fenced request's batch is durably
-    // enqueued to the local log, false if that enqueue failed -- so a
-    // waiter fenced on it can tell "safe to proceed" apart from "the
-    // introducing write never landed" instead of treating both as success.
-    ss::lw_shared_ptr<ss::shared_promise<bool>> _append_tail;
+    /// Identities introduced by requests still in flight on this leader; see
+    /// inflight_request. Bounded by the records in flight.
+    pending_identities _pending;
+    /// Committed batches do_apply() could not read; see do_apply().
+    uint64_t _batches_skipped{0};
+    /// Whether start() applied a local snapshot; see start().
+    bool _local_snapshot_applied{false};
     metrics::internal_metric_groups _metrics;
 };
 
 class dedup_stm_factory : public state_machine_factory {
 public:
+    /// One factory per shard, so the budget it hands its STMs is the shard's.
+    /// max_entries_per_shard of 0 derives the limit from shard memory.
     dedup_stm_factory(
       storage::kvstore&,
       config::binding<std::chrono::milliseconds> sync_timeout,
-      size_t max_entries);
+      size_t max_entries,
+      size_t max_entries_per_shard);
 
     bool is_applicable_for(const storage::ntp_config&) const final;
 
@@ -220,9 +270,13 @@ public:
       const cluster::stm_instance_config&) final;
 
 private:
+    void setup_metrics();
+
     storage::kvstore& _kvstore;
     config::binding<std::chrono::milliseconds> _sync_timeout;
     size_t _max_entries;
+    ss::lw_shared_ptr<dedup_shard_budget> _shard_budget;
+    metrics::internal_metric_groups _metrics;
 };
 
 } // namespace cluster

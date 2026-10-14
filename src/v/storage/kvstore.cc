@@ -13,12 +13,16 @@
 #include "bytes/iobuf.h"
 #include "bytes/iostream.h"
 #include "config/configuration.h"
+#include "container/chunked_vector.h"
 #include "metrics/prometheus_sanitize.h"
+#include "model/adl_serde.h"
 #include "model/async_adl_serde.h"
 #include "model/namespace.h"
+#include "model/record_utils.h"
 #include "reflection/adl.h"
 #include "ssx/async_algorithm.h"
 #include "ssx/future-util.h"
+#include "ssx/sformat.h"
 #include "storage/parser.h"
 #include "storage/record_batch_builder.h"
 #include "storage/segment.h"
@@ -31,11 +35,14 @@
 #include <seastar/coroutine/maybe_yield.hh>
 #include <seastar/util/log.hh>
 
+#include <algorithm>
 #include <exception>
 
 static ss::logger lg("kvstore");
 
 namespace storage {
+
+static inline bytes make_spaced_key(kvstore::key_space ks, bytes_view key);
 
 kvstore::kvstore(
   kvstore_config kv_conf,
@@ -50,10 +57,23 @@ kvstore::kvstore(
       std::filesystem::path(_ntpc.work_directory()),
       simple_snapshot_manager::default_snapshot_filename)
   , _timer([this] { _sem.signal(); }) {
+    for (const auto& name : _conf.discarded_stm_snapshots) {
+        // persisted_stm keys stm snapshots "<name>/<ntp>"; see
+        // raft::kvstore_backed_stm_snapshot::snapshot_key().
+        _discarded_prefixes.push_back(make_spaced_key(
+          key_space::stms, bytes::from_string(ssx::sformat("{}/", name))));
+    }
     if (_conf.sanitizer_config) {
         _ntp_sanitizer_config = _conf.sanitizer_config->get_config_for_ntp(
           _ntpc.ntp());
     }
+}
+
+bool kvstore::is_discarded(bytes_view spaced_key) const {
+    return std::ranges::any_of(
+      _discarded_prefixes, [spaced_key](const bytes& prefix) {
+          return spaced_key.starts_with(prefix);
+      });
 }
 
 kvstore::~kvstore() noexcept = default;
@@ -187,6 +207,11 @@ std::optional<iobuf> kvstore::get(key_space ks, bytes_view key) {
         return it->second.copy();
     }
     return std::nullopt;
+}
+
+bool kvstore::contains(key_space ks, bytes_view key) {
+    vassert(_recovered, "kvstore::contains called before recover()");
+    return _db.contains(make_spaced_key(ks, key));
 }
 
 ss::future<> kvstore::put(key_space ks, bytes key, iobuf value) {
@@ -482,6 +507,14 @@ ss::future<> kvstore::recover() {
 
         co_await replay_segments(std::move(segments));
 
+        if (_discarded_entries > 0) {
+            vlog(
+              lg.info,
+              "Recovery dropped {} entries ({} bytes) of stm snapshots no "
+              "longer kept in the kvstore",
+              _discarded_entries,
+              _discarded_bytes);
+        }
         _recovered = true;
     } catch (...) {
         auto ex = std::current_exception();
@@ -554,42 +587,96 @@ ss::future<> kvstore::load_snapshot_from_reader(snapshot_reader& reader) {
             buf.size_bytes()));
     }
 
-    auto batch = co_await reflection::from_iobuf_async<model::record_batch>(
-      std::move(buf));
-
-    auto batch_crc = model::crc_record_batch(batch);
-    if (batch.header().crc != batch_crc) {
+    // Restored record by record, straight from the buffer read off disk,
+    // instead of first decoding it into a record batch: that decode re-encodes
+    // every record into a second buffer while the first is still alive, and
+    // the batch is then walked with a copying iterator. A store holding large
+    // values (an earlier build kept whole dedup indices here) was then two to
+    // three times its own size in memory before the broker had started
+    // anything else -- enough to keep it from starting at all.
+    //
+    // The checksum is accumulated record by record over the same encoding the
+    // batch decode would have produced, so the integrity check is unchanged;
+    // it simply completes after the records are restored rather than before.
+    // A mismatch still throws out of recovery.
+    iobuf_parser records(std::move(buf));
+    auto hdr = reflection::adl<reflection::batch_header>{}.from(records);
+    if (hdr.is_compressed != 0) {
         throw std::runtime_error(
-          fmt::format(
-            "Snapshot batch failed crc {} != {}",
-            batch_crc,
-            batch.header().crc));
+          "Kvstore snapshot batch is compressed, which kvstore never writes");
     }
 
-    auto header_crc = model::internal_header_only_crc(batch.header());
-    if (batch.header().header_crc != header_crc) {
+    auto header_crc = model::internal_header_only_crc(hdr.bhdr);
+    if (hdr.bhdr.header_crc != header_crc) {
         throw std::runtime_error(
           fmt::format(
             "Snapshot batch header failed crc {} != {}",
             header_crc,
-            batch.header().header_crc));
+            hdr.bhdr.header_crc));
     }
 
+    crc::crc32c batch_crc;
+    model::crc_record_batch_header(batch_crc, hdr.bhdr);
     auto lock = co_await _db_mut.get_units();
-    co_await batch.for_each_record_async([this](model::record r) {
-        auto key = iobuf_to_bytes(r.release_key());
-        _probe.add_cached_bytes(key.size() + r.value().size_bytes());
-        auto res = _db.emplace(std::move(key), r.release_value());
-        vassert(
-          res.second, "Snapshot contained duplicate key {}", res.first->first);
-        vlog(
-          lg.trace,
-          "Load snapshot: restoring key={} value={}",
-          res.first->first,
-          res.first->second);
-    });
-
+    // Values are kept as shares of the buffer read off disk, which costs no
+    // copy. A share pins whole fragments of that buffer, including the bytes
+    // of any discarded value next to it, so when the snapshot turns out to
+    // hold discarded entries the kept values are copied once it is read and
+    // the buffer can go; a store without any (the steady state) pays nothing.
+    chunked_vector<bytes> restored_keys;
+    const auto discarded_before = _discarded_entries;
+    for (int32_t i = 0; i < hdr.bhdr.record_count; ++i) {
+        auto r = reflection::adl<model::record>{}.from(records);
+        model::crc_extend_record(batch_crc, r);
+        if (auto key = restore_snapshot_record(std::move(r), lock); key) {
+            restored_keys.push_back(std::move(*key));
+        }
+        co_await ss::coroutine::maybe_yield();
+    }
+    if (hdr.bhdr.crc != batch_crc.value()) {
+        throw std::runtime_error(
+          fmt::format(
+            "Snapshot batch failed crc {} != {}",
+            batch_crc.value(),
+            hdr.bhdr.crc));
+    }
+    if (_discarded_entries != discarded_before) {
+        for (const auto& key : restored_keys) {
+            if (auto it = _db.find(key); it != _db.end()) {
+                it->second = it->second.copy();
+            }
+            co_await ss::coroutine::maybe_yield();
+        }
+    }
     _next_offset = last_offset + model::offset(1);
+}
+
+std::optional<bytes>
+kvstore::restore_snapshot_record(model::record r, const ssx::semaphore_units&) {
+    auto key = iobuf_to_bytes(r.release_key());
+    if (is_discarded(key)) {
+        ++_discarded_entries;
+        _discarded_bytes += key.size() + r.value().size_bytes();
+        return std::nullopt;
+    }
+    auto value = r.release_value();
+    const auto entry_bytes = key.size() + value.size_bytes();
+    auto restored = key;
+    auto res = _db.emplace(std::move(key), std::move(value));
+    if (!res.second) {
+        // Records go into _db as they stream in, before the batch crc can be
+        // checked at its end, so a duplicate here may well be corruption:
+        // fail the recovery the way a crc mismatch does rather than abort.
+        throw std::runtime_error(
+          fmt::format("Snapshot contained duplicate key {}", res.first->first));
+    }
+    _probe.add_cached_bytes(entry_bytes);
+    vlog(
+      lg.trace,
+      "Load snapshot: restoring key={} value={}",
+      res.first->first,
+      res.first->second);
+    return restored;
 }
 
 ss::future<> kvstore::replay_segments(segment_set segs) {
@@ -600,6 +687,11 @@ ss::future<> kvstore::replay_segments(segment_set segs) {
       _next_offset);
 
     if (segs.empty()) {
+        if (_discarded_entries > 0) {
+            // The snapshot just loaded still holds the discarded entries.
+            // Rewrite it now, so the next start does not read them again.
+            co_await save_snapshot();
+        }
         co_return;
     }
 
@@ -723,8 +815,16 @@ kvstore::replay_consumer::consume_batch_end() {
     auto lock = co_await _store->_db_mut.get_units();
     co_await batch.for_each_record_async([this, &lock](model::record r) {
         auto key = iobuf_to_bytes(r.release_key());
-        auto value = reflection::from_iobuf<std::optional<iobuf>>(
-          r.release_value());
+        std::optional<iobuf> value;
+        if (_store->is_discarded(key)) {
+            // Applied as a removal, so a discarded key is gone whether or not
+            // the snapshot held it. The value is never deserialized.
+            ++_store->_discarded_entries;
+            _store->_discarded_bytes += key.size() + r.value().size_bytes();
+        } else {
+            value = reflection::from_iobuf<std::optional<iobuf>>(
+              r.release_value());
+        }
         _store->apply_op(std::move(key), std::move(value), lock);
         _store->_next_offset += model::offset(1);
     });

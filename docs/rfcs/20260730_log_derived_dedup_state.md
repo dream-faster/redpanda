@@ -71,15 +71,23 @@ Guarantees:
 - **G3** — Log consistency and Kafka offset translation never depend on
   filter state. There are no dedup batches in the log at all.
 - **G4** — Classification order does not imply log order (an introducing
-  request inserts into the map before its batch is appended), so any request
-  that observed a duplicate first waits on the **append-order fence**: a
-  shared promise resolved when the most recently admitted request's batch has
-  been appended. This is a conservative global fence, not per-key tracking.
-  After it, a *partially* deduplicated request replicates its own batch,
-  whose offset now follows the introducing appends — the Raft prefix
-  property makes its quorum ack cover them.
+  request inserts into the map before its batch is appended), so the
+  identities a request introduces are **pending** -- `_pending` maps each to
+  the in-flight request that introduced it -- until raft confirms the batch
+  appended. A request that drops a record against a pending identity waits
+  for exactly that introducer to resolve: appended, and it proceeds (its own
+  batch, if any, is replicated after the introducing append, so the Raft
+  prefix property makes its quorum ack cover it); never appended (the
+  introducer's entries are reverted), or unresolved within the sync timeout,
+  and it fails with a retriable error after reverting its own insertions, so
+  the producer's retry is classified fresh. A request that drops nothing
+  waits on nobody. A raft timeout leaves a batch's fate open -- the batcher
+  may have appended it before the timer fired -- so its identities stay
+  pending until this replica has applied past the dirty offset read at that
+  point, and whether `do_apply()` saw the batch decides. Snapshots leave
+  pending identities out (see Snapshots).
 - **G5** — A request that is *entirely* deduplicated (nothing to replicate)
-  and requests `quorum_ack` waits, after the append fence, for the committed
+  and requests `quorum_ack` waits, once its introducers are appended, for the committed
   offset to reach the current dirty offset before acking. The introducing
   entries are therefore durable when the duplicate is acknowledged. This
   closes the "acked duplicate, introducing write lost" hole without per-key
@@ -129,6 +137,19 @@ Guarantees:
   `snapshot_entries_truncated`. A consequence worth having: two replicas with
   different ceilings now retain a prefix relationship (the smaller keeps a
   subset of the larger) rather than arbitrary disjoint subsets.
+
+  The per-partition ceiling does not bound a shard: partitions are placed on
+  shards by count, not by index size, so several saturated indices can share
+  one shard's memory. `dedup_max_entries_per_shard` (0, the default, derives it
+  from 15% of shard memory at ~80 bytes an entry) caps the sum. Every index on
+  the shard reports its size into one shared `dedup_shard_budget`; the same
+  cursor trims a partition that inserts while the shard is within a tenth of
+  its limit, and at the limit a new identity with nothing freeable in its own
+  partition is admitted unindexed. The shard total is exported as the
+  `dedup:shard` gauges `index_entries` and `max_index_entries`. Effective
+  capacity now depends on which partitions share a shard, which differs per
+  replica, so under shard pressure replicas trim differently -- the same
+  best-effort divergence capacity eviction already has.
 
 - **G8** — The two ways the filter can stop deduplicating without failing a
   request -- entry-limit saturation (G7) and producer timestamp skew (B5) --
@@ -341,18 +362,44 @@ Best-effort boundaries (all bounded by one dedup window, all documented):
 2. If `ntp_config.dedup_generation() != _generation`: `clear()` and adopt the
    new generation.
 3. `set_window(config window)`.
-4. Decompress if compressed; for each record with a key:
-   `populate(key, first_timestamp + timestamp_delta)`. `populate()` never lets
-   the index exceed its hard per-partition entry limit; when a bounded step
-   cannot free a slot, the identity remains unindexed.
+4. On the leader, skip the batch if this STM filtered it: `filter_request()`
+   already indexed its identities with these timestamps, and `populate()` is
+   max-wins, so applying it again would only cost the parse. The leader
+   records the batch's crc and record count before handing it to Raft (the
+   crc covers the records, attributes, timestamps and count, not the base
+   offset Raft assigns), and `do_apply()` consumes that record. It is dropped
+   when the request fails and its entries are reverted, cleared with the
+   index on a generation change, and bounded, so a batch Raft never reports
+   on ages out and is simply indexed again. A crc collision between two
+   batches in flight on one partition leaves the other's identities
+   unindexed on this replica alone: a 2^-32 chance of a bounded coverage
+   loss of the kind the index already tolerates.
+5. Decompress if compressed; `for_each_dedup_identity()` walks the records
+   reading only what dedup needs -- the key, or in header mode the first
+   occurrence of the configured header, digested straight from the batch's
+   buffer, and the timestamp -- and skips the rest of each record by its
+   length. Nothing is copied or shared per record. For each identity:
+   `populate(digest, first_timestamp + timestamp_delta)` (a saturating add:
+   the delta is client-controlled). `populate()` never lets the index exceed
+   its hard per-partition entry limit; when a bounded step cannot free a
+   slot, the identity remains unindexed.
+6. A batch whose records cannot be read -- the walk or the decompression
+   throws -- is skipped and counted (`batches_skipped`), with a rate-limited
+   warning. The STM manager treats an exception from apply as transient and
+   retries the batch forever, which would also hold up every raft snapshot
+   on the partition and with it the log's prefix truncation; the index is
+   advisory, and an unreadable batch is one the leader could not have
+   filtered either. `std::bad_alloc` is the exception: it propagates.
 
 `populate()` advances the same sweep cursor the leader's classification path
 does, at the same point relative to its insert, so follower maps stay bounded
-by the same mechanism and reach the same contents (see B10).
+by the same mechanism and reach the same contents (see B10). With the leader
+skipping its own batches, each replica now sweeps once per record, where the
+leader used to sweep twice.
 
 The STM manager already reads every committed batch once and dispatches it to
 all registered STMs (`rm_stm` consumes `raft_data` batches this way), so this
-adds record iteration + decompression per replica but **no additional log
+adds the identity walk + decompression per replica but **no additional log
 read**.
 
 ## Leader/produce path
@@ -365,27 +412,44 @@ read**.
 2. Adopt generation and window as in apply.
 3. `auto res = _state.filter_request(std::move(batch))` — classification and
    insertion are synchronous (single reactor task), so concurrent produces
-   serialize naturally per shard with no lock. `res` carries the filtered
-   batch (or `nullopt` if everything was a duplicate) and this request's undo
-   list: `{key, applied_timestamp, previous_timestamp}` per admitted key.
-4. If the request observed any duplicate, wait on the append-order fence
-   (`_append_tail`, G4) with the sync timeout, so everything below is ordered
-   after the appends that introduced the observed keys.
+   serialize naturally per shard with no lock. The identities come from the
+   same `for_each_dedup_identity()` walk the apply path uses; what survives
+   the pass is 32 bytes per record, not the records. `res` carries the
+   filtered batch (or `nullopt` if everything was a duplicate) and this
+   request's undo list: `{key, applied_timestamp, previous_timestamp}` per
+   admitted key.
+4. Look the dropped identities up in `_pending` (G4) and, if anything was
+   admitted, register this request's insertions there under a fresh
+   `inflight_request` -- before the first suspension, so a request classified
+   behind this one finds them. Then wait on each distinct introducer with the
+   sync timeout: one that never appended fails this request with
+   `replication_error`, one that does not resolve in time with `timeout`,
+   either after reverting its own insertions.
 5. **All-duplicate**: resolve `enqueued` immediately. If
    `opts.consistency == quorum_ack`, capture `fence = dirty_offset()` (which
    now covers the introducing appends) and wait on
-   `visible_offset_monitor().wait(fence, now + sync_timeout, as)` (G5); on
-   timeout return `errc::timeout`. Ack with the committed offset and
-   `replicated_record_count = 0`.
+   `events().wait(fence, now + sync_timeout, as)` (G5); on timeout return
+   `errc::timeout`; if the term changed meanwhile return `errc::not_leader`.
+   Ack with the committed offset and `replicated_record_count = 0`.
 6. Otherwise `_raft->replicate_in_stages(std::move(*res.batch), opts)` — the
    data batch alone; there is no metadata batch to keep ordered, so Raft
    batching and pipelining across produce requests work exactly as for
-   non-dedup topics. Install a fresh `_append_tail` promise and resolve it
-   when `request_enqueued` completes (success or failure), so later
-   duplicate-observers never hang.
-7. On enqueue or replication failure: `_state.revert_request(res.undo)` and
-   return the error. **No step-down** — the map is repaired locally, and
-   log-derived state means the next leader is correct by construction.
+   non-dedup topics.
+7. On enqueue or replication failure, `settle(appended = false)`:
+   `_state.revert_request(res.undo)`, forget the self-filtered key, drop the
+   request's `_pending` registrations and resolve its promise with `false`,
+   so requests waiting on it fail for retry. **No step-down** — the map is
+   repaired locally, and log-derived state means the next leader is correct
+   by construction. `raft::errc::timeout` is the one result that says
+   nothing about the batch: `resolve_after_timeout()` keeps its identities
+   pending, waits until this replica has applied past the dirty offset (or
+   leadership is lost), and settles by whether `do_apply()` saw the batch --
+   its key moved out of the bounded self-filtered set for the duration, so
+   load cannot age it out. If the key was already gone and the set did age
+   entries out meanwhile, the answer is unknowable and the request settles
+   as never appended: the retry may then land beside an appended batch (a
+   duplicate, which is what a timed-out produce means to a Kafka client
+   anyway) rather than be acknowledged against a write that may not exist.
 8. On success: ack with `replicated_record_count = admitted` when records
    were dropped (feeding the existing `produce.cc` base-offset correction).
 
@@ -397,6 +461,88 @@ definition and cannot influence future decisions). `_max_ts` is not reverted
 (monotonic advance only sharpens eviction; harmless).
 
 ## Snapshots
+
+Local snapshots are files in the partition directory (`persisted_stm<>`'s
+default file backend), not kvstore values. The kvstore holds every value in
+memory for as long as it exists and copies all of them each time it rolls a
+segment, which a value larger than `kvstore_max_segment_size` forces on nearly
+every write; with several saturated indices on a shard, that cost a multiple
+of the indices themselves and ran the shard out of memory. `start()` removes
+the key an earlier build left in the kvstore; that snapshot is not migrated,
+and the index rebuilds from the log within one window.
+
+The payload (`state_snapshot` version 2) carries the entries as one packed blob
+of 24-byte records (digest hi, digest lo, timestamp; little-endian), written
+straight from the index. A snapshot therefore costs one serialized copy of the
+live entries. Earlier versions are refused on compat version, and the index is
+rebuilt from the log, in both upgrade directions.
+
+Identities introduced by requests still in flight (`_pending`, G4) are left
+out of both local and raft snapshots: they are not in the log yet, and a
+snapshot holding one would, after a crash, drop the producer's retry of a
+record no replica ever wrote. The next snapshot carries them once their
+batches have applied.
+
+Raft snapshot installs take the shard's `restore_one_at_a_time` semaphore,
+as startup restores do: a node rejoining after a long absence installs one
+for every partition it fell behind on.
+
+The write yields. `for_each_live_entry_async()` walks the map's value array in
+chunks of 4096 entries with a preemption check between them, while the produce
+path keeps mutating the index (the apply lock is held for a local snapshot,
+but the leader's `filter_request()` runs without it). Rather than forbid that,
+the walk is made exact under it: an insert appends to the array and is
+emitted or not, which a convergent snapshot tolerates; an erase moves the
+array's last entry into the hole, and when the hole is behind the walk's
+cursor that entry would never be reached, so every erase records it for each
+walk in progress and the walk emits those at the end. A clear or restore under
+the walk invalidates it and the serializer starts over. The restore keeps the
+newer timestamp when a snapshot carries an identity twice, which an index that
+erased and re-admitted it during the walk can produce. The longest stretch
+the snapshot write holds the reactor is therefore one chunk, however large the
+index; the one-pass write it replaced held it for hundreds of milliseconds at
+the shard limit, on every segment roll.
+
+Startup is where a memory shortfall does the most damage, because a broker
+that cannot start cannot shed load either. Three paths were bounded:
+
+- **kvstore recovery** runs before any partition starts, so it would load an
+  earlier build's dedup snapshots before `dedup_stm::start()` could remove
+  them. The kvstore is configured with `discarded_stm_snapshots =
+  {dedup.snapshot}`: recovery drops those keys from the snapshot and the
+  replayed segments without retaining them, and rewrites its snapshot so the
+  next start never reads them. The snapshot is now restored record by record
+  straight from the buffer read off disk, rather than being decoded into a
+  batch (a re-encoded second copy) and walked with a copying iterator; the
+  batch checksum is accumulated record by record over the same encoding
+  (`model::crc_extend_record()`), so integrity checking is unchanged.
+- **Snapshot load** is serialized per shard: `persisted_stm::start()` reads
+  the whole snapshot file before the restore trims it, and partition starts
+  are not otherwise bounded, so `dedup_stm::start()` holds a one-unit
+  semaphore in the shard budget around it and at most one snapshot file is in
+  memory per shard at a time.
+- **Snapshot restore** is bounded by the shard budget's headroom as well as by
+  the partition ceiling, keeping the newest identities. It reads the packed
+  entries in place, in passes, so it costs at most 8 bytes an entry beyond the
+  index (and only when trimming). It measures the capacity cutoff over what it
+  restores and inserts the entries below it first, where the sweep cursor
+  starts, so a restart into a full shard can trim at once.
+- **Log replay** was already bounded: every insert goes through the same
+  capacity checks as the produce path.
+
+Under shard pressure the indices within a tenth of the largest one's size trim
+themselves; a smaller partition at the shard limit takes one bounded cursor
+step on the largest index instead. Without it, partitions that filled the
+budget and then went idle -- and so never trim themselves -- would leave a
+newly busy partition without coverage for as long as they sat there. When a
+bounded step at the shard limit finds nothing below the cutoff, it replaces the
+oldest entry just ahead of the cursor if that is older than the incoming
+identity, so a pass whose trimmable entries were used up early (by log replay
+after a restart, say) keeps indexing new identities instead of admitting them
+unindexed until the cursor wraps.
+
+The original design notes follow.
+
 
 - `take_local_snapshot`: `evict_expired()`, then serialize
   `{generation, window_ms, max_timestamp, inserts_since_evict, entries}` at
@@ -413,11 +559,16 @@ The branch is unmerged, so the checkpoint/undo local-snapshot formats
 ## Recovery
 
 `get_initial_recovery_policy()` returns `read_everything` when the partition's
-config has dedup enabled at STM start and `skip_to_end` otherwise. First boot
-of a dedup-enabled partition replays the log through `do_apply` (bounded
-thereafter by local snapshot cadence). Follow-up (not in this change): seek
-the initial replay to the timequery offset of `max_ts − window`, since older
-entries are expired by definition.
+config has dedup enabled at STM start and `skip_to_end` otherwise, and
+`get_initial_recovery_start_offset()` bounds the first boot of a dedup-enabled
+partition to one window: the timequery offset of `now − window`, since older
+entries are expired by definition. The STM manager applies that bound only on
+the partition's first start and afterwards resumes from the offset it recorded
+then, so `dedup_stm::start()` applies the same bound itself whenever no local
+snapshot was restored (the file was lost, or discarded on a version break);
+otherwise such a restart would replay the whole retained log, with produce
+requests waiting on `sync()` meanwhile. The manager clamps with `max`, so the
+two agree.
 
 # File-by-file changes
 
@@ -497,16 +648,26 @@ STM (`dedup_stm_test.cc`, single-node raft fixture as today):
 # Performance expectations
 
 - Leader produce path: unchanged vs. non-dedup topics except the synchronous
-  filter pass (decompress + hash ops, ~100–200 ns/record). No serialization
-  point: the current branch's mutex capped plain produce at one in-flight
-  batch per partition per Raft commit RTT; this design has no such ceiling.
+  filter pass (decompress if compressed, one identity walk over the batch's
+  buffer, a digest and a map insert per record). No serialization point: the
+  current branch's mutex capped plain produce at one in-flight batch per
+  partition per Raft commit RTT; this design has no such ceiling. The leader
+  does not apply its own batches a second time.
 - Replication traffic: no metadata amplification (the current branch adds
   ~tens of bytes per admitted record, permanently uncompactable); dropped
   duplicates reduce traffic.
-- Apply path: each replica pays decompress + record parse + map insert,
-  ~3–7% of a core per 100k records/s of dedup-enabled ingest. This is the
-  price of the design and is proportional to ingest on dedup topics only.
-- Snapshots: O(active keys), same as before.
+- Apply path: each follower pays decompress + identity walk + map insert.
+  This is the price of the design and is proportional to ingest on dedup
+  topics only. Compressed batches are the expensive case: the walk cannot
+  read identities out of a compressed batch, so every replica decompresses
+  every committed batch of a dedup topic.
+- Snapshots: O(active keys), 24 bytes an entry, written in chunks with the
+  reactor yielded between them.
+- Measured: `//src/v/cluster/tests:dedup_window_filter_rpbench` (per-record
+  cost of each path, run in the `unit-tests` workflow) and
+  `tests/dedup_acceptance/test_bench.py` (end-to-end records/s and broker CPU
+  per million records against a topic without dedup; results in
+  `tests/dedup_acceptance/BENCHMARK.md`).
 - The dominant cost at scale remains the index cardinality itself (window ×
   unique-key rate), which is inherent to the feature and unchanged by either
   design; bounding it (map size cap, eviction ring) is follow-up work.
