@@ -1578,6 +1578,20 @@ redpanda_cc_gtest(
 )
 
 redpanda_cc_gtest(
+    name = "dedup_compact_index_test",
+    timeout = "moderate",
+    srcs = [
+        "dedup_compact_index_test.cc",
+    ],
+    cpu = 1,
+    deps = [
+        "//src/v/cluster:dedup_compact_index",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+redpanda_cc_gtest(
     name = "dedup_stm_test",
     timeout = "short",
     srcs = [

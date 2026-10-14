@@ -11,8 +11,8 @@
 
 #include "bytes/iobuf.h"
 #include "bytes/iobuf_parser.h"
+#include "cluster/dedup_compact_index.h"
 #include "cluster/dedup_index_limits.h"
-#include "container/chunked_hash_map.h"
 #include "container/chunked_vector.h"
 #include "hashing/xx.h"
 #include "model/record.h"
@@ -39,42 +39,6 @@
 
 namespace cluster {
 
-/// \brief A fixed-width, process-stable digest of a dedup identity.
-///
-/// The index stores this instead of the identity bytes, so an entry costs the
-/// same regardless of how large the Kafka key or header value is. Two
-/// independently seeded xxhash64 passes give 128 bits: at the supported
-/// 10^7-entry upper limit, the birthday collision probability is on the order
-/// of 10^-25, far below the window-edge and generation-change
-/// boundaries the feature already documents as best-effort.
-///
-/// xxhash64 is not collision-resistant against a chosen-input attacker, which
-/// is deliberate: a producer that wants to suppress another producer's
-/// identity can already do so directly by writing that identity first, since
-/// dedup is first-wins on whatever identity it is given. Digesting adds no
-/// capability an attacker does not already have.
-///
-/// Stability matters: the digest is serialized into snapshots and compared
-/// across replicas, so it must not depend on a per-process hash seed the way
-/// absl::Hash does.
-struct dedup_identity_digest {
-    uint64_t hi{0};
-    uint64_t lo{0};
-
-    friend bool operator==(
-      const dedup_identity_digest&, const dedup_identity_digest&) = default;
-};
-
-/// The digest is already avalanched by xxhash64, so the map takes one half
-/// verbatim rather than paying to re-mix it.
-struct dedup_identity_digest_hash {
-    using is_avalanching = void;
-
-    uint64_t operator()(const dedup_identity_digest& d) const noexcept {
-        return d.lo;
-    }
-};
-
 /// \brief Digest one dedup identity.
 ///
 /// Consumes the iobuf fragment by fragment, so no contiguous copy of the
@@ -92,8 +56,9 @@ public:
         _hi.update(data, size);
         _lo.update(data, size);
     }
+    /// In dedup_canonical_digest() form: the 96 bits the index keeps.
     dedup_identity_digest digest() {
-        return {.hi = _hi.digest(), .lo = _lo.digest()};
+        return dedup_canonical_digest({.hi = _hi.digest(), .lo = _lo.digest()});
     }
 
 private:
@@ -375,8 +340,9 @@ struct dedup_shard_budget {
 /// (revert_request).
 ///
 /// Memory is bounded three ways. Each entry costs the same regardless of
-/// identity size, because the index stores a dedup_identity_digest rather
-/// than the identity bytes. Entries older than the window (relative to the
+/// identity size, because the index stores a 96-bit digest of the identity
+/// rather than its bytes, in a table built for this (dedup_compact_index):
+/// about 22 bytes per entry. Entries older than the window (relative to the
 /// most recent timestamp seen) can never cause a drop again, and a cursor
 /// that advances a few entries per new identity drops them as it goes.
 /// Finally, a hard per-partition entry limit prevents a large window,
@@ -410,7 +376,8 @@ struct dedup_shard_budget {
 ///
 /// Both ways the filter can silently stop deduplicating -- timestamp skew and
 /// entry-limit saturation -- are counted, and dedup_stm exports the counters
-/// per partition.
+/// per partition. An identity the index's table refuses (see
+/// dedup_compact_index) is counted as unindexed, like one at the limit.
 class dedup_window_filter {
 public:
     // Shared with the cluster-level dedup_max_entries_per_partition setting,
@@ -483,10 +450,11 @@ public:
     /// once into a dedup_index_snapshot and again into their own wire type.
     template<typename F>
     void for_each_live_entry(F&& emit) const {
-        const int64_t cutoff = _max_ts.value() - _window.count();
-        for (const auto& [identity, timestamp] : _map) {
-            if (timestamp.value() >= cutoff) {
-                emit(identity, timestamp);
+        const int64_t cutoff = expiry_cutoff();
+        for (size_t pos = 0; pos < _index.size(); ++pos) {
+            const auto timestamp = _index.timestamp_at(pos);
+            if (is_live(timestamp, cutoff)) {
+                emit(_index.identity_at(pos), model::timestamp{timestamp});
             }
         }
     }
@@ -496,7 +464,7 @@ public:
     ///
     /// The index changes while the walk is suspended: the produce path
     /// inserts, sweeps and reverts without the apply lock. An insert appends
-    /// to the map's value array and is emitted or not depending on where the
+    /// to the index's entry array and is emitted or not depending on where the
     /// cursor is, which a convergent snapshot tolerates either way. An erase
     /// moves the array's last entry into the hole, and when the hole is
     /// behind the cursor that entry would never be reached: erases record
@@ -512,29 +480,36 @@ public:
         _walks.push_back(&walk);
         auto unregister = ss::defer(
           [this, &walk]() noexcept { std::erase(_walks, &walk); });
-        const int64_t cutoff = _max_ts.value() - _window.count();
-        while (!walk.invalidated && walk.cursor < _map.size()) {
-            const auto end = std::min(walk.cursor + walk_chunk, _map.size());
+        const int64_t cutoff = expiry_cutoff();
+        while (!walk.invalidated && walk.cursor < _index.size()) {
+            const auto end = std::min(walk.cursor + walk_chunk, _index.size());
             // emit may mutate the index; the bound is re-read each step.
-            for (; walk.cursor < end && walk.cursor < _map.size()
+            for (; walk.cursor < end && walk.cursor < _index.size()
                    && !walk.invalidated;
                  ++walk.cursor) {
-                const auto& [identity, timestamp] = _map.values()[walk.cursor];
-                if (timestamp.value() >= cutoff) {
-                    emit(identity, timestamp);
+                const auto timestamp = _index.timestamp_at(walk.cursor);
+                if (is_live(timestamp, cutoff)) {
+                    emit(
+                      _index.identity_at(walk.cursor),
+                      model::timestamp{timestamp});
                 }
             }
             co_await ss::coroutine::maybe_yield();
         }
-        if (walk.invalidated) {
-            co_return false;
-        }
-        for (const auto& [identity, timestamp] : walk.displaced) {
-            if (timestamp.value() >= cutoff) {
-                emit(identity, timestamp);
+        // By index, re-reading the size: erases while this yields can still
+        // displace entries behind the cursor, and those belong here too.
+        for (size_t i = 0; !walk.invalidated && i < walk.displaced.size();
+             ++i) {
+            // A copy: emit may mutate the index, and so this list.
+            const auto entry = walk.displaced[i];
+            if (is_live(entry.timestamp.value(), cutoff)) {
+                emit(entry.identity, entry.timestamp);
+            }
+            if ((i + 1) % walk_chunk == 0) {
+                co_await ss::coroutine::maybe_yield();
             }
         }
-        co_return true;
+        co_return !walk.invalidated;
     }
 
     /// \brief Install a snapshot, replacing any current index state.
@@ -552,13 +527,13 @@ public:
     /// entry, \p count times in all, produce the same entries each time it is
     /// called, and return a future that resolves once it has. It may yield
     /// between entries: a restore of millions of entries at startup is what
-    /// stays off the reactor that way. It runs up to four times: once to find
-    /// the oldest entry -- or, when they do not all fit, to find the trim
-    /// point, which is the oldest kept entry -- once to measure the capacity
-    /// cutoff, and once each to insert the entries older than that cutoff and
-    /// the rest. Passes over the snapshot keep the transient cost at 8 bytes
-    /// per entry, and only when trimming, rather than a full copy of the
-    /// entries.
+    /// stays off the reactor that way. It runs once to find the oldest entry
+    /// -- or, when they do not all fit, a few times to select the trim point,
+    /// which is the oldest kept entry (see dedup_timestamp_selector) -- once
+    /// to measure the capacity cutoff, and once each to insert the entries
+    /// older than that cutoff and the rest. Passes over the snapshot cost no
+    /// copy of the entries, nor of their timestamps, and every step between
+    /// them is bounded.
     ///
     /// The entries old enough to trim are inserted first. The sweep cursor
     /// starts at the front of the index, so after a restart that filled the
@@ -581,28 +556,35 @@ public:
         size_t at_keep_from = 0;
         const bool trimming = keep > 0 && keep < count;
         if (trimming) {
-            // Keep the most recent identities. The index is a dense hash map
-            // whose iteration is insertion order, so snapshots run roughly
-            // oldest first; taking a prefix would drop exactly the entries
-            // most likely to still match an incoming duplicate.
-            chunked_vector<int64_t> stamps;
-            stamps.reserve(count);
+            // Keep the most recent identities. The index's iteration is
+            // insertion order, so snapshots run roughly oldest first; taking a
+            // prefix would drop exactly the entries most likely to still match
+            // an incoming duplicate.
+            //
+            // The trim point is the (count - keep)-th smallest timestamp,
+            // selected in passes that each yield, where an nth_element over a
+            // copy of every timestamp held the reactor for tens of
+            // milliseconds at millions of entries.
+            int64_t lowest = std::numeric_limits<int64_t>::max();
+            int64_t highest = std::numeric_limits<int64_t>::min();
             co_await ss::coroutine::without_preemption_check(for_each_entry(
-              [&stamps](dedup_identity_digest, model::timestamp ts) {
-                  stamps.push_back(ts.value());
+              [&lowest, &highest](dedup_identity_digest, model::timestamp ts) {
+                  lowest = std::min(lowest, ts.value());
+                  highest = std::max(highest, ts.value());
               }));
-            const auto smallest_kept
-              = stamps.begin() + static_cast<std::ptrdiff_t>(count - keep);
-            std::nth_element(stamps.begin(), smallest_kept, stamps.end());
-            keep_from = *smallest_kept;
-            const auto newer = static_cast<size_t>(std::count_if(
-              stamps.begin(), stamps.end(), [keep_from](int64_t ts) {
-                  return ts > keep_from;
-              }));
+            dedup_timestamp_selector select(lowest, highest, count - keep);
+            while (!select.done()) {
+                co_await ss::coroutine::without_preemption_check(for_each_entry(
+                  [&select](dedup_identity_digest, model::timestamp ts) {
+                      select.add(ts.value());
+                  }));
+                select.finish_pass();
+            }
+            keep_from = select.value();
             // Everything newer than keep_from fits by construction; entries
             // exactly at it fill what is left, first come first kept. The
             // trim point is one of the kept entries, so at least one is.
-            at_keep_from = keep - newer;
+            at_keep_from = keep - select.greater();
         }
         if (keep == 0) {
             begin_restore_pass(max_timestamp, no_pass_oldest);
@@ -628,9 +610,7 @@ public:
               }
           }));
         if (trimming) {
-            for (size_t i = 0; i < at_keep_from; ++i) {
-                count_in_pass(model::timestamp{keep_from});
-            }
+            count_in_pass(model::timestamp{keep_from}, at_keep_from);
         }
         const int64_t trim_below = finish_restore_pass();
 
@@ -701,7 +681,13 @@ public:
 
     const std::optional<ss::sstring>& key_header() const { return _key_header; }
 
-    size_t map_size() const { return _map.size(); }
+    size_t map_size() const { return _index.size(); }
+    /// Bytes the index has allocated.
+    size_t memory_usage() const { return _index.memory_usage(); }
+    /// The index's own counters, for tests and benchmarks.
+    dedup_compact_index::table_stats index_stats() const {
+        return _index.stats();
+    }
     size_t max_entries() const { return _max_entries; }
     const dedup_shard_budget* shard_budget() const {
         return _shard_budget.get();
@@ -745,6 +731,16 @@ public:
     size_t rebuilt_requests() const { return _rebuilt_requests; }
 
 private:
+    /// Timestamp below which an entry is outside the window: expired, never
+    /// a match again, and left out of snapshots. Saturating, since both
+    /// operands can come from a snapshot.
+    int64_t expiry_cutoff() const;
+    /// Whether an entry stamped \p ts is inside the window ending at the
+    /// watermark. An entry the index stored as expired never is.
+    static bool is_live(int64_t ts, int64_t cutoff) {
+        return ts != dedup_compact_index::expired && ts >= cutoff;
+    }
+
     /// Bound a client-supplied CreateTime by the broker's clock, counting the
     /// record when the clamp bites. A no-op for any timestamp at or behind
     /// broker time, so log replay is unaffected.
@@ -786,8 +782,8 @@ private:
     /// Turn a completed pass's histogram into the next capacity cutoff and
     /// start the following pass.
     void finish_pass();
-    /// Add \p stamp to the histogram of the pass in progress.
-    void count_in_pass(model::timestamp stamp);
+    /// Add \p stamp to the histogram of the pass in progress, \p times over.
+    void count_in_pass(model::timestamp stamp, size_t times = 1);
 
     /// Erase the entry the cursor is on. The map moves its last entry into
     /// the freed slot, so the caller must re-examine the same index rather
@@ -807,10 +803,10 @@ private:
     /// the map will move into its place for every walk that has passed the
     /// index but not reached the end of the array.
     void note_erase(size_t index);
-    /// Called when the whole value array is discarded.
+    /// Called when the whole entry array is discarded.
     void invalidate_walks();
-    /// Entries emitted between preemption checks. 24 bytes each on the wire,
-    /// so about 100 KiB of snapshot per check.
+    /// Entries emitted between preemption checks. 20 bytes each on the wire,
+    /// so about 80 KiB of snapshot per check.
     static constexpr size_t walk_chunk = 4096;
     /// Restored entries between reports to the shard budget. A power of two.
     static constexpr size_t restore_sync_interval = 4096;
@@ -835,10 +831,21 @@ private:
     /// Insert one restored entry. A snapshot taken while the index was being
     /// mutated can hold an identity twice (see for_each_live_entry_async());
     /// the newer timestamp wins, as it does in populate().
+    ///
+    /// No entry is newer than the watermark, which begin_restore_pass() has
+    /// clamped to broker time: a snapshot written before the clamp can carry
+    /// future-dated entries, and one of those would hold its block's newest
+    /// timestamp far ahead, so the index could keep nothing else in that
+    /// block (see dedup_compact_index) for as long as it stayed.
     void restore_entry(dedup_identity_digest identity, model::timestamp ts) {
-        auto [it, inserted] = _map.try_emplace(identity, ts);
-        if (!inserted) {
-            it->second = std::max(it->second, ts);
+        ts = std::min(ts, _max_ts);
+        const auto pos = _index.find(identity);
+        if (pos != dedup_compact_index::npos) {
+            if (ts.value() > _index.timestamp_at(pos)) {
+                _index.set_timestamp_at(pos, ts.value());
+            }
+        } else if (!_index.push_back(identity, ts.value())) {
+            ++_truncated_entries;
         }
     }
     /// Account for the restored entries.
@@ -896,16 +903,12 @@ private:
     // claimed from the shard budget; see begin_restore(). Zero otherwise.
     size_t _budget_reserved{0};
     std::optional<ss::sstring> _key_header;
-    chunked_hash_map<
-      dedup_identity_digest,
-      model::timestamp,
-      dedup_identity_digest_hash>
-      _map;
+    dedup_compact_index _index;
     // Highest record timestamp seen; used as the reference "now" for eviction.
     model::timestamp _max_ts{model::timestamp::min()};
-    // Cursor into _map.values(), the dense array the hash map keeps entries
-    // in. Erasing moves the array's last entry into the freed slot, so an
-    // erase at the cursor leaves an unvisited entry there.
+    // Cursor into the index's entry array, which is in insertion order.
+    // Erasing moves the array's last entry into the freed slot, so an erase
+    // at the cursor leaves an unvisited entry there.
     //
     // Replicas agree on this because they insert the same identities in the
     // same order and so lay the array out identically. revert_request() is
@@ -916,6 +919,15 @@ private:
     // ceiling, and which live entry goes is already best-effort -- but it is
     // a divergence the whole-map passes this replaced did not have, and it is
     // inherent to doing bounded work: a cursor is a position in a layout.
+    //
+    // A reverted request's writes also stay in the leader's timestamp blocks
+    // (dedup_compact_index): their newest-timestamp bounds and bases are
+    // where those writes put them, so the leader can store as expired an
+    // entry a follower keeps exactly. Such an entry is more than
+    // retained_span behind a timestamp the leader's watermark already holds
+    // -- the watermark is not reverted either -- so with a window up to that
+    // span the leader treats it as expired regardless: the same divergence
+    // the unreverted watermark already causes.
     size_t _sweep_pos{0};
     // Walks in progress; one per snapshot being taken, so at most a few.
     std::vector<live_walk*> _walks;

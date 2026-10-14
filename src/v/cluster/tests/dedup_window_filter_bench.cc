@@ -47,9 +47,7 @@ struct dedup_stm_test_accessor {
     static ss::future<>
     restore(dedup_window_filter& state, int64_t& generation, iobuf buffer) {
         co_await dedup_stm::restore_snapshot(
-          state,
-          generation,
-          serde::from_iobuf<dedup_stm::state_snapshot>(std::move(buffer)));
+          state, generation, dedup_stm::decode_snapshot(std::move(buffer)));
     }
 };
 
@@ -155,7 +153,7 @@ void fill(cluster::dedup_window_filter& filter, size_t entries) {
     seed.entries.reserve(entries);
     for (size_t i = 0; i < entries; ++i) {
         // Odd multipliers are bijections mod 2^64: distinct identities whose
-        // high bits move, which is what the map takes its bucket from.
+        // high bits move, which is what the index picks a segment by.
         seed.entries.push_back(
           {.identity
            = {.hi = 0xbf58'476d'1ce4'e5b9ULL * (i + 1), .lo = 0x9e37'79b9'7f4a'7c15ULL * (i + 1)},

@@ -45,6 +45,23 @@ struct dedup_stm_test_accessor {
                / dedup_stm::packed_entry_size;
     }
 
+    /// The entry layout and the entries' size in bytes of a snapshot.
+    static std::pair<uint32_t, size_t> snapshot_layout(iobuf snapshot) {
+        auto parsed = serde::from_iobuf<dedup_stm::state_snapshot>(
+          std::move(snapshot));
+        return {parsed.entry_size, parsed.entries.size_bytes()};
+    }
+
+    static iobuf
+    state_snapshot_with_entry_size(iobuf entries, uint32_t entry_size) {
+        return serde::to_iobuf(
+          dedup_stm::state_snapshot{
+            .window_ms = 1000,
+            .generation = 1,
+            .entries = std::move(entries),
+            .entry_size = entry_size});
+    }
+
     static ss::future<raft::local_snapshot_applied>
     apply_local_snapshot(dedup_stm& stm, iobuf buffer) {
         co_return co_await stm.apply_local_snapshot(
@@ -83,9 +100,7 @@ struct dedup_stm_test_accessor {
     static void
     restore(dedup_window_filter& state, int64_t& generation, iobuf buffer) {
         dedup_stm::restore_snapshot(
-          state,
-          generation,
-          serde::from_iobuf<dedup_stm::state_snapshot>(std::move(buffer)))
+          state, generation, dedup_stm::decode_snapshot(std::move(buffer)))
           .get();
     }
 
@@ -96,6 +111,7 @@ struct dedup_stm_test_accessor {
             .window_ms = 1000, .generation = 1, .entries = std::move(entries)});
     }
 
+    /// \p entries in the version 2 layout (digest hi, digest lo, timestamp).
     static iobuf
     state_snapshot_with_entries(iobuf entries, model::timestamp max_timestamp) {
         return serde::to_iobuf(
@@ -103,7 +119,8 @@ struct dedup_stm_test_accessor {
             .window_ms = 3'600'000,
             .generation = 1,
             .max_timestamp = max_timestamp,
-            .entries = std::move(entries)});
+            .entries = std::move(entries),
+            .entry_size = dedup_stm::legacy_packed_entry_size});
     }
 
     static bytes legacy_kvstore_key(const model::ntp& ntp) {
@@ -280,6 +297,102 @@ iobuf v1_snapshot_with(size_t entries) {
 
 } // namespace
 
+namespace {
+
+/// The version 2 layout as a version 2 binary writes and reads it: 24-byte
+/// entries carrying all 64 bits of digest hi, and no entry_size field.
+struct v2_state_snapshot
+  : serde::
+      envelope<v2_state_snapshot, serde::version<2>, serde::compat_version<2>> {
+    int64_t window_ms{0};
+    int64_t generation{0};
+    model::timestamp max_timestamp{model::timestamp::min()};
+    iobuf entries;
+
+    auto serde_fields() {
+        return std::tie(window_ms, generation, max_timestamp, entries);
+    }
+};
+
+} // namespace
+
+// A version 2 snapshot still restores, and the digests it carries -- 128 bits
+// each, as version 2 binaries computed them -- become the 96-bit identities
+// this build computes, so they deduplicate as before the upgrade.
+TEST(dedup_stm_snapshot, version_2_snapshot_restores_as_96_bit_identities) {
+    const auto canonical = dedup_digest_of(iobuf::from("key"));
+    const dedup_identity_digest wide{
+      .hi = canonical.hi | 0xa0e1'ea34'0000'0000ULL, .lo = canonical.lo};
+    iobuf entries;
+    for (const auto& [id, ts] :
+         {std::pair{wide, int64_t{1'000'000}},
+          std::pair{
+            dedup_identity_digest{.hi = (7ULL << 40) | 3, .lo = 9},
+            int64_t{999'999}}}) {
+        const auto hi = ss::cpu_to_le(id.hi);
+        const auto lo = ss::cpu_to_le(id.lo);
+        const auto le_ts = ss::cpu_to_le(ts);
+        entries.append(reinterpret_cast<const char*>(&hi), sizeof(hi));
+        entries.append(reinterpret_cast<const char*>(&lo), sizeof(lo));
+        entries.append(reinterpret_cast<const char*>(&le_ts), sizeof(le_ts));
+    }
+    auto buffer = serde::to_iobuf(
+      v2_state_snapshot{
+        .window_ms = 3'600'000,
+        .generation = 4,
+        .max_timestamp = model::timestamp{1'000'000},
+        .entries = std::move(entries)});
+
+    dedup_window_filter target(1h);
+    int64_t generation = 0;
+    dedup_stm_test_accessor::restore(target, generation, std::move(buffer));
+    EXPECT_EQ(generation, 4);
+    ASSERT_EQ(target.map_size(), 2u);
+    const auto restored = target.snapshot().entries;
+    EXPECT_EQ(restored[0].identity, canonical);
+    EXPECT_EQ(restored[1].identity, (dedup_identity_digest{.hi = 3, .lo = 9}));
+    // The identity this build digests from the same key finds it.
+    target.populate(iobuf::from("key"), model::timestamp{1'000'100});
+    EXPECT_EQ(target.map_size(), 2u);
+    EXPECT_EQ(target.unindexed_records(), 0u);
+
+    // Written back out, it takes the current layout.
+    auto rewritten = dedup_stm_test_accessor::serialize(target, generation);
+    const auto [entry_size, entry_bytes]
+      = dedup_stm_test_accessor::snapshot_layout(rewritten.copy());
+    EXPECT_EQ(entry_size, dedup_stm::packed_entry_size);
+    EXPECT_EQ(entry_bytes, 2 * dedup_stm::packed_entry_size);
+    dedup_window_filter again(1h);
+    dedup_stm_test_accessor::restore(again, generation, std::move(rewritten));
+    EXPECT_EQ(again.snapshot(), target.snapshot());
+}
+
+// A version 2 binary refuses the current layout on compat version, and so
+// rebuilds from the log, rather than restoring 96-bit digests it would never
+// match against the 128-bit ones it computes.
+TEST(dedup_stm_snapshot, version_2_reader_refuses_the_current_layout) {
+    dedup_window_filter source(1h);
+    source.populate(iobuf::from("key"), model::timestamp{1'000'000});
+    auto buffer = dedup_stm_test_accessor::serialize(source, 1);
+    EXPECT_THROW(
+      serde::from_iobuf<v2_state_snapshot>(std::move(buffer)),
+      serde::serde_exception);
+}
+
+// An entry size this build does not know is refused rather than misread.
+TEST(dedup_stm_snapshot, unknown_entry_size_is_refused) {
+    dedup_window_filter target(1h);
+    int64_t generation = 0;
+    EXPECT_THROW(
+      dedup_stm_test_accessor::restore(
+        target,
+        generation,
+        dedup_stm_test_accessor::state_snapshot_with_entry_size(
+          iobuf::from(std::string(32, 'x')), 16)),
+      serde::serde_exception);
+    EXPECT_EQ(target.map_size(), 0u);
+}
+
 TEST(dedup_stm_snapshot, version_1_snapshot_is_refused) {
     dedup_window_filter target(1h);
     int64_t generation = 0;
@@ -328,7 +441,7 @@ TEST(dedup_stm_snapshot, restore_into_a_smaller_ceiling_keeps_the_newest) {
     }
 }
 
-// The serialized size is the format's whole point: a fixed header plus 24
+// The serialized size is the format's whole point: a fixed header plus 20
 // bytes an entry, against 30 for the version 1 envelope-per-entry layout.
 TEST(dedup_stm_snapshot, packed_format_is_smaller_than_version_1) {
     constexpr size_t count = 10'000;
@@ -342,6 +455,7 @@ TEST(dedup_stm_snapshot, packed_format_is_smaller_than_version_1) {
     source.restore(seed);
     const auto packed
       = dedup_stm_test_accessor::serialize(source, 0).size_bytes();
+    static_assert(dedup_stm::packed_entry_size == 20);
     EXPECT_LE(packed, count * dedup_stm::packed_entry_size + 64);
     EXPECT_LT(packed, v1_snapshot_with(count).size_bytes());
 }

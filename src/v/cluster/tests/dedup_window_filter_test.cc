@@ -32,6 +32,7 @@
 #include <memory>
 #include <optional>
 #include <random>
+#include <set>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -1251,7 +1252,7 @@ TEST(DedupIdentityDigest, IsIndependentOfFragmentation) {
     // leader classifying a wire-fragmented identity and a replica digesting
     // the same identity after a round trip through the log agree.
     const auto d = cluster::dedup_digest_of(fragmented);
-    EXPECT_EQ(d.hi, 0x6603e3319e7157bbULL);
+    EXPECT_EQ(d.hi, 0x6603e3319e7157bbULL & cluster::dedup_digest_hi_mask);
     EXPECT_EQ(d.lo, 0xc7c5a0e27b0d32daULL);
 }
 
@@ -1274,10 +1275,12 @@ TEST(DedupIdentityDigest, SeparatesDistinctIdentities) {
 // silently invalidates every existing index without a serde version bump.
 // These constants were computed independently (python-xxhash, xxh64 with the
 // same two seeds), so this also cross-checks the implementation rather than
-// just pinning whatever it happens to produce.
+// just pinning whatever it happens to produce. The digest keeps the low half
+// of the `hi` hash only (see dedup_canonical_digest()).
 TEST(DedupIdentityDigest, IsPinnedForSnapshotCompatibility) {
     const auto d = cluster::dedup_digest_of(iobuf::from("dedup-identity"));
-    EXPECT_EQ(d.hi, 0xa0e1ea34f71724b7ULL);
+    EXPECT_EQ(d.hi, 0xa0e1ea34f71724b7ULL & cluster::dedup_digest_hi_mask);
+    EXPECT_EQ(d.hi, 0xf71724b7ULL);
     EXPECT_EQ(d.lo, 0x68a86e30b386534dULL);
 }
 
@@ -2986,4 +2989,144 @@ TEST(DedupShardBudget, TotalMatchesTheIndicesUnderRandomOperations) {
     }
     filters.clear();
     EXPECT_EQ(budget->entries, 0u);
+}
+
+// --- The compact index under the filter ---
+//
+// The index keeps 96 bits of each digest and a 32-bit timestamp relative to a
+// block of entries (dedup_compact_index). What that may change is bounded: an
+// identity is its 96 bits, and an entry whose timestamp a block cannot keep
+// beside much newer ones reads as expired, so it can stop matching but never
+// make a match that should not happen.
+
+TEST(DedupCompactIndexInTheFilter, IdentitiesAre96Bits) {
+    cluster::dedup_window_filter f(1000ms);
+    const auto d = cluster::dedup_digest_of(iobuf::from("k"));
+    EXPECT_EQ(d.hi & ~cluster::dedup_digest_hi_mask, 0u);
+    f.populate(d, ts(1000));
+    // The same 96 bits with anything above them is the same identity, as a
+    // digest read from a snapshot written before the index kept 96 bits is.
+    f.populate(
+      cluster::dedup_identity_digest{
+        .hi = d.hi | (0xdeadULL << 40), .lo = d.lo},
+      ts(1500));
+    EXPECT_EQ(f.map_size(), 1u);
+    const auto snap = f.snapshot();
+    ASSERT_EQ(snap.entries.size(), 1u);
+    EXPECT_EQ(snap.entries[0].identity, d);
+    EXPECT_EQ(snap.entries[0].timestamp, ts(1500));
+    EXPECT_FALSE(f.filter(make_batch("k", "dup", ts(1600))).has_value());
+}
+
+// A window longer than the span one block keeps exactly (about 37 days): an
+// entry far enough behind a newer one in its block is kept as expired. The
+// duplicate is admitted -- coverage lost, as at the entry limit -- rather than
+// dropped against a timestamp the index no longer has.
+TEST(DedupCompactIndexInTheFilter, AnEntryKeptAsExpiredIsNeverAMatch) {
+    constexpr int64_t day = 86'400'000;
+    cluster::dedup_window_filter f(std::chrono::days{60});
+    ASSERT_TRUE(f.filter(make_batch("old", "1", ts(day))).has_value());
+    // Fifty days later, in the same block: the old entry cannot stay beside
+    // it.
+    ASSERT_TRUE(f.filter(make_batch("new", "1", ts(51 * day))).has_value());
+    EXPECT_GT(f.index_stats().rebases, 0u);
+    EXPECT_EQ(f.map_size(), 2u);
+    // Within the configured window of both its old timestamp and the new one,
+    // but the index cannot vouch for it any more, and cannot keep it beside
+    // the newer entry when it is written again either.
+    EXPECT_TRUE(f.filter(make_batch("old", "2", ts(day))).has_value());
+    EXPECT_TRUE(f.filter(make_batch("old", "3", ts(day + 1))).has_value());
+    EXPECT_EQ(f.dropped_records(), 0u);
+    // Newer identities deduplicate as usual, and so does the old one once it
+    // is written close enough to them.
+    EXPECT_FALSE(f.filter(make_batch("new", "2", ts(51 * day))).has_value());
+    EXPECT_TRUE(f.filter(make_batch("old", "4", ts(40 * day))).has_value());
+    EXPECT_FALSE(f.filter(make_batch("old", "5", ts(40 * day))).has_value());
+}
+
+// Within the span a block keeps, nothing is lost however the index moves its
+// entries around: identities spread over 36 days, erased and refilled across
+// blocks, still deduplicate against exactly the timestamps they were admitted
+// with.
+TEST(DedupCompactIndexInTheFilter, WindowsWithinTheBlockSpanAreExact) {
+    constexpr int64_t day = 86'400'000;
+    cluster::dedup_window_filter f(std::chrono::days{36});
+    constexpr int keys = 3 * cluster::dedup_compact_index::block_entries;
+    auto stamp = [](int i) { return ts(day + (i % 36) * day + i); };
+    for (int i = 0; i < keys; ++i) {
+        ASSERT_TRUE(f.filter(make_batch(fmt::format("k{}", i), "1", stamp(i)))
+                      .has_value());
+    }
+    ASSERT_EQ(f.map_size(), static_cast<size_t>(keys));
+    // Every identity, exactly at its own timestamp and one window either side
+    // of it: a duplicate at the edges, admitted one millisecond beyond.
+    for (int i = 0; i < keys; i += 7) {
+        const auto key = fmt::format("k{}", i);
+        EXPECT_FALSE(f.filter(make_batch(key, "dup", stamp(i))).has_value())
+          << i;
+    }
+    const auto snap = f.snapshot();
+    ASSERT_EQ(snap.entries.size(), static_cast<size_t>(keys));
+    std::set<int64_t> stamps;
+    for (const auto& e : snap.entries) {
+        stamps.insert(e.timestamp.value());
+    }
+    for (int i = 0; i < keys; ++i) {
+        EXPECT_TRUE(stamps.contains(stamp(i).value())) << i;
+    }
+}
+
+// The index's table refuses an identity rather than search without bound
+// when digests collide on everything it hashes by. That cannot happen with
+// xxhash64 digests of distinct identities short of a deliberate search for
+// them; when it does, the record is admitted unindexed and counted, as at
+// the entry limit.
+TEST(DedupCompactIndexInTheFilter, RefusedIdentitiesAreAdmittedUnindexed) {
+    cluster::dedup_window_filter f(1000s);
+    size_t refused = 0;
+    for (uint64_t i = 0; i < 1000; ++i) {
+        const auto before = f.map_size();
+        f.populate(
+          cluster::dedup_identity_digest{
+            .hi = i, .lo = 0x1234'5678'9abc'def0ULL},
+          ts(1000));
+        refused += f.map_size() == before ? 1 : 0;
+    }
+    EXPECT_GT(refused, 0u);
+    EXPECT_EQ(f.unindexed_records(), refused);
+    EXPECT_EQ(f.map_size() + refused, 1000u);
+}
+
+// A snapshot written before the broker-time clamp can carry entries from the
+// future as well as a future watermark. Restored as they are, one of them
+// would hold its block's newest timestamp decades ahead, and the index could
+// keep none of the block's real entries beside it: every one would read as
+// expired, and stay so. They are clamped to the restored watermark instead.
+TEST(DedupCompactIndexInTheFilter, FutureEntriesInASnapshotAreClamped) {
+    cluster::dedup_window_filter f(5min);
+    const auto now = broker_now();
+    cluster::dedup_index_snapshot snap;
+    snap.max_timestamp = model::timestamp{4'102'444'800'000}; // 2100-01-01
+    snap.entries.push_back(
+      {.identity = cluster::dedup_digest_of(iobuf::from("future")),
+       .timestamp = snap.max_timestamp});
+    for (int i = 0; i < 100; ++i) {
+        snap.entries.push_back(
+          {.identity = cluster::dedup_digest_of(
+             iobuf::from(fmt::format("real-{}", i))),
+           .timestamp = now});
+    }
+    f.restore(snap);
+    ASSERT_EQ(f.map_size(), 101u);
+    EXPECT_LE(f.max_timestamp().value(), broker_now().value());
+    for (const auto& entry : f.snapshot().entries) {
+        EXPECT_LE(entry.timestamp.value(), f.max_timestamp().value());
+    }
+    // The real entries still deduplicate, and so does the clamped one.
+    for (int i = 0; i < 100; ++i) {
+        EXPECT_FALSE(f.filter(make_batch(fmt::format("real-{}", i), "dup", now))
+                       .has_value())
+          << i;
+    }
+    EXPECT_FALSE(f.filter(make_batch("future", "dup", now)).has_value());
 }

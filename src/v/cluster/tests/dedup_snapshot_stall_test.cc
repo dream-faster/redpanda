@@ -20,6 +20,7 @@
 #include <seastar/core/coroutine.hh>
 #include <seastar/core/future.hh>
 #include <seastar/core/memory.hh>
+#include <seastar/coroutine/maybe_yield.hh>
 #include <seastar/util/later.hh>
 
 #include <gtest/gtest.h>
@@ -49,9 +50,7 @@ struct dedup_stm_test_accessor {
     static ss::future<>
     restore(dedup_window_filter& state, int64_t& generation, iobuf buffer) {
         co_await dedup_stm::restore_snapshot(
-          state,
-          generation,
-          serde::from_iobuf<dedup_stm::state_snapshot>(std::move(buffer)));
+          state, generation, dedup_stm::decode_snapshot(std::move(buffer)));
     }
 };
 
@@ -176,14 +175,13 @@ void fill(dedup_window_filter& filter, size_t entries) {
         // bijection mod 2^64 -- so every identity is distinct and the index
         // really does hold `entries` of them.
         //
-        // `lo` matters more than it looks: dedup_identity_digest_hash returns
-        // it verbatim and declares is_avalanching, so the map does not re-mix
-        // it, and unordered_dense takes the bucket index from the hash's
-        // *high* bits. Anything whose high bits barely move across the range
-        // -- a counter, or ~counter -- puts every key in one bucket
-        // neighbourhood and turns these inserts quadratic. A real xxhash64
-        // digest is spread; the multiplier here is what keeps the synthetic
-        // one spread too.
+        // `lo` matters more than it looks: the index uses it verbatim as the
+        // hash, picking a segment by its high bits and a slot by its low
+        // ones. Anything whose high bits barely move across the range -- a
+        // counter, or ~counter -- puts every key in one segment, which then
+        // cannot split and refuses most of them. A real xxhash64 digest is
+        // spread; the multiplier here is what keeps the synthetic one spread
+        // too.
         seed.entries.push_back(
           {.identity
            = {.hi = 0xbf58'476d'1ce4'e5b9ULL * (i + 1), .lo = 0x9e37'79b9'7f4a'7c15ULL * (i + 1)},
@@ -267,35 +265,124 @@ ss::future<> compare_at(size_t entries) {
 
 // The shard budget turns memory into an entry limit at
 // DEDUP_SHARD_BYTES_PER_ENTRY, which has to cover what the index itself takes
-// per entry (map storage and bucket array, at the map's worst load) with room
-// for the snapshot's packed copy. Measured rather than derived, since the map
-// implementation decides it.
+// per entry (entries and lookup table, at the table's worst load) with room
+// for the snapshot's packed copy. Measured rather than derived, since the
+// table's load moves with its size: right after its segments split it is at
+// its emptiest, just before at its fullest. The sizes below land on both.
 TEST_CORO(dedup_snapshot_stall, index_memory_per_entry_fits_the_budget) {
-    constexpr size_t entries = 1'000'000;
-    const auto before = ss::memory::stats().allocated_memory();
-    auto filter = std::make_unique<dedup_window_filter>(1h, entries);
-    fill(*filter, entries);
-    const auto after = ss::memory::stats().allocated_memory();
-    const auto per_entry = (after - before) / entries;
-    std::cout << "\nindex memory: " << per_entry << " bytes per entry at "
-              << entries << " entries (budget assumes "
-              << DEDUP_SHARD_BYTES_PER_ENTRY << ")\n"
-              << std::flush;
-    ASSERT_EQ_CORO(filter->map_size(), entries);
+    size_t worst = 0;
+    for (size_t entries : {460'000ul, 920'000ul, 1'000'000ul, 1'800'000ul}) {
+        const auto before = ss::memory::stats().allocated_memory();
+        auto filter = std::make_unique<dedup_window_filter>(1h, entries);
+        fill(*filter, entries);
+        const auto after = ss::memory::stats().allocated_memory();
+        const auto per_entry = (after - before) / entries;
+        const auto stats = filter->index_stats();
+        std::cout << "\nindex memory: " << per_entry << " bytes per entry at "
+                  << entries << " entries (table's own count "
+                  << filter->memory_usage() / entries << "), lookup table "
+                  << static_cast<double>(entries)
+                       / static_cast<double>(stats.slots)
+                  << " full (budget assumes " << DEDUP_SHARD_BYTES_PER_ENTRY
+                  << ")\n"
+                  << std::flush;
+        ASSERT_EQ_CORO(filter->map_size(), entries);
+        ASSERT_EQ_CORO(stats.refused_inserts, 0u);
+        // Not compared with the table's own count: the allocator also counts
+        // the spans its pools take on first use, and reuses what an earlier
+        // round freed, so the two differ by a few bytes an entry either way.
+        worst = std::max(worst, per_entry);
+    }
+    // The point of the table: well under the ~50 bytes the map it replaced
+    // took, measured the same way.
+    ASSERT_LE_CORO(worst, 32u);
     // The packed snapshot adds dedup_stm::packed_entry_size on top while it
     // is written; the budget's figure must cover both.
     ASSERT_LE_CORO(
-      per_entry + dedup_stm::packed_entry_size, DEDUP_SHARD_BYTES_PER_ENTRY);
-    co_return;
+      worst + dedup_stm::packed_entry_size, DEDUP_SHARD_BYTES_PER_ENTRY);
+}
+
+// Growing an index never stops the reactor for long: the lookup table grows a
+// segment at a time instead of rehashing everything once it doubles, which at
+// millions of entries took tens of milliseconds in one go. The produce and
+// apply paths call into the filter once per record without yielding in
+// between, so this drives populate() the same way, yielding only every
+// `per_task` records, and measures the longest stretch: a task's worth of
+// records plus the largest single step, however large the index.
+TEST_CORO(dedup_snapshot_stall, growth_and_churn_stay_off_the_reactor) {
+    constexpr size_t entries = 6'000'000;
+    constexpr size_t per_task = 1024;
+    dedup_window_filter filter(1h, entries);
+    auto digest = [](size_t i) {
+        return dedup_identity_digest{
+          .hi = 0xbf58'476d'1ce4'e5b9ULL * (i + 1),
+          .lo = 0x9e37'79b9'7f4a'7c15ULL * (i + 1)};
+    };
+    // A millisecond per thousand identities, so the capacity cutoff has a
+    // spread of ages to trim at the ceiling.
+    auto drive = [&](size_t from, size_t to) -> ss::future<> {
+        for (size_t i = from; i < to; ++i) {
+            filter.populate(
+              digest(i),
+              model::timestamp{
+                base_timestamp + static_cast<int64_t>(i / 1000)});
+            if ((i + 1) % per_task == 0) {
+                co_await ss::coroutine::maybe_yield();
+            }
+        }
+    };
+    {
+        stall_probe probe;
+        probe.start();
+        const auto start = clock::now();
+        co_await drive(0, entries);
+        const auto total = clock::now() - start;
+        const auto stall = co_await probe.stop();
+        const auto stats = filter.index_stats();
+        std::cout << "\ngrowth to " << entries << " entries: worst stall "
+                  << us(stall) << "us   total " << us(total) << "us   "
+                  << stats.segment_splits << " segment splits\n"
+                  << std::flush;
+        // From 90% of the ceiling the sweep trims as it goes.
+        ASSERT_LE_CORO(filter.map_size(), entries);
+        ASSERT_GT_CORO(filter.map_size(), entries / 10 * 8);
+        ASSERT_LT_CORO(us(stall), 20'000);
+    }
+    {
+        // At the ceiling: every new identity sweeps, evicts and inserts.
+        stall_probe probe;
+        probe.start();
+        const auto start = clock::now();
+        co_await drive(entries, entries + 2'000'000);
+        const auto total = clock::now() - start;
+        const auto stall = co_await probe.stop();
+        std::cout << "churn of 2000000 identities at the ceiling: worst stall "
+                  << us(stall) << "us   total " << us(total) << "us   "
+                  << filter.capacity_evicted_entries() << " evicted\n"
+                  << std::flush;
+        ASSERT_LE_CORO(filter.map_size(), entries);
+        ASSERT_LT_CORO(us(stall), 20'000);
+    }
+    {
+        // Giving it all back (dedup disabled, a generation change, a restore)
+        // frees blocks and segments, a few thousand allocations, not entries.
+        const auto start = clock::now();
+        filter.clear();
+        const auto took = clock::now() - start;
+        std::cout << "clear: " << us(took) << "us\n" << std::flush;
+        ASSERT_EQ_CORO(filter.map_size(), 0u);
+        ASSERT_LT_CORO(filter.memory_usage(), 1024u);
+        ASSERT_LT_CORO(us(took), 20'000);
+    }
 }
 
 // The restore is the other half: at startup every dedup partition on the
 // shard restores in turn, and one that held the reactor for its whole
 // snapshot would hold the others behind the restore semaphore with it. Its
 // passes over the packed entries yield, so the longest stretch is bounded
-// however large the index. A restore that has to trim selects the newest
-// entries with one nth_element over the timestamps, which does not yield; at
-// this size that is tens of milliseconds, once, which is bounded separately.
+// however large the index -- including a restore that has to trim, which
+// selects the newest entries in passes too, where an nth_element over every
+// timestamp held the reactor for tens of milliseconds at this size.
 TEST_CORO(dedup_snapshot_stall, restore_yields_however_large_the_index) {
     constexpr size_t entries = 6'000'000;
     auto source = std::make_unique<dedup_window_filter>(1h, entries);
@@ -339,7 +426,7 @@ TEST_CORO(dedup_snapshot_stall, restore_yields_however_large_the_index) {
                   << "us   total " << us(total) << "us\n"
                   << std::flush;
         ASSERT_EQ_CORO(target.map_size(), entries / 2);
-        ASSERT_LT_CORO(us(stall), 250'000);
+        ASSERT_LT_CORO(us(stall), 20'000);
     }
 }
 

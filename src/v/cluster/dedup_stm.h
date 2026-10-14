@@ -53,9 +53,12 @@ struct dedup_stm_test_accessor;
 class dedup_stm : public raft::persisted_stm<> {
 public:
     static constexpr std::string_view name = "dedup_stm";
-    /// Bytes one index entry occupies in a snapshot: digest hi, digest lo,
-    /// timestamp. See state_snapshot.
-    static constexpr size_t packed_entry_size = 3 * sizeof(uint64_t);
+    /// Bytes one index entry occupies in a snapshot: digest lo, the 32 bits
+    /// of digest hi the index keeps, timestamp. See state_snapshot.
+    static constexpr size_t packed_entry_size = 2 * sizeof(uint64_t)
+                                                + sizeof(uint32_t);
+    /// The version 2 layout, which carried all 64 bits of digest hi.
+    static constexpr size_t legacy_packed_entry_size = 3 * sizeof(uint64_t);
 
     dedup_stm(
       raft::consensus*,
@@ -109,27 +112,58 @@ protected:
 private:
     friend struct dedup_stm_test_accessor;
 
-    /// Version history, each a compat break the reader handles by discarding
-    /// the snapshot and rebuilding the index from the log (see
+    /// Version history, each a compat break: a reader that cannot read a
+    /// version discards the snapshot and rebuilds the index from the log (see
     /// try_restore_snapshot()); the index is advisory and log-derived, so that
-    /// is correct, only slower:
+    /// is correct, only slower. This build reads versions 2 and 3:
     ///
     /// - 0: full identity bytes per entry.
     /// - 1: a 128-bit digest per entry, each its own serde envelope.
-    /// - 2: the entries as one packed blob of fixed packed_entry_size records
-    ///   (digest hi, digest lo, timestamp; each little-endian). Written in one
-    ///   pass straight from the index, so a snapshot costs one serialized copy
-    ///   -- 24 bytes per entry -- instead of an entry vector plus a 30-byte
-    ///   per-entry encoding of it.
+    /// - 2: the entries as one packed blob of fixed legacy_packed_entry_size
+    ///   records (digest hi, digest lo, timestamp; each little-endian).
+    ///   Written in one pass straight from the index, so a snapshot costs one
+    ///   serialized copy -- 24 bytes per entry -- instead of an entry vector
+    ///   plus a 30-byte per-entry encoding of it.
+    /// - 3: digests are 96 bits (dedup_canonical_digest()), and an entry packs
+    ///   into packed_entry_size bytes: digest lo, the low 32 bits of digest
+    ///   hi, timestamp. `entry_size` says which layout `entries` holds; a
+    ///   version 2 snapshot has no such field and reads as the legacy layout,
+    ///   so this build restores version 2 snapshots, keeping 96 bits of each
+    ///   digest.
     ///
-    /// The break runs both ways: an older binary rejects a version 2 snapshot
-    /// on compat version and rebuilds the same way, so a raft snapshot crossing
-    /// a rolling upgrade in either direction costs a rebuild, not a failed
-    /// partition. Version 1 snapshots only ever lived in the kvstore, which
-    /// this STM no longer reads.
+    /// The break runs both ways: an older binary rejects a newer snapshot on
+    /// compat version and rebuilds the same way, so a raft snapshot crossing a
+    /// rolling upgrade in either direction costs a rebuild, not a failed
+    /// partition. Version 3 is a compat break for that reason alone: a version
+    /// 2 reader would restore its digests without complaint and then never
+    /// match them against its own 128-bit ones. Version 1 snapshots only ever
+    /// lived in the kvstore, which this STM no longer reads.
     struct state_snapshot
       : serde::envelope<
           state_snapshot,
+          serde::version<3>,
+          serde::compat_version<3>> {
+        int64_t window_ms{0};
+        int64_t generation{0};
+        model::timestamp max_timestamp{model::timestamp::min()};
+        iobuf entries;
+        /// Bytes per record in `entries`. Always packed_entry_size when this
+        /// build writes it; decode_snapshot() sets legacy_packed_entry_size
+        /// for a version 2 snapshot.
+        uint32_t entry_size{packed_entry_size};
+
+        auto serde_fields() {
+            return std::tie(
+              window_ms, generation, max_timestamp, entries, entry_size);
+        }
+    };
+
+    /// Version 2 of state_snapshot, read only. Its own envelope because a
+    /// reader refuses data older than its compat version, and version 3's is
+    /// 3 so that version 2 binaries refuse it.
+    struct state_snapshot_v2
+      : serde::envelope<
+          state_snapshot_v2,
           serde::version<2>,
           serde::compat_version<2>> {
         int64_t window_ms{0};
@@ -141,6 +175,10 @@ private:
             return std::tie(window_ms, generation, max_timestamp, entries);
         }
     };
+
+    /// Deserialize a snapshot of any version this build reads: 3, or 2 in
+    /// its legacy entry layout. Throws serde_exception for anything else.
+    static state_snapshot decode_snapshot(iobuf);
 
     ss::future<result<kafka_result>> do_replicate(
       model::record_batch,
