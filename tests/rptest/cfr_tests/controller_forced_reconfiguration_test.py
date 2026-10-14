@@ -15,6 +15,7 @@ from ducktape.cluster.cluster import ClusterNode
 from ducktape.mark import matrix
 from ducktape.tests.test import TestContext
 from ducktape.utils.util import wait_until
+from requests.exceptions import HTTPError
 
 from rptest.cfr_tests.cfr_test_base import (
     LONG_TIMEOUT,
@@ -29,18 +30,11 @@ from rptest.cfr_tests.cfr_test_base import (
 from rptest.clients.kcl import KCL
 from rptest.clients.rpk import RpkTool
 from rptest.clients.types import TopicSpec
-from rptest.services.admin import Replica
+from rptest.services.admin import Admin, Replica
 from rptest.services.cluster import cluster
 from rptest.services.kgo_verifier_services import KgoVerifierProducer
 from rptest.utils.node_operations import NodeDecommissionWaiter
 from rptest.tests.partition_movement import PartitionMovementMixin
-
-from connectrpc.unary import UnaryOutput
-from rptest.clients.admin.v2 import Admin as AdminV2
-from rptest.clients.admin.proto.redpanda.core.admin.internal.v1 import (
-    breakglass_pb2,
-    breakglass_pb2_connect,
-)
 
 
 class Scenario(str, Enum):
@@ -54,7 +48,7 @@ class Scenario(str, Enum):
 class ControllerForcedReconfigurationApiTestBase(
     ControllerForcedReconfigurationTestBase,
 ):
-    """Adds the API-specific CFR helpers (protobuf invocation, partition
+    """Adds the API-specific CFR helpers (admin API invocation, partition
     recovery checks, etc.) on top of the shared base."""
 
     def __init__(
@@ -66,16 +60,6 @@ class ControllerForcedReconfigurationApiTestBase(
             *args,
             **kwargs,
         )
-
-    # ── CFR via protobuf API ─────────────────────────────────────────────
-
-    def _do_request(
-        self,
-        client: breakglass_pb2_connect.BreakglassServiceClient,
-        request: breakglass_pb2.ControllerForcedReconfigurationRequest,
-    ) -> UnaryOutput[breakglass_pb2.ControllerForcedReconfigurationResponse]:
-        """helper method to do a cfr request, handles the typing concerns"""
-        return client.call_controller_forced_reconfiguration(request)
 
     def _check_tp_recovered(
         self,
@@ -257,35 +241,33 @@ class ControllerForcedReconfigurationApiTestBase(
     def _execute_cfr_against_node(
         self,
         survivor: ClusterNode,
-        admin: AdminV2,
+        admin: Admin,
         dead_node_ids: list[int],
         surviving_node_count: int,
     ):
         """Execute a CFR request against a specific node"""
         survivor_id = self.redpanda.node_id(survivor)
         self.redpanda.logger.debug(f"cfr on node {survivor.name} with id {survivor_id}")
-        breakglass_client = admin.breakglass(node=survivor)
-        request = breakglass_pb2.ControllerForcedReconfigurationRequest(
-            dead_node_ids=dead_node_ids,
-            surviving_node_count=surviving_node_count,
-        )
-        result = self._do_request(breakglass_client, request)
-        self.redpanda.logger.debug(f"CFR request on {survivor.name} finished")
-
-        error = result.error()
-        if error is not None:
+        try:
+            admin.controller_forced_reconfiguration(
+                dead_node_ids=dead_node_ids,
+                surviving_node_count=surviving_node_count,
+                node=survivor,
+            )
+        except HTTPError as e:
             # this happens when there are multiple candidate leaders
             # and one wins the election before all cfr requests have been finished
-            if "use the existing controller leader" in error.message:
+            if "use the existing controller leader" in e.response.text:
                 return
-            error_message = f"CFR request on node {survivor.name} failed with error {result.error()}"
+            error_message = f"CFR request on node {survivor.name} failed with error {e.response.status_code}: {e.response.text}"
             self.redpanda.logger.info(error_message)
             assert False, error_message
+        self.redpanda.logger.debug(f"CFR request on {survivor.name} finished")
 
     def _execute_cfr_requests_parallel(
         self,
         nodes: list[ClusterNode],
-        admin: AdminV2,
+        admin: Admin,
         dead_node_ids: list[int],
         surviving_node_count: int,
     ):
@@ -331,7 +313,7 @@ class ControllerForcedReconfiguration_SmokeTest(
         9. produce to topic
         10. check that all partitions on topic have voter set of 3
         """
-        admin = AdminV2(self.redpanda)
+        admin = Admin(self.redpanda)
 
         # will start a cluster of 3 nodes on 1, 2, 3
         cluster_size: int = 3
@@ -523,7 +505,7 @@ class ControllerForcedReconfiguration_Size5(
         )
 
         """ setup 1: bootstrap """
-        admin = AdminV2(self.redpanda)
+        admin = Admin(self.redpanda)
         _ = self._start_redpanda_base(cluster_size=cluster_size)
         self.client().create_topic(topic)
 
@@ -731,7 +713,7 @@ class ControllerForcedReconfiguration_Size6(
         step_f_survivor_ids.append(designated_survivor_id)
         step_f_dead_ids = step_d_shut_down_ids
 
-        admin = AdminV2(self.redpanda)
+        admin = Admin(self.redpanda)
         _ = self._start_redpanda_base(cluster_size=cluster_size)
 
         step_b_shut_down_nodes = [

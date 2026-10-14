@@ -22,10 +22,6 @@ from ducktape.cluster.cluster import ClusterNode
 from ducktape.errors import TimeoutError
 from ducktape.mark import matrix
 
-from rptest.clients.admin.proto.redpanda.core.admin.v2 import (
-    features_pb2,
-)
-from rptest.clients.admin.v2 import Admin as AdminV2
 from rptest.clients.default import DefaultClient
 from rptest.clients.kcl import KCL
 from rptest.clients.rpk import RpkException, RpkTool
@@ -1040,18 +1036,18 @@ class AuditLogTestAdminApi(AuditLogTestBase):
 
     @skip_fips_mode
     @cluster(num_nodes=5)
-    def test_admin_v2_finalize_upgrade(self):
+    def test_admin_finalize_upgrade(self):
         """
-        Verifies that calls to the admin v2 FeaturesService.FinalizeUpgrade
-        RPC produce an api_activity audit record when the "admin" event
-        type is enabled. The audit entry is emitted at the auth boundary,
-        so it appears regardless of whether the service handler later
-        rejects the request — here it does, with FAILED_PRECONDITION,
-        because features_auto_finalization defaults to true.
+        Verifies that calls to POST /v1/features/finalize_upgrade produce an
+        api_activity audit record when the "admin" event type is enabled.
+        The audit entry is emitted at the auth boundary, so it appears
+        regardless of whether the handler later rejects the request — here
+        it does, with 400, because features_auto_finalization defaults to
+        true.
         """
         self.modify_audit_event_types(["admin"])
 
-        admin_v2 = AdminV2(
+        admin = Admin(
             self.redpanda,
             auth=(
                 self.redpanda.SUPERUSER_CREDENTIALS[0],
@@ -1060,9 +1056,9 @@ class AuditLogTestAdminApi(AuditLogTestBase):
         )
 
         try:
-            admin_v2.features().finalize_upgrade(features_pb2.FinalizeUpgradeRequest())
-        except Exception as e:
-            self.logger.debug(f"FinalizeUpgrade returned (expected failure): {e}")
+            admin.finalize_upgrade()
+        except requests.HTTPError as e:
+            self.logger.debug(f"finalize_upgrade returned (expected failure): {e}")
 
         def is_finalize_upgrade_record(record):
             if (
@@ -1071,12 +1067,12 @@ class AuditLogTestAdminApi(AuditLogTestBase):
             ):
                 return False
             url = record["http_request"]["url"]["url_string"]
-            return "FeaturesService/FinalizeUpgrade" in url
+            return "/v1/features/finalize_upgrade" in url
 
         records = self.find_matching_record(
             is_finalize_upgrade_record,
             lambda count: count >= 1,
-            "admin v2 FinalizeUpgrade audit record",
+            "finalize_upgrade audit record",
         )
 
         assert len(records) >= 1, (
@@ -1088,17 +1084,16 @@ class AuditLogTestAdminApi(AuditLogTestBase):
 
     @skip_fips_mode
     @cluster(num_nodes=5)
-    def test_admin_v2_get_upgrade_status(self):
+    def test_admin_get_upgrade_status(self):
         """
-        Verifies that calls to the admin v2 FeaturesService.GetUpgradeStatus
-        RPC produce an api_activity audit record when the "admin" event type
-        is enabled. Unlike FinalizeUpgrade this RPC is read-only (USER authz)
-        and succeeds; the audit entry is emitted at the auth boundary either
-        way.
+        Verifies that calls to GET /v1/features/upgrade_status produce an
+        api_activity audit record when the "admin" event type is enabled.
+        Unlike finalize_upgrade this route is read-only (USER authz) and
+        succeeds; the audit entry is emitted at the auth boundary either way.
         """
         self.modify_audit_event_types(["admin"])
 
-        admin_v2 = AdminV2(
+        admin = Admin(
             self.redpanda,
             auth=(
                 self.redpanda.SUPERUSER_CREDENTIALS[0],
@@ -1107,14 +1102,12 @@ class AuditLogTestAdminApi(AuditLogTestBase):
         )
 
         # The audit record is emitted at the auth boundary, so it appears even
-        # if the handler transiently returns UNAVAILABLE (e.g. no controller
-        # leader during the election window under parallel load).
+        # if the handler transiently answers 503 (e.g. no controller leader
+        # during the election window under parallel load).
         try:
-            admin_v2.features().get_upgrade_status(
-                features_pb2.GetUpgradeStatusRequest()
-            )
-        except Exception as e:
-            self.logger.debug(f"GetUpgradeStatus returned: {e}")
+            admin.get_upgrade_status()
+        except requests.RequestException as e:
+            self.logger.debug(f"upgrade_status returned: {e}")
 
         def is_get_upgrade_status_record(record):
             if (
@@ -1123,12 +1116,12 @@ class AuditLogTestAdminApi(AuditLogTestBase):
             ):
                 return False
             url = record["http_request"]["url"]["url_string"]
-            return "FeaturesService/GetUpgradeStatus" in url
+            return "/v1/features/upgrade_status" in url
 
         records = self.find_matching_record(
             is_get_upgrade_status_record,
             lambda count: count >= 1,
-            "admin v2 GetUpgradeStatus audit record",
+            "upgrade_status audit record",
         )
 
         assert len(records) >= 1, (
