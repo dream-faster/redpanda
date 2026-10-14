@@ -107,7 +107,9 @@ void dedup_window_filter::sync_shard_budget() {
     if (!_shard_budget) {
         return;
     }
-    const auto size = _map.size();
+    // A restore in progress counts as the entries it is going to hold, so the
+    // room it was granted stays its own while it fills it.
+    const auto size = std::max(_map.size(), _budget_reserved);
     _shard_budget->entries = _shard_budget->entries - _budget_accounted + size;
     _budget_accounted = size;
 }
@@ -633,16 +635,31 @@ void dedup_window_filter::replace_oldest_visited(model::timestamp incoming) {
         _sweep_pos = 0;
         finish_pass();
     }
-    const auto begin = _sweep_pos;
-    const auto end = std::min(begin + capacity_emergency_budget, _map.size());
-    std::optional<size_t> oldest;
-    for (size_t i = begin; i < end; ++i) {
-        if (
-          !oldest || _map.values()[i].second < _map.values()[*oldest].second) {
-            oldest = i;
-        }
+    // As many as it takes for the shard to hold one more, not one: a shard
+    // can stand above its limit, not only at it, and freeing one entry per
+    // new identity would then leave every new identity unindexed for good.
+    // Bounded by the window either way.
+    size_t need = 1;
+    if (_shard_budget && _shard_budget->entries >= _shard_budget->max_entries) {
+        need = std::min(
+          _shard_budget->entries - _shard_budget->max_entries + 1,
+          capacity_emergency_budget);
     }
-    if (oldest && _map.values()[*oldest].second < incoming) {
+    for (; need > 0 && _sweep_pos < _map.size(); --need) {
+        const auto begin = _sweep_pos;
+        const auto end = std::min(
+          begin + capacity_emergency_budget, _map.size());
+        std::optional<size_t> oldest;
+        for (size_t i = begin; i < end; ++i) {
+            if (
+              !oldest
+              || _map.values()[i].second < _map.values()[*oldest].second) {
+                oldest = i;
+            }
+        }
+        if (!oldest || !(_map.values()[*oldest].second < incoming)) {
+            return;
+        }
         erase_at(*oldest);
         ++_capacity_evicted_entries;
     }
@@ -662,6 +679,11 @@ bool dedup_window_filter::take_room_from_largest(model::timestamp incoming) {
         return false;
     }
     auto* largest = _shard_budget->largest();
+    if (largest->_budget_reserved > 0) {
+        // Mid-restore, its claim on the budget stands whatever it holds right
+        // now, so nothing freed from it is room for anyone else.
+        return false;
+    }
     // The largest index's own cursor decides what goes, so it loses its
     // oldest entries as it would at its own ceiling -- once its next pass has
     // found them. That is a change to another partition's index driven by
@@ -720,6 +742,15 @@ size_t dedup_window_filter::begin_restore(size_t count) {
         allowed = std::min(allowed, headroom);
     }
     const auto keep = std::min(count, allowed);
+    // Claimed now, not as the entries go in: the restore yields between
+    // chunks, and meanwhile the shard's other partitions replay their logs
+    // and insert into whatever the budget still shows free. Counted only
+    // afterwards, the restored entries landed on top of theirs, and the shard
+    // sat above its limit -- where freeing one entry per new identity never
+    // gets it back under, so every new identity on the shard was admitted
+    // unindexed.
+    _budget_reserved = keep;
+    sync_shard_budget();
     _map.reserve(keep);
     return keep;
 }
@@ -751,6 +782,9 @@ int64_t dedup_window_filter::finish_restore_pass() {
 
 void dedup_window_filter::finish_restore(size_t truncated) {
     _truncated_entries += truncated;
+    // Settle the claim to what was actually restored: fewer, when the
+    // snapshot held an identity twice.
+    _budget_reserved = 0;
     sync_shard_budget();
 }
 
@@ -763,6 +797,7 @@ void dedup_window_filter::clear() {
     // immediately and the capacity is worth keeping there.
     invalidate_walks();
     _map = {};
+    _budget_reserved = 0;
     sync_shard_budget();
     stop_being_largest();
     _max_ts = model::timestamp::min();

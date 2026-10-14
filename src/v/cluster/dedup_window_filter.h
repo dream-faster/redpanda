@@ -892,6 +892,9 @@ private:
     ss::lw_shared_ptr<dedup_shard_budget> _shard_budget;
     // This filter's contribution to _shard_budget->entries.
     size_t _budget_accounted{0};
+    // Entries a restore in progress has yet to insert but has already
+    // claimed from the shard budget; see begin_restore(). Zero otherwise.
+    size_t _budget_reserved{0};
     std::optional<ss::sstring> _key_header;
     chunked_hash_map<
       dedup_identity_digest,

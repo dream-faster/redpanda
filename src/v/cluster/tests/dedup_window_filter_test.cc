@@ -21,6 +21,7 @@
 #include "model/record.h"
 #include "storage/record_batch_builder.h"
 
+#include <seastar/core/future.hh>
 #include <seastar/core/lowres_clock.hh>
 
 #include <fmt/format.h>
@@ -2464,6 +2465,80 @@ TEST(DedupShardBudget, RestoreIsBoundedByShardHeadroom) {
     first.restore(snap);
     EXPECT_EQ(first.map_size(), shard_limit);
     EXPECT_EQ(budget->entries, shard_limit);
+}
+
+// A restore claims its room in the shard budget before it inserts anything.
+// It yields between chunks, and the shard's other partitions replay their
+// logs meanwhile: counted only afterwards, the restored entries landed on top
+// of theirs and the shard ended up above its limit, where freeing one entry
+// per new identity never gets back under it.
+TEST(DedupShardBudget, RestoreClaimsItsRoomBeforeFillingIt) {
+    constexpr size_t shard_limit = 100;
+    auto budget = make_budget(shard_limit);
+    cluster::dedup_window_filter restoring(1'000s, 1'000, budget);
+    cluster::dedup_window_filter replaying(1'000s, 1'000, budget);
+
+    // 80 entries to restore; halfway through, the other partition admits 60
+    // new identities, as a log replay would. All at one timestamp, so the
+    // sweep has nothing older than the cutoff to trim and the counts below
+    // are exact.
+    bool interleaved = false;
+    restoring
+      .restore_from(
+        80,
+        ts(2000),
+        [&](auto&& emit) {
+            for (uint64_t i = 0; i < 80; ++i) {
+                if (i == 40 && !interleaved) {
+                    interleaved = true;
+                    populate_n(replaying, "replay", 60, 5000, 0);
+                }
+                emit(
+                  cluster::dedup_identity_digest{.hi = i + 1, .lo = i + 1},
+                  ts(1000 + static_cast<int64_t>(i)));
+            }
+            return ss::now();
+        })
+      .get();
+    EXPECT_TRUE(interleaved);
+    EXPECT_EQ(restoring.map_size(), 80u);
+    EXPECT_EQ(budget->entries, restoring.map_size() + replaying.map_size());
+    EXPECT_LE(budget->entries, shard_limit);
+    // The replay got the room the restore left and no more: the restoring
+    // index's claim was not its to take, and with nothing of its own older
+    // than the incoming records to replace, the rest went unindexed.
+    EXPECT_EQ(replaying.map_size(), 20u);
+    EXPECT_EQ(replaying.unindexed_records(), 40u);
+
+    // The shard is full, and both partitions keep indexing new identities.
+    for (auto* f : {&restoring, &replaying}) {
+        const auto unindexed = f->unindexed_records();
+        f->populate(iobuf::from("fresh"), ts(9000));
+        EXPECT_EQ(f->unindexed_records(), unindexed);
+        EXPECT_LE(budget->entries, shard_limit);
+        EXPECT_EQ(budget->entries, restoring.map_size() + replaying.map_size());
+    }
+}
+
+// A shard above its limit, however it got there, frees enough on the next new
+// identity to hold it rather than exactly one entry.
+TEST(DedupShardBudget, AnOvershotShardGetsBackUnderItsLimit) {
+    constexpr size_t shard_limit = 100;
+    auto budget = make_budget(shard_limit);
+    cluster::dedup_window_filter f(1'000s, 1'000, budget);
+    // One timestamp, so the soft-limit sweep trims nothing on the way up.
+    populate_n(f, "k", shard_limit, 1000, 0);
+    ASSERT_EQ(budget->entries, shard_limit);
+    // Stand in for entries counted against the shard from elsewhere.
+    constexpr size_t overshoot = 5;
+    budget->entries += overshoot;
+
+    const auto unindexed = f.unindexed_records();
+    f.populate(iobuf::from("fresh"), ts(9000));
+    EXPECT_EQ(f.unindexed_records(), unindexed);
+    EXPECT_EQ(budget->entries, shard_limit);
+    EXPECT_EQ(f.map_size(), shard_limit - overshoot);
+    budget->entries -= overshoot;
 }
 
 // Entries at the trim cutoff timestamp fill exactly the room that is left, so
