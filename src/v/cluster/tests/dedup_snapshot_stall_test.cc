@@ -13,6 +13,7 @@
 #include "model/timestamp.h"
 #include "serde/envelope.h"
 #include "serde/rw/envelope.h"
+#include "serde/rw/iobuf.h"
 #include "serde/rw/vector.h"
 #include "test_utils/test.h"
 
@@ -40,6 +41,13 @@ struct dedup_stm_test_accessor {
     static ss::future<iobuf>
     serialize(dedup_window_filter& state, int64_t generation) {
         return dedup_stm::serialize_snapshot(state, generation);
+    }
+    static ss::future<>
+    restore(dedup_window_filter& state, int64_t& generation, iobuf buffer) {
+        return dedup_stm::restore_snapshot(
+          state,
+          generation,
+          serde::from_iobuf<dedup_stm::state_snapshot>(std::move(buffer)));
     }
 };
 
@@ -275,6 +283,57 @@ TEST_CORO(dedup_snapshot_stall, index_memory_per_entry_fits_the_budget) {
     ASSERT_LE_CORO(
       per_entry + dedup_stm::packed_entry_size, DEDUP_SHARD_BYTES_PER_ENTRY);
     co_return;
+}
+
+// The restore is the other half: at startup every dedup partition on the
+// shard restores in turn, and one that held the reactor for its whole
+// snapshot would hold the others behind the restore semaphore with it. Its
+// passes over the packed entries yield, so the longest stretch is bounded
+// however large the index. A restore that has to trim selects the newest
+// entries with one nth_element over the timestamps, which does not yield; at
+// this size that is tens of milliseconds, once, which is bounded separately.
+TEST_CORO(dedup_snapshot_stall, restore_yields_however_large_the_index) {
+    constexpr size_t entries = 6'000'000;
+    auto source = std::make_unique<dedup_window_filter>(1h, entries);
+    fill(*source, entries);
+    auto packed = co_await dedup_stm_test_accessor::serialize(*source, 7);
+    source.reset();
+
+    {
+        dedup_window_filter target(1h, entries);
+        int64_t generation = 0;
+        stall_probe probe;
+        probe.start();
+        const auto start = clock::now();
+        co_await dedup_stm_test_accessor::restore(
+          target, generation, packed.copy());
+        const auto total = clock::now() - start;
+        const auto stall = co_await probe.stop();
+        std::cout << "\nrestore of " << entries << " entries: worst stall "
+                  << us(stall) << "us   total " << us(total) << "us\n"
+                  << std::flush;
+        ASSERT_EQ_CORO(target.map_size(), entries);
+        ASSERT_EQ_CORO(generation, 7);
+        ASSERT_LT_CORO(us(stall), 20'000);
+    }
+    {
+        // Into half the room: the trimming restore.
+        dedup_window_filter target(1h, entries / 2);
+        int64_t generation = 0;
+        stall_probe probe;
+        probe.start();
+        const auto start = clock::now();
+        co_await dedup_stm_test_accessor::restore(
+          target, generation, std::move(packed));
+        const auto total = clock::now() - start;
+        const auto stall = co_await probe.stop();
+        std::cout << "trimming restore of " << entries << " entries into "
+                  << entries / 2 << ": worst stall " << us(stall)
+                  << "us   total " << us(total) << "us\n"
+                  << std::flush;
+        ASSERT_EQ_CORO(target.map_size(), entries / 2);
+        ASSERT_LT_CORO(us(stall), 250'000);
+    }
 }
 
 // An index this size is what put 123-124ms reactor stalls in the produce and
