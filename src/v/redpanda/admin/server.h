@@ -465,6 +465,13 @@ private:
     /// Feature routes
     ss::future<ss::json::json_return_type>
       put_feature_handler(std::unique_ptr<ss::http::request>);
+    ss::future<ss::json::json_return_type>
+      get_upgrade_status_handler(std::unique_ptr<ss::http::request>);
+    ss::future<ss::json::json_return_type>
+      finalize_upgrade_handler(std::unique_ptr<ss::http::request>);
+    ss::future<ss::json::json_return_type>
+      controller_forced_reconfiguration_handler(
+        std::unique_ptr<ss::http::request>);
 
     /// Broker routes
 

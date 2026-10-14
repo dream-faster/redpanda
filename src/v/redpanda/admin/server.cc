@@ -2177,7 +2177,88 @@ admin_server::put_feature_handler(std::unique_ptr<ss::http::request> req) {
     }
 }
 
+ss::future<ss::json::json_return_type> admin_server::get_upgrade_status_handler(
+  std::unique_ptr<ss::http::request> req) {
+    if (need_redirect_to_leader(model::controller_ntp, _metadata_cache)) {
+        throw co_await redirect_to_leader(*req, model::controller_ntp);
+    }
+
+    auto status = co_await _controller->get_feature_manager().invoke_on(
+      cluster::feature_manager::backend_shard,
+      [](cluster::feature_manager& fm) { return fm.get_upgrade_status(); });
+
+    using state_t
+      = cluster::feature_manager::upgrade_status::finalization_state;
+    ss::httpd::features_json::upgrade_status res;
+    switch (status.state) {
+    case state_t::finalized:
+        res.state = "finalized";
+        break;
+    case state_t::ready_to_finalize:
+        res.state = "ready_to_finalize";
+        break;
+    case state_t::upgrade_in_progress:
+        res.state = "upgrade_in_progress";
+        break;
+    }
+    res.active_version = status.active_version();
+    res.version_after_finalization = status.version_after_finalization();
+    res.auto_finalization_enabled = status.auto_finalization_enabled;
+    for (auto& m : status.members) {
+        ss::httpd::features_json::upgrade_member item;
+        item.node_id = m.id();
+        item.logical_version = m.logical_version();
+        item.version_known = m.version_known;
+        item.alive = m.alive;
+        item.release_version = std::move(m.release_version);
+        res.members.push(item);
+    }
+    co_return std::move(res);
+}
+
+ss::future<ss::json::json_return_type>
+admin_server::finalize_upgrade_handler(std::unique_ptr<ss::http::request> req) {
+    if (config::shard_local_cfg().features_auto_finalization()) {
+        throw ss::httpd::bad_request_exception(
+          "finalize_upgrade is only valid when features_auto_finalization "
+          "is disabled");
+    }
+    if (need_redirect_to_leader(model::controller_ntp, _metadata_cache)) {
+        throw co_await redirect_to_leader(*req, model::controller_ntp);
+    }
+
+    auto status = co_await _controller->get_feature_manager().invoke_on(
+      cluster::feature_manager::backend_shard,
+      [](cluster::feature_manager& fm) {
+          return fm.submit_manual_finalize_request();
+      });
+
+    using finalize_status = cluster::feature_manager::finalize_status;
+    switch (status) {
+    case finalize_status::ok:
+        co_return ss::json::json_void();
+    case finalize_status::not_leader:
+        throw ss::httpd::base_exception(
+          "controller leadership changed during processing; retry the "
+          "request",
+          ss::http::reply::status_type::service_unavailable);
+    }
+    vunreachable("unhandled finalize_status: {}", static_cast<int>(status));
+}
+
 void admin_server::register_features_routes() {
+    register_route<user>(
+      ss::httpd::features_json::get_upgrade_status,
+      [this](std::unique_ptr<ss::http::request> req) {
+          return get_upgrade_status_handler(std::move(req));
+      });
+
+    register_route<superuser>(
+      ss::httpd::features_json::finalize_upgrade,
+      [this](std::unique_ptr<ss::http::request> req) {
+          return finalize_upgrade_handler(std::move(req));
+      });
+
     register_route<user>(
       ss::httpd::features_json::get_features,
       [this](std::unique_ptr<ss::http::request>) {

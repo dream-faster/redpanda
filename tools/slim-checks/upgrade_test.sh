@@ -388,6 +388,39 @@ for route in "GET /v1/usage" "GET /v1/debug/self_test/status" \
 done
 wait_healthy 0 || fail "unhealthy after calling removed routes"
 
+# admin_status <node> <method> <path> [curl args...] -> HTTP status code.
+# -L follows the 307 a non-leader answers with to the controller leader.
+admin_status() {
+  local n="$1" method="$2" path="$3"
+  shift 3
+  docker exec "$(name "$n")" curl -sL -o /dev/null -w '%{http_code}' \
+    -X "$method" "$@" "localhost:9644$path" || true
+}
+
+echo "-- v1 replacements for the admin API v2 upgrade and recovery calls"
+status=$(docker exec "$(name 1)" curl -sfL localhost:9644/v1/features/upgrade_status) ||
+  fail "upgrade_status"
+grep -q '"state": *"finalized"' <<<"$status" ||
+  fail "a finished roll should be finalized: $status"
+code=$(admin_status 1 POST /v1/features/finalize_upgrade)
+[[ $code == 400 ]] || fail "finalize_upgrade with auto finalization on answered $code"
+rpk 0 cluster config set features_auto_finalization false >/dev/null ||
+  fail "disable auto finalization"
+# Cluster config reaches each node asynchronously; retry until the node
+# serving the request (and the leader it redirects to) has the new value.
+for _ in $(seq 1 30); do
+  code=$(admin_status 1 POST /v1/features/finalize_upgrade)
+  [[ $code == 200 ]] && break
+  sleep 1
+done
+[[ $code == 200 ]] || fail "finalize_upgrade with auto finalization off answered $code"
+rpk 0 cluster config set features_auto_finalization true >/dev/null ||
+  fail "re-enable auto finalization"
+code=$(admin_status 1 POST /v1/debug/controller_forced_reconfiguration \
+  -H 'Content-Type: application/json' -d '{}')
+[[ $code == 400 ]] || fail "forced reconfiguration with no arguments answered $code"
+wait_healthy 1 || fail "unhealthy after the upgrade and recovery calls"
+
 echo "== restart the slim cluster once more"
 for id in 0 1 2; do docker restart -t 60 "$(name "$id")" >/dev/null; done
 for id in 0 1 2; do wait_ready "$id" || fail "slim restart $id"; done

@@ -505,6 +505,30 @@
             ]
         },
         {
+            "path": "/v1/debug/controller_forced_reconfiguration",
+            "operations": [
+                {
+                    "method": "POST",
+                    "summary": "Disaster recovery for a controller group that has lost quorum: starts forced reconfiguration of the controller on this broker, excluding the given dead brokers. The body is {\"dead_node_ids\": [int], \"surviving_node_count\": int}. Issue it on every surviving broker.",
+                    "operationId": "controller_forced_reconfiguration",
+                    "nickname": "controller_forced_reconfiguration",
+                    "parameters": [
+                        {
+                            "name": "body",
+                            "required": true,
+                            "paramType": "body"
+                        }
+                    ],
+                    "responseMessages": [
+                        {
+                            "code": 200,
+                            "message": "Forced reconfiguration initialized"
+                        }
+                    ]
+                }
+            ]
+        },
+        {
             "path": "/v1/debug/unsafe_reset_metadata/{topic}/{partition}",
             "operations": [
                 {
