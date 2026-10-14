@@ -128,13 +128,21 @@ def test_sustained_duplicate_heavy_load(make_cluster, pytestconfig):
         errors = []
         for i in range(per_producer):
             k = (start + i * 7) % keyspace
-            p.produce(
-                t,
-                key=f"id-{k}".encode(),
-                value=b"x" * 64,
-                partition=k % 8,
-                on_delivery=lambda e, _m: e and errors.append(e),
-            )
+            while True:
+                try:
+                    p.produce(
+                        t,
+                        key=f"id-{k}".encode(),
+                        value=b"x" * 64,
+                        partition=k % 8,
+                        on_delivery=lambda e, _m: e and errors.append(e),
+                    )
+                    break
+                except BufferError:
+                    # The client's own queue is full: the broker is behind
+                    # this producer for a moment. Serve deliveries until
+                    # there is room, then send the same record again.
+                    p.poll(0.1)
             if i % 5000 == 0:
                 p.poll(0)
         assert p.flush(300) == 0

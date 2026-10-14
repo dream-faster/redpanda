@@ -587,14 +587,28 @@ void dedup_window_filter::reclaim_expired_elsewhere() {
             // whatever its index holds, and its cursor is not running.
             continue;
         }
-        const auto before = other->_index.size();
-        other->sweep_step(sweep_budget, false);
-        other->_reclaimed_entries += before - other->_index.size();
+        other->reclaim_expired_step(sweep_budget);
         return;
     }
 }
 
-void dedup_window_filter::sweep_step(size_t budget, bool trim) {
+void dedup_window_filter::reclaim_expired_step(size_t budget) {
+    const int64_t cutoff = expiry_cutoff();
+    for (size_t step = 0; step < budget && !_index.empty(); ++step) {
+        if (_reclaim_pos >= _index.size()) {
+            _reclaim_pos = 0;
+        }
+        if (!is_live(_index.timestamp_at(_reclaim_pos), cutoff)) {
+            // As in sweep_step(), the erase moved an unvisited entry here.
+            erase_at(_reclaim_pos);
+            ++_reclaimed_entries;
+            continue;
+        }
+        ++_reclaim_pos;
+    }
+}
+
+void dedup_window_filter::sweep_step(size_t budget) {
     const int64_t cutoff = expiry_cutoff();
     // Only the largest indices trim themselves under shard pressure. If every
     // inserting partition trimmed itself instead, a small busy one would keep
@@ -603,7 +617,7 @@ void dedup_window_filter::sweep_step(size_t budget, bool trim) {
     // still over its soft limit is checked per entry, as the own soft limit
     // is, so the step stops trimming once its own erases have brought the
     // shard back under it.
-    const bool largest_here = trim && _shard_budget && over_shard_soft_limit()
+    const bool largest_here = _shard_budget && over_shard_soft_limit()
                               && among_the_largest();
 
     for (size_t step = 0; step < budget; ++step) {
@@ -630,7 +644,7 @@ void dedup_window_filter::sweep_step(size_t budget, bool trim) {
             continue;
         }
         if (
-          trim && stamp.value() < _capacity_cutoff.value()
+          stamp.value() < _capacity_cutoff.value()
           && ((largest_here && over_shard_soft_limit()) || over_own_soft_limit())) {
             // Inside the window, so this is coverage genuinely lost. Doing it
             // here, a few entries at a time from the soft limit upwards, is
@@ -835,6 +849,7 @@ void dedup_window_filter::begin_restore_pass(
     // unindexed for a whole pass -- hundreds of thousands of records on a
     // large index. The frame starts at the oldest restored entry.
     _sweep_pos = 0;
+    _reclaim_pos = 0;
     _pass_oldest = oldest;
     begin_pass();
 }
@@ -863,6 +878,7 @@ void dedup_window_filter::clear() {
     stop_being_largest();
     _max_ts = model::timestamp::min();
     _sweep_pos = 0;
+    _reclaim_pos = 0;
     _capacity_cutoff = model::timestamp::min();
     _pass_oldest = no_pass_oldest;
     begin_pass();

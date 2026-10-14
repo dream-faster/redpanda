@@ -761,8 +761,8 @@ private:
     /// the follower's alike: reclaim_expired_elsewhere(), then sweep_step().
     void sweep_for_new_identity();
 
-    /// Under shard pressure, advance one other index's cursor by a step that
-    /// drops only its expired entries, round-robin over the shard's indices.
+    /// Under shard pressure, take one reclaim_expired_step() on another
+    /// index, round-robin over the shard's indices.
     ///
     /// A cursor moves only on its own index's new identities, so an index
     /// holding a window's worth of entries takes a sizeable fraction of that
@@ -777,16 +777,26 @@ private:
     /// expired entry cannot match in the window, so no dedup decision there
     /// changes.
     void reclaim_expired_elsewhere();
+    /// Walk this index's own reclaim cursor over at most \p budget entries,
+    /// dropping the expired ones and nothing else.
+    ///
+    /// Its own cursor, not the sweep cursor: the sweep cursor's pass is what
+    /// finds the entries to trim for capacity and measures the cutoff, so
+    /// walking it without trimming would skip, for that pass, the entries the
+    /// shard takes room from this index with (take_room_from_largest()). An
+    /// erase here behind the sweep cursor moves an unvisited entry behind it,
+    /// which only ends that pass early, as revert_request()'s erases do.
+    void reclaim_expired_step(size_t budget);
 
     /// \brief Advance the sweep cursor over at most \p budget entries.
     ///
     /// Drops the expired ones, and -- once the index is within
-    /// capacity_soft_margin_divisor of the ceiling, and only when \p trim --
-    /// the ones below the capacity cutoff. The cursor persists across calls and
+    /// capacity_soft_margin_divisor of the ceiling -- the ones below the
+    /// capacity cutoff. The cursor persists across calls and
     /// wraps at the end of the value array, so successive calls walk the whole
     /// index in bounded slices instead of one pass. This is the only eviction
     /// the produce and apply paths perform.
-    void sweep_step(size_t budget, bool trim = true);
+    void sweep_step(size_t budget);
 
     /// One bounded sweep step taken because a new identity stamped
     /// \p incoming arrived with the index at the hard ceiling. Returns whether
@@ -956,6 +966,8 @@ private:
     // span the leader treats it as expired regardless: the same divergence
     // the unreverted watermark already causes.
     size_t _sweep_pos{0};
+    // Position of reclaim_expired_step() in the same array.
+    size_t _reclaim_pos{0};
     // Walks in progress; one per snapshot being taken, so at most a few.
     std::vector<live_walk*> _walks;
     // Histogram of the entries the pass in progress has visited, measured
