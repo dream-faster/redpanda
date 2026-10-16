@@ -272,7 +272,6 @@ redpanda_cc_library(
         ":roles",
         ":security",
         ":topic_config_utils",
-        "//proto/redpanda/core/admin/v2:kafka_connections_redpanda_proto",
         "//src/v/base",
         "//src/v/bytes",
         "//src/v/bytes:iobuf",

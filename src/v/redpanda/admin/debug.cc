@@ -13,6 +13,7 @@
 #include "base/vassert.h"
 #include "cluster/controller.h"
 #include "cluster/controller_stm.h"
+#include "cluster/errc.h"
 #include "cluster/metadata_cache.h"
 #include "cluster/partition_leaders_table.h"
 #include "cluster/shard_table.h"
@@ -39,6 +40,10 @@
 #include <seastar/http/exception.hh>
 #include <seastar/http/httpd.hh>
 #include <seastar/json/json_elements.hh>
+
+#include <fmt/ranges.h>
+
+#include <limits>
 
 namespace {
 ss::future<result<std::vector<cluster::partition_state>>>
@@ -163,7 +168,70 @@ void trigger_crash(std::unique_ptr<ss::http::request> req) {
 
 } // namespace
 
+ss::future<ss::json::json_return_type>
+admin_server::controller_forced_reconfiguration_handler(
+  std::unique_ptr<ss::http::request> req) {
+    auto doc = co_await parse_json_body(req.get());
+    if (
+      !doc.IsObject() || !doc.HasMember("dead_node_ids")
+      || !doc["dead_node_ids"].IsArray()
+      || !doc.HasMember("surviving_node_count")
+      || !doc["surviving_node_count"].IsUint()) {
+        throw ss::httpd::bad_request_exception(
+          "Request body must be {\"dead_node_ids\": [int], "
+          "\"surviving_node_count\": int}");
+    }
+    const auto surviving = doc["surviving_node_count"].GetUint();
+    if (surviving > std::numeric_limits<uint16_t>::max()) {
+        throw ss::httpd::bad_request_exception(
+          fmt::format(
+            "provided surviving broker size is too large: {}", surviving));
+    }
+    std::vector<model::node_id> dead_nodes;
+    for (const auto& id : doc["dead_node_ids"].GetArray()) {
+        if (!id.IsInt()) {
+            throw ss::httpd::bad_request_exception(
+              "dead_node_ids must be integers");
+        }
+        dead_nodes.emplace_back(id.GetInt());
+    }
+
+    vlog(
+      adminlog.info,
+      "Starting controller forced reconfiguration with dead nodes {} and "
+      "surviving_node_count {}",
+      dead_nodes,
+      surviving);
+    auto error_info = co_await ss::smp::submit_to(
+      0,
+      [this,
+       dead_nodes = std::move(dead_nodes),
+       surviving_node_count = static_cast<uint16_t>(surviving)]() mutable {
+          return _controller->initialize_controller_forced_reconfiguration(
+            std::move(dead_nodes), surviving_node_count);
+      });
+    vlog(
+      adminlog.info,
+      "Controller forced reconfiguration initialization finished: {}",
+      error_info);
+
+    if (error_info.err == std::error_code{cluster::errc::success}) {
+        co_return ss::json::json_void();
+    }
+    throw ss::httpd::base_exception(
+      std::move(error_info.message),
+      error_info.err == std::errc::operation_not_supported
+        ? ss::http::reply::status_type::not_implemented
+        : ss::http::reply::status_type::internal_server_error);
+}
+
 void admin_server::register_debug_routes() {
+    register_route<superuser>(
+      ss::httpd::debug_json::controller_forced_reconfiguration,
+      [this](std::unique_ptr<ss::http::request> req) {
+          return controller_forced_reconfiguration_handler(std::move(req));
+      });
+
     register_route<user>(
       ss::httpd::debug_json::stress_fiber_stop,
       [this](std::unique_ptr<ss::http::request>) {

@@ -153,6 +153,8 @@ def data_dependency():
     http_archive(
         name = "seastar",
         build_file = "//bazel/thirdparty:seastar.BUILD",
+        patch_args = ["-p1"],
+        patches = ["//bazel/thirdparty:seastar-prometheus-protobuf.patch"],
         sha256 = "8d49c9bc4125e77aad3345ad1b29bb8d60e15cff34de60d217c0642c330c93a0",
         strip_prefix = "seastar-5bf36c507142f1f82cd92ca78be3adc6030f4c3f",
         url = "https://github.com/redpanda-data/seastar/archive/5bf36c507142f1f82cd92ca78be3adc6030f4c3f.tar.gz",

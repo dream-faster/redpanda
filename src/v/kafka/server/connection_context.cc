@@ -10,7 +10,6 @@
  */
 #include "kafka/server/connection_context.h"
 
-#include "absl/time/time.h"
 #include "base/likely.h"
 #include "base/units.h"
 #include "base/vlog.h"
@@ -163,7 +162,6 @@ parse_virtual_connection_id(const kafka::request_header& header) {
 connection_context::connection_context(
   std::optional<
     std::reference_wrapper<boost::intrusive::list<connection_context>>> hook,
-  std::optional<std::reference_wrapper<closed_connections_t>> closed_list,
   class server& s,
   ss::lw_shared_ptr<net::connection> conn,
   std::optional<security::sasl_server> sasl,
@@ -173,7 +171,6 @@ connection_context::connection_context(
   config::conversion_binding<api_key_table<bool>, std::vector<ss::sstring>>
     kafka_throughput_controlled_api_keys) noexcept
   : _hook(hook)
-  , _closed_list(closed_list)
   , _server(s)
   , conn(conn)
   , _protocol_state()
@@ -216,18 +213,6 @@ ss::future<> connection_context::start() {
     }
 }
 
-namespace {
-constexpr static size_t closed_list_size_per_shard = 5;
-
-void push_limited(
-  closed_connections_t& queue, closed_connections_t::value_type&& value) {
-    if (queue.size() == closed_list_size_per_shard) {
-        queue.pop_front();
-    }
-    queue.push_back(std::move(value));
-}
-} // namespace
-
 ss::future<> connection_context::stop() {
     if (conn) {
         vlog(klog.trace, "stopping connection context for {}", conn->addr);
@@ -240,10 +225,6 @@ ss::future<> connection_context::stop() {
 
     if (_hook && is_linked()) {
         _hook.value().get().erase(_hook.value().get().iterator_to(*this));
-    }
-    if (_closed_list) {
-        push_limited(
-          _closed_list.value().get(), ss::make_lw_shared(to_closed_proto()));
     }
 
     if (conn) {
@@ -857,132 +838,6 @@ connection_context::dispatch_method_once(request_header hdr, size_t size) {
       shared_from_this(), std::move(rctx), rres);
 }
 
-namespace {
-absl::Time
-ss_sys_clock_to_absl(const ss::lowres_system_clock::time_point& lowres_tp) {
-    return absl::FromChrono(
-      std::chrono::system_clock::time_point{lowres_tp.time_since_epoch()});
-}
-} // namespace
-
-proto::admin::kafka_connection connection_context::to_proto() const {
-    using proto::admin::kafka_connection_state;
-
-    auto res = proto::admin::kafka_connection{};
-    res.set_shard_id(ss::this_shard_id());
-    res.set_node_id(
-      config::node().node_id.value().value_or(model::unassigned_node_id));
-    res.set_uid(ssx::sformat("{}", _attributes.connection_id));
-    res.set_listener_name(ss::sstring{listener()});
-    auto conn_state = [this]() {
-        if (!_as.local_is_initialized() || _as.abort_requested()) {
-            return kafka_connection_state::aborting;
-        }
-        return kafka_connection_state::open;
-    }();
-    res.set_state(conn_state);
-    res.set_open_time(ss_sys_clock_to_absl(_attributes.open_time));
-
-    auto src = proto::admin::source{};
-    src.set_ip_address(ssx::sformat("{}", client_host()));
-    src.set_port(client_port());
-    res.set_source(std::move(src));
-
-    auto tls_info = proto::admin::tls_info{};
-    tls_info.set_enabled(conn->tls_enabled());
-    res.set_tls_info(std::move(tls_info));
-
-    auto auth_state = [this]() {
-        if (_mtls_state) {
-            return proto::admin::authentication_state::success;
-        } else if (_sasl) {
-            switch (_sasl->state()) {
-            case security::sasl_server::sasl_state::initial:
-            case security::sasl_server::sasl_state::handshake:
-            case security::sasl_server::sasl_state::authenticate:
-                return proto::admin::authentication_state::unauthenticated;
-            case security::sasl_server::sasl_state::complete:
-                return proto::admin::authentication_state::success;
-            case security::sasl_server::sasl_state::failed:
-                return proto::admin::authentication_state::failure;
-            }
-        }
-        return proto::admin::authentication_state::unauthenticated;
-    }();
-    auto auth_mechanism = [this]() -> proto::admin::authentication_mechanism {
-        if (_mtls_state) {
-            return proto::admin::authentication_mechanism::mtls;
-        } else if (_sasl && _sasl->has_mechanism()) {
-            return string_switch<proto::admin::authentication_mechanism>(
-                     _sasl->mechanism().mechanism_name())
-              .match(
-                security::scram_sha256_authenticator::name,
-                proto::admin::authentication_mechanism::sasl_scram)
-              .match(
-                security::scram_sha512_authenticator::name,
-                proto::admin::authentication_mechanism::sasl_scram)
-              .match(
-                security::plain_authenticator::name,
-                proto::admin::authentication_mechanism::sasl_plain)
-              .default_match(
-                proto::admin::authentication_mechanism::unspecified);
-        }
-        return proto::admin::authentication_mechanism::unspecified;
-    }();
-    auto auth_info = proto::admin::authentication_info{};
-    auth_info.set_user_principal(ss::sstring{get_principal().name()});
-    auth_info.set_state(auth_state);
-    auth_info.set_mechanism(auth_mechanism);
-    res.set_authentication_info(std::move(auth_info));
-
-    constexpr auto get_last_str = [](const last_value& val) {
-        return val.get().value_or("");
-    };
-
-    res.set_client_id(get_last_str(_attributes.last_client_id));
-    res.set_client_software_name(
-      get_last_str(_attributes.last_client_software_name));
-    res.set_client_software_version(
-      get_last_str(_attributes.last_client_software_version));
-    res.set_transactional_id(get_last_str(_attributes.last_transactional_id));
-    res.set_group_id(get_last_str(_attributes.last_group_id));
-    res.set_group_instance_id(get_last_str(_attributes.last_group_instance_id));
-    res.set_group_member_id(get_last_str(_attributes.last_group_member_id));
-
-    res.set_api_versions(
-      chunked_hash_map<int32_t, int32_t>{
-        _attributes.api_versions.cbegin(), _attributes.api_versions.cend()});
-
-    auto now = ss::lowres_clock::now();
-    res.set_in_flight_requests(_attributes.in_flight_requests.to_proto(now));
-    res.set_idle_duration(
-      absl::FromChrono(_attributes.in_flight_requests.get_idle_duration(now)));
-
-    auto make_stats = [this](auto&& get_value) {
-        auto stats = proto::admin::request_statistics{};
-        stats.set_request_count(get_value(_attributes.request_count));
-        stats.set_produce_bytes(get_value(_attributes.produce_bytes));
-        stats.set_produce_batch_count(
-          get_value(_attributes.produce_batch_count));
-        stats.set_fetch_bytes(get_value(_attributes.fetch_bytes));
-        return stats;
-    };
-
-    res.set_recent_request_statistics(make_stats(
-      [now](auto& attr) { return attr.recent_stat.window_total(now); }));
-    res.set_total_request_statistics(
-      make_stats([](auto& attr) { return attr.total_stat; }));
-
-    return res;
-}
-
-proto::admin::kafka_connection connection_context::to_closed_proto() const {
-    auto res = to_proto();
-    res.set_state(proto::admin::kafka_connection_state::closed);
-    res.set_close_time(ss_sys_clock_to_absl(ss::lowres_system_clock::now()));
-    return res;
-}
-
 ss::future<> connection_context::virtual_connection_state::process_request(
   ss::lw_shared_ptr<connection_context> connection_ctx,
   request_context rctx,
@@ -1259,25 +1114,6 @@ void connection_attributes::in_flight_request_tracker::record_end_request() {
     if (_total_in_flight_count == 0) {
         _idle_since = clock::now();
     }
-}
-
-proto::admin::in_flight_requests
-connection_attributes::in_flight_request_tracker::to_proto(
-  clock::time_point now) const {
-    proto::admin::in_flight_requests res;
-
-    chunked_vector<proto::admin::in_flight_requests_request> reqs;
-    for (auto& req : _in_flight_request_samples) {
-        auto& proto_req = reqs.emplace_back();
-        proto_req.set_api_key(req.key);
-        proto_req.set_in_flight_duration(absl::FromChrono(now - req.recv_time));
-    }
-    res.set_sampled_in_flight_requests(std::move(reqs));
-
-    res.set_has_more_requests(
-      _in_flight_request_samples.size() < _total_in_flight_count);
-
-    return res;
 }
 
 } // namespace kafka

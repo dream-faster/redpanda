@@ -49,12 +49,6 @@
 #include <seastar/core/thread.hh>
 #include <seastar/util/defer.hh>
 
-#if __has_include(<google/protobuf/runtime_version.h>)
-#include <google/protobuf/runtime_version.h>
-#endif
-#if __has_include(<google/protobuf/stubs/logging.h>)
-#include <google/protobuf/stubs/logging.h>
-#endif
 #include <sys/resource.h>
 #include <sys/utsname.h>
 
@@ -334,11 +328,8 @@ void application::initialize(std::optional<YAML::Node> audit_log_client_cfg) {
       .get();
     _cpu_profiler.invoke_on_all(&resources::cpu_profiler::start).get();
 
-    /*
-     * Disable the logger for protobuf; some interfaces don't allow a pluggable
-     * error collector.
-     */
-    // Protobuf uses absl logging in the latest version
+    // Silence absl logging (used by re2), which would otherwise bypass the
+    // seastar logger.
     absl::SetMinLogLevel(absl::LogSeverityAtLeast::kInfinity);
 
     /*

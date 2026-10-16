@@ -1134,21 +1134,6 @@ redpanda_cc_btest(
 )
 
 redpanda_cc_gtest(
-    name = "in_flight_requests_test",
-    timeout = "short",
-    srcs = [
-        "in_flight_requests_test.cc",
-    ],
-    cpu = 1,
-    deps = [
-        "//src/v/kafka/server",
-        "//src/v/test_utils:gtest",
-        "@googletest//:gtest",
-        "@seastar",
-    ],
-)
-
-redpanda_cc_gtest(
     name = "throughput_controlled_api_keys_test",
     timeout = "short",
     srcs = [

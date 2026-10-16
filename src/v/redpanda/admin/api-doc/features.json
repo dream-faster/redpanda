@@ -8,6 +8,36 @@
     ],
     "apis": [
         {
+            "path": "/v1/features/upgrade_status",
+            "operations": [
+                {
+                    "method": "GET",
+                    "summary": "Get the cluster's upgrade finalization state, as seen by the controller leader",
+                    "type": "upgrade_status",
+                    "nickname": "get_upgrade_status",
+                    "produces": [
+                        "application/json"
+                    ],
+                    "parameters": []
+                }
+            ]
+        },
+        {
+            "path": "/v1/features/finalize_upgrade",
+            "operations": [
+                {
+                    "method": "POST",
+                    "summary": "Ask the controller leader to advance the cluster's logical version. Only valid when features_auto_finalization is false; poll upgrade_status to confirm.",
+                    "type": "void",
+                    "nickname": "finalize_upgrade",
+                    "produces": [
+                        "application/json"
+                    ],
+                    "parameters": []
+                }
+            ]
+        },
+        {
             "path": "/v1/features",
             "operations": [
                 {
@@ -102,6 +132,50 @@
         }
     ],
     "models": {
+        "upgrade_member": {
+            "id": "upgrade_member",
+            "description": "One member's reported version state",
+            "properties": {
+                "node_id": {
+                    "type": "int"
+                },
+                "logical_version": {
+                    "type": "long"
+                },
+                "version_known": {
+                    "type": "boolean"
+                },
+                "alive": {
+                    "type": "boolean"
+                },
+                "release_version": {
+                    "type": "string"
+                }
+            }
+        },
+        "upgrade_status": {
+            "id": "upgrade_status",
+            "description": "Upgrade finalization state of the cluster",
+            "properties": {
+                "state": {
+                    "type": "string",
+                    "description": "finalized, ready_to_finalize or upgrade_in_progress"
+                },
+                "active_version": {
+                    "type": "long"
+                },
+                "version_after_finalization": {
+                    "type": "long"
+                },
+                "auto_finalization_enabled": {
+                    "type": "boolean"
+                },
+                "members": {
+                    "type": "array",
+                    "items": {"type": "upgrade_member"}
+                }
+            }
+        },
         "feature_state": {
             "id": "feature_state",
             "description": "State of one feature (active, available etc)",

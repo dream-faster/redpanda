@@ -49,106 +49,6 @@ redpanda_cc_library(
 )
 
 redpanda_cc_library(
-    name = "aip_common_config",
-    hdrs = ["aip_common_config.h"],
-    visibility = ["//visibility:public"],
-    deps = [
-        "//src/v/serde/protobuf:base",
-        "//src/v/serde/protobuf:rpc",
-        "@fmt",
-        "@seastar",
-    ],
-)
-
-redpanda_cc_library(
-    name = "aip_filter",
-    srcs = [
-        "aip_filter.cc",
-    ],
-    hdrs = [
-        "aip_filter.h",
-    ],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":aip_common_config",
-        "//src/v/base",
-        "//src/v/serde/protobuf:base",
-        "//src/v/serde/protobuf:field_mask",
-        "//src/v/serde/protobuf:rpc",
-        "@abseil-cpp//absl/strings",
-        "@abseil-cpp//absl/time",
-        "@fmt",
-        "@lexy",
-        "@seastar",
-    ],
-)
-
-redpanda_cc_library(
-    name = "aip_ordering",
-    srcs = [
-        "aip_ordering.cc",
-    ],
-    hdrs = [
-        "aip_ordering.h",
-    ],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":aip_common_config",
-        "//src/v/base",
-        "//src/v/serde/protobuf:base",
-        "//src/v/serde/protobuf:field_mask",
-        "//src/v/serde/protobuf:rpc",
-        "@abseil-cpp//absl/strings",
-        "@abseil-cpp//absl/time",
-        "@fmt",
-        "@seastar",
-    ],
-)
-
-redpanda_cc_library(
-    name = "kafka_connections_service_impl",
-    hdrs = [
-        "kafka_connections_service_impl.h",
-    ],
-    visibility = ["//src/v/redpanda/admin:__subpackages__"],
-    deps = [
-        "//proto/redpanda/core/admin/v2:kafka_connections_redpanda_proto",
-        "//src/v/base",
-        "//src/v/container:priority_queue",
-        "//src/v/ssx:async_algorithm",
-        "@seastar",
-    ],
-)
-
-redpanda_cc_library(
-    name = "kafka_connections_service",
-    srcs = [
-        "kafka_connections_service.cc",
-    ],
-    hdrs = [
-        "kafka_connections_service.h",
-    ],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":aip_filter",
-        ":aip_ordering",
-        ":kafka_connections_service_impl",
-        "//proto/redpanda/core/admin/v2:cluster_redpanda_proto",
-        "//proto/redpanda/core/admin/v2:kafka_connections_redpanda_proto",
-        "//src/v/base",
-        "//src/v/cluster:fwd",
-        "//src/v/container:priority_queue",
-        "//src/v/kafka/server",
-        "//src/v/random:generators",
-        "//src/v/redpanda/admin/proxy:client",
-        "//src/v/serde/protobuf:rpc",
-        "//src/v/ssx:async_algorithm",
-        "//src/v/ssx:semaphore",
-        "@seastar",
-    ],
-)
-
-redpanda_cc_library(
     name = "admin",
     srcs = [
         "debug.cc",
@@ -203,7 +103,6 @@ redpanda_cc_library(
         ":debug",
         ":features",
         ":hbadger",
-        ":kafka_connections_service",
         ":partition",
         ":raft",
         ":recovery",
@@ -239,7 +138,6 @@ redpanda_cc_library(
         "//src/v/model",
         "//src/v/net",
         "//src/v/raft",
-        "//src/v/redpanda/admin/services:broker",
         "//src/v/reflection:type_traits",
         "//src/v/resource_mgmt:cpu_profiler",
         "//src/v/resource_mgmt:memory_sampling",
@@ -249,7 +147,6 @@ redpanda_cc_library(
         "//src/v/security/audit",
         "//src/v/security/audit:types",
         "//src/v/serde",
-        "//src/v/serde/protobuf:rpc",
         "//src/v/ssx:async_algorithm",
         "//src/v/ssx:future_util",
         "//src/v/ssx:sformat",

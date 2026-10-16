@@ -22,7 +22,6 @@
 #include "kafka/data/rpc/service.h"
 #include "kafka/server/rm_group_frontend.h"
 #include "raft/service.h"
-#include "redpanda/admin/proxy/service.h"
 #include "redpanda/admin/server.h"
 #include "redpanda/application.h"
 #include "resource_mgmt/scheduling_groups_probe.h"
@@ -124,18 +123,6 @@ void application::add_runtime_rpc_services(
         kafka::data::rpc::network_service::memory_config{
           .memory = &s.memory(),
           .total = s.cfg.max_service_memory_per_core,
-        }));
-
-    runtime_services.push_back(
-      std::make_unique<admin::proxy::service_impl>(
-        scheduling_groups::instance().admin_sg(),
-        smp_service_groups.cluster_smp_sg(),
-        [this](serde::pb::rpc::context ctx, iobuf buf) {
-            if (!_admin.local_is_initialized()) {
-                throw std::runtime_error("admin service is not initialized");
-            }
-            return _admin.local().handle_rpc_request(
-              std::move(ctx), std::move(buf));
         }));
 
     s.add_services(std::move(runtime_services));

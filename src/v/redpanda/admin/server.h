@@ -21,7 +21,6 @@
 #include "finjector/stress_fiber.h"
 #include "kafka/server/fwd.h"
 #include "model/metadata.h"
-#include "redpanda/admin/kafka_connections_service.h"
 #include "resource_mgmt/cpu_profiler.h"
 #include "resource_mgmt/memory_sampling.h"
 #include "rpc/connection_cache.h"
@@ -30,7 +29,6 @@
 #include "security/fwd.h"
 #include "security/request_auth.h"
 #include "security/types.h"
-#include "serde/protobuf/rpc.h"
 #include "storage/node.h"
 
 #include <seastar/core/do_with.hh>
@@ -73,13 +71,7 @@ public:
       ss::sharded<security::audit::audit_log_manager>&,
       std::unique_ptr<cluster::tx_manager_migrator>&,
       ss::sharded<kafka::server>&,
-      ss::sharded<cluster::tx_gateway_frontend>&,
-      ss::sharded<admin::kafka_connections_service>&);
-
-    // Add a ConnectRPC service to the admin server.
-    void add_service(std::unique_ptr<serde::pb::rpc::base_service>);
-    // Handle a ConnectRPC request that has been proxied from another node.
-    ss::future<iobuf> handle_rpc_request(serde::pb::rpc::context, iobuf);
+      ss::sharded<cluster::tx_gateway_frontend>&);
 
     ss::future<> start();
     ss::future<> stop();
@@ -473,6 +465,13 @@ private:
     /// Feature routes
     ss::future<ss::json::json_return_type>
       put_feature_handler(std::unique_ptr<ss::http::request>);
+    ss::future<ss::json::json_return_type>
+      get_upgrade_status_handler(std::unique_ptr<ss::http::request>);
+    ss::future<ss::json::json_return_type>
+      finalize_upgrade_handler(std::unique_ptr<ss::http::request>);
+    ss::future<ss::json::json_return_type>
+      controller_forced_reconfiguration_handler(
+        std::unique_ptr<ss::http::request>);
 
     /// Broker routes
 
@@ -652,10 +651,6 @@ private:
     std::unique_ptr<cluster::tx_manager_migrator>& _tx_manager_migrator;
     ss::sharded<kafka::server>& _kafka_server;
     ss::sharded<cluster::tx_gateway_frontend>& _tx_gateway_frontend;
-
-    std::vector<std::unique_ptr<serde::pb::rpc::base_service>> _services;
-
-    ss::sharded<admin::kafka_connections_service>& _kafka_connections_service;
 
     // Value before the temporary override
     std::chrono::milliseconds _default_blocked_reactor_notify;

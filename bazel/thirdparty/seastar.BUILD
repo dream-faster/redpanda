@@ -3,10 +3,8 @@
 #
 
 load("@bazel_skylib//rules:common_settings.bzl", "bool_flag", "int_flag")
-load("@protobuf//bazel:cc_proto_library.bzl", "cc_proto_library")
 load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
-load("@rules_proto//proto:defs.bzl", "proto_library")
 load("@rules_python//python:defs.bzl", "py_binary")
 
 bool_flag(
@@ -161,42 +159,28 @@ py_binary(
     visibility = ["//visibility:public"],
 )
 
-# the fix to the generated parsers applied in the cmake build appears to be
-# unnecessary with recent versions of ragel. omitting until needed. see
-# https://github.com/scylladb/seastar/commit/1cb8b0e for more info.
+# The HTTP parsers are generated from src/http/*.rl by ragel. The generated
+# headers are checked in (bazel/thirdparty/seastar-ragel) so that a build
+# does not have to compile ragel first.
 genrule(
     name = "http_request_parser",
-    srcs = ["src/http/request_parser.rl"],
+    srcs = ["@//bazel/thirdparty/seastar-ragel:request_parser.hh"],
     outs = ["include/seastar/http/request_parser.hh"],
-    cmd = "$(location @ragel//:ragel) -G2 -o $@ $(SRCS)",
-    tools = ["@ragel"],
+    cmd = "cp $< $@",
 )
 
 genrule(
     name = "http_response_parser",
-    srcs = ["src/http/response_parser.rl"],
+    srcs = ["@//bazel/thirdparty/seastar-ragel:response_parser.hh"],
     outs = ["include/seastar/http/response_parser.hh"],
-    cmd = "$(location @ragel//:ragel) -G2 -o $@ $(SRCS)",
-    tools = ["@ragel"],
+    cmd = "cp $< $@",
 )
 
 genrule(
     name = "http_chunk_parsers",
-    srcs = ["src/http/chunk_parsers.rl"],
+    srcs = ["@//bazel/thirdparty/seastar-ragel:chunk_parsers.hh"],
     outs = ["include/seastar/http/chunk_parsers.hh"],
-    cmd = "$(location @ragel//:ragel) -G2 -o $@ $(SRCS)",
-    tools = ["@ragel"],
-)
-
-proto_library(
-    name = "metrics_proto",
-    srcs = ["src/proto/metrics2.proto"],
-    deps = ["@protobuf//:timestamp_proto"],
-)
-
-cc_proto_library(
-    name = "metrics_cc_proto",
-    deps = [":metrics_proto"],
+    cmd = "cp $< $@",
 )
 
 cc_library(
@@ -261,7 +245,6 @@ cc_library(
         "src/core/uname.cc",
         "src/core/vla.hh",
         "src/http/api_docs.cc",
-        "src/http/client.cc",
         "src/http/common.cc",
         "src/http/file_handler.cc",
         "src/http/httpd.cc",
@@ -270,7 +253,6 @@ cc_library(
         "src/http/mime_types.cc",
         "src/http/reply.cc",
         "src/http/request.cc",
-        "src/http/retry_strategy.cc",
         "src/http/routes.cc",
         "src/http/transformers.cc",
         "src/http/url.cc",
@@ -301,9 +283,6 @@ cc_library(
         "src/net/udp.cc",
         "src/net/unix_address.cc",
         "src/net/virtio.cc",
-        "src/rpc/lz4_compressor.cc",
-        "src/rpc/lz4_fragmented_compressor.cc",
-        "src/rpc/rpc.cc",
         "src/util/alloc_failure_injector.cc",
         "src/util/backtrace.cc",
         "src/util/conversions.cc",
@@ -315,10 +294,6 @@ cc_library(
         "src/util/read_first_line.cc",
         "src/util/short_streams.cc",
         "src/util/tmp_file.cc",
-        "src/websocket/client.cc",
-        "src/websocket/common.cc",
-        "src/websocket/parser.cc",
-        "src/websocket/server.cc",
     ],
     hdrs = [
         "include/seastar/core/abort_on_ebadf.hh",
@@ -662,7 +637,6 @@ cc_library(
         "//visibility:public",
     ],
     deps = [
-        ":metrics_cc_proto",
         "@abseil-cpp//absl/hash",
         "@boost//:algorithm",
         "@boost//:asio",
@@ -674,7 +648,6 @@ cc_library(
         "@fmt",
         "@lksctp",
         "@lz4",
-        "@protobuf",
         "@unordered_dense",
         "@yaml-cpp",
     ] + select({
