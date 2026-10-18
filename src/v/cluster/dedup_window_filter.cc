@@ -157,6 +157,12 @@ bool dedup_window_filter::over_shard_soft_limit() const {
                 _shard_budget->max_entries, capacity_soft_margin_divisor);
 }
 
+bool dedup_window_filter::over_shard_reclaim_limit() const {
+    return _shard_budget
+           && _shard_budget->entries >= soft_limit_of(
+                _shard_budget->max_entries, reclaim_margin_divisor);
+}
+
 namespace {
 
 model::timestamp broker_now() {
@@ -607,7 +613,7 @@ void dedup_window_filter::sweep_for_new_identity() {
 void dedup_window_filter::reclaim_expired_elsewhere() {
     if (
       !_shard_budget || _shard_budget->filters.size() < 2
-      || !over_shard_soft_limit()) {
+      || !over_shard_reclaim_limit()) {
         return;
     }
     auto& filters = _shard_budget->filters;

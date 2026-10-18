@@ -146,9 +146,13 @@ Guarantees:
   cursor trims a partition that inserts while the shard is within a tenth of
   its limit, and at the limit a new identity with nothing freeable in its own
   partition is admitted unindexed. Before anything live is trimmed, expired
-  entries elsewhere go: while the shard is within that tenth, every new
-  identity on it also advances another index's cursor, round-robin, by a step
-  that drops only expired entries (`expired_entries_reclaimed`). A cursor
+  entries elsewhere go: from a fifth below the limit -- before trimming starts
+  at a tenth -- every new identity on the shard also advances another index's
+  cursor, round-robin, by a step that drops only expired entries
+  (`expired_entries_reclaimed`). Started only at the trim margin, it stopped
+  as soon as the shard was back under it, so expired entries were never
+  drained and held the shard at the margin, where a step that found nothing
+  let the largest index trim a live entry. A cursor
   moves only on its own index's inserts, so without this an index takes a
   sizeable fraction of its window per pass, and the shard trimmed live
   entries from the largest index while its neighbours held more expired ones

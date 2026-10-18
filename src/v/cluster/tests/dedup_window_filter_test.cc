@@ -3202,6 +3202,30 @@ TEST(DedupShardBudget, LiveNeighboursAreNotReclaimed) {
     EXPECT_LE(budget->entries, 1'000u);
 }
 
+// Reclaiming starts a fifth below the shard limit, before trimming does at a
+// tenth: expired entries elsewhere go while the shard still has room, rather
+// than only once it is at the trim margin, where a reclaim step that finds
+// nothing lets the largest index trim a live entry.
+TEST(DedupShardBudget, ExpiredEntriesAreReclaimedBeforeTheTrimMargin) {
+    auto budget = make_budget(1'000);
+    cluster::dedup_window_filter busy(1'000s, 100'000, budget);
+    cluster::dedup_window_filter idle(1s, 100'000, budget);
+    populate_n(idle, "idle", 300, 1000, 1);
+    idle.populate(iobuf::from("idle-late"), ts(11'000));
+    ASSERT_GT(idle.map_size(), 280u);
+    // Up to 860 on the shard: past the reclaim margin, short of the trim one.
+    const auto n = 860 - idle.map_size();
+    for (size_t i = 0; i < n; ++i) {
+        busy.populate(
+          iobuf::from(fmt::format("busy-{}", i)),
+          ts(1000 + static_cast<int64_t>(i) * 10));
+    }
+    EXPECT_GT(idle.reclaimed_entries(), 0u);
+    EXPECT_EQ(busy.map_size(), n);
+    EXPECT_EQ(busy.capacity_evicted_entries(), 0u);
+    EXPECT_LT(budget->entries, 860u);
+}
+
 // An index that stops receiving records ages by the shard's clock: its
 // entries never expire by its own watermark, but once the shard's newest
 // record is a window past its last one, they are reclaimed before the busy

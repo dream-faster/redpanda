@@ -765,8 +765,9 @@ private:
     /// the follower's alike: reclaim_expired_elsewhere(), then sweep_step().
     void sweep_for_new_identity();
 
-    /// Under shard pressure, take one reclaim_expired_step() on another
-    /// index, round-robin over the shard's indices.
+    /// Once the shard is within reclaim_margin_divisor of its limit, take one
+    /// reclaim_expired_step() on another index, round-robin over the shard's
+    /// indices.
     ///
     /// A cursor moves only on its own index's new identities, so an index
     /// holding a window's worth of entries takes a sizeable fraction of that
@@ -913,6 +914,8 @@ private:
     bool over_own_soft_limit() const;
     /// Whether the shard is within capacity_soft_margin_divisor of its limit.
     bool over_shard_soft_limit() const;
+    /// Whether the shard is within reclaim_margin_divisor of its limit.
+    bool over_shard_reclaim_limit() const;
     /// Whether no index on the shard is larger than this one by more than a
     /// tenth of its size; those are the indices whose cursors trim under shard
     /// pressure. Requires a shard budget.
@@ -940,6 +943,15 @@ private:
     // so trimming begins at 90% and the index converges on its target instead
     // of dropping a quarter of itself in one step at the ceiling.
     static constexpr size_t capacity_soft_margin_divisor = 10;
+    // Margin below the shard limit, as a divisor of it, from which inserts
+    // reclaim expired entries elsewhere on the shard: a fifth, twice the trim
+    // margin. Started only at the trim margin, reclaim stopped as soon as the
+    // shard was back under it, so a quiet index's expired entries were never
+    // drained: they held the shard just under the margin, where every reclaim
+    // step that found nothing expired let the largest index trim a live
+    // entry. Dropping an expired entry costs no coverage, so starting earlier
+    // costs only the bounded step.
+    static constexpr size_t reclaim_margin_divisor = 5;
 
     // Fraction of the index the capacity cutoff designates as droppable:
     // size/capacity_evict_divisor, so a quarter, measured over a completed
