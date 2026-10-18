@@ -152,7 +152,12 @@ Guarantees:
   moves only on its own index's inserts, so without this an index takes a
   sizeable fraction of its window per pass, and the shard trimmed live
   entries from the largest index while its neighbours held more expired ones
-  than it was short. The shard total is exported as the
+  than it was short. That step judges expiry by the index's own watermark
+  moved on by however far the shard's newest record has advanced since the
+  index last saw one, so an index whose partition went quiet still ages and
+  does not hold its share of the shard until traffic returns, while one whose
+  producers merely stamp records behind its neighbours' keeps its entries as
+  long as they keep arriving. The shard total is exported as the
   `dedup:shard` gauges `index_entries` and `max_index_entries`. Effective
   capacity now depends on which partitions share a shard, which differs per
   replica, so under shard pressure replicas trim differently -- the same

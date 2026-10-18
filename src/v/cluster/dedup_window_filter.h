@@ -315,6 +315,10 @@ struct dedup_shard_budget {
     /// Next filter to reclaim expired entries from under shard pressure; see
     /// dedup_window_filter::reclaim_expired_elsewhere().
     size_t reclaim_next{0};
+    /// Newest record timestamp any filter on the shard has seen, clamped to
+    /// broker time as every record's is. The clock an idle index ages by when
+    /// others reclaim from it; see dedup_window_filter::reclaim_cutoff().
+    int64_t newest_timestamp{std::numeric_limits<int64_t>::min()};
 };
 
 /// \brief Write-path, first-wins deduplication.
@@ -777,8 +781,24 @@ private:
     /// expired entry cannot match in the window, so no dedup decision there
     /// changes.
     void reclaim_expired_elsewhere();
+    /// The cutoff reclaim_expired_step() drops entries below: expiry_cutoff(),
+    /// moved on by how far the shard's newest timestamp has advanced since
+    /// this index last saw a record.
+    ///
+    /// expiry_cutoff() moves only with this index's own records, so an index
+    /// that stops receiving them stops ageing: a busy partition whose feed
+    /// went quiet would hold its whole window's worth of the shard budget
+    /// until it got traffic again, and the shard's largest index would trim
+    /// live entries for it. The shard's clock ages it instead. Measured from
+    /// the index's last record rather than against the shard's clock outright,
+    /// so a partition whose producers stamp records well behind its
+    /// neighbours' keeps its entries while it is still receiving them.
+    int64_t reclaim_cutoff() const;
+    /// Record that this index saw a record stamped \p ts, for
+    /// reclaim_cutoff().
+    void note_shard_time(model::timestamp ts);
     /// Walk this index's own reclaim cursor over at most \p budget entries,
-    /// dropping the expired ones and nothing else.
+    /// dropping the expired ones -- by reclaim_cutoff() -- and nothing else.
     ///
     /// Its own cursor, not the sweep cursor: the sweep cursor's pass is what
     /// finds the entries to trim for capacity and measures the cutoff, so
@@ -968,6 +988,9 @@ private:
     size_t _sweep_pos{0};
     // Position of reclaim_expired_step() in the same array.
     size_t _reclaim_pos{0};
+    // The shard budget's newest_timestamp when this index last saw a record;
+    // min() until it has seen one. See reclaim_cutoff().
+    int64_t _shard_time_seen{std::numeric_limits<int64_t>::min()};
     // Walks in progress; one per snapshot being taken, so at most a few.
     std::vector<live_walk*> _walks;
     // Histogram of the entries the pass in progress has visited, measured
