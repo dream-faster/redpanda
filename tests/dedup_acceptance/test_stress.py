@@ -908,3 +908,122 @@ def test_a_burst_gone_quiet_does_not_cost_busy_partitions_their_window(
     assert not any(unindexed.values()), report
     assert not any(forgotten.values()), report
     assert_memory_healthy(c)
+
+
+def test_leadership_moves_with_a_large_index_under_load(make_cluster, pytestconfig):
+    """Leadership of a partition holding a large index moves to every replica
+    in turn while a producer keeps writing, half of it identities indexed
+    before the moves. Followers keep their entries unindexed, and a replica
+    taking over indexes them all before it filters (see
+    dedup_window_filter::defer_lookup()): after every move, everything
+    indexed earlier still drops, new identities are admitted once each, and
+    the producer waits no longer than a leadership move costs anyway."""
+    c = make_cluster(nodes=3, smp=1, memory="2G")
+    t = kafka.unique("moves")
+    kafka.create_topic(c.brokers, t, 1, 3, {kafka.DEDUP_WINDOW: "3600000"})
+    kafka.wait_for_leaders(c.brokers, t, 1)
+    # Below the partition's entry ceiling with room for what the producer
+    # adds: at the ceiling the oldest entries are trimmed, and their resends
+    # rightly admitted.
+    n = min(scaled(600_000), 800_000)
+    kafka.produce_bulk(
+        c.brokers, t, 0, (f"big-{i}".encode() for i in range(n)), value=b"v" * 32
+    )
+    assert kafka.high_watermark(c.brokers, t, 0) == n
+
+    stop = threading.Event()
+    lock = threading.Lock()
+    latencies: list[float] = []
+    errors: list = []
+    fresh_sent = 0
+
+    def steady():
+        nonlocal fresh_sent
+        p = kafka.producer(
+            c.brokers,
+            **{
+                "linger.ms": 0,
+                "retries": 1_000_000,
+                "retry.backoff.ms": 100,
+                "message.timeout.ms": 120_000,
+            },
+        )
+
+        def delivered(sent: float):
+            def cb(err, _msg):
+                with lock:
+                    if err is None:
+                        latencies.append(time.monotonic() - sent)
+                    else:
+                        errors.append(err)
+
+            return cb
+
+        i = 0
+        while not stop.is_set():
+            sent = time.monotonic()
+            old = f"big-{(i * 7919) % n}".encode()
+            p.produce(
+                t, key=old, value=b"again", partition=0, on_delivery=delivered(sent)
+            )
+            p.produce(
+                t,
+                key=f"fresh-{i}".encode(),
+                value=b"v",
+                partition=0,
+                on_delivery=delivered(sent),
+            )
+            i += 1
+            p.poll(0.005)
+        assert p.flush(120) == 0
+        fresh_sent = i
+
+    moves = 0
+
+    def mover():
+        nonlocal moves
+        time.sleep(3)
+        for _ in range(2):
+            for target in range(3):
+                if c.leader(t, 0) == target:
+                    continue
+                c.transfer_leadership(t, 0, target)
+                moves += 1
+                time.sleep(4)
+        stop.set()
+
+    before = {i: c.node(i).metrics() for i in range(3)}
+    run_threads([steady, mover])
+    assert not errors, f"{len(errors)} records failed, e.g. {errors[:3]}"
+    assert moves >= 3
+
+    # Every identity from before the moves was dropped when sent again, and
+    # every fresh one was written once: only the fresh ones moved the log.
+    written = kafka.high_watermark(c.brokers, t, 0)
+    if written != n + fresh_sent:
+        counts = Counter(kafka.keys_in(c.brokers, t, 0, timeout_s=600))
+        twice = [k for k, m in counts.items() if m > 1]
+        old_twice = [k for k in twice if k.startswith(b"big-")]
+        missing = [i for i in range(fresh_sent) if f"fresh-{i}".encode() not in counts]
+        raise AssertionError(
+            f"{written} written, {n + fresh_sent} expected: {len(twice)} identities "
+            f"twice ({len(old_twice)} from before the moves), e.g. {twice[:5]}; "
+            f"{len(missing)} fresh missing"
+        )
+
+    latencies.sort()
+    worst_stall_ms = (
+        max(c.node(i).metrics().longest_stall_us(before[i]) for i in range(3)) / 1000
+    )
+    report = (
+        f"{len(latencies)} acks over {moves} moves: p50 "
+        f"{latencies[len(latencies) // 2] * 1000:.1f} ms, p99 "
+        f"{latencies[len(latencies) * 99 // 100] * 1000:.1f} ms, max "
+        f"{latencies[-1] * 1000:.0f} ms; longest reactor stall {worst_stall_ms:.0f} ms"
+    )
+    print("\n" + report)
+    # A move costs an election's worth of retries whatever the index; what
+    # indexing several hundred thousand entries adds must not show on top.
+    assert latencies[-1] < 10, report
+    assert worst_stall_ms < 500, report
+    assert_memory_healthy(c)
