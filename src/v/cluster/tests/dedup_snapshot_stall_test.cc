@@ -267,7 +267,7 @@ ss::future<> compare_at(size_t entries) {
               << us(copy_m.stall) << "us   total " << us(copy_m.total) << "us\n"
               << std::flush;
 
-    // The serialized copy is the snapshot's whole memory cost: 24 bytes per
+    // The serialized copy is the snapshot's whole memory cost: 16 bytes per
     // entry plus a fixed header, against the 30 of a per-entry envelope.
     ASSERT_LE_CORO(
       packed.size_bytes(), entries * dedup_stm::packed_entry_size + 64);
