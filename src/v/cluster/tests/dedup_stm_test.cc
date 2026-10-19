@@ -1318,6 +1318,7 @@ TEST_F_CORO(dedup_stm_fixture, relaxed_introducer_is_fenced_until_committed) {
     co_await std::move(relaxed.request_enqueued);
     auto appended = co_await std::move(relaxed.replicate_finished);
     ASSERT_TRUE_CORO(appended.has_value());
+    const auto relaxed_offset = node(leader).raft()->dirty_offset();
 
     auto duplicate = produce_batch(
       leader, make_batch_of({"k1"}, model::timestamp{1000}));
@@ -1328,8 +1329,7 @@ TEST_F_CORO(dedup_stm_fixture, relaxed_introducer_is_fenced_until_committed) {
     auto acknowledged = co_await std::move(duplicate);
     ASSERT_TRUE_CORO(acknowledged.has_value());
     ASSERT_EQ_CORO(acknowledged.value().replicated_record_count, 0);
-    ASSERT_GE_CORO(
-      node(leader).raft()->committed_offset(), appended.value().last_offset);
+    ASSERT_GE_CORO(node(leader).raft()->committed_offset(), relaxed_offset);
 }
 
 // A committed batch whose records cannot be read is skipped, not retried:
