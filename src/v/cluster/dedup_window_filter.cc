@@ -251,7 +251,9 @@ private:
     void flush() {
         if (_buf.size() > 0) {
             _buf.trim(static_cast<size_t>(_p - _buf.get()));
-            _out.append(std::move(_buf));
+            // As a fragment of its own: appending the buffer instead copies
+            // one no larger than the last into a freshly allocated fragment.
+            _out.append(std::make_unique<iobuf::fragment>(std::move(_buf)));
         }
         _p = _e = nullptr;
     }
