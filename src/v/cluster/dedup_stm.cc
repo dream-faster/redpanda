@@ -103,6 +103,15 @@ void dedup_stm::setup_metrics() {
             "arrival rate."),
           labels),
         sm::make_counter(
+          "expired_entries_reclaimed",
+          [this] { return _state.reclaimed_entries(); },
+          sm::description(
+            "Number of expired identities dropped from this partition's "
+            "index by other partitions' inserts while the shard was near "
+            "dedup_max_entries_per_shard, before any live identity on the "
+            "shard is trimmed."),
+          labels),
+        sm::make_counter(
           "capacity_emergency_sweeps",
           [this] { return _state.capacity_sweeps(); },
           sm::description(

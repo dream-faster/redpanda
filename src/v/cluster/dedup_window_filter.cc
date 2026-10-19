@@ -157,6 +157,12 @@ bool dedup_window_filter::over_shard_soft_limit() const {
                 _shard_budget->max_entries, capacity_soft_margin_divisor);
 }
 
+bool dedup_window_filter::over_shard_reclaim_limit() const {
+    return _shard_budget
+           && _shard_budget->entries >= soft_limit_of(
+                _shard_budget->max_entries, reclaim_margin_divisor);
+}
+
 namespace {
 
 model::timestamp broker_now() {
@@ -175,6 +181,15 @@ int64_t saturating_sub(int64_t a, int64_t b) {
     return r;
 }
 
+int64_t saturating_add(int64_t a, int64_t b) {
+    int64_t r{};
+    if (__builtin_add_overflow(a, b, &r)) [[unlikely]] {
+        return b < 0 ? std::numeric_limits<int64_t>::min()
+                     : std::numeric_limits<int64_t>::max();
+    }
+    return r;
+}
+
 /// Whether two timestamps are at most \p window apart. Either can be at the
 /// extremes of int64: the index reads an expired entry as its minimum, and
 /// client timestamps saturate.
@@ -187,6 +202,27 @@ bool within_window(int64_t a, int64_t b, int64_t window) {
 
 int64_t dedup_window_filter::expiry_cutoff() const {
     return saturating_sub(_max_ts.value(), _window.count());
+}
+
+int64_t dedup_window_filter::reclaim_cutoff() const {
+    const auto own = expiry_cutoff();
+    if (
+      !_shard_budget
+      || _shard_time_seen == std::numeric_limits<int64_t>::min()) {
+        return own;
+    }
+    const auto idle = std::max<int64_t>(
+      saturating_sub(_shard_budget->newest_timestamp, _shard_time_seen), 0);
+    return saturating_add(own, idle);
+}
+
+void dedup_window_filter::note_shard_time(model::timestamp ts) {
+    if (!_shard_budget) {
+        return;
+    }
+    _shard_budget->newest_timestamp = std::max(
+      _shard_budget->newest_timestamp, ts.value());
+    _shard_time_seen = _shard_budget->newest_timestamp;
 }
 
 model::timestamp
@@ -214,6 +250,7 @@ bool dedup_window_filter::is_duplicate(
   dedup_identity_digest identity,
   model::timestamp ts,
   dedup_request_undo* undo) {
+    note_shard_time(ts);
     const auto pos = _index.find(identity);
     if (pos != dedup_compact_index::npos) {
         const auto stored_ts = model::timestamp{_index.timestamp_at(pos)};
@@ -246,7 +283,7 @@ bool dedup_window_filter::is_duplicate(
     // Before the insert, not after: a follower's populate() sweeps at the same
     // point, and capacity trimming is decision-affecting, so the two orders
     // must match or replicas drift. See populate().
-    sweep_step(sweep_budget);
+    sweep_for_new_identity();
     if (
       (at_capacity() && !take_room_from_largest(ts) && !make_room_for_one(ts))
       || !_index.push_back(identity, ts.value())) {
@@ -457,6 +494,7 @@ void dedup_window_filter::populate(
   dedup_identity_digest identity, model::timestamp ts) {
     ts = clamp_to_broker_time(ts);
     _max_ts = std::max(_max_ts, ts);
+    note_shard_time(ts);
 
     // Followers apply the same capacity rule as the leader does in
     // is_duplicate(), and they must apply it at the same point. Expiry timing
@@ -475,7 +513,7 @@ void dedup_window_filter::populate(
         }
         return;
     }
-    sweep_step(sweep_budget);
+    sweep_for_new_identity();
     if (
       (at_capacity() && !take_room_from_largest(ts) && !make_room_for_one(ts))
       || !_index.push_back(identity, ts.value())) {
@@ -565,6 +603,47 @@ void dedup_window_filter::finish_pass() {
           _pass_lo + static_cast<int64_t>(bucket) * _pass_width};
     }
     begin_pass();
+}
+
+void dedup_window_filter::sweep_for_new_identity() {
+    reclaim_expired_elsewhere();
+    sweep_step(sweep_budget);
+}
+
+void dedup_window_filter::reclaim_expired_elsewhere() {
+    if (
+      !_shard_budget || _shard_budget->filters.size() < 2
+      || !over_shard_reclaim_limit()) {
+        return;
+    }
+    auto& filters = _shard_budget->filters;
+    // Two tries, so landing on this index still reaches another one.
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        auto* other = filters[_shard_budget->reclaim_next++ % filters.size()];
+        if (other == this || other->_budget_reserved > 0) {
+            // Itself, or mid-restore: a restore's claim on the budget stands
+            // whatever its index holds, and its cursor is not running.
+            continue;
+        }
+        other->reclaim_expired_step(sweep_budget);
+        return;
+    }
+}
+
+void dedup_window_filter::reclaim_expired_step(size_t budget) {
+    const int64_t cutoff = reclaim_cutoff();
+    for (size_t step = 0; step < budget && !_index.empty(); ++step) {
+        if (_reclaim_pos >= _index.size()) {
+            _reclaim_pos = 0;
+        }
+        if (!is_live(_index.timestamp_at(_reclaim_pos), cutoff)) {
+            // As in sweep_step(), the erase moved an unvisited entry here.
+            erase_at(_reclaim_pos);
+            ++_reclaimed_entries;
+            continue;
+        }
+        ++_reclaim_pos;
+    }
 }
 
 void dedup_window_filter::sweep_step(size_t budget) {
@@ -808,6 +887,7 @@ void dedup_window_filter::begin_restore_pass(
     // unindexed for a whole pass -- hundreds of thousands of records on a
     // large index. The frame starts at the oldest restored entry.
     _sweep_pos = 0;
+    _reclaim_pos = 0;
     _pass_oldest = oldest;
     begin_pass();
 }
@@ -823,6 +903,10 @@ void dedup_window_filter::finish_restore(size_t truncated) {
     // snapshot held an identity twice.
     _budget_reserved = 0;
     sync_shard_budget();
+    // A restored index ages from here, as if its newest entry had just
+    // arrived: the shard's clock says nothing about how long the partition
+    // was down.
+    note_shard_time(_max_ts);
 }
 
 void dedup_window_filter::clear() {
@@ -836,6 +920,8 @@ void dedup_window_filter::clear() {
     stop_being_largest();
     _max_ts = model::timestamp::min();
     _sweep_pos = 0;
+    _reclaim_pos = 0;
+    _shard_time_seen = std::numeric_limits<int64_t>::min();
     _capacity_cutoff = model::timestamp::min();
     _pass_oldest = no_pass_oldest;
     begin_pass();

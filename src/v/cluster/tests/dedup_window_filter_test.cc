@@ -3130,3 +3130,161 @@ TEST(DedupCompactIndexInTheFilter, FutureEntriesInASnapshotAreClamped) {
     }
     EXPECT_FALSE(f.filter(make_batch("future", "dup", now)).has_value());
 }
+
+// Under shard pressure the largest index trims its oldest live entries. A
+// neighbour's expired entries -- which its own cursor, moving only on its own
+// new identities, has not reached yet -- go first: every insert on the shard
+// reclaims a step's worth from another index while the shard is over its soft
+// limit, so the busy index keeps its whole window as long as there are
+// expired entries elsewhere to give. Driven through the leader's path and the
+// follower's, which must end in the same state.
+TEST(DedupShardBudget, ExpiredNeighboursAreReclaimedBeforeLiveEntriesTrimmed) {
+    struct side {
+        ss::lw_shared_ptr<cluster::dedup_shard_budget> budget = make_budget(
+          1'000);
+        cluster::dedup_window_filter busy{1'000s, 100'000, budget};
+        cluster::dedup_window_filter idle{1s, 100'000, budget};
+    };
+    side leader;
+    side follower;
+    for (auto* s : {&leader, &follower}) {
+        // 300 identities, all expired once a later one moves the watermark
+        // ten seconds on; only the first sweep step's worth is dropped by the
+        // idle index's own cursor.
+        populate_n(s->idle, "idle", 300, 1000, 1);
+        s->idle.populate(iobuf::from("idle-late"), ts(11'000));
+    }
+    ASSERT_GT(leader.idle.map_size(), 280u);
+    for (int i = 0; i < 650; ++i) {
+        const auto key = fmt::format("busy-{}", i);
+        const auto at = ts(1000 + static_cast<int64_t>(i) * 10);
+        ASSERT_TRUE(leader.busy.filter(make_batch(key, "v", at)).has_value());
+        follower.busy.populate(iobuf::from(key), at);
+    }
+    for (auto* s : {&leader, &follower}) {
+        EXPECT_EQ(s->busy.map_size(), 650u);
+        EXPECT_EQ(s->busy.capacity_evicted_entries(), 0u);
+        EXPECT_EQ(s->busy.unindexed_records(), 0u);
+        EXPECT_GT(s->idle.reclaimed_entries(), 0u);
+        EXPECT_EQ(s->idle.capacity_evicted_entries(), 0u);
+        EXPECT_LE(s->budget->entries, 900u);
+        EXPECT_EQ(s->budget->entries, s->busy.map_size() + s->idle.map_size());
+    }
+    EXPECT_EQ(leader.busy.snapshot(), follower.busy.snapshot());
+    EXPECT_EQ(leader.idle.snapshot(), follower.idle.snapshot());
+    // Every busy identity still deduplicates.
+    for (int i = 0; i < 650; ++i) {
+        EXPECT_FALSE(leader.busy
+                       .filter(make_batch(
+                         fmt::format("busy-{}", i),
+                         "dup",
+                         ts(1000 + static_cast<int64_t>(i) * 10)))
+                       .has_value())
+          << i;
+    }
+}
+
+// Reclaiming only ever takes expired entries: neighbours whose entries are all
+// live keep every one, and the shard trims the largest index as before.
+TEST(DedupShardBudget, LiveNeighboursAreNotReclaimed) {
+    auto budget = make_budget(1'000);
+    cluster::dedup_window_filter busy(1'000s, 100'000, budget);
+    cluster::dedup_window_filter idle(1'000s, 100'000, budget);
+    populate_n(idle, "idle", 300, 1000, 1);
+    for (int i = 0; i < 1'500; ++i) {
+        busy.populate(
+          iobuf::from(fmt::format("busy-{}", i)),
+          ts(2000 + static_cast<int64_t>(i) * 10));
+    }
+    EXPECT_EQ(idle.map_size(), 300u);
+    EXPECT_EQ(idle.reclaimed_entries(), 0u);
+    EXPECT_GT(busy.capacity_evicted_entries(), 0u);
+    EXPECT_LE(budget->entries, 1'000u);
+}
+
+// Reclaiming starts a fifth below the shard limit, before trimming does at a
+// tenth: expired entries elsewhere go while the shard still has room, rather
+// than only once it is at the trim margin, where a reclaim step that finds
+// nothing lets the largest index trim a live entry.
+TEST(DedupShardBudget, ExpiredEntriesAreReclaimedBeforeTheTrimMargin) {
+    auto budget = make_budget(1'000);
+    cluster::dedup_window_filter busy(1'000s, 100'000, budget);
+    cluster::dedup_window_filter idle(1s, 100'000, budget);
+    populate_n(idle, "idle", 300, 1000, 1);
+    idle.populate(iobuf::from("idle-late"), ts(11'000));
+    ASSERT_GT(idle.map_size(), 280u);
+    // Up to 860 on the shard: past the reclaim margin, short of the trim one.
+    const auto n = 860 - idle.map_size();
+    for (size_t i = 0; i < n; ++i) {
+        busy.populate(
+          iobuf::from(fmt::format("busy-{}", i)),
+          ts(1000 + static_cast<int64_t>(i) * 10));
+    }
+    EXPECT_GT(idle.reclaimed_entries(), 0u);
+    EXPECT_EQ(busy.map_size(), n);
+    EXPECT_EQ(busy.capacity_evicted_entries(), 0u);
+    EXPECT_LT(budget->entries, 860u);
+}
+
+// An index that stops receiving records ages by the shard's clock: its
+// entries never expire by its own watermark, but once the shard's newest
+// record is a window past its last one, they are reclaimed before the busy
+// index trims any live entry for them.
+TEST(DedupShardBudget, IdleIndexAgesByTheShardsClock) {
+    auto budget = make_budget(1'000);
+    cluster::dedup_window_filter busy(1'000s, 100'000, budget);
+    cluster::dedup_window_filter idle(10s, 100'000, budget);
+    // 300 ms apart from first to last: none is ever expired by idle's own
+    // watermark, which stays at the last of them.
+    populate_n(idle, "idle", 300, 1000, 1);
+    // A minute of the busy partition's records, the shard's soft limit
+    // reached at the 600th.
+    for (int i = 0; i < 650; ++i) {
+        busy.populate(
+          iobuf::from(fmt::format("busy-{}", i)),
+          ts(2000 + static_cast<int64_t>(i) * 100));
+    }
+    EXPECT_EQ(busy.map_size(), 650u);
+    EXPECT_EQ(busy.capacity_evicted_entries(), 0u);
+    EXPECT_EQ(busy.unindexed_records(), 0u);
+    EXPECT_GT(idle.reclaimed_entries(), 0u);
+    EXPECT_EQ(idle.capacity_evicted_entries(), 0u);
+    EXPECT_LE(budget->entries, 900u);
+    EXPECT_EQ(budget->entries, busy.map_size() + idle.map_size());
+    for (int i = 0; i < 650; ++i) {
+        EXPECT_FALSE(busy
+                       .filter(make_batch(
+                         fmt::format("busy-{}", i),
+                         "dup",
+                         ts(2000 + static_cast<int64_t>(i) * 100)))
+                       .has_value())
+          << i;
+    }
+}
+
+// The shard's clock ages an index only while it receives nothing: one whose
+// producers stamp records far behind its neighbours' keeps every entry inside
+// its own window while its records keep arriving.
+TEST(DedupShardBudget, LaggingButActiveIndexIsNotReclaimed) {
+    auto budget = make_budget(1'000);
+    cluster::dedup_window_filter busy(1'000s, 100'000, budget);
+    cluster::dedup_window_filter lagging(10s, 100'000, budget);
+    for (int i = 0; i < 700; ++i) {
+        // A millisecond apart, while the shard's clock moves a tenth of a
+        // second per record: a minute behind by the end.
+        lagging.populate(
+          iobuf::from(fmt::format("lagging-{}", i)),
+          ts(1000 + static_cast<int64_t>(i)));
+        busy.populate(
+          iobuf::from(fmt::format("busy-{}", i)),
+          ts(2000 + static_cast<int64_t>(i) * 100));
+    }
+    EXPECT_EQ(lagging.reclaimed_entries(), 0u);
+    EXPECT_EQ(busy.reclaimed_entries(), 0u);
+    // The shard was over its limit all the same: live entries went.
+    EXPECT_GT(
+      lagging.capacity_evicted_entries() + busy.capacity_evicted_entries()
+        + lagging.unindexed_records() + busy.unindexed_records(),
+      0u);
+    EXPECT_LE(budget->entries, 1'000u);
+}

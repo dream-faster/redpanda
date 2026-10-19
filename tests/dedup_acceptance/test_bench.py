@@ -7,8 +7,13 @@ producer processes, and reports
 - records/s the client managed to produce (offered load, duplicates included),
 - broker CPU per million records (reactor CPU time, from the broker's own
   metrics -- the number that does not depend on how fast the client is),
-- reactor stalls during the run,
-- records actually written, so the duplicates dropped are visible.
+- reactor stalls during the run, and the longest of them (from the
+  broker's stall histogram, so an upper bound),
+- records actually written, so the duplicates dropped are visible,
+- produce latency once the index is loaded: after the throughput run, one
+  producer sends the same kind of records at a fixed rate into the same
+  topic, and each record's acknowledgement latency (acks=all) is taken from
+  the client.
 
 Every dedup scenario is compared against the same load on a topic without
 dedup. Results go to stdout and, with --bench-out, to a Markdown file.
@@ -35,6 +40,15 @@ SHARD_ENTRIES = "vectorized_dedup_shard_index_entries"
 RECORDS = int(os.environ.get("DEDUP_BENCH_RECORDS", "2000000"))
 PRODUCERS = int(os.environ.get("DEDUP_BENCH_PRODUCERS", "2"))
 REPEATS = int(os.environ.get("DEDUP_BENCH_REPEATS", "3"))
+LATENCY_RATE = int(os.environ.get("DEDUP_BENCH_LATENCY_RATE", "20000"))
+LATENCY_SECONDS = float(os.environ.get("DEDUP_BENCH_LATENCY_SECONDS", "10"))
+# Scenario names to run, separated by semicolons (the names contain
+# commas), for a longer A/B of a few of them; all of them when unset.
+ONLY = {
+    n.strip()
+    for n in os.environ.get("DEDUP_BENCH_SCENARIOS", "").split(";")
+    if n.strip()
+}
 PARTITIONS = 4
 VALUE = b"v" * 100
 HEADER = "dedup-id"
@@ -117,6 +131,62 @@ def _produce_worker(args) -> tuple[float, int]:
     return time.monotonic() - start, errors
 
 
+def _latency(brokers: str, topic: str, s: Scenario) -> dict[str, float]:
+    """Acknowledgement latency, in ms, of records produced at LATENCY_RATE for
+    LATENCY_SECONDS into a topic whose index the throughput run filled. Sent
+    in 1 ms ticks with linger.ms=0, so what is measured is the broker's time
+    to append and replicate a small batch, not client batching."""
+    p = Producer(
+        {
+            "bootstrap.servers": brokers,
+            "enable.idempotence": False,
+            "acks": "all",
+            "linger.ms": 0,
+            "compression.type": s.compression,
+            "message.timeout.ms": 120_000,
+        }
+    )
+    latencies: list[float] = []
+    errors = 0
+
+    def cb(err, msg):
+        nonlocal errors
+        if err is not None:
+            errors += 1
+        else:
+            latencies.append(msg.latency())
+
+    total = int(LATENCY_RATE * LATENCY_SECONDS)
+    per_tick = max(1, LATENCY_RATE // 1000)
+    start = time.monotonic()
+    sent = 0
+    while sent < total:
+        due = start + sent / LATENCY_RATE
+        now = time.monotonic()
+        if due > now:
+            time.sleep(due - now)
+        for _ in range(min(per_tick, total - sent)):
+            ident = sent // s.duplicate_every if s.duplicate_every else sent
+            key = f"lat-{ident:012d}".encode()
+            kw = {"headers": [(HEADER, key)]} if s.header else {}
+            p.produce(topic, value=VALUE, key=key, on_delivery=cb, **kw)
+            sent += 1
+        p.poll(0)
+    p.flush(120)
+    latencies.sort()
+
+    def pct(q: float) -> float:
+        return latencies[min(len(latencies) - 1, int(q * len(latencies)))] * 1e3
+
+    return {
+        "p50 ms": pct(0.50),
+        "p99 ms": pct(0.99),
+        "p99.9 ms": pct(0.999),
+        "max ms": latencies[-1] * 1e3,
+        "latency errors": errors,
+    }
+
+
 def _written(brokers: str, topic: str) -> int:
     return sum(kafka.high_watermark(brokers, topic, p) for p in range(PARTITIONS))
 
@@ -159,11 +229,15 @@ def _run(c: Cluster, s: Scenario) -> dict:
         "records/s": offered / wall,
         "cpu ms per 1M records": cpu_ms / offered * 1e6,
         "stalls": after.sum(STALLS) - before.sum(STALLS),
+        "longest stall ms": after.longest_stall_us(before) / 1000,
         "offered": offered,
         "written": _written(c.brokers, topic),
         "errors": errors,
         "index entries": after.sum(SHARD_ENTRIES),
     }
+    stalls_before = c.node(0).metrics().sum(STALLS)
+    out.update(_latency(c.brokers, topic, s))
+    out["latency stalls"] = c.node(0).metrics().sum(STALLS) - stalls_before
     kafka.delete_topic(c.brokers, topic)
     return out
 
@@ -173,11 +247,15 @@ def _table(rows: list[dict], image: str) -> str:
     lines = [
         f"Image `{image}`, {RECORDS:,} records of 100 bytes per scenario from "
         f"{PRODUCERS} producer processes, one broker with one core, 4 "
-        f"partitions, acks=all; median of {REPEATS} interleaved runs.",
+        f"partitions, acks=all; median of {REPEATS} interleaved runs. "
+        f"Latency: {LATENCY_RATE:,} records/s for {LATENCY_SECONDS:g} s from "
+        "one producer (linger.ms=0) after each throughput run, into the same "
+        "topic with its index loaded.",
         "",
         "| scenario | records/s | vs baseline | broker CPU ms / 1M records "
-        "| vs baseline | written | stalls | note |",
-        "|---|---:|---:|---:|---:|---:|---:|---|",
+        "| vs baseline | written | stalls | longest stall ms | p50 ms | p99 ms "
+        "| p99.9 ms | max ms | note |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
     for r in rows:
         ref = base.get("baseline, lz4" if "lz4" in r["scenario"] else "baseline")
@@ -190,7 +268,10 @@ def _table(rows: list[dict], image: str) -> str:
         lines.append(
             f"| {r['scenario']} | {r['records/s']:,.0f} | {rel_rate:+.0%} "
             f"| {r['cpu ms per 1M records']:,.0f} | {rel_cpu:+.0%} "
-            f"| {r['written']:,} | {r['stalls']:,.0f} | {r['note']} |"
+            f"| {r['written']:,} | {r['stalls']:,.0f} "
+            f"| {r['longest stall ms']:.1f} "
+            f"| {r['p50 ms']:.2f} | {r['p99 ms']:.2f} | {r['p99.9 ms']:.2f} "
+            f"| {r['max ms']:.1f} | {r['note']} |"
         )
     return "\n".join(lines) + "\n"
 
@@ -198,10 +279,19 @@ def _table(rows: list[dict], image: str) -> str:
 def _median(rows: list[dict]) -> dict:
     """Per-metric median over the repeats of one scenario."""
     out = dict(rows[0])
-    for k in ("records/s", "cpu ms per 1M records", "stalls"):
+    for k in (
+        "records/s",
+        "cpu ms per 1M records",
+        "stalls",
+        "longest stall ms",
+        "p50 ms",
+        "p99 ms",
+        "p99.9 ms",
+        "max ms",
+    ):
         vals = sorted(r[k] for r in rows)
         out[k] = vals[len(vals) // 2]
-    out["errors"] = sum(r["errors"] for r in rows)
+    out["errors"] = sum(r["errors"] + r["latency errors"] for r in rows)
     return out
 
 
@@ -209,6 +299,8 @@ def test_dedup_throughput(make_cluster, image, pytestconfig):
     runs: dict[str, list[dict]] = {}
     by_config: dict[tuple, list[Scenario]] = {}
     for s in SCENARIOS:
+        if ONLY and s.name not in ONLY:
+            continue
         by_config.setdefault(tuple(sorted(s.cluster_config.items())), []).append(s)
     for config, scenarios in by_config.items():
         c = make_cluster(nodes=1, smp=1, memory="2G", cluster_config=dict(config))

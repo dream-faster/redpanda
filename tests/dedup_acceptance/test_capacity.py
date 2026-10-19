@@ -25,6 +25,7 @@ PART_ENTRIES = "vectorized_dedup_partition_index_entries"
 TRUNCATED = "vectorized_dedup_partition_snapshot_entries_truncated"
 UNINDEXED = "vectorized_dedup_partition_records_unindexed"
 EVICTED = "vectorized_dedup_partition_capacity_evicted_entries"
+RECLAIMED = "vectorized_dedup_partition_expired_entries_reclaimed"
 KVSTORE_BYTES = "vectorized_storage_kvstore_cached_bytes"
 
 
@@ -33,6 +34,24 @@ def require_new_build(c: Cluster, pytestconfig) -> None:
         if pytestconfig.getoption("--require-new-build"):
             pytest.fail("image predates the dedup memory fixes")
         pytest.skip("image predates the dedup memory fixes")
+
+
+def require_reclaim(c: Cluster, pytestconfig) -> None:
+    """Builds that reclaim expired entries from a shard's other indices under
+    shard pressure export a per-partition count of them. Call once a dedup
+    partition exists."""
+    if not c.any_node().metrics().has(RECLAIMED):
+        msg = "image predates reclaiming expired entries under shard pressure"
+        if pytestconfig.getoption("--require-new-build"):
+            pytest.fail(msg)
+        pytest.skip(msg)
+
+
+def admitted_on_resend(c: Cluster, t: str, partition: int, recs: list[Rec]) -> int:
+    """How many of `recs`, sent again as they are, the partition admits."""
+    before = len(kafka.consume_all(c.brokers, t, partition))
+    kafka.produce_ok(c.brokers, t, recs, partition=partition)
+    return len(kafka.consume_all(c.brokers, t, partition)) - before
 
 
 def spread_timestamps(n: int, window_s: int):
@@ -163,6 +182,160 @@ def test_shard_limit_is_per_shard(make_cluster, pytestconfig):
     per_shard = {int(l["shard"]): v for l, v in m.select(SHARD_ENTRIES)}
     assert per_shard[full_shard] <= limit
     assert per_shard[1 - full_shard] == 0
+
+
+def _fill_busy_partition(c: Cluster, n: int, now: int) -> tuple[str, list[Rec]]:
+    """Fill a fresh partition with `n` identities, 50 ms apart up to ten
+    minutes ago, every one inside its hour-long window. Returns the topic and
+    what it was sent."""
+    busy = topic_on_one_node(c, 1)
+    recs = [
+        Rec(f"busy-{i}".encode(), timestamp_ms=now - 1_300_000 + i * 50)
+        for i in range(n)
+    ]
+    kafka.produce_bulk(
+        c.brokers,
+        busy,
+        0,
+        (r.key for r in recs),
+        timestamp_ms=lambda i: recs[i].timestamp_ms,
+    )
+    return busy, recs
+
+
+def _assert_busy_kept_everything(c: Cluster, busy: str, recs: list[Rec]) -> None:
+    m = c.node(0).metrics()
+    assert m.sum(SHARD_ENTRIES) <= m.sum(SHARD_MAX)
+    assert m.sum(EVICTED, topic=busy) == 0
+    assert m.sum(UNINDEXED, topic=busy) == 0
+    assert m.sum(PART_ENTRIES, topic=busy) == len(recs)
+    # The oldest and the newest it was sent are both still caught.
+    assert admitted_on_resend(c, busy, 0, recs[:500] + recs[-500:]) == 0
+
+
+def test_expired_entries_elsewhere_go_before_live_ones(make_cluster, pytestconfig):
+    """A partition whose entries have all expired, but whose own cursor has
+    not reached them yet, holds two fifths of the shard while another
+    partition fills the rest. The shard reclaims the expired entries rather
+    than trim the busy partition's live ones: it keeps every identity it
+    was sent."""
+    limit = 20_000
+    c = make_cluster(
+        nodes=1, smp=1, cluster_config={"dedup_max_entries_per_shard": limit}
+    )
+    require_new_build(c, pytestconfig)
+    stale = topic_on_one_node(c, 1, window_ms=60_000)
+    now = int(time.time() * 1000)
+    held = limit * 2 // 5
+    kafka.produce_bulk(
+        c.brokers,
+        stale,
+        0,
+        (f"stale-{i}".encode() for i in range(held)),
+        timestamp_ms=lambda i: now - 2_000_000 + i,
+    )
+    # One record ten minutes on puts every earlier one outside the window; the
+    # partition's own cursor drops only a step's worth of them.
+    kafka.produce_ok(
+        c.brokers,
+        stale,
+        [Rec(b"stale-late", timestamp_ms=now - 1_400_000)],
+        partition=0,
+    )
+    require_reclaim(c, pytestconfig)
+    assert c.node(0).metrics().sum(PART_ENTRIES, topic=stale) > held * 9 // 10
+
+    busy, recs = _fill_busy_partition(c, limit * 7 // 10, now)
+    assert c.node(0).metrics().sum(RECLAIMED, topic=stale) > 0
+    _assert_busy_kept_everything(c, busy, recs)
+
+
+def test_a_quiet_partitions_entries_age_with_the_shard(make_cluster, pytestconfig):
+    """A partition that went quiet holding two fifths of the shard: by its own
+    watermark nothing in it ever expires, since nothing newer arrives. Its
+    entries age with the shard's newest records instead, so once those are a
+    window past them they are reclaimed, and the busy partition filling the
+    rest of the shard keeps every identity it was sent."""
+    limit = 20_000
+    c = make_cluster(
+        nodes=1, smp=1, cluster_config={"dedup_max_entries_per_shard": limit}
+    )
+    require_new_build(c, pytestconfig)
+    quiet = topic_on_one_node(c, 1, window_ms=60_000)
+    now = int(time.time() * 1000)
+    held = limit * 2 // 5
+    # Eight seconds from first to last, well inside the minute-long window.
+    kafka.produce_bulk(
+        c.brokers,
+        quiet,
+        0,
+        (f"quiet-{i}".encode() for i in range(held)),
+        timestamp_ms=lambda i: now - 1_600_000 + i,
+    )
+    require_reclaim(c, pytestconfig)
+    assert c.node(0).metrics().sum(PART_ENTRIES, topic=quiet) == held
+
+    # The busy partition's records start five minutes after the quiet one's
+    # last: a window and more.
+    busy, recs = _fill_busy_partition(c, limit * 7 // 10, now)
+    assert c.node(0).metrics().sum(RECLAIMED, topic=quiet) > 0
+    _assert_busy_kept_everything(c, busy, recs)
+
+
+def test_a_partition_stamping_behind_its_neighbours_keeps_its_entries(
+    make_cluster, pytestconfig
+):
+    """A partition whose producers stamp records half an hour behind its
+    neighbour's, still receiving them: its entries are all inside its own
+    window, so however far ahead the shard's newest records are, none of them
+    is reclaimed. Only the shard's own trimming takes from it."""
+    limit = 20_000
+    c = make_cluster(
+        nodes=1, smp=1, cluster_config={"dedup_max_entries_per_shard": limit}
+    )
+    require_new_build(c, pytestconfig)
+    lagging = topic_on_one_node(c, 1, window_ms=60_000)
+    busy = topic_on_one_node(c, 1)
+    now = int(time.time() * 1000)
+    chunk = 500
+    p = kafka.producer(c.brokers)
+    for r in range(30):
+        # In turns, each flushed before the next, so the broker sees them in
+        # this order: the lagging partition keeps receiving records as the
+        # shard's newest move on.
+        for i in range(chunk):
+            n = r * chunk + i
+            p.produce(
+                lagging,
+                key=f"lag-{n}".encode(),
+                value=b"v",
+                partition=0,
+                timestamp=now - 3_000_000 + n,
+            )
+        assert p.flush(60) == 0
+        for i in range(chunk):
+            n = r * chunk + i
+            p.produce(
+                busy,
+                key=f"busy-{n}".encode(),
+                value=b"v",
+                partition=0,
+                timestamp=now - 1_200_000 + n * 10,
+            )
+        assert p.flush(60) == 0
+        if r == 0:
+            require_reclaim(c, pytestconfig)
+    m = c.node(0).metrics()
+    assert m.sum(SHARD_ENTRIES) <= limit
+    assert m.sum(RECLAIMED, topic=lagging) == 0
+    assert m.sum(RECLAIMED, topic=busy) == 0
+    # The shard was over its limit all the same, and trimmed for it.
+    assert (
+        m.sum(EVICTED, topic=lagging)
+        + m.sum(EVICTED, topic=busy)
+        + m.sum(UNINDEXED, topic=lagging)
+        + m.sum(UNINDEXED, topic=busy)
+    ) > 0
 
 
 def test_default_shard_limit_follows_shard_memory(make_cluster, pytestconfig):

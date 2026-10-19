@@ -25,11 +25,15 @@ from harness import kafka
 from harness.cluster import Cluster
 from harness.kafka import Rec
 from test_capacity import (
+    EVICTED,
     PART_ENTRIES,
+    RECLAIMED,
     SHARD_ENTRIES,
     SHARD_MAX,
     UNINDEXED,
+    admitted_on_resend,
     require_new_build,
+    require_reclaim,
     topic_on_one_node,
 )
 
@@ -128,13 +132,21 @@ def test_sustained_duplicate_heavy_load(make_cluster, pytestconfig):
         errors = []
         for i in range(per_producer):
             k = (start + i * 7) % keyspace
-            p.produce(
-                t,
-                key=f"id-{k}".encode(),
-                value=b"x" * 64,
-                partition=k % 8,
-                on_delivery=lambda e, _m: e and errors.append(e),
-            )
+            while True:
+                try:
+                    p.produce(
+                        t,
+                        key=f"id-{k}".encode(),
+                        value=b"x" * 64,
+                        partition=k % 8,
+                        on_delivery=lambda e, _m: e and errors.append(e),
+                    )
+                    break
+                except BufferError:
+                    # The client's own queue is full: the broker is behind
+                    # this producer for a moment. Serve deliveries until
+                    # there is room, then send the same record again.
+                    p.poll(0.1)
             if i % 5000 == 0:
                 p.poll(0)
         assert p.flush(300) == 0
@@ -701,3 +713,105 @@ def test_full_shard_keeps_the_newest_identities(make_cluster, pytestconfig):
     assert m.sum(UNINDEXED, topic=t, partition="1") == 0
     newest = [f"busy-{i}".encode() for i in range(total - 2_000, total)]
     assert _readmitted(c, t, 1, newest) == 0
+
+
+def test_a_burst_gone_quiet_does_not_cost_busy_partitions_their_window(
+    make_cluster, pytestconfig
+):
+    """The staging shard: one large busy feed, two smaller ones, and a burst
+    that fills a partition for a minute and then goes quiet, together over
+    the shard's soft limit for as long as the burst counts. Ten minutes of
+    traffic, two-minute windows.
+
+    The burst's entries stop ageing by their own partition's clock the moment
+    it goes quiet; they age with the shard's newest records instead, so they
+    are reclaimed once a window has passed. From then on the busy feeds alone
+    stay under the soft limit and nothing of theirs is trimmed: every
+    identity they were sent in the last window is still caught. Without
+    that, the burst held the shard over its soft limit for good and the
+    largest feed lost the oldest part of its window."""
+    limit = 46_000
+    c = make_cluster(
+        nodes=1, smp=1, cluster_config={"dedup_max_entries_per_shard": limit}
+    )
+    require_new_build(c, pytestconfig)
+    window_s = 120
+    feeds = {
+        "quotes": (topic_on_one_node(c, 1, window_ms=window_s * 1000), 200),
+        "trades": (topic_on_one_node(c, 1, window_ms=window_s * 1000), 40),
+        "book": (topic_on_one_node(c, 1, window_ms=window_s * 1000), 40),
+    }
+    burst = topic_on_one_node(c, 1, window_ms=window_s * 1000)
+    burst_rate, burst_s = 200, 60
+    run_s = 600
+    # Record time: ten minutes ending a minute ago, so no record is clamped.
+    start = int(time.time() * 1000) - (run_s + 60) * 1000
+    sent: dict[str, list[Rec]] = {name: [] for name in feeds}
+    p = kafka.producer(c.brokers, **{"queue.buffering.max.messages": 1_000_000})
+    # At each checkpoint: what the feeds had lost to trimming, and what the
+    # shard and the burst held.
+    checkpoints: dict[int, dict[str, float]] = {}
+
+    def checkpoint(second: int) -> None:
+        m = c.node(0).metrics()
+        checkpoints[second] = {
+            "evicted": sum(m.sum(EVICTED, topic=t) for t, _ in feeds.values()),
+            "shard": m.sum(SHARD_ENTRIES),
+            "burst": m.sum(PART_ENTRIES, topic=burst),
+            "burst reclaimed": m.sum(RECLAIMED, topic=burst),
+        }
+
+    def produce(topic: str, key: bytes, ts: int) -> None:
+        while True:
+            try:
+                p.produce(topic, key=key, value=b"v", partition=0, timestamp=ts)
+                return
+            except BufferError:
+                p.poll(0.1)
+
+    for second in range(run_s):
+        for name, (t, rate) in feeds.items():
+            for i in range(rate):
+                ts = start + second * 1000 + i * 1000 // rate
+                key = f"{name}-{second}-{i}".encode()
+                sent[name].append(Rec(key, timestamp_ms=ts))
+                produce(t, key, ts)
+        if second < burst_s:
+            for i in range(burst_rate):
+                produce(
+                    burst,
+                    f"burst-{second}-{i}".encode(),
+                    start + second * 1000 + i * 1000 // burst_rate,
+                )
+        if second == 0:
+            assert p.flush(60) == 0
+            require_reclaim(c, pytestconfig)
+        if second in (burst_s, run_s // 2, run_s - 1):
+            # Flushed per second of record time otherwise only in batches, so
+            # the broker sees the feeds roughly in step with each other.
+            assert p.flush(120) == 0
+            checkpoint(second)
+        elif second % 10 == 9:
+            assert p.flush(120) == 0
+    m = c.node(0).metrics()
+    unindexed = {name: m.sum(UNINDEXED, topic=t) for name, (t, _) in feeds.items()}
+    # Everything each feed was sent in the last window, less five seconds at
+    # its old edge, sent again as it was: what a feed trims is its oldest.
+    forgotten = {
+        name: admitted_on_resend(c, t, 0, sent[name][-(window_s - 5) * rate :])
+        for name, (t, rate) in feeds.items()
+    }
+    report = f"checkpoints={checkpoints} unindexed={unindexed} forgotten={forgotten}"
+    print(report)
+    assert m.sum(SHARD_ENTRIES) <= limit, report
+    # The burst held the shard over its soft limit while it was live, and was
+    # reclaimed once it had aged a window.
+    assert checkpoints[run_s - 1]["burst reclaimed"] > 0, report
+    # From halfway through, long after the burst's last entry was a window
+    # old, no feed lost anything more to trimming.
+    assert checkpoints[run_s - 1]["evicted"] == checkpoints[run_s // 2]["evicted"], (
+        report
+    )
+    assert not any(unindexed.values()), report
+    assert not any(forgotten.values()), report
+    assert_memory_healthy(c)

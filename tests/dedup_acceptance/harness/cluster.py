@@ -310,6 +310,29 @@ class Metrics:
     def sum(self, name: str, **labels: str) -> float:
         return sum(v for _, v in self.select(name, **labels))
 
+    def longest_stall_us(self, since: Metrics | None = None) -> float:
+        """Upper bound, in microseconds, of the longest reactor stall any shard
+        recorded (since `since`, when given): the smallest bucket of the
+        vectorized_reactor_stalls histogram that holds all of them. Zero when
+        there were none."""
+
+        def buckets(m: Metrics) -> dict[tuple[str, float], float]:
+            return {
+                (l.get("shard", ""), float(l["le"])): v
+                for l, v in m.select("vectorized_reactor_stalls_bucket")
+            }
+
+        now = buckets(self)
+        then = buckets(since) if since is not None else {}
+        longest = 0.0
+        for shard in {s for s, _ in now}:
+            bounds = sorted(le for s, le in now if s == shard)
+            delta = {le: now[(shard, le)] - then.get((shard, le), 0.0) for le in bounds}
+            total = delta[bounds[-1]]
+            if total > 0:
+                longest = max(longest, next(le for le in bounds if delta[le] >= total))
+        return longest
+
 
 class Cluster:
     """Nodes 0..n-1; node 0 is the seed."""

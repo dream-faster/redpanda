@@ -312,6 +312,13 @@ struct dedup_shard_budget {
     static constexpr size_t largest_refresh_interval = 256;
     dedup_window_filter* largest_cache{nullptr};
     size_t lookups_since_refresh{0};
+    /// Next filter to reclaim expired entries from under shard pressure; see
+    /// dedup_window_filter::reclaim_expired_elsewhere().
+    size_t reclaim_next{0};
+    /// Newest record timestamp any filter on the shard has seen, clamped to
+    /// broker time as every record's is. The clock an idle index ages by when
+    /// others reclaim from it; see dedup_window_filter::reclaim_cutoff().
+    int64_t newest_timestamp{std::numeric_limits<int64_t>::min()};
 };
 
 /// \brief Write-path, first-wins deduplication.
@@ -715,6 +722,9 @@ public:
     size_t capacity_evicted_entries() const {
         return _capacity_evicted_entries;
     }
+    /// Expired entries other partitions' inserts reclaimed from this index
+    /// under shard pressure (see reclaim_expired_elsewhere()).
+    size_t reclaimed_entries() const { return _reclaimed_entries; }
     /// Bounded emergency sweep steps taken because a new identity arrived
     /// with the index exactly at the hard ceiling. Non-zero means the soft
     /// limit is not keeping ahead of the arrival rate.
@@ -751,14 +761,62 @@ private:
       model::timestamp ts,
       dedup_request_undo* undo);
 
+    /// The sweeping every new identity pays for, on the leader's path and
+    /// the follower's alike: reclaim_expired_elsewhere(), then sweep_step().
+    void sweep_for_new_identity();
+
+    /// Once the shard is within reclaim_margin_divisor of its limit, take one
+    /// reclaim_expired_step() on another index, round-robin over the shard's
+    /// indices.
+    ///
+    /// A cursor moves only on its own index's new identities, so an index
+    /// holding a window's worth of entries takes a sizeable fraction of that
+    /// window per pass, and the entries that expired behind its cursor wait
+    /// for it. Under shard pressure that let the largest index trim live
+    /// entries while its neighbours held more expired ones than it was short.
+    /// Reclaiming those first, from every insert on the shard, keeps the trim
+    /// for when expired entries are not enough. Like take_room_from_largest()
+    /// it changes another partition's index on this one's traffic, so its
+    /// replicas, whose neighbours differ, lay their arrays out differently:
+    /// the same best-effort divergence the shard budget already accepts. An
+    /// expired entry cannot match in the window, so no dedup decision there
+    /// changes.
+    void reclaim_expired_elsewhere();
+    /// The cutoff reclaim_expired_step() drops entries below: expiry_cutoff(),
+    /// moved on by how far the shard's newest timestamp has advanced since
+    /// this index last saw a record.
+    ///
+    /// expiry_cutoff() moves only with this index's own records, so an index
+    /// that stops receiving them stops ageing: a busy partition whose feed
+    /// went quiet would hold its whole window's worth of the shard budget
+    /// until it got traffic again, and the shard's largest index would trim
+    /// live entries for it. The shard's clock ages it instead. Measured from
+    /// the index's last record rather than against the shard's clock outright,
+    /// so a partition whose producers stamp records well behind its
+    /// neighbours' keeps its entries while it is still receiving them.
+    int64_t reclaim_cutoff() const;
+    /// Record that this index saw a record stamped \p ts, for
+    /// reclaim_cutoff().
+    void note_shard_time(model::timestamp ts);
+    /// Walk this index's own reclaim cursor over at most \p budget entries,
+    /// dropping the expired ones -- by reclaim_cutoff() -- and nothing else.
+    ///
+    /// Its own cursor, not the sweep cursor: the sweep cursor's pass is what
+    /// finds the entries to trim for capacity and measures the cutoff, so
+    /// walking it without trimming would skip, for that pass, the entries the
+    /// shard takes room from this index with (take_room_from_largest()). An
+    /// erase here behind the sweep cursor moves an unvisited entry behind it,
+    /// which only ends that pass early, as revert_request()'s erases do.
+    void reclaim_expired_step(size_t budget);
+
     /// \brief Advance the sweep cursor over at most \p budget entries.
     ///
     /// Drops the expired ones, and -- once the index is within
     /// capacity_soft_margin_divisor of the ceiling -- the ones below the
-    /// capacity cutoff. The cursor persists across calls and wraps at the end
-    /// of the value array, so successive calls walk the whole index in
-    /// bounded slices instead of one pass. This is the only eviction the
-    /// produce and apply paths perform.
+    /// capacity cutoff. The cursor persists across calls and
+    /// wraps at the end of the value array, so successive calls walk the whole
+    /// index in bounded slices instead of one pass. This is the only eviction
+    /// the produce and apply paths perform.
     void sweep_step(size_t budget);
 
     /// One bounded sweep step taken because a new identity stamped
@@ -856,6 +914,8 @@ private:
     bool over_own_soft_limit() const;
     /// Whether the shard is within capacity_soft_margin_divisor of its limit.
     bool over_shard_soft_limit() const;
+    /// Whether the shard is within reclaim_margin_divisor of its limit.
+    bool over_shard_reclaim_limit() const;
     /// Whether no index on the shard is larger than this one by more than a
     /// tenth of its size; those are the indices whose cursors trim under shard
     /// pressure. Requires a shard budget.
@@ -883,6 +943,15 @@ private:
     // so trimming begins at 90% and the index converges on its target instead
     // of dropping a quarter of itself in one step at the ceiling.
     static constexpr size_t capacity_soft_margin_divisor = 10;
+    // Margin below the shard limit, as a divisor of it, from which inserts
+    // reclaim expired entries elsewhere on the shard: a fifth, twice the trim
+    // margin. Started only at the trim margin, reclaim stopped as soon as the
+    // shard was back under it, so a quiet index's expired entries were never
+    // drained: they held the shard just under the margin, where every reclaim
+    // step that found nothing expired let the largest index trim a live
+    // entry. Dropping an expired entry costs no coverage, so starting earlier
+    // costs only the bounded step.
+    static constexpr size_t reclaim_margin_divisor = 5;
 
     // Fraction of the index the capacity cutoff designates as droppable:
     // size/capacity_evict_divisor, so a quarter, measured over a completed
@@ -929,6 +998,11 @@ private:
     // span the leader treats it as expired regardless: the same divergence
     // the unreverted watermark already causes.
     size_t _sweep_pos{0};
+    // Position of reclaim_expired_step() in the same array.
+    size_t _reclaim_pos{0};
+    // The shard budget's newest_timestamp when this index last saw a record;
+    // min() until it has seen one. See reclaim_cutoff().
+    int64_t _shard_time_seen{std::numeric_limits<int64_t>::min()};
     // Walks in progress; one per snapshot being taken, so at most a few.
     std::vector<live_walk*> _walks;
     // Histogram of the entries the pass in progress has visited, measured
@@ -959,6 +1033,7 @@ private:
     size_t _capacity_evicted_entries{0};
     size_t _rebuilt_requests{0};
     size_t _capacity_sweeps{0};
+    size_t _reclaimed_entries{0};
 };
 
 } // namespace cluster
