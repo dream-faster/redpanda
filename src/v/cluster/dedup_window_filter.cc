@@ -10,13 +10,14 @@
 #include "cluster/dedup_window_filter.h"
 
 #include "hashing/xx.h"
-#include "model/batch_builder.h"
 #include "model/batch_compression.h"
 #include "model/record.h"
+#include "utils/vint.h"
 
 #include <seastar/core/lowres_clock.hh>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <iterator>
@@ -319,8 +320,8 @@ dedup_window_filter::filter_request(model::record_batch batch) {
     }
     model::record_batch& readable = decompressed ? *decompressed : batch;
 
-    // Copied, not referenced: the batch header is read again after the
-    // iterator below has taken a share of the records.
+    // Copied, not referenced: the rebuild below reads it after `readable`
+    // has been walked.
     const auto header = readable.header();
     const auto base_ts = header.first_timestamp;
     const int32_t total = readable.record_count();
@@ -340,6 +341,7 @@ dedup_window_filter::filter_request(model::record_batch batch) {
     struct classified {
         dedup_identity_digest identity;
         model::timestamp timestamp;
+        dedup_record_span span;
         bool has_identity{false};
         bool dropped{false};
     };
@@ -353,7 +355,8 @@ dedup_window_filter::filter_request(model::record_batch batch) {
       [this, &records, &missing_header](
         dedup_identity_lookup lookup,
         dedup_identity_digest digest,
-        model::timestamp ts) {
+        model::timestamp ts,
+        const dedup_record_span& span) {
           if (lookup == dedup_identity_lookup::missing_header) {
               missing_header = true;
               return false;
@@ -361,6 +364,7 @@ dedup_window_filter::filter_request(model::record_batch batch) {
           records.push_back(
             {.identity = digest,
              .timestamp = clamp_to_broker_time(ts),
+             .span = span,
              .has_identity = lookup == dedup_identity_lookup::identity});
           return true;
       });
@@ -408,55 +412,101 @@ dedup_window_filter::filter_request(model::record_batch batch) {
 
     ++_rebuilt_requests;
 
-    // Rebuild with surviving records while preserving batch and record
-    // metadata. Offset deltas are made contiguous because this is a produce
-    // batch, not a compacted batch with intentional offset gaps.
-    model::batch_builder builder;
-    builder.set_batch_type(header.type);
-    builder.set_base_offset(header.base_offset);
-    builder.set_batch_timestamp(header.attrs.timestamp_type(), base_ts);
-    // From the original batch, not `header`: `readable` may be the
-    // decompressed temporary, whose attrs no longer name the compression the
-    // rebuilt batch should be written back with.
-    builder.set_compression(batch.header().attrs.compression());
-    builder.set_producer_id(header.producer_id);
-    builder.set_producer_epoch(header.producer_epoch);
-    builder.set_base_sequence(header.base_sequence);
-    if (header.attrs.is_transactional()) {
-        builder.set_transactional();
-    }
-    if (header.attrs.is_control()) {
-        builder.set_control();
-    }
-
-    // Second sharing pass, taken only when something was actually dropped.
-    // Re-parsing is cheap next to holding every record's iobufs alive across
-    // the classification above, and the fast path above never reaches here.
+    // The batch is rebuilt from the surviving records' bytes rather than
+    // parsed into records and serialized again: each is copied as it is but
+    // for its offset delta, made contiguous because this is a produce batch,
+    // not a compacted one with intentional gaps, and the length in front of
+    // it that counts the delta's bytes. The result is what rebuilding it
+    // through model::batch_builder gives (dedup_window_filter_test pins the
+    // two together), without an allocation per record.
     //
-    // This pass decodes fields the identity walk skipped (values, headers in
-    // key mode), so a malformed record can fail here after the index was
-    // already mutated above. The insertions are undone before the error
-    // propagates: the request fails and nothing of it stays behind.
+    // Nothing past the identity walk is decoded, so nothing here can fail on
+    // the records themselves; compression can still fail. The insertions are
+    // undone before an error propagates: the request fails and nothing of it
+    // stays behind.
     try {
-        int32_t output_offset_delta = 0;
-        size_t idx = 0;
-        auto rebuild = model::record_batch_iterator::create(readable.share());
-        while (rebuild.has_next()) {
-            auto r = rebuild.next();
-            if (records[idx++].dropped) {
+        iobuf data;
+        data.reserve_memory(readable.data().size_bytes());
+        iobuf_const_parser parser(readable.data());
+        std::array<uint8_t, vint::max_length> varint{};
+        const auto append_varint = [&data, &varint](int64_t v) {
+            const auto n = vint::serialize(v, varint.data());
+            data.append(reinterpret_cast<const char*>(varint.data()), n);
+        };
+        const auto copy = [&data, &parser](size_t from, size_t to) {
+            parser.skip(from - parser.bytes_consumed());
+            parser.consume(to - from, [&data](const char* src, size_t n) {
+                data.append(src, n);
+                return ss::stop_iteration::no;
+            });
+        };
+        int64_t max_timestamp_delta = std::numeric_limits<int64_t>::min();
+        int32_t offset_delta = 0;
+        for (const auto& c : records) {
+            if (c.dropped) {
                 continue;
             }
-            builder.add_record(
-              model::record(
-                r.attributes(),
-                r.timestamp_delta(),
-                output_offset_delta++,
-                r.share_key_opt(),
-                r.share_value_opt(),
-                std::move(r.headers())));
+            const auto& span = c.span;
+            const auto unchanged = static_cast<int64_t>(
+              (span.end - span.body)
+              - (span.after_offset_delta - span.offset_delta));
+            append_varint(
+              unchanged + static_cast<int64_t>(vint::vint_size(offset_delta)));
+            copy(span.body, span.offset_delta);
+            append_varint(offset_delta++);
+            copy(span.after_offset_delta, span.end);
+            max_timestamp_delta = std::max(
+              max_timestamp_delta, span.timestamp_delta);
+        }
+
+        // As model::batch_builder::build_header() lays it out for the same
+        // records.
+        model::record_batch_attributes attrs;
+        if (header.attrs.is_control()) {
+            attrs.set_control_type();
+        }
+        if (header.attrs.is_transactional()) {
+            attrs.set_transactional_type();
+        }
+        attrs.set_timestamp_type(header.attrs.timestamp_type());
+        model::record_batch_header::context ctx;
+        ctx.term = model::term_id{};
+        ctx.owner_shard = ss::this_shard_id();
+        auto max_timestamp = base_ts;
+        if (
+          header.attrs.timestamp_type() == model::timestamp_type::create_time) {
+            max_timestamp = model::timestamp{base_ts() + max_timestamp_delta};
+        }
+        model::record_batch_header out{
+          .header_crc = 0,
+          .size_bytes = static_cast<int32_t>(
+            model::packed_record_batch_header_size + data.size_bytes()),
+          .base_offset = header.base_offset,
+          .type = header.type,
+          .crc = 0,
+          .attrs = attrs,
+          .last_offset_delta = kept - 1,
+          .first_timestamp = base_ts,
+          .max_timestamp = max_timestamp,
+          .producer_id = header.producer_id,
+          .producer_epoch = header.producer_epoch,
+          .base_sequence = header.base_sequence,
+          .record_count = kept,
+          .ctx = ctx,
+        };
+        model::record_batch rebuilt(
+          out, std::move(data), model::record_batch::tag_ctor_ng{});
+        // From the original batch, not `header`: `readable` may be the
+        // decompressed temporary, whose attrs no longer name the compression
+        // the rebuilt batch should be written back with.
+        if (const auto codec = batch.header().attrs.compression();
+            codec != model::compression::none) {
+            rebuilt = model::compress_batch_sync(codec, std::move(rebuilt));
+        } else {
+            rebuilt.header().reset_size_checksum_metadata(rebuilt.data());
         }
         return {
-          .batch = std::move(builder).build_sync(),
+          .batch = std::move(rebuilt),
           .undo = std::move(undo),
           .dropped = std::move(dropped)};
     } catch (...) {

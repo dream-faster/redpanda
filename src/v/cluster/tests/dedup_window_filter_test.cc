@@ -598,6 +598,119 @@ TEST(DedupWindowFilter, BatchPopulateMatchesOneAtATime) {
     }
 }
 
+namespace {
+
+// What filter_request() produced before it spliced records: every survivor
+// parsed and added to a model::batch_builder with contiguous offset deltas.
+// The splice must stay byte for byte the same.
+model::record_batch rebuild_through_builder(
+  const model::record_batch& original, const std::vector<bool>& dropped) {
+    auto readable = decompressed_copy(original);
+    const auto& header = readable.header();
+    model::batch_builder builder;
+    builder.set_batch_type(header.type);
+    builder.set_base_offset(header.base_offset);
+    builder.set_batch_timestamp(
+      header.attrs.timestamp_type(), header.first_timestamp);
+    builder.set_compression(original.header().attrs.compression());
+    builder.set_producer_id(header.producer_id);
+    builder.set_producer_epoch(header.producer_epoch);
+    builder.set_base_sequence(header.base_sequence);
+    int32_t offset_delta = 0;
+    size_t i = 0;
+    readable.for_each_record([&](model::record r) {
+        if (dropped[i++]) {
+            return;
+        }
+        builder.add_record(
+          model::record(
+            r.attributes(),
+            r.timestamp_delta(),
+            offset_delta++,
+            r.share_key_opt(),
+            r.share_value_opt(),
+            std::move(r.headers())));
+    });
+    return std::move(builder).build_sync();
+}
+
+} // namespace
+
+// Partial drops across the shapes that move bytes around: offset deltas whose
+// varints shrink (record 64 onwards re-numbered below 64), null keys, empty
+// and large values, headers, negative and large timestamp deltas, every codec.
+TEST(DedupWindowFilter, SplicedRebuildMatchesTheBuilder) {
+    std::mt19937_64 rng(17);
+    const std::vector<model::compression> codecs{
+      model::compression::none,
+      model::compression::gzip,
+      model::compression::snappy,
+      model::compression::lz4,
+      model::compression::zstd};
+    for (auto codec : codecs) {
+        for (int round = 0; round < 20; ++round) {
+            const size_t n = 1 + rng() % 300;
+            std::vector<record_spec> specs;
+            for (size_t i = 0; i < n; ++i) {
+                record_spec spec;
+                if (rng() % 10 != 0) {
+                    spec.key = fmt::format("k{}", rng() % (n / 2 + 1));
+                }
+                spec.value = ss::sstring(
+                  rng() % 4 == 0 ? rng() % 3000 : rng() % 40, 'v');
+                spec.timestamp_delta = static_cast<int64_t>(rng() % 200'000)
+                                       - 100'000;
+                for (size_t h = rng() % 3; h > 0; --h) {
+                    spec.headers.emplace_back(
+                      fmt::format("h{}", h), fmt::format("value-{}", rng()));
+                }
+                specs.push_back(std::move(spec));
+            }
+            auto batch = make_batch_of(specs, ts(1'000'000));
+            if (codec != model::compression::none) {
+                batch = model::compress_batch_sync(codec, std::move(batch));
+            }
+
+            // Index some keys up front, so records drop across requests as
+            // well as within this one.
+            cluster::dedup_window_filter f(3'600'000ms);
+            std::set<ss::sstring> seen;
+            for (size_t i = 0; i < n / 2; ++i) {
+                auto key = fmt::format("k{}", rng() % (n / 2 + 1));
+                f.populate(iobuf::from(key), ts(1'000'000));
+                seen.insert(key);
+            }
+            std::vector<bool> dropped;
+            for (const auto& spec : specs) {
+                dropped.push_back(
+                  spec.key && !seen.insert(*spec.key).second);
+            }
+            const auto kept = std::ranges::count(dropped, false);
+
+            auto expected = rebuild_through_builder(batch, dropped);
+            auto result = f.filter_request(batch.copy());
+            if (kept == static_cast<int64_t>(n)) {
+                ASSERT_TRUE(result.batch);
+                EXPECT_EQ(*result.batch, batch);
+                continue;
+            }
+            if (kept == 0) {
+                EXPECT_FALSE(result.batch);
+                continue;
+            }
+            ASSERT_TRUE(result.batch);
+            const auto& got = *result.batch;
+            EXPECT_EQ(got.header(), expected.header());
+            EXPECT_EQ(got.header().type, expected.header().type);
+            EXPECT_EQ(got.header().producer_id, expected.header().producer_id);
+            EXPECT_EQ(
+              got.header().base_sequence, expected.header().base_sequence);
+            EXPECT_EQ(got.data(), expected.data());
+            EXPECT_EQ(keys_of(got), keys_of(expected));
+        }
+    }
+}
+
 // A compressed batch is correctly decompressed before key inspection.
 TEST(DedupWindowFilter, CompressedBatch) {
     cluster::dedup_window_filter f(1000ms);

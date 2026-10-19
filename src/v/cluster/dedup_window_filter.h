@@ -35,6 +35,7 @@
 #include <limits>
 #include <optional>
 #include <stdexcept>
+#include <type_traits>
 #include <vector>
 
 namespace cluster {
@@ -93,6 +94,21 @@ enum class dedup_identity_lookup {
     missing_header,
 };
 
+/// Where one record lies in its batch's records buffer, as offsets from the
+/// start of the buffer, for a caller that copies records out of it.
+struct dedup_record_span {
+    /// The record's length varint.
+    size_t begin{0};
+    /// The first byte the length counts: the attributes.
+    size_t body{0};
+    /// The offset delta varint, and the first byte after it.
+    size_t offset_delta{0};
+    size_t after_offset_delta{0};
+    /// One past the record's last byte.
+    size_t end{0};
+    int64_t timestamp_delta{0};
+};
+
 /// \brief Walk a batch's records reading only what dedup needs.
 ///
 /// For each record, in order, calls emit(lookup, digest, timestamp) with the
@@ -105,7 +121,8 @@ enum class dedup_identity_lookup {
 /// key, value and header) on both.
 ///
 /// emit returns whether to go on; the walk stops at the first false. The
-/// digest is meaningful only for dedup_identity_lookup::identity.
+/// digest is meaningful only for dedup_identity_lookup::identity. An emit that
+/// also takes a dedup_record_span is told where the record lies.
 ///
 /// The decoding mirrors model::parse_one_record_from_buffer(): batches reach
 /// here already validated, but a malformed one still throws rather than
@@ -154,16 +171,20 @@ void for_each_dedup_identity(
         // The length counts the bytes after itself. Whatever dedup does not
         // read is skipped as one span to this end, rather than header by
         // header.
+        [[maybe_unused]] const size_t begin = parser.bytes_consumed();
         const auto size = read_length();
         if (size < 0) [[unlikely]] {
             throw std::out_of_range(
               fmt::format("dedup: record of negative size {}", size));
         }
-        const size_t record_end = parser.bytes_consumed()
-                                  + static_cast<size_t>(size);
+        const size_t body = parser.bytes_consumed();
+        const size_t record_end = body + static_cast<size_t>(size);
         parser.skip(1); // attributes
         auto [ts_delta, _tv] = parser.read_varlong();
-        parser.read_varlong(); // offset delta
+        [[maybe_unused]] const size_t offset_delta = parser.bytes_consumed();
+        parser.read_varlong();
+        [[maybe_unused]] const size_t after_offset_delta
+          = parser.bytes_consumed();
         const auto key_len = read_length();
         auto lookup = dedup_identity_lookup::no_identity;
         dedup_identity_digest digest;
@@ -226,7 +247,28 @@ void for_each_dedup_identity(
             ts = ts_delta < 0 ? std::numeric_limits<int64_t>::min()
                               : std::numeric_limits<int64_t>::max();
         }
-        if (!emit(lookup, digest, model::timestamp{ts})) {
+        bool go_on = false;
+        if constexpr (std::is_invocable_v<
+                        F&,
+                        dedup_identity_lookup,
+                        dedup_identity_digest,
+                        model::timestamp,
+                        const dedup_record_span&>) {
+            go_on = emit(
+              lookup,
+              digest,
+              model::timestamp{ts},
+              dedup_record_span{
+                .begin = begin,
+                .body = body,
+                .offset_delta = offset_delta,
+                .after_offset_delta = after_offset_delta,
+                .end = record_end,
+                .timestamp_delta = ts_delta});
+        } else {
+            go_on = emit(lookup, digest, model::timestamp{ts});
+        }
+        if (!go_on) {
             return;
         }
     }
