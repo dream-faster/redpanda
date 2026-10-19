@@ -21,6 +21,8 @@ from pathlib import Path
 import requests
 import yaml
 
+from harness.delay_proxy import DelayProxy
+
 READY_TIMEOUT_S = float(os.environ.get("DEDUP_ACCEPTANCE_READY_TIMEOUT", "120"))
 
 
@@ -63,6 +65,14 @@ class Node:
         return self.cluster.port_base + 10 * self.node_id + 5
 
     @property
+    def advertised_rpc_port(self) -> int:
+        """Where peers reach this node's RPC server: through its delay proxy
+        when the cluster has one (see Cluster.rpc_delay_ms)."""
+        if self.cluster.rpc_delay_ms > 0:
+            return self.cluster.port_base + 10 * self.node_id + 7
+        return self.rpc_port
+
+    @property
     def kafka_addr(self) -> str:
         return f"127.0.0.1:{self.kafka_port}"
 
@@ -85,14 +95,17 @@ class Node:
                 "developer_mode": True,
                 "empty_seed_starts_cluster": False,
                 "rpc_server": {"address": "127.0.0.1", "port": self.rpc_port},
-                "advertised_rpc_api": {"address": "127.0.0.1", "port": self.rpc_port},
+                "advertised_rpc_api": {
+                    "address": "127.0.0.1",
+                    "port": self.advertised_rpc_port,
+                },
                 "kafka_api": [{"address": "127.0.0.1", "port": self.kafka_port}],
                 "advertised_kafka_api": [
                     {"address": "127.0.0.1", "port": self.kafka_port}
                 ],
                 "admin": [{"address": "127.0.0.1", "port": self.admin_port}],
                 "seed_servers": [
-                    {"host": {"address": "127.0.0.1", "port": seed.rpc_port}}
+                    {"host": {"address": "127.0.0.1", "port": seed.advertised_rpc_port}}
                 ],
             }
         }
@@ -348,6 +361,7 @@ class Cluster:
         cluster_config: dict | None = None,
         port_base: int | None = None,
         workdir: Path | None = None,
+        rpc_delay_ms: float = 0,
     ):
         Cluster._counter += 1
         self.name = f"dedup-acc-{os.getpid()}-{Cluster._counter}"
@@ -357,6 +371,10 @@ class Cluster:
         self.port_base = port_base or (21000 + 200 * Cluster._counter)
         assert self.port_base + 200 < 65000, "too many clusters in one run"
         self.workdir = Path(workdir or tempfile.mkdtemp(prefix=f"{self.name}-"))
+        # Delay, each way, of every byte between brokers' RPC servers; see
+        # harness/delay_proxy.py. 0: brokers talk to each other directly.
+        self.rpc_delay_ms = rpc_delay_ms
+        self._proxies: list[DelayProxy] = []
         self.cluster_config = {
             "enable_leader_balancer": False,
             "auto_create_topics_enabled": False,
@@ -380,6 +398,13 @@ class Cluster:
         return ",".join(n.kafka_addr for n in self.nodes if n.is_running())
 
     def start(self) -> Cluster:
+        if self.rpc_delay_ms > 0 and not self._proxies:
+            for n in self.nodes:
+                proxy = DelayProxy(
+                    n.advertised_rpc_port, n.rpc_port, self.rpc_delay_ms / 1000
+                )
+                proxy.start()
+                self._proxies.append(proxy)
         for n in self.nodes:
             n.start(wait=False)
         for n in self.nodes:
@@ -393,6 +418,9 @@ class Cluster:
 
     def destroy(self, keep_on_failure: bool = False) -> None:
         self.stop()
+        for proxy in self._proxies:
+            proxy.stop()
+        self._proxies.clear()
         if not keep_on_failure:
             # Data was written as root inside the container; the test runner
             # may not be root, so clean up from a container too.
