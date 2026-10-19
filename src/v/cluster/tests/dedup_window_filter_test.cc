@@ -686,7 +686,6 @@ TEST(DedupWindowFilter, SplicedRebuildMatchesTheBuilder) {
             }
             const auto kept = std::ranges::count(dropped, false);
 
-            auto expected = rebuild_through_builder(batch, dropped);
             auto result = f.filter_request(batch.copy());
             if (kept == static_cast<int64_t>(n)) {
                 ASSERT_TRUE(result.batch);
@@ -699,6 +698,7 @@ TEST(DedupWindowFilter, SplicedRebuildMatchesTheBuilder) {
             }
             ASSERT_TRUE(result.batch);
             const auto& got = *result.batch;
+            const auto expected = rebuild_through_builder(batch, dropped);
             EXPECT_EQ(got.header().attrs, expected.header().attrs);
             EXPECT_EQ(got.header().type, expected.header().type);
             EXPECT_EQ(got.header().producer_id, expected.header().producer_id);
