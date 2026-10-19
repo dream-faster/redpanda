@@ -198,6 +198,19 @@ def test_chaos_loses_nothing_and_duplicates_nothing(make_cluster, pytestconfig):
     and stripped of leadership. Every acknowledged record must be readable,
     and no identity may appear twice: a retry of a write that did land is
     exactly what dedup must absorb."""
+    run_chaos(make_cluster, feeds=1)
+
+
+def test_chaos_with_redundant_feeds(make_cluster, pytestconfig):
+    """The chaos above with two producers sending the same identities in the
+    same order, as redundant feeds of one stream do: about half of what
+    arrives duplicates a record still being replicated, so requests depend on
+    other requests' outcomes while leaders move and nodes die. Every record
+    either feed had acknowledged must be readable, and none written twice."""
+    run_chaos(make_cluster, feeds=2)
+
+
+def run_chaos(make_cluster, feeds: int) -> None:
     c = make_cluster(nodes=3, smp=1, memory="1G")
     t = kafka.unique("chaos")
     partitions = 3
@@ -271,7 +284,7 @@ def test_chaos_loses_nothing_and_duplicates_nothing(make_cluster, pytestconfig):
             c.wait_healthy(timeout_s=180)
         stop.set()
 
-    run_threads([producer, chaos])
+    run_threads([producer] * feeds + [chaos])
     assert not failed, f"{len(failed)} records failed for good: {failed[:3]}"
     assert len(acked) > 1000
     present = set()
@@ -284,6 +297,86 @@ def test_chaos_loses_nothing_and_duplicates_nothing(make_cluster, pytestconfig):
         present.update(keys)
     lost = [k for k in acked if k not in present]
     assert not lost, f"{len(lost)} acknowledged records missing, e.g. {lost[:3]}"
+    assert_memory_healthy(c)
+
+
+def test_redundant_feeds_at_full_speed(make_cluster, pytestconfig):
+    """Three producers send the same identities in the same order as fast as
+    they can -- two with acks=all, one with acks=1 -- while leadership moves
+    between nodes. Nearly every duplicate arrives while the record it repeats
+    is still being replicated. Each identity must be written exactly once,
+    and every one an acks=all producer had acknowledged must be readable."""
+    c = make_cluster(nodes=3, smp=2, memory="1G")
+    t = kafka.unique("feeds")
+    partitions = 8
+    kafka.create_topic(c.brokers, t, partitions, 3, {kafka.DEDUP_WINDOW: "3600000"})
+    kafka.wait_for_leaders(c.brokers, t, partitions)
+    n = scaled(150_000)
+    acked_all: list[bytes] = []
+    failed: list = []
+    lock = threading.Lock()
+    done = threading.Event()
+
+    def feed(acks: str):
+        p = kafka.producer(
+            c.brokers,
+            acks=acks,
+            **{
+                "linger.ms": 2,
+                "retries": 1_000_000,
+                "message.timeout.ms": 300_000,
+                "queue.buffering.max.messages": 200_000,
+            },
+        )
+
+        def cb(err, msg):
+            with lock:
+                if err is not None:
+                    failed.append(err)
+                elif acks == "all":
+                    acked_all.append(msg.key())
+
+        for i in range(n):
+            while True:
+                try:
+                    p.produce(
+                        t,
+                        key=f"f-{i}".encode(),
+                        value=b"v" * 64,
+                        partition=i % partitions,
+                        on_delivery=cb,
+                    )
+                    break
+                except BufferError:
+                    p.poll(0.05)
+            if i % 2000 == 0:
+                p.poll(0)
+        assert p.flush(300) == 0
+
+    def feeds():
+        try:
+            run_threads([lambda: feed("all"), lambda: feed("all"), lambda: feed("1")])
+        finally:
+            done.set()
+
+    def move_leaders():
+        rng = random.Random(7)
+        while not done.wait(rng.uniform(1, 3)):
+            part = rng.randrange(partitions)
+            try:
+                c.transfer_leadership(t, part, rng.randrange(3))
+            except AssertionError:
+                pass  # already the leader, or the target is catching up
+
+    run_threads([feeds, move_leaders])
+    assert not failed, f"{len(failed)} records failed for good: {failed[:3]}"
+    admitted = assert_each_key_once(c, t, partitions, prefix=b"f-")
+    present = set()
+    for part in range(partitions):
+        present.update(kafka.keys_in(c.brokers, t, part, timeout_s=300))
+    lost = {k for k in acked_all if k not in present}
+    assert not lost, f"{len(lost)} acknowledged records missing, e.g. {list(lost)[:3]}"
+    assert admitted == n, f"{admitted} identities written, {n} sent"
     assert_memory_healthy(c)
 
 

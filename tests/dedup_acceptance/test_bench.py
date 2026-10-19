@@ -1,12 +1,14 @@
 """Throughput cost of produce-time deduplication.
 
 Not part of the default run: pass --bench. Each scenario creates a topic on a
-single-node, single-core broker, produces the same offered load from several
-producer processes, and reports
+single-node, single-core broker -- or, for the rf3 scenarios, on three
+single-core brokers with every partition replicated three times -- produces
+the same offered load from several producer processes, and reports
 
 - records/s the client managed to produce (offered load, duplicates included),
-- broker CPU per million records (reactor CPU time, from the broker's own
-  metrics -- the number that does not depend on how fast the client is),
+- broker CPU per million records (reactor CPU time summed over every broker,
+  from their own metrics -- the number that does not depend on how fast the
+  client is; with three replicas it includes the followers' apply path),
 - reactor stalls during the run, and the longest of them (from the
   broker's stall histogram, so an upper bound),
 - records actually written, so the duplicates dropped are visible,
@@ -14,6 +16,11 @@ producer processes, and reports
   producer sends the same kind of records at a fixed rate into the same
   topic, and each record's acknowledgement latency (acks=all) is taken from
   the client.
+
+The redundant-producer scenarios send every identity from two producers at
+about the same time, the way two redundant feeds of the same stream do: half
+of all records are duplicates of one still being replicated when it arrives.
+Their latency phase runs two such producers in step.
 
 Every dedup scenario is compared against the same load on a topic without
 dedup. Results go to stdout and, with --bench-out, to a Markdown file.
@@ -23,13 +30,14 @@ from __future__ import annotations
 
 import multiprocessing as mp
 import os
+import threading
 import time
 from dataclasses import dataclass, field
 
 import pytest
 from confluent_kafka import Producer
 from harness import kafka
-from harness.cluster import Cluster
+from harness.cluster import Cluster, Metrics
 
 pytestmark = pytest.mark.bench
 
@@ -59,10 +67,20 @@ class Scenario:
     name: str
     dedup: bool
     duplicate_every: int = 0  # 0: all unique; 2: every key sent twice
+    # Producers send in pairs, both of a pair the same identities in the same
+    # order, so each identity arrives twice at about the same time.
+    redundant: bool = False
     header: bool = False
     compression: str = "none"
+    # 1: one broker; 3: three brokers, every partition on all of them.
+    replicas: int = 1
     cluster_config: dict = field(default_factory=dict)
     note: str = ""
+
+    @property
+    def baseline(self) -> str:
+        name = "rf3 baseline" if self.replicas == 3 else "baseline"
+        return f"{name}, lz4" if self.compression == "lz4" else name
 
 
 SCENARIOS = [
@@ -88,11 +106,36 @@ SCENARIOS = [
         cluster_config={"dedup_max_entries_per_shard": 200_000},
         note="index at the shard limit the whole run: every insert trims",
     ),
+    Scenario("rf3 baseline", dedup=False, replicas=3, note="no dedup"),
+    Scenario(
+        "rf3 key, 50% duplicates",
+        dedup=True,
+        duplicate_every=2,
+        replicas=3,
+        note="each key sent twice in a row; the second is dropped",
+    ),
+    Scenario(
+        "rf3 key, redundant producers",
+        dedup=True,
+        redundant=True,
+        replicas=3,
+        note="two producers send every key at about the same time",
+    ),
+    Scenario("rf3 baseline, lz4", dedup=False, replicas=3, compression="lz4"),
+    Scenario(
+        "rf3 key, redundant producers, lz4",
+        dedup=True,
+        redundant=True,
+        replicas=3,
+        compression="lz4",
+    ),
 ]
 
 
 def _produce_worker(args) -> tuple[float, int]:
-    brokers, topic, worker, n, dup_every, header, compression = args
+    brokers, topic, worker, n, dup_every, redundant, header, compression = args
+    # A redundant pair shares its identities: both send stream worker // 2.
+    stream = worker // 2 if redundant else worker
     p = Producer(
         {
             "bootstrap.servers": brokers,
@@ -117,7 +160,7 @@ def _produce_worker(args) -> tuple[float, int]:
     start = time.monotonic()
     for i in range(n):
         ident = i // dup_every if dup_every else i
-        key = f"w{worker}-{ident:012d}".encode()
+        key = f"w{stream}-{ident:012d}".encode()
         kw = {"headers": [(HEADER, key)]} if header else {}
         while True:
             try:
@@ -135,44 +178,62 @@ def _latency(brokers: str, topic: str, s: Scenario) -> dict[str, float]:
     """Acknowledgement latency, in ms, of records produced at LATENCY_RATE for
     LATENCY_SECONDS into a topic whose index the throughput run filled. Sent
     in 1 ms ticks with linger.ms=0, so what is measured is the broker's time
-    to append and replicate a small batch, not client batching."""
-    p = Producer(
-        {
-            "bootstrap.servers": brokers,
-            "enable.idempotence": False,
-            "acks": "all",
-            "linger.ms": 0,
-            "compression.type": s.compression,
-            "message.timeout.ms": 120_000,
-        }
-    )
+    to append and replicate a small batch, not client batching. A redundant
+    scenario runs two producers sending the same records in step, each at
+    LATENCY_RATE, and takes both producers' latencies."""
     latencies: list[float] = []
     errors = 0
+    lock = threading.Lock()
 
-    def cb(err, msg):
+    def run(prefix: str) -> None:
         nonlocal errors
-        if err is not None:
-            errors += 1
-        else:
-            latencies.append(msg.latency())
+        p = Producer(
+            {
+                "bootstrap.servers": brokers,
+                "enable.idempotence": False,
+                "acks": "all",
+                "linger.ms": 0,
+                "compression.type": s.compression,
+                "message.timeout.ms": 120_000,
+            }
+        )
+        mine: list[float] = []
+        failed = 0
 
-    total = int(LATENCY_RATE * LATENCY_SECONDS)
-    per_tick = max(1, LATENCY_RATE // 1000)
-    start = time.monotonic()
-    sent = 0
-    while sent < total:
-        due = start + sent / LATENCY_RATE
-        now = time.monotonic()
-        if due > now:
-            time.sleep(due - now)
-        for _ in range(min(per_tick, total - sent)):
-            ident = sent // s.duplicate_every if s.duplicate_every else sent
-            key = f"lat-{ident:012d}".encode()
-            kw = {"headers": [(HEADER, key)]} if s.header else {}
-            p.produce(topic, value=VALUE, key=key, on_delivery=cb, **kw)
-            sent += 1
-        p.poll(0)
-    p.flush(120)
+        def cb(err, msg):
+            nonlocal failed
+            if err is not None:
+                failed += 1
+            else:
+                mine.append(msg.latency())
+
+        total = int(LATENCY_RATE * LATENCY_SECONDS)
+        per_tick = max(1, LATENCY_RATE // 1000)
+        start = time.monotonic()
+        sent = 0
+        while sent < total:
+            due = start + sent / LATENCY_RATE
+            now = time.monotonic()
+            if due > now:
+                time.sleep(due - now)
+            for _ in range(min(per_tick, total - sent)):
+                ident = sent // s.duplicate_every if s.duplicate_every else sent
+                key = f"{prefix}-{ident:012d}".encode()
+                kw = {"headers": [(HEADER, key)]} if s.header else {}
+                p.produce(topic, value=VALUE, key=key, on_delivery=cb, **kw)
+                sent += 1
+            p.poll(0)
+        p.flush(120)
+        with lock:
+            latencies.extend(mine)
+            errors += failed
+
+    producers = 2 if s.redundant else 1
+    threads = [threading.Thread(target=run, args=("lat",)) for _ in range(producers)]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join()
     latencies.sort()
 
     def pct(q: float) -> float:
@@ -191,6 +252,14 @@ def _written(brokers: str, topic: str) -> int:
     return sum(kafka.high_watermark(brokers, topic, p) for p in range(PARTITIONS))
 
 
+def _metrics(c: Cluster) -> list[Metrics]:
+    return [c.node(i).metrics() for i in range(len(c.nodes))]
+
+
+def _sum(ms: list[Metrics], name: str) -> float:
+    return sum(m.sum(name) for m in ms)
+
+
 def _run(c: Cluster, s: Scenario) -> dict:
     topic = kafka.unique("bench")
     cfg = {}
@@ -198,9 +267,10 @@ def _run(c: Cluster, s: Scenario) -> dict:
         cfg[kafka.DEDUP_WINDOW] = str(3_600_000)
         if s.header:
             cfg[kafka.DEDUP_KEY_HEADER] = HEADER
-    kafka.create_topic(c.brokers, topic, PARTITIONS, 1, cfg)
+    kafka.create_topic(c.brokers, topic, PARTITIONS, s.replicas, cfg)
+    kafka.wait_for_leaders(c.brokers, topic, PARTITIONS)
     per = RECORDS // PRODUCERS
-    before = c.node(0).metrics()
+    before = _metrics(c)
     t0 = time.monotonic()
     with mp.get_context("spawn").Pool(PRODUCERS) as pool:
         results = pool.map(
@@ -212,6 +282,7 @@ def _run(c: Cluster, s: Scenario) -> dict:
                     w,
                     per,
                     s.duplicate_every,
+                    s.redundant,
                     s.header,
                     s.compression,
                 )
@@ -219,25 +290,27 @@ def _run(c: Cluster, s: Scenario) -> dict:
             ],
         )
     wall = time.monotonic() - t0
-    after = c.node(0).metrics()
+    after = _metrics(c)
     errors = sum(e for _, e in results)
     offered = per * PRODUCERS
-    cpu_ms = after.sum(CPU_MS) - before.sum(CPU_MS)
+    cpu_ms = _sum(after, CPU_MS) - _sum(before, CPU_MS)
     out = {
         "scenario": s.name,
+        "baseline": s.baseline,
         "note": s.note,
         "records/s": offered / wall,
         "cpu ms per 1M records": cpu_ms / offered * 1e6,
-        "stalls": after.sum(STALLS) - before.sum(STALLS),
-        "longest stall ms": after.longest_stall_us(before) / 1000,
+        "stalls": _sum(after, STALLS) - _sum(before, STALLS),
+        "longest stall ms": max(a.longest_stall_us(b) for a, b in zip(after, before))
+        / 1000,
         "offered": offered,
         "written": _written(c.brokers, topic),
         "errors": errors,
-        "index entries": after.sum(SHARD_ENTRIES),
+        "index entries": _sum(after, SHARD_ENTRIES),
     }
-    stalls_before = c.node(0).metrics().sum(STALLS)
+    stalls_before = _sum(_metrics(c), STALLS)
     out.update(_latency(c.brokers, topic, s))
-    out["latency stalls"] = c.node(0).metrics().sum(STALLS) - stalls_before
+    out["latency stalls"] = _sum(_metrics(c), STALLS) - stalls_before
     kafka.delete_topic(c.brokers, topic)
     return out
 
@@ -246,11 +319,12 @@ def _table(rows: list[dict], image: str) -> str:
     base = {r["scenario"]: r for r in rows}
     lines = [
         f"Image `{image}`, {RECORDS:,} records of 100 bytes per scenario from "
-        f"{PRODUCERS} producer processes, one broker with one core, 4 "
+        f"{PRODUCERS} producer processes, one broker with one core (rf3: three "
+        f"brokers with one core each, every partition on all three), 4 "
         f"partitions, acks=all; median of {REPEATS} interleaved runs. "
         f"Latency: {LATENCY_RATE:,} records/s for {LATENCY_SECONDS:g} s from "
-        "one producer (linger.ms=0) after each throughput run, into the same "
-        "topic with its index loaded.",
+        "one producer (linger.ms=0; two in step for the redundant scenarios) "
+        "after each throughput run, into the same topic with its index loaded.",
         "",
         "| scenario | records/s | vs baseline | broker CPU ms / 1M records "
         "| vs baseline | written | stalls | longest stall ms | p50 ms | p99 ms "
@@ -258,7 +332,7 @@ def _table(rows: list[dict], image: str) -> str:
         "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
     for r in rows:
-        ref = base.get("baseline, lz4" if "lz4" in r["scenario"] else "baseline")
+        ref = base.get(r["baseline"])
         rel_rate = r["records/s"] / ref["records/s"] - 1 if ref else 0.0
         rel_cpu = (
             r["cpu ms per 1M records"] / ref["cpu ms per 1M records"] - 1
@@ -301,14 +375,21 @@ def test_dedup_throughput(make_cluster, image, pytestconfig):
     for s in SCENARIOS:
         if ONLY and s.name not in ONLY:
             continue
-        by_config.setdefault(tuple(sorted(s.cluster_config.items())), []).append(s)
-    for config, scenarios in by_config.items():
-        c = make_cluster(nodes=1, smp=1, memory="2G", cluster_config=dict(config))
+        by_config.setdefault(
+            (s.replicas, tuple(sorted(s.cluster_config.items()))), []
+        ).append(s)
+    for (replicas, config), scenarios in by_config.items():
+        c = make_cluster(
+            nodes=replicas,
+            smp=1,
+            memory="2G" if replicas == 1 else "1536M",
+            cluster_config=dict(config),
+        )
         if config and not c.node(0).metrics().has(SHARD_ENTRIES):
             continue  # the shard budget does not exist in this build
         # Warm up the broker (allocator, page cache, connections) so the first
         # scenario is not charged for it.
-        _run(c, Scenario("warm-up", dedup=False))
+        _run(c, Scenario("warm-up", dedup=False, replicas=replicas))
         # Interleaved rather than back to back, so drift over the run spreads
         # across scenarios instead of landing on one.
         for _ in range(REPEATS):
