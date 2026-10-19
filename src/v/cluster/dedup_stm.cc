@@ -659,10 +659,19 @@ ss::future<result<kafka_result>> dedup_stm::do_replicate(
     // The requests this one depends on: those still in flight whose
     // identities made it drop records. Until each is known appended, the
     // dropped records have no durable copy, and acknowledging this request
-    // -- or replicating its remaining records under the same acknowledgment
-    // -- would tell the producer otherwise. Looked up before this request's
-    // own identities go in, which happens before its first suspension, so a
+    // would tell the producer otherwise. Looked up before this request's own
+    // identities go in, which happens before its first suspension, so a
     // request classified behind it finds them pending in turn.
+    //
+    // Only the acknowledgment waits for them, not this request's own
+    // records: those are handed to raft straight away. The connection does
+    // not read its next request until this one is enqueued, so waiting for an
+    // introducer's replication first would stall every partition the
+    // producer writes through this broker for a round trip, and add that
+    // round trip to this request's own. If an introducer turns out never to
+    // have been appended, the request fails for retry once its own records
+    // are settled; the retry drops those against themselves and admits the
+    // reverted ones afresh.
     std::vector<inflight_ptr> depends_on;
     for (const auto& identity : filtered.dropped) {
         if (auto it = _pending.find(identity); it != _pending.end()) {
@@ -679,36 +688,16 @@ ss::future<result<kafka_result>> dedup_stm::do_replicate(
         }
     }
 
-    for (const auto& dep : depends_on) {
-        auto waited = co_await ss::coroutine::as_future(
-          ss::with_timeout(
-            model::timeout_clock::now() + _sync_timeout(),
-            dep->appended.get_shared_future()));
-        if (waited.failed() || !waited.get()) {
-            // Either the introducer never appended -- its entry is reverted,
-            // so nothing in the log holds the identity this request dropped
-            // against -- or its fate is still unknown. Fail this request so
-            // the producer retries the whole batch; by then it is classified
-            // fresh. Its own insertions go first, so the retry is not fenced
-            // on itself.
-            const bool unknown = waited.failed();
-            vlog(
-              clusterlog.debug,
-              "{} dedup request waited on an introducing request that {}, "
-              "failing it for retry",
-              _raft->ntp(),
-              unknown ? "did not resolve in time" : "never appended");
-            settle(mine, filtered.undo, false, std::nullopt);
-            co_return unknown ? errc::timeout : errc::replication_error;
-        }
-    }
-
     if (!filtered.batch) {
-        // Every record was a duplicate: nothing to replicate. Its
-        // introducers are appended; a quorum-ack request must not
+        // Every record was a duplicate: nothing to replicate, so nothing for
+        // the requests behind this one to be ordered after. Once its
+        // introducers are appended, a quorum-ack request must not
         // acknowledge more strongly than they were, so wait for everything
         // appended so far -- which includes them -- to commit first.
         enqueued->set_value();
+        if (auto failed = co_await wait_for_introducers(depends_on); failed) {
+            co_return *failed;
+        }
         if (opts.consistency == raft::consistency_level::quorum_ack) {
             const auto fence = _raft->dirty_offset();
             // Commit-based, not visibility-based: last_visible_index() can
@@ -832,6 +821,9 @@ ss::future<result<kafka_result>> dedup_stm::do_replicate(
         co_return result.error();
     }
     settle(mine, filtered.undo, true, std::nullopt);
+    if (auto failed = co_await wait_for_introducers(depends_on); failed) {
+        co_return *failed;
+    }
 
     kafka_result response{
       .last_offset = from_log_offset(result.value().last_offset),
@@ -840,6 +832,35 @@ ss::future<result<kafka_result>> dedup_stm::do_replicate(
         response.replicated_record_count = admitted_count;
     }
     co_return response;
+}
+
+ss::future<std::optional<errc>>
+dedup_stm::wait_for_introducers(const std::vector<inflight_ptr>& introducers) {
+    for (const auto& introducer : introducers) {
+        auto waited = co_await ss::coroutine::as_future(
+          ss::with_timeout(
+            model::timeout_clock::now() + _sync_timeout(),
+            introducer->appended.get_shared_future()));
+        const bool unknown = waited.failed();
+        if (unknown) {
+            waited.ignore_ready_future();
+        }
+        if (unknown || !waited.get()) {
+            // Either the introducer never appended -- its entry is reverted,
+            // so nothing in the log holds an identity this request dropped
+            // against -- or its fate is still unknown. Fail this request so
+            // the producer retries the whole batch; by then it is classified
+            // fresh.
+            vlog(
+              clusterlog.debug,
+              "{} dedup request waited on an introducing request that {}, "
+              "failing it for retry",
+              _raft->ntp(),
+              unknown ? "did not resolve in time" : "never appended");
+            co_return unknown ? errc::timeout : errc::replication_error;
+        }
+    }
+    co_return std::nullopt;
 }
 
 void dedup_stm::settle(
