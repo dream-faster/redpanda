@@ -17,6 +17,7 @@ can never pass as a skip.
 from __future__ import annotations
 
 import os
+import re
 import time
 
 import pytest
@@ -46,8 +47,9 @@ def pytest_addoption(parser):
     parser.addoption(
         "--stall-report",
         default=os.environ.get("DEDUP_STALL_REPORT"),
-        help="append each dedicated cluster's reactor stalls and the test's "
-        "duration to this file, one tab-separated line per test",
+        help="append a tab-separated line per test that made its own clusters: "
+        "test, outcome, reactor stalls counted, longest stall logged (ms), "
+        "duration (s)",
     )
     parser.addoption(
         "--keep-clusters",
@@ -101,8 +103,10 @@ def old_image(pytestconfig) -> str:
 
 def _report_stalls(path: str, request, clusters: list[Cluster], took_s: float):
     """Reactor stalls the test's clusters counted, summed over their running
-    nodes' shards. A node restarted during the test counts from its restart."""
+    nodes' shards, and the longest one any node logged. A node restarted
+    during the test counts from its restart."""
     stalls = 0.0
+    longest_ms = 0
     for c in clusters:
         try:
             for m in c.metrics().values():
@@ -111,10 +115,19 @@ def _report_stalls(path: str, request, clusters: list[Cluster], took_s: float):
             # A node the test left frozen or half-stopped; report what the
             # others counted rather than fail the teardown.
             pass
+        for n in c.nodes:
+            for ms in _STALL_LOG.findall(n.logs()):
+                longest_ms = max(longest_ms, int(ms))
     rep = getattr(request.node, "rep_call", None)
     outcome = rep.outcome if rep is not None else "error"
     with open(path, "a") as f:
-        f.write(f"{request.node.nodeid}\t{outcome}\t{stalls:.0f}\t{took_s:.1f}\n")
+        f.write(
+            f"{request.node.nodeid}\t{outcome}\t{stalls:.0f}\t{longest_ms}"
+            f"\t{took_s:.1f}\n"
+        )
+
+
+_STALL_LOG = re.compile(r"Reactor stalled for (\d+) ms")
 
 
 def _dump_logs(cluster: Cluster, request) -> None:

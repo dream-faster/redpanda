@@ -41,6 +41,13 @@ PRODUCERS = int(os.environ.get("DEDUP_BENCH_PRODUCERS", "2"))
 REPEATS = int(os.environ.get("DEDUP_BENCH_REPEATS", "3"))
 LATENCY_RATE = int(os.environ.get("DEDUP_BENCH_LATENCY_RATE", "20000"))
 LATENCY_SECONDS = float(os.environ.get("DEDUP_BENCH_LATENCY_SECONDS", "10"))
+# Scenario names to run, separated by semicolons (the names contain
+# commas), for a longer A/B of a few of them; all of them when unset.
+ONLY = {
+    n.strip()
+    for n in os.environ.get("DEDUP_BENCH_SCENARIOS", "").split(";")
+    if n.strip()
+}
 PARTITIONS = 4
 VALUE = b"v" * 100
 HEADER = "dedup-id"
@@ -288,6 +295,8 @@ def test_dedup_throughput(make_cluster, image, pytestconfig):
     runs: dict[str, list[dict]] = {}
     by_config: dict[tuple, list[Scenario]] = {}
     for s in SCENARIOS:
+        if ONLY and s.name not in ONLY:
+            continue
         by_config.setdefault(tuple(sorted(s.cluster_config.items())), []).append(s)
     for config, scenarios in by_config.items():
         c = make_cluster(nodes=1, smp=1, memory="2G", cluster_config=dict(config))
