@@ -132,7 +132,8 @@ struct clock {
         timespec ts{};
         ::clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
         return time_point(
-          std::chrono::seconds(ts.tv_sec) + std::chrono::nanoseconds(ts.tv_nsec));
+          std::chrono::seconds(ts.tv_sec)
+          + std::chrono::nanoseconds(ts.tv_nsec));
     }
 };
 
