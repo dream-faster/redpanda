@@ -709,10 +709,11 @@ TEST(DedupWindowFilter, SplicedRebuildMatchesTheBuilder) {
             const auto expected_records = decompressed_copy(expected);
             EXPECT_EQ(got_records.header(), expected_records.header());
             EXPECT_EQ(got_records.data(), expected_records.data());
-            // So is the batch, but under snappy, whose output depends on how
-            // the input buffer is split into fragments: the splice builds
-            // the records in one, the builder in several.
-            if (codec != model::compression::snappy) {
+            // Uncompressed, so is the batch. Compressed bytes depend on how
+            // the input buffer is split into fragments for snappy and zstd,
+            // and the splice builds the records in one where the builder
+            // uses several.
+            if (codec == model::compression::none) {
                 EXPECT_EQ(got.header(), expected.header());
                 EXPECT_EQ(got.data(), expected.data());
             }
