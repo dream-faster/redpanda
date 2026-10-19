@@ -50,6 +50,10 @@ PRODUCERS = int(os.environ.get("DEDUP_BENCH_PRODUCERS", "2"))
 REPEATS = int(os.environ.get("DEDUP_BENCH_REPEATS", "3"))
 LATENCY_RATE = int(os.environ.get("DEDUP_BENCH_LATENCY_RATE", "20000"))
 LATENCY_SECONDS = float(os.environ.get("DEDUP_BENCH_LATENCY_SECONDS", "10"))
+# One-way delay added between the rf3 brokers' RPC servers (see
+# harness/delay_proxy.py), so a replication round trip costs what a network
+# hop and an fsync do in production instead of a loopback hop. 0: none.
+RPC_DELAY_MS = float(os.environ.get("DEDUP_BENCH_RPC_DELAY_MS", "0"))
 # Scenario names to run, separated by semicolons (the names contain
 # commas), for a longer A/B of a few of them; all of them when unset.
 ONLY = {
@@ -320,7 +324,9 @@ def _table(rows: list[dict], image: str) -> str:
     lines = [
         f"Image `{image}`, {RECORDS:,} records of 100 bytes per scenario from "
         f"{PRODUCERS} producer processes, one broker with one core (rf3: three "
-        f"brokers with one core each, every partition on all three), 4 "
+        f"brokers with one core each, every partition on all three"
+        + (f", {RPC_DELAY_MS:g} ms added each way between them" if RPC_DELAY_MS else "")
+        + "), 4 "
         f"partitions, acks=all; median of {REPEATS} interleaved runs. "
         f"Latency: {LATENCY_RATE:,} records/s for {LATENCY_SECONDS:g} s from "
         "one producer (linger.ms=0; two in step for the redundant scenarios) "
@@ -384,6 +390,7 @@ def test_dedup_throughput(make_cluster, image, pytestconfig):
             smp=1,
             memory="2G" if replicas == 1 else "1536M",
             cluster_config=dict(config),
+            rpc_delay_ms=RPC_DELAY_MS if replicas > 1 else 0,
         )
         if config and not c.node(0).metrics().has(SHARD_ENTRIES):
             continue  # the shard budget does not exist in this build
