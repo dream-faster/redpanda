@@ -709,8 +709,10 @@ ss::future<result<kafka_result>> dedup_stm::do_replicate(
         // acknowledge more strongly than they were, so wait for everything
         // appended so far -- which includes them -- to commit first.
         enqueued->set_value();
-        if (opts.consistency == raft::consistency_level::quorum_ack) {
-            const auto fence = _raft->dirty_offset();
+        if (
+          opts.consistency == raft::consistency_level::quorum_ack
+          && _relaxed_admitted_offset > _raft->committed_offset()) {
+            const auto fence = _relaxed_admitted_offset;
             // Commit-based, not visibility-based: last_visible_index() can
             // advance past the true flush-durable commit point under
             // relaxed-consistency traffic on the same partition (see
@@ -830,6 +832,10 @@ ss::future<result<kafka_result>> dedup_stm::do_replicate(
         }
         settle(mine, filtered.undo, false, self_key);
         co_return result.error();
+    }
+    if (opts.consistency != raft::consistency_level::quorum_ack) {
+        _relaxed_admitted_offset = std::max(
+          _relaxed_admitted_offset, result.value().last_offset);
     }
     settle(mine, filtered.undo, true, std::nullopt);
 
