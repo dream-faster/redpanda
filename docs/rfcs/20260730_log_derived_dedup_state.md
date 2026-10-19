@@ -587,9 +587,11 @@ after a restart, say) keeps indexing new identities instead of admitting them
 unindexed until the cursor wraps. Above a limit -- the shard's, or an index's
 own once a lowered ceiling leaves it there -- it replaces as many as it takes
 to get back under, up to 64, and the insert goes ahead once two have gone, so
-the total falls with every new identity. Fewer than 64 entries ahead of the
-cursor, it wraps rather than look at a short window: the array's tail is where
-new identities were just appended.
+the total falls with every new identity. There, with fewer than 64 entries
+ahead of the cursor, it wraps rather than look at a short window, since the
+array's tail is where new identities were just appended; and an index freeing
+that many per insert drops itself from the shard's largest-index cache, which
+would otherwise keep naming it until it had trimmed itself empty.
 
 The original design notes follow.
 

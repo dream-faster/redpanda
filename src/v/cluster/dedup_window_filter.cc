@@ -779,15 +779,20 @@ void dedup_window_filter::replace_oldest_visited(model::timestamp incoming) {
           need, _shard_budget->entries - _shard_budget->max_entries + 1);
     }
     need = std::min(need, capacity_emergency_budget);
+    // Above a limit, rather than at it: a lowered limit, or a restore that
+    // claimed room before others filled it.
+    const bool over_limit
+      = _index.size() > _max_entries
+        || (_shard_budget && _shard_budget->entries > _shard_budget->max_entries);
     for (; need > 0 && _sweep_pos < _index.size(); --need) {
         if (
-          _index.size() > capacity_emergency_budget
+          over_limit && _index.size() > capacity_emergency_budget
           && _sweep_pos + capacity_emergency_budget > _index.size()) {
             // Too few entries left ahead for a full window: wrap, as above.
             // The array's tail is where new identities were just appended, so
             // the oldest of a short window there is likely one of them, and
-            // replacing many per insert above a lowered limit would otherwise
-            // drop the newest identities while older ones stay.
+            // replacing many per insert would otherwise drop the newest
+            // identities while older ones stay.
             _sweep_pos = 0;
             finish_pass();
         }
@@ -803,10 +808,17 @@ void dedup_window_filter::replace_oldest_visited(model::timestamp incoming) {
             }
         }
         if (!oldest || !(_index.timestamp_at(*oldest) < incoming.value())) {
-            return;
+            break;
         }
         erase_at(*oldest);
         ++_capacity_evicted_entries;
+    }
+    if (over_limit) {
+        // Up to capacity_emergency_budget entries a call shrinks this index
+        // far faster than largest() refreshes. Left cached as the largest, an
+        // index trimming itself would go on counting as the largest until it
+        // was empty, while a larger one kept everything.
+        stop_being_largest();
     }
 }
 

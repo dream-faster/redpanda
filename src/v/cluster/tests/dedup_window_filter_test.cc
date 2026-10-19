@@ -2533,14 +2533,25 @@ TEST(DedupShardBudget, RaisedShardLimitIndexesNewIdentitiesAtOnce) {
 // Lowered below what the shard holds, the shard limit drops nothing at once.
 // New identities anywhere on the shard free a bounded number of entries from
 // its largest indices -- the idle one's too -- and are still indexed, until the
-// shard is back under.
-TEST(DedupShardBudget, LoweredShardLimitShrinksTheShardWithTraffic) {
+// shard is back under. Run with either index registered first: on a tie the
+// first is what largest() caches, and an index that frees up to 64 entries an
+// insert must not go on counting as the largest from a stale cache until it
+// has trimmed itself empty while the other keeps everything.
+namespace {
+
+void lowered_shard_limit_shrinks_the_shard(bool busy_registered_first) {
     auto budget = make_budget(2'000);
-    cluster::dedup_window_filter idle(std::chrono::hours(24), 10'000, budget);
-    cluster::dedup_window_filter busy(std::chrono::hours(24), 10'000, budget);
+    std::unique_ptr<cluster::dedup_window_filter> idle;
+    std::unique_ptr<cluster::dedup_window_filter> busy;
+    for (const bool make_busy :
+         {busy_registered_first, !busy_registered_first}) {
+        (make_busy ? busy : idle)
+          = std::make_unique<cluster::dedup_window_filter>(
+            std::chrono::hours(24), 10'000, budget);
+    }
     // One timestamp, so shard pressure trims nothing on the way up.
-    populate_n(idle, "idle", 900, 1000, 0);
-    populate_n(busy, "busy", 900, 1000, 0);
+    populate_n(*idle, "idle", 900, 1000, 0);
+    populate_n(*busy, "busy", 900, 1000, 0);
     ASSERT_EQ(budget->entries, 1'800u);
 
     constexpr size_t new_limit = 200;
@@ -2552,21 +2563,32 @@ TEST(DedupShardBudget, LoweredShardLimitShrinksTheShardWithTraffic) {
     const int64_t now = 2'000'000;
     while (budget->entries > new_limit) {
         ASSERT_LT(fresh, 40) << budget->entries;
-        busy.populate(
+        busy->populate(
           iobuf::from(fmt::format("new-{}", fresh)), ts(now + fresh));
         ++fresh;
-        ASSERT_EQ(budget->entries, idle.map_size() + busy.map_size());
+        ASSERT_EQ(budget->entries, idle->map_size() + busy->map_size());
     }
-    EXPECT_EQ(busy.unindexed_records(), 0u);
+    EXPECT_EQ(busy->unindexed_records(), 0u);
     // The idle index gave up room too: the busy one did not trim only itself.
-    EXPECT_LT(idle.map_size(), 900u - 64);
+    EXPECT_LT(idle->map_size(), 900u - 64);
+    EXPECT_GT(busy->map_size(), new_limit / 4);
     for (int i = 0; i < fresh; ++i) {
         EXPECT_FALSE(
           busy
-            .filter(make_batch(fmt::format("new-{}", i), "dup", ts(now + 100)))
+            ->filter(make_batch(fmt::format("new-{}", i), "dup", ts(now + 100)))
             .has_value())
           << "new-" << i;
     }
+}
+
+} // namespace
+
+TEST(DedupShardBudget, LoweredShardLimitShrinksTheShardWithTraffic) {
+    lowered_shard_limit_shrinks_the_shard(false);
+}
+
+TEST(DedupShardBudget, LoweredShardLimitShrinksTheLargestNotTheCachedOne) {
+    lowered_shard_limit_shrinks_the_shard(true);
 }
 
 // Filters leave the budget's registry when destroyed, so a later filter never
