@@ -499,8 +499,9 @@ dedup_window_filter::filter_request(model::record_batch batch) {
         // From the original batch, not `header`: `readable` may be the
         // decompressed temporary, whose attrs no longer name the compression
         // the rebuilt batch should be written back with.
-        if (const auto codec = batch.header().attrs.compression();
-            codec != model::compression::none) {
+        if (
+          const auto codec = batch.header().attrs.compression();
+          codec != model::compression::none) {
             rebuilt = model::compress_batch_sync(codec, std::move(rebuilt));
         } else {
             rebuilt.header().reset_size_checksum_metadata(rebuilt.data());
