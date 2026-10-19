@@ -17,7 +17,6 @@ can never pass as a skip.
 from __future__ import annotations
 
 import os
-import re
 import time
 
 import pytest
@@ -48,7 +47,7 @@ def pytest_addoption(parser):
         "--stall-report",
         default=os.environ.get("DEDUP_STALL_REPORT"),
         help="append a tab-separated line per test that made its own clusters: "
-        "test, outcome, reactor stalls counted, longest stall logged (ms), "
+        "test, outcome, reactor stalls, longest stall (ms, upper bound), "
         "duration (s)",
     )
     parser.addoption(
@@ -102,32 +101,28 @@ def old_image(pytestconfig) -> str:
 
 
 def _report_stalls(path: str, request, clusters: list[Cluster], took_s: float):
-    """Reactor stalls the test's clusters counted, summed over their running
-    nodes' shards, and the longest one any node logged. A node restarted
-    during the test counts from its restart."""
+    """Reactor stalls the test's clusters recorded, summed over their running
+    nodes' shards, and the longest of them (an upper bound, from the stall
+    histogram's buckets). A node restarted during the test counts from its
+    restart."""
     stalls = 0.0
-    longest_ms = 0
+    longest_us = 0.0
     for c in clusters:
         try:
             for m in c.metrics().values():
                 stalls += m.sum("vectorized_reactor_stalls_count")
+                longest_us = max(longest_us, m.longest_stall_us())
         except Exception:
             # A node the test left frozen or half-stopped; report what the
-            # others counted rather than fail the teardown.
+            # others recorded rather than fail the teardown.
             pass
-        for n in c.nodes:
-            for ms in _STALL_LOG.findall(n.logs()):
-                longest_ms = max(longest_ms, int(ms))
     rep = getattr(request.node, "rep_call", None)
     outcome = rep.outcome if rep is not None else "error"
     with open(path, "a") as f:
         f.write(
-            f"{request.node.nodeid}\t{outcome}\t{stalls:.0f}\t{longest_ms}"
-            f"\t{took_s:.1f}\n"
+            f"{request.node.nodeid}\t{outcome}\t{stalls:.0f}"
+            f"\t{longest_us / 1000:.1f}\t{took_s:.1f}\n"
         )
-
-
-_STALL_LOG = re.compile(r"Reactor stalled for (\d+) ms")
 
 
 def _dump_logs(cluster: Cluster, request) -> None:
