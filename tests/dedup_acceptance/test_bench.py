@@ -189,8 +189,7 @@ def _latency(brokers: str, topic: str, s: Scenario) -> dict[str, float]:
     errors = 0
     lock = threading.Lock()
 
-    def run(prefix: str) -> None:
-        nonlocal errors
+    def make_producer() -> Producer:
         p = Producer(
             {
                 "bootstrap.servers": brokers,
@@ -201,6 +200,13 @@ def _latency(brokers: str, topic: str, s: Scenario) -> dict[str, float]:
                 "message.timeout.ms": 120_000,
             }
         )
+        # Metadata and connections up front, so neither producer's start is
+        # held back by them.
+        p.list_topics(topic, timeout=30)
+        return p
+
+    def run(p: Producer, start: float) -> None:
+        nonlocal errors
         mine: list[float] = []
         failed = 0
 
@@ -213,7 +219,6 @@ def _latency(brokers: str, topic: str, s: Scenario) -> dict[str, float]:
 
         total = int(LATENCY_RATE * LATENCY_SECONDS)
         per_tick = max(1, LATENCY_RATE // 1000)
-        start = time.monotonic()
         sent = 0
         while sent < total:
             due = start + sent / LATENCY_RATE
@@ -222,7 +227,7 @@ def _latency(brokers: str, topic: str, s: Scenario) -> dict[str, float]:
                 time.sleep(due - now)
             for _ in range(min(per_tick, total - sent)):
                 ident = sent // s.duplicate_every if s.duplicate_every else sent
-                key = f"{prefix}-{ident:012d}".encode()
+                key = f"lat-{ident:012d}".encode()
                 kw = {"headers": [(HEADER, key)]} if s.header else {}
                 p.produce(topic, value=VALUE, key=key, on_delivery=cb, **kw)
                 sent += 1
@@ -232,8 +237,12 @@ def _latency(brokers: str, topic: str, s: Scenario) -> dict[str, float]:
             latencies.extend(mine)
             errors += failed
 
-    producers = 2 if s.redundant else 1
-    threads = [threading.Thread(target=run, args=("lat",)) for _ in range(producers)]
+    # In step: the redundant pair shares one schedule, so each identity is
+    # sent by both within the same millisecond tick and the second copy
+    # arrives while the first is still being replicated.
+    producers = [make_producer() for _ in range(2 if s.redundant else 1)]
+    start = time.monotonic() + 0.5
+    threads = [threading.Thread(target=run, args=(p, start)) for p in producers]
     for th in threads:
         th.start()
     for th in threads:
