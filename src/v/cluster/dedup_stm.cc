@@ -692,14 +692,24 @@ ss::future<result<kafka_result>> dedup_stm::do_replicate(
         // Every record was a duplicate: nothing to replicate, so nothing for
         // the requests behind this one to be ordered after. Once its
         // introducers are appended, a quorum-ack request must not
-        // acknowledge more strongly than they were, so wait for everything
-        // appended so far -- which includes them -- to commit first.
+        // acknowledge more strongly than they were.
+        //
+        // An identity in the index that is no longer pending came from a
+        // committed batch -- applied, restored from a snapshot, or admitted
+        // by a quorum-ack request raft confirmed -- unless a request with
+        // weaker acks admitted it: raft reports those appended on the
+        // leader alone. So only those need the commit index to catch up,
+        // and only while it is behind the last of them. Waiting for the
+        // dirty offset instead held every all-duplicate request for a
+        // replication round trip whatever it dropped against.
         enqueued->set_value();
         if (auto failed = co_await wait_for_introducers(depends_on); failed) {
             co_return *failed;
         }
-        if (opts.consistency == raft::consistency_level::quorum_ack) {
-            const auto fence = _raft->dirty_offset();
+        if (
+          opts.consistency == raft::consistency_level::quorum_ack
+          && _relaxed_admitted_offset > _raft->committed_offset()) {
+            const auto fence = _relaxed_admitted_offset;
             // Commit-based, not visibility-based: last_visible_index() can
             // advance past the true flush-durable commit point under
             // relaxed-consistency traffic on the same partition (see
@@ -819,6 +829,13 @@ ss::future<result<kafka_result>> dedup_stm::do_replicate(
         }
         settle(mine, filtered.undo, false, self_key);
         co_return result.error();
+    }
+    if (opts.consistency != raft::consistency_level::quorum_ack) {
+        // Appended on this leader, maybe nowhere else yet; see the
+        // all-duplicate branch above. Recorded before settle() releases the
+        // requests waiting on this one.
+        _relaxed_admitted_offset = std::max(
+          _relaxed_admitted_offset, result.value().last_offset);
     }
     settle(mine, filtered.undo, true, std::nullopt);
     if (auto failed = co_await wait_for_introducers(depends_on); failed) {

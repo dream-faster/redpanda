@@ -289,6 +289,12 @@ private:
     /// Identities introduced by requests still in flight on this leader; see
     /// inflight_request. Bounded by the records in flight.
     pending_identities _pending;
+    /// Last offset of a batch this leader admitted for a request with weaker
+    /// acks than quorum_ack, which raft reports appended before it commits.
+    /// Every other identity in the index that is not pending is committed,
+    /// so this is all an all-duplicate quorum-ack request has to wait to
+    /// commit; see do_replicate().
+    model::offset _relaxed_admitted_offset{model::offset::min()};
     /// Committed batches do_apply() could not read; see do_apply().
     uint64_t _batches_skipped{0};
     /// Whether start() applied a local snapshot; see start().
