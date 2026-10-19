@@ -7,7 +7,8 @@ producer processes, and reports
 - records/s the client managed to produce (offered load, duplicates included),
 - broker CPU per million records (reactor CPU time, from the broker's own
   metrics -- the number that does not depend on how fast the client is),
-- reactor stalls during the run,
+- reactor stalls during the run, and the longest of them (from the
+  broker's stall histogram, so an upper bound),
 - records actually written, so the duplicates dropped are visible,
 - produce latency once the index is loaded: after the throughput run, one
   producer sends the same kind of records at a fixed rate into the same
@@ -228,6 +229,7 @@ def _run(c: Cluster, s: Scenario) -> dict:
         "records/s": offered / wall,
         "cpu ms per 1M records": cpu_ms / offered * 1e6,
         "stalls": after.sum(STALLS) - before.sum(STALLS),
+        "longest stall ms": after.longest_stall_us(before) / 1000,
         "offered": offered,
         "written": _written(c.brokers, topic),
         "errors": errors,
@@ -251,9 +253,9 @@ def _table(rows: list[dict], image: str) -> str:
         "topic with its index loaded.",
         "",
         "| scenario | records/s | vs baseline | broker CPU ms / 1M records "
-        "| vs baseline | written | stalls | p50 ms | p99 ms | p99.9 ms | max ms "
-        "| note |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+        "| vs baseline | written | stalls | longest stall ms | p50 ms | p99 ms "
+        "| p99.9 ms | max ms | note |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
     for r in rows:
         ref = base.get("baseline, lz4" if "lz4" in r["scenario"] else "baseline")
@@ -267,6 +269,7 @@ def _table(rows: list[dict], image: str) -> str:
             f"| {r['scenario']} | {r['records/s']:,.0f} | {rel_rate:+.0%} "
             f"| {r['cpu ms per 1M records']:,.0f} | {rel_cpu:+.0%} "
             f"| {r['written']:,} | {r['stalls']:,.0f} "
+            f"| {r['longest stall ms']:.1f} "
             f"| {r['p50 ms']:.2f} | {r['p99 ms']:.2f} | {r['p99.9 ms']:.2f} "
             f"| {r['max ms']:.1f} | {r['note']} |"
         )
@@ -280,6 +283,7 @@ def _median(rows: list[dict]) -> dict:
         "records/s",
         "cpu ms per 1M records",
         "stalls",
+        "longest stall ms",
         "p50 ms",
         "p99 ms",
         "p99.9 ms",
