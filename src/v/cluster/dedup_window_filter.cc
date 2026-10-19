@@ -401,13 +401,20 @@ dedup_window_filter::filter_request(model::record_batch batch) {
     // has to survive the pass is 32 bytes per record, not the records
     // themselves, whose iobufs would otherwise pin a multiple of the batch
     // size for the duration of the call.
+    //
+    // Where each record lies is found again by the rebuild, which only a
+    // request with something dropped pays for; kept here, it made each
+    // record's entry 80 bytes written for every produce.
     struct classified {
         dedup_identity_digest identity;
         model::timestamp timestamp;
-        dedup_record_span span;
+        // The record's length less its offset delta's bytes, the part of it
+        // a rebuild keeps as it is.
+        uint32_t unchanged{0};
         bool has_identity{false};
         bool dropped{false};
     };
+    static_assert(sizeof(classified) == 32);
     chunked_vector<classified> records;
     records.reserve(static_cast<size_t>(total));
 
@@ -427,7 +434,9 @@ dedup_window_filter::filter_request(model::record_batch batch) {
           records.push_back(
             {.identity = digest,
              .timestamp = clamp_to_broker_time(ts),
-             .span = span,
+             .unchanged = static_cast<uint32_t>(
+               (span.end - span.body)
+               - (span.after_offset_delta - span.offset_delta)),
              .has_identity = lookup == dedup_identity_lookup::identity});
           return true;
       });
@@ -490,11 +499,8 @@ dedup_window_filter::filter_request(model::record_batch batch) {
     try {
         // A kept record's length counts its new offset delta's bytes in
         // place of the old one's.
-        const auto length_of = [](
-                                 const dedup_record_span& span, int32_t delta) {
-            return static_cast<int64_t>(
-                     (span.end - span.body)
-                     - (span.after_offset_delta - span.offset_delta))
+        const auto length_of = [](const classified& c, int32_t delta) {
+            return static_cast<int64_t>(c.unchanged)
                    + static_cast<int64_t>(vint::vint_size(delta));
         };
         size_t size = 0;
@@ -504,31 +510,46 @@ dedup_window_filter::filter_request(model::record_batch batch) {
                 if (c.dropped) {
                     continue;
                 }
-                const auto length = length_of(c.span, offset_delta++);
+                const auto length = length_of(c, offset_delta++);
                 size += vint::vint_size(length) + static_cast<size_t>(length);
             }
         }
         exact_iobuf_writer data(size);
-        dedup_record_reader parser(readable.data());
-        const auto copy = [&data, &parser](size_t from, size_t to) {
-            parser.skip(from - parser.bytes_consumed());
-            parser.consume(to - from, [&data](const char* src, size_t n) {
-                data.append(src, n);
-            });
+        // One reader finds each record's fields, the other copies the bytes
+        // between them. The walk above already checked every length against
+        // the buffer.
+        dedup_record_reader scan(readable.data());
+        dedup_record_reader source(readable.data());
+        const auto copy_to = [&data, &source](size_t to) {
+            source.consume(
+              to - source.bytes_consumed(),
+              [&data](const char* src, size_t n) { data.append(src, n); });
         };
         int64_t max_timestamp_delta = std::numeric_limits<int64_t>::min();
         int32_t offset_delta = 0;
         for (const auto& c : records) {
+            const auto length = static_cast<size_t>(scan.read_varlong());
+            const size_t body = scan.bytes_consumed();
+            const size_t end = body + length;
             if (c.dropped) {
+                scan.skip(length);
                 continue;
             }
-            const auto& span = c.span;
-            data.append_varint(length_of(span, offset_delta));
-            copy(span.body, span.offset_delta);
+            scan.skip(1); // attributes
+            const auto timestamp_delta = scan.read_varlong();
+            const size_t old_delta = scan.bytes_consumed();
+            scan.read_varlong();
+            const size_t after_delta = scan.bytes_consumed();
+            scan.skip(end - after_delta);
+
+            data.append_varint(length_of(c, offset_delta));
+            source.skip(body - source.bytes_consumed());
+            copy_to(old_delta);
             data.append_varint(offset_delta++);
-            copy(span.after_offset_delta, span.end);
+            source.skip(after_delta - old_delta);
+            copy_to(end);
             max_timestamp_delta = std::max(
-              max_timestamp_delta, span.timestamp_delta);
+              max_timestamp_delta, timestamp_delta);
         }
         iobuf records_data = std::move(data).finish();
 
