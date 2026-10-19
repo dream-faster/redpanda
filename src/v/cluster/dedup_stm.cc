@@ -53,6 +53,10 @@ dedup_stm::dedup_stm(
   , _kvstore(kvstore)
   , _sync_timeout(std::move(sync_timeout))
   , _state(std::chrono::milliseconds{0}, max_entries, std::move(shard_budget)) {
+    // Until this replica leads, it only applies: a restore and every applied
+    // batch keep their entries without the lookup table, and the first
+    // request it filters builds it (see do_replicate()).
+    _state.defer_lookup();
 }
 
 void dedup_stm::setup_metrics() {
@@ -454,6 +458,12 @@ ss::future<> dedup_stm::do_apply(const model::record_batch& batch) {
         co_return;
     }
 
+    if (_unsettled == 0 && !_raft->is_leader()) {
+        // Not filtering, so nothing here needs the lookup table, and nothing
+        // left from leading needs it to be reverted.
+        _state.defer_lookup();
+    }
+
     // A batch this replica cannot read is skipped, not retried: the STM
     // manager treats an exception from apply as transient and retries the
     // batch forever, which also holds up every raft snapshot and so the
@@ -582,6 +592,14 @@ ss::future<result<kafka_result>> dedup_stm::do_replicate(
     if (!opts.expected_term) {
         opts.expected_term = _insync_term;
     }
+    if (!_state.lookup_ready()) {
+        // Leading since entries went in unindexed: index them all first.
+        co_await _state.build_lookup();
+        if (!_state.lookup_ready()) {
+            // Applying as a follower again deferred it meanwhile.
+            co_return errc::not_leader;
+        }
+    }
 
     const auto original_count = batch.record_count();
     dedup_filter_result filtered;
@@ -665,6 +683,7 @@ ss::future<result<kafka_result>> dedup_stm::do_replicate(
     inflight_ptr mine;
     if (filtered.batch) {
         mine = ss::make_lw_shared<inflight_request>();
+        ++_unsettled;
         for (const auto& entry : filtered.undo.entries) {
             _pending.insert_or_assign(entry.identity, mine);
         }
@@ -887,6 +906,7 @@ void dedup_stm::settle(
             forget_self_filtered(*self_key);
         }
     }
+    --_unsettled;
     mine->appended.set_value(appended);
 }
 

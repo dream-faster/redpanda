@@ -265,6 +265,9 @@ private:
     /// Identities introduced by requests still in flight on this leader; see
     /// inflight_request. Bounded by the records in flight.
     pending_identities _pending;
+    // Requests admitted and not yet settled. While any is, the lookup table
+    // stays: settle() may have to revert one (see do_apply()).
+    size_t _unsettled{0};
     /// Last offset of a batch this leader admitted for a request with weaker
     /// acks than quorum_ack, which raft reports appended before it commits.
     /// Every other identity in the index that is not pending is committed,

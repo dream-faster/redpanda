@@ -254,7 +254,53 @@ public:
     bool push_back(const dedup_identity_digest& identity, int64_t ts);
 
     /// Erase the entry at \p pos. The last entry moves into its place.
+    /// Requires fully_indexed() or \p pos >= indexed().
     void erase_at(size_t pos);
+
+    /// \brief Entries can be kept without the lookup table.
+    ///
+    /// Positions [0, indexed()) are in the lookup table, and find() sees only
+    /// them; those from indexed() on were appended by append_unindexed() and
+    /// are only in the entry array, at 16 bytes an entry and no lookup cost.
+    /// A replica that is not filtering needs nothing but the entries, and
+    /// indexes them in bulk once it is: begin_bulk_index(), prepare_step()
+    /// until it returns false, then index_next() up to size(). push_back()
+    /// and every lookup need fully_indexed().
+    size_t indexed() const noexcept { return _indexed; }
+    bool fully_indexed() const noexcept {
+        return _indexed == _size && !_preparing;
+    }
+
+    /// Append \p identity at position size() without indexing it. It may be
+    /// present already, which index_next() reports when it gets to it.
+    /// False, changing nothing, at max_size.
+    bool append_unindexed(const dedup_identity_digest& identity, int64_t ts);
+
+    /// Free the lookup table, leaving every entry unindexed.
+    void drop_lookup() noexcept;
+
+    /// With nothing indexed, start a lookup table sized for size() entries:
+    /// its segments, which prepare_step() allocates, are what that many keys
+    /// spread over, so index_next() does not grow them a doubling at a time,
+    /// each doubling reading back every key. O(1).
+    void begin_bulk_index();
+    /// Allocate up to \p n more of the segments begin_bulk_index() sized.
+    /// True while some are left; index_next() needs none to be.
+    bool prepare_step(size_t n);
+
+    enum class index_outcome {
+        /// The entry at the old indexed() is in the lookup table now.
+        indexed,
+        /// An indexed entry has the same identity; the caller merges the two
+        /// and erases this one, which is still at indexed().
+        duplicate,
+        /// The lookup table cannot take it, as push_back() can refuse; the
+        /// caller erases it.
+        refused,
+    };
+    /// Index the entry at indexed(). For a duplicate, \p duplicate_of is set
+    /// to the indexed entry's position.
+    index_outcome index_next(size_t& duplicate_of);
 
     /// Make room for \p n entries without growing the entry storage again.
     void reserve(size_t n);
@@ -369,6 +415,19 @@ private:
     /// \p seg's keys: each one's hash and position.
     std::vector<std::pair<uint64_t, uint32_t>> keys_of(const segment&) const;
     segment make_segment(uint32_t slots, uint32_t depth) const;
+    /// Allocate what the entry at position size() needs: all of what can
+    /// throw in an append.
+    void make_room_for_entry();
+    /// Write \p key, in canonical form, at position size(), after
+    /// make_room_for_entry(), without touching the lookup table.
+    void write_entry(const dedup_identity_digest& key, int64_t ts);
+    /// Put the entry at \p pos, hashing to \p h, in the lookup table,
+    /// growing it as needed. False if it cannot.
+    bool slot_index(uint64_t h, uint32_t pos);
+    /// Whether the lookup table is usable: allocated, if begun in bulk.
+    bool lookup_ready() const noexcept {
+        return !_directory.empty() && !_preparing;
+    }
 
     // Entries: _blocks[i] holds positions [i * block_entries, ...). The first
     // block grows by doubling to block_entries; later blocks are allocated
@@ -381,6 +440,14 @@ private:
     std::vector<std::unique_ptr<segment>> _segments;
     std::vector<segment*> _directory;
     uint32_t _depth{0};
+    // Entries [0, _indexed) are in the lookup table.
+    size_t _indexed{0};
+    // Between begin_bulk_index() and the prepare_step() that finishes: the
+    // directory entries from _prepared on name no segment yet, and each gets
+    // one of _bulk_slots slots.
+    bool _preparing{false};
+    size_t _prepared{0};
+    uint32_t _bulk_slots{0};
 
     size_t _rebases{0};
     size_t _refused_inserts{0};

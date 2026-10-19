@@ -120,6 +120,10 @@ struct dedup_stm_test_accessor {
         introducer->appended.set_value(appended);
     }
 
+    static const dedup_window_filter& state(const dedup_stm& stm) {
+        return stm._state;
+    }
+
     static size_t pending_size(const dedup_stm& stm) {
         return stm._pending.size();
     }
@@ -819,6 +823,50 @@ struct dedup_stm_fixture : raft::stm_raft_fixture<dedup_stm> {
 
     config::mock_property<std::chrono::milliseconds> sync_timeout{10s};
 };
+
+// Followers keep what they apply without the lookup table, and a replica
+// builds it once it leads: deduplication carries across the change, and the
+// replica that stopped leading frees its table again.
+TEST_F_CORO(dedup_stm_fixture, followers_index_only_once_they_lead) {
+    co_await initialize_state_machines();
+    set_dedup_config(1h);
+    auto leader = co_await wait_for_leader(10s);
+    for (int i = 0; i < 50; ++i) {
+        co_await produce(
+          leader, fmt::format("k{}", i), "v", model::timestamp{1000 + i});
+    }
+    co_await wait_for_stms(node(leader).raft()->committed_offset());
+    for (auto& [id, n] : nodes()) {
+        const auto& state = dedup_stm_test_accessor::state(*get_stm<0>(*n));
+        ASSERT_EQ_CORO(state.map_size(), 50u);
+        ASSERT_EQ_CORO(state.lookup_ready(), id == leader);
+        ASSERT_EQ_CORO(state.lookup_deferred(), id != leader);
+    }
+
+    auto old_term = node(leader).raft()->term();
+    auto transfer = co_await node(leader).raft()->transfer_leadership(
+      {.group = node(leader).raft()->group(), .timeout = 10s});
+    ASSERT_TRUE_CORO(transfer.success);
+    auto new_leader = co_await wait_for_leader_change(
+      model::timeout_clock::now() + 10s, old_term);
+    ASSERT_NE_CORO(new_leader, leader);
+
+    // Every identity the old leader indexed is found by the new one.
+    for (int i = 0; i < 50; i += 7) {
+        auto duplicate = co_await produce(
+          new_leader, fmt::format("k{}", i), "v2", model::timestamp{2000});
+        ASSERT_EQ_CORO(duplicate.replicated_record_count, 0);
+    }
+    auto fresh = co_await produce(
+      new_leader, "k-fresh", "v", model::timestamp{2000});
+    ASSERT_EQ_CORO(fresh.replicated_record_count, -1);
+    co_await wait_for_stms(node(new_leader).raft()->committed_offset());
+    for (auto& [id, n] : nodes()) {
+        const auto& state = dedup_stm_test_accessor::state(*get_stm<0>(*n));
+        ASSERT_EQ_CORO(state.map_size(), 51u);
+        ASSERT_EQ_CORO(state.lookup_ready(), id == new_leader);
+    }
+}
 
 TEST_F_CORO(dedup_stm_fixture, follower_state_derived_from_data_batches) {
     co_await initialize_state_machines();
