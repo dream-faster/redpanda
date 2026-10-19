@@ -699,12 +699,23 @@ TEST(DedupWindowFilter, SplicedRebuildMatchesTheBuilder) {
             }
             ASSERT_TRUE(result.batch);
             const auto& got = *result.batch;
-            EXPECT_EQ(got.header(), expected.header());
+            EXPECT_EQ(got.header().attrs, expected.header().attrs);
             EXPECT_EQ(got.header().type, expected.header().type);
             EXPECT_EQ(got.header().producer_id, expected.header().producer_id);
             EXPECT_EQ(
               got.header().base_sequence, expected.header().base_sequence);
-            EXPECT_EQ(got.data(), expected.data());
+            // The records are the same bytes whatever the codec.
+            const auto got_records = decompressed_copy(got);
+            const auto expected_records = decompressed_copy(expected);
+            EXPECT_EQ(got_records.header(), expected_records.header());
+            EXPECT_EQ(got_records.data(), expected_records.data());
+            // So is the batch, but under snappy, whose output depends on how
+            // the input buffer is split into fragments: the splice builds
+            // the records in one, the builder in several.
+            if (codec != model::compression::snappy) {
+                EXPECT_EQ(got.header(), expected.header());
+                EXPECT_EQ(got.data(), expected.data());
+            }
             EXPECT_EQ(keys_of(got), keys_of(expected));
         }
     }
