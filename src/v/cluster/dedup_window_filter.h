@@ -664,6 +664,10 @@ public:
     void populate(const iobuf& identity, model::timestamp ts);
     /// The same, for an identity already digested (for_each_dedup_identity()).
     void populate(dedup_identity_digest identity, model::timestamp ts);
+    /// populate() every entry of a committed batch, in order. The same as
+    /// one call each, with each lookup's memory loads started a few entries
+    /// ahead (see prefetch_ahead()).
+    void populate(const chunked_vector<dedup_index_entry>& entries);
 
     /// \brief Reset all index state.
     void clear();
@@ -972,6 +976,45 @@ private:
     // claimed from the shard budget; see begin_restore(). Zero otherwise.
     size_t _budget_reserved{0};
     std::optional<ss::sstring> _key_header;
+    /// How many records ahead of the lookup in progress each prefetch stage
+    /// is issued: far enough that a stage's line has arrived before the next
+    /// stage reads it, near enough that it is still cached when the lookup
+    /// runs. A batch's records are looked up back to back, and in an index
+    /// too large for the cache each of a lookup's three dependent loads is a
+    /// miss; staggered like this they overlap instead of queueing.
+    static constexpr size_t prefetch_segment_ahead = 12;
+    static constexpr size_t prefetch_slot_ahead = 8;
+    static constexpr size_t prefetch_entry_ahead = 4;
+
+    /// Before looking up record \p i of \p n, start the loads of the records
+    /// ahead of it. \p identity_at(j) is record j's digest, or nullptr if it
+    /// has none. At \p i == 0 this also covers the records the stages have
+    /// not reached yet, as far as a load can usefully start before the one
+    /// it depends on has arrived.
+    template<typename IdentityAt>
+    void
+    prefetch_ahead(size_t i, size_t n, const IdentityAt& identity_at) const {
+        using stage = dedup_compact_index::prefetch_stage;
+        auto issue = [&](size_t j, stage st) {
+            if (j < n) {
+                if (const dedup_identity_digest* id = identity_at(j)) {
+                    _index.prefetch(*id, st);
+                }
+            }
+        };
+        if (i == 0) {
+            for (size_t j = 0; j < prefetch_segment_ahead; ++j) {
+                issue(j, stage::segment);
+            }
+            for (size_t j = 0; j < prefetch_slot_ahead; ++j) {
+                issue(j, stage::slot);
+            }
+        }
+        issue(i + prefetch_segment_ahead, stage::segment);
+        issue(i + prefetch_slot_ahead, stage::slot);
+        issue(i + prefetch_entry_ahead, stage::entry);
+    }
+
     dedup_compact_index _index;
     // Highest record timestamp seen; used as the reference "now" for eviction.
     model::timestamp _max_ts{model::timestamp::min()};

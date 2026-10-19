@@ -570,6 +570,34 @@ TEST(DedupWindowFilter, PopulateIsIdempotentMaxWins) {
     EXPECT_FALSE(f.filter(make_batch("k", "v", ts(2900))).has_value());
 }
 
+// Populating a committed batch at once -- with each lookup prefetched ahead
+// -- leaves exactly the index one populate() per record does, including at a
+// ceiling where the sweep trims as it goes.
+TEST(DedupWindowFilter, BatchPopulateMatchesOneAtATime) {
+    for (size_t ceiling : {size_t{64}, size_t{100'000}}) {
+        cluster::dedup_window_filter one(60'000ms, ceiling);
+        cluster::dedup_window_filter batched(60'000ms, ceiling);
+        uint64_t seed = 5;
+        for (int b = 0; b < 200; ++b) {
+            chunked_vector<cluster::dedup_index_entry> entries;
+            for (int r = 0; r < 37; ++r) {
+                // Some identities repeat, within the batch and across them.
+                const auto key = (seed = seed * 6364136223846793005ULL + 1)
+                                 % 3000;
+                entries.push_back(
+                  {.identity = cluster::dedup_digest_of(
+                     iobuf::from(fmt::format("k{}", key))),
+                   .timestamp = ts(1000 + b * 10 + r)});
+            }
+            for (const auto& e : entries) {
+                one.populate(e.identity, e.timestamp);
+            }
+            batched.populate(entries);
+        }
+        EXPECT_EQ(one.snapshot(), batched.snapshot());
+    }
+}
+
 // A compressed batch is correctly decompressed before key inspection.
 TEST(DedupWindowFilter, CompressedBatch) {
     cluster::dedup_window_filter f(1000ms);

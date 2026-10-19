@@ -222,6 +222,18 @@ public:
     /// Position of \p identity, or npos.
     size_t find(const dedup_identity_digest& identity) const noexcept;
 
+    /// Stages of a lookup's memory accesses, each one dependent on the one
+    /// before: the segment the directory names, the slot the key hashes to in
+    /// it, and the entry that slot holds.
+    enum class prefetch_stage { segment, slot, entry };
+
+    /// Start loading the memory find() reads for an identity at a stage, and
+    /// return without waiting for it. In an index too large for the cache
+    /// every stage of a lookup is a miss; issued for keys some lookups
+    /// ahead, a stage at a time, those misses overlap the work in between.
+    /// A hint only: it changes nothing, and is safe for any key at any time.
+    void prefetch(const dedup_identity_digest&, prefetch_stage) const noexcept;
+
     /// The identity at \p pos, in dedup_canonical_digest() form.
     dedup_identity_digest identity_at(size_t pos) const noexcept {
         const auto& e = entry(pos);

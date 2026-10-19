@@ -494,18 +494,24 @@ ss::future<> dedup_stm::do_apply(const model::record_batch& batch) {
         // already validated and committed under an older config, so a
         // record here may lack the *current* header; it is left unindexed
         // rather than rejecting an already committed batch.
+        //
+        // Digested first and indexed after, so the index can start each
+        // lookup's loads a few records ahead (see populate()).
+        chunked_vector<dedup_index_entry> entries;
+        entries.reserve(static_cast<size_t>(readable.record_count()));
         for_each_dedup_identity(
           readable,
           _state.key_header(),
-          [this](
+          [&entries](
             dedup_identity_lookup lookup,
             dedup_identity_digest digest,
             model::timestamp ts) {
               if (lookup == dedup_identity_lookup::identity) {
-                  _state.populate(digest, ts);
+                  entries.push_back({.identity = digest, .timestamp = ts});
               }
               return true;
           });
+        _state.populate(entries);
     } catch (const std::bad_alloc&) {
         throw;
     } catch (...) {
