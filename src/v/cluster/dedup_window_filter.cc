@@ -20,6 +20,7 @@
 #include <array>
 #include <chrono>
 #include <cstddef>
+#include <cstring>
 #include <iterator>
 #include <ranges>
 
@@ -198,6 +199,68 @@ bool within_window(int64_t a, int64_t b, int64_t window) {
     const auto diff = static_cast<__int128>(a) - b;
     return diff >= -window && diff <= window;
 }
+
+/// Writes a buffer of a size known up front into fragments it allocates
+/// itself, at most an iobuf fragment's largest each, with plain stores:
+/// iobuf::append() keeps its bookkeeping for every call, and the rebuild
+/// makes four of them per record.
+class exact_iobuf_writer {
+public:
+    explicit exact_iobuf_writer(size_t size)
+      : _left(size) {}
+
+    void append(const char* src, size_t n) {
+        while (n > 0) {
+            if (_p == _e) {
+                roll();
+            }
+            const size_t k = std::min(n, static_cast<size_t>(_e - _p));
+            std::memcpy(_p, src, k);
+            _p += k;
+            src += k;
+            n -= k;
+        }
+    }
+    void append_varint(int64_t v) {
+        if (_e - _p >= static_cast<ptrdiff_t>(vint::max_length)) {
+            _p += vint::serialize(v, reinterpret_cast<uint8_t*>(_p));
+            return;
+        }
+        std::array<uint8_t, vint::max_length> buf{};
+        const auto n = vint::serialize(v, buf.data());
+        append(reinterpret_cast<const char*>(buf.data()), n);
+    }
+    iobuf finish() && {
+        flush();
+        return std::move(_out);
+    }
+
+private:
+    void roll() {
+        flush();
+        // The size given up front is what gets written, so no fragment is
+        // left with room that would stay allocated behind the batch.
+        const size_t n = std::max<size_t>(
+          std::min<size_t>(_left, iobuf::max_linearize_size), 1);
+        _buf = ss::temporary_buffer<char>(n);
+        _p = _buf.get_write();
+        _e = _p + n;
+        _left -= std::min(_left, n);
+    }
+    void flush() {
+        if (_buf.size() > 0) {
+            _buf.trim(static_cast<size_t>(_p - _buf.get()));
+            _out.append(std::move(_buf));
+        }
+        _p = _e = nullptr;
+    }
+
+    size_t _left;
+    iobuf _out;
+    ss::temporary_buffer<char> _buf;
+    char* _p{nullptr};
+    char* _e{nullptr};
+};
 
 } // namespace
 
@@ -425,19 +488,32 @@ dedup_window_filter::filter_request(model::record_batch batch) {
     // undone before an error propagates: the request fails and nothing of it
     // stays behind.
     try {
-        iobuf data;
-        data.reserve_memory(readable.data().size_bytes());
-        iobuf_const_parser parser(readable.data());
-        std::array<uint8_t, vint::max_length> varint{};
-        const auto append_varint = [&data, &varint](int64_t v) {
-            const auto n = vint::serialize(v, varint.data());
-            data.append(reinterpret_cast<const char*>(varint.data()), n);
+        // A kept record's length counts its new offset delta's bytes in
+        // place of the old one's.
+        const auto length_of = [](
+                                 const dedup_record_span& span, int32_t delta) {
+            return static_cast<int64_t>(
+                     (span.end - span.body)
+                     - (span.after_offset_delta - span.offset_delta))
+                   + static_cast<int64_t>(vint::vint_size(delta));
         };
+        size_t size = 0;
+        {
+            int32_t offset_delta = 0;
+            for (const auto& c : records) {
+                if (c.dropped) {
+                    continue;
+                }
+                const auto length = length_of(c.span, offset_delta++);
+                size += vint::vint_size(length) + static_cast<size_t>(length);
+            }
+        }
+        exact_iobuf_writer data(size);
+        dedup_record_reader parser(readable.data());
         const auto copy = [&data, &parser](size_t from, size_t to) {
             parser.skip(from - parser.bytes_consumed());
             parser.consume(to - from, [&data](const char* src, size_t n) {
                 data.append(src, n);
-                return ss::stop_iteration::no;
             });
         };
         int64_t max_timestamp_delta = std::numeric_limits<int64_t>::min();
@@ -447,17 +523,14 @@ dedup_window_filter::filter_request(model::record_batch batch) {
                 continue;
             }
             const auto& span = c.span;
-            const auto unchanged = static_cast<int64_t>(
-              (span.end - span.body)
-              - (span.after_offset_delta - span.offset_delta));
-            append_varint(
-              unchanged + static_cast<int64_t>(vint::vint_size(offset_delta)));
+            data.append_varint(length_of(span, offset_delta));
             copy(span.body, span.offset_delta);
-            append_varint(offset_delta++);
+            data.append_varint(offset_delta++);
             copy(span.after_offset_delta, span.end);
             max_timestamp_delta = std::max(
               max_timestamp_delta, span.timestamp_delta);
         }
+        iobuf records_data = std::move(data).finish();
 
         // As model::batch_builder::build_header() lays it out for the same
         // records.
@@ -480,7 +553,7 @@ dedup_window_filter::filter_request(model::record_batch batch) {
         model::record_batch_header out{
           .header_crc = 0,
           .size_bytes = static_cast<int32_t>(
-            model::packed_record_batch_header_size + data.size_bytes()),
+            model::packed_record_batch_header_size + records_data.size_bytes()),
           .base_offset = header.base_offset,
           .type = header.type,
           .crc = 0,
@@ -495,7 +568,7 @@ dedup_window_filter::filter_request(model::record_batch batch) {
           .ctx = ctx,
         };
         model::record_batch rebuilt(
-          out, std::move(data), model::record_batch::tag_ctor_ng{});
+          out, std::move(records_data), model::record_batch::tag_ctor_ng{});
         // From the original batch, not `header`: `readable` may be the
         // decompressed temporary, whose attrs no longer name the compression
         // the rebuilt batch should be written back with.
