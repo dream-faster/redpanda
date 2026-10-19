@@ -156,6 +156,27 @@ private:
     /// does not read.
     static state_snapshot decode_snapshot(iobuf);
 
+    ss::future<result<kafka_result>> do_replicate(
+      model::record_batch,
+      raft::replicate_options,
+      ss::lw_shared_ptr<available_promise<>>);
+
+    /// A request whose batch this leader admitted but raft has not yet
+    /// confirmed appended. The identities it introduced are in the index, so
+    /// the requests behind it see them, but not yet in the log. A request
+    /// that drops a record against one of them waits for the outcome before
+    /// it is acknowledged, and a snapshot leaves them out. `appended` resolves
+    /// true once the batch is appended at the request's consistency level,
+    /// false once it is known never to have been and its entries are reverted.
+    struct inflight_request {
+        ss::shared_promise<bool> appended;
+    };
+    using inflight_ptr = ss::lw_shared_ptr<inflight_request>;
+    using pending_identities = chunked_hash_map<
+      dedup_identity_digest,
+      inflight_ptr,
+      dedup_identity_digest_hash>;
+
     /// Serialize the index's live entries, yielding between chunks. The
     /// produce path mutates the index meanwhile; the filter's walk accounts
     /// for that (dedup_window_filter::for_each_live_entry_async()), and a walk
