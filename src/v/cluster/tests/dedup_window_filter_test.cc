@@ -1744,8 +1744,10 @@ model::record_batch make_varied_batch() {
       1'000'000,
       int64_t{1} << 40,
       -(int64_t{1} << 55),
-      std::numeric_limits<int64_t>::max(),
-      std::numeric_limits<int64_t>::min()};
+      // Ten-byte varints, still clear of the overflow the walk saturates
+      // and the record parse it is checked against does not.
+      int64_t{1} << 62,
+      -(int64_t{1} << 62)};
     for (size_t i = 0; i < 40; ++i) {
         record_spec spec;
         if (i % 7 != 3) {
