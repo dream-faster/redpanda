@@ -17,6 +17,7 @@ can never pass as a skip.
 from __future__ import annotations
 
 import os
+import time
 
 import pytest
 from harness import kafka
@@ -41,6 +42,12 @@ def pytest_addoption(parser):
         "--bench-out",
         default=os.environ.get("DEDUP_BENCH_OUT"),
         help="append the benchmark results table to this Markdown file",
+    )
+    parser.addoption(
+        "--stall-report",
+        default=os.environ.get("DEDUP_STALL_REPORT"),
+        help="append each dedicated cluster's reactor stalls and the test's "
+        "duration to this file, one tab-separated line per test",
     )
     parser.addoption(
         "--keep-clusters",
@@ -92,6 +99,24 @@ def old_image(pytestconfig) -> str:
     return img
 
 
+def _report_stalls(path: str, request, clusters: list[Cluster], took_s: float):
+    """Reactor stalls the test's clusters counted, summed over their running
+    nodes' shards. A node restarted during the test counts from its restart."""
+    stalls = 0.0
+    for c in clusters:
+        try:
+            for m in c.metrics().values():
+                stalls += m.sum("vectorized_reactor_stalls_count")
+        except Exception:
+            # A node the test left frozen or half-stopped; report what the
+            # others counted rather than fail the teardown.
+            pass
+    rep = getattr(request.node, "rep_call", None)
+    outcome = rep.outcome if rep is not None else "error"
+    with open(path, "a") as f:
+        f.write(f"{request.node.nodeid}\t{outcome}\t{stalls:.0f}\t{took_s:.1f}\n")
+
+
 def _dump_logs(cluster: Cluster, request) -> None:
     rep = getattr(request.node, "rep_call", None)
     if rep is not None and rep.failed:
@@ -120,6 +145,7 @@ def make_cluster(image, request, pytestconfig):
     """Dedicated clusters, for tests that restart nodes, change cluster-wide
     settings, or need particular memory limits."""
     made: list[Cluster] = []
+    started = time.monotonic()
 
     def make(image_override: str | None = None, **kw) -> Cluster:
         c = Cluster(image_override or image, **kw)
@@ -127,6 +153,9 @@ def make_cluster(image, request, pytestconfig):
         return c.start()
 
     yield make
+    report = pytestconfig.getoption("--stall-report")
+    if report:
+        _report_stalls(report, request, made, time.monotonic() - started)
     for c in made:
         _dump_logs(c, request)
         failed = getattr(request.node, "rep_call", None)
