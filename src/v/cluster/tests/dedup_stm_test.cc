@@ -146,7 +146,8 @@ struct dedup_stm_test_accessor {
             .window_ms = 1000, .generation = 1, .entries = std::move(entries)});
     }
 
-    /// \p entries in the version 2 layout (digest hi, digest lo, timestamp).
+    /// \p entries in the packed layout (digest lo, low 32 bits of digest hi,
+    /// timestamp).
     static iobuf
     state_snapshot_with_entries(iobuf entries, model::timestamp max_timestamp) {
         return serde::to_iobuf(
@@ -155,7 +156,7 @@ struct dedup_stm_test_accessor {
             .generation = 1,
             .max_timestamp = max_timestamp,
             .entries = std::move(entries),
-            .entry_size = dedup_stm::legacy_packed_entry_size});
+            .entry_size = dedup_stm::packed_entry_size});
     }
 
     static bytes legacy_kvstore_key(const model::ntp& ntp) {
@@ -360,68 +361,65 @@ struct v2_state_snapshot
     }
 };
 
+/// Version 3: the current layout, with digests of two seeded xxhash64 passes.
+struct v3_state_snapshot
+  : serde::
+      envelope<v3_state_snapshot, serde::version<3>, serde::compat_version<3>> {
+    int64_t window_ms{0};
+    int64_t generation{0};
+    model::timestamp max_timestamp{model::timestamp::min()};
+    iobuf entries;
+    uint32_t entry_size{dedup_stm::packed_entry_size};
+
+    auto serde_fields() {
+        return std::tie(
+          window_ms, generation, max_timestamp, entries, entry_size);
+    }
+};
+
 } // namespace
 
-// A version 2 snapshot still restores, and the digests it carries -- 128 bits
-// each, as version 2 binaries computed them -- become the 96-bit identities
-// this build computes, so they deduplicate as before the upgrade.
-TEST(dedup_stm_snapshot, version_2_snapshot_restores_as_96_bit_identities) {
-    const auto canonical = dedup_digest_of(iobuf::from("key"));
-    const dedup_identity_digest wide{
-      .hi = canonical.hi | 0xa0e1'ea34'0000'0000ULL, .lo = canonical.lo};
-    iobuf entries;
-    for (const auto& [id, ts] :
-         {std::pair{wide, int64_t{1'000'000}},
-          std::pair{
-            dedup_identity_digest{.hi = (7ULL << 40) | 3, .lo = 9},
-            int64_t{999'999}}}) {
-        const auto hi = ss::cpu_to_le(id.hi);
-        const auto lo = ss::cpu_to_le(id.lo);
-        const auto le_ts = ss::cpu_to_le(ts);
-        entries.append(reinterpret_cast<const char*>(&hi), sizeof(hi));
-        entries.append(reinterpret_cast<const char*>(&lo), sizeof(lo));
-        entries.append(reinterpret_cast<const char*>(&le_ts), sizeof(le_ts));
+// Snapshots from before the digest became XXH3-128 hold digests this build
+// never computes: they are refused, and the index is rebuilt from the log.
+TEST(dedup_stm_snapshot, xxhash64_snapshots_are_refused) {
+    std::vector<iobuf> buffers;
+    buffers.push_back(
+      serde::to_iobuf(
+        v2_state_snapshot{
+          .window_ms = 3'600'000,
+          .generation = 4,
+          .entries = iobuf::from(std::string(24, 'x'))}));
+    buffers.push_back(
+      serde::to_iobuf(
+        v3_state_snapshot{
+          .window_ms = 3'600'000,
+          .generation = 4,
+          .entries = iobuf::from(
+            std::string(dedup_stm::packed_entry_size, 'x'))}));
+    for (auto& buffer : buffers) {
+        dedup_window_filter target(1h);
+        int64_t generation = 0;
+        EXPECT_THROW(
+          dedup_stm_test_accessor::restore(
+            target, generation, std::move(buffer)),
+          serde::serde_exception);
+        EXPECT_EQ(target.map_size(), 0u);
+        EXPECT_EQ(generation, 0);
     }
-    auto buffer = serde::to_iobuf(
-      v2_state_snapshot{
-        .window_ms = 3'600'000,
-        .generation = 4,
-        .max_timestamp = model::timestamp{1'000'000},
-        .entries = std::move(entries)});
-
-    dedup_window_filter target(1h);
-    int64_t generation = 0;
-    dedup_stm_test_accessor::restore(target, generation, std::move(buffer));
-    EXPECT_EQ(generation, 4);
-    ASSERT_EQ(target.map_size(), 2u);
-    const auto restored = target.snapshot().entries;
-    EXPECT_EQ(restored[0].identity, canonical);
-    EXPECT_EQ(restored[1].identity, (dedup_identity_digest{.hi = 3, .lo = 9}));
-    // The identity this build digests from the same key finds it.
-    target.populate(iobuf::from("key"), model::timestamp{1'000'100});
-    EXPECT_EQ(target.map_size(), 2u);
-    EXPECT_EQ(target.unindexed_records(), 0u);
-
-    // Written back out, it takes the current layout.
-    auto rewritten = dedup_stm_test_accessor::serialize(target, generation);
-    const auto [entry_size, entry_bytes]
-      = dedup_stm_test_accessor::snapshot_layout(rewritten.copy());
-    EXPECT_EQ(entry_size, dedup_stm::packed_entry_size);
-    EXPECT_EQ(entry_bytes, 2 * dedup_stm::packed_entry_size);
-    dedup_window_filter again(1h);
-    dedup_stm_test_accessor::restore(again, generation, std::move(rewritten));
-    EXPECT_EQ(again.snapshot(), target.snapshot());
 }
 
-// A version 2 binary refuses the current layout on compat version, and so
-// rebuilds from the log, rather than restoring 96-bit digests it would never
-// match against the 128-bit ones it computes.
-TEST(dedup_stm_snapshot, version_2_reader_refuses_the_current_layout) {
+// Version 2 and 3 binaries refuse the current layout on compat version, and so
+// rebuild from the log, rather than restoring digests they would never match
+// against the ones they compute.
+TEST(dedup_stm_snapshot, xxhash64_readers_refuse_the_current_layout) {
     dedup_window_filter source(1h);
     source.populate(iobuf::from("key"), model::timestamp{1'000'000});
     auto buffer = dedup_stm_test_accessor::serialize(source, 1);
     EXPECT_THROW(
-      serde::from_iobuf<v2_state_snapshot>(std::move(buffer)),
+      serde::from_iobuf<v2_state_snapshot>(buffer.copy()),
+      serde::serde_exception);
+    EXPECT_THROW(
+      serde::from_iobuf<v3_state_snapshot>(std::move(buffer)),
       serde::serde_exception);
 }
 
@@ -709,11 +707,11 @@ TEST(dedup_stm_snapshot, a_repeated_identity_restores_to_the_newer_timestamp) {
     auto entries = iobuf{};
     for (const int64_t ts :
          {walk_base_ts + 5, walk_base_ts + 9, walk_base_ts}) {
-        const auto hi = ss::cpu_to_le(id.hi);
         const auto lo = ss::cpu_to_le(id.lo);
+        const auto hi = ss::cpu_to_le(static_cast<uint32_t>(id.hi));
         const auto le_ts = ss::cpu_to_le(ts);
-        entries.append(reinterpret_cast<const char*>(&hi), sizeof(hi));
         entries.append(reinterpret_cast<const char*>(&lo), sizeof(lo));
+        entries.append(reinterpret_cast<const char*>(&hi), sizeof(hi));
         entries.append(reinterpret_cast<const char*>(&le_ts), sizeof(le_ts));
     }
     dedup_stm_test_accessor::restore(

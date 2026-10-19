@@ -57,8 +57,6 @@ public:
     /// of digest hi the index keeps, timestamp. See state_snapshot.
     static constexpr size_t packed_entry_size = 2 * sizeof(uint64_t)
                                                 + sizeof(uint32_t);
-    /// The version 2 layout, which carried all 64 bits of digest hi.
-    static constexpr size_t legacy_packed_entry_size = 3 * sizeof(uint64_t);
 
     dedup_stm(
       raft::consensus*,
@@ -115,41 +113,37 @@ private:
     /// Version history, each a compat break: a reader that cannot read a
     /// version discards the snapshot and rebuilds the index from the log (see
     /// try_restore_snapshot()); the index is advisory and log-derived, so that
-    /// is correct, only slower. This build reads versions 2 and 3:
+    /// is correct, only slower. This build reads version 4 only:
     ///
     /// - 0: full identity bytes per entry.
     /// - 1: a 128-bit digest per entry, each its own serde envelope.
-    /// - 2: the entries as one packed blob of fixed legacy_packed_entry_size
-    ///   records (digest hi, digest lo, timestamp; each little-endian).
-    ///   Written in one pass straight from the index, so a snapshot costs one
-    ///   serialized copy -- 24 bytes per entry -- instead of an entry vector
-    ///   plus a 30-byte per-entry encoding of it.
+    /// - 2: the entries as one packed blob of fixed 24-byte records (digest
+    ///   hi, digest lo, timestamp; each little-endian), written in one pass
+    ///   straight from the index.
     /// - 3: digests are 96 bits (dedup_canonical_digest()), and an entry packs
     ///   into packed_entry_size bytes: digest lo, the low 32 bits of digest
-    ///   hi, timestamp. `entry_size` says which layout `entries` holds; a
-    ///   version 2 snapshot has no such field and reads as the legacy layout,
-    ///   so this build restores version 2 snapshots, keeping 96 bits of each
-    ///   digest.
+    ///   hi, timestamp. `entry_size` names the layout.
+    /// - 4: the layout of version 3, with digests taken by one XXH3-128 pass
+    ///   rather than two seeded xxhash64 passes (dedup_digester). A digest of
+    ///   either kind never matches one of the other, so earlier snapshots
+    ///   cannot be restored, and this build refuses them on compat version.
     ///
     /// The break runs both ways: an older binary rejects a newer snapshot on
     /// compat version and rebuilds the same way, so a raft snapshot crossing a
     /// rolling upgrade in either direction costs a rebuild, not a failed
-    /// partition. Version 3 is a compat break for that reason alone: a version
-    /// 2 reader would restore its digests without complaint and then never
-    /// match them against its own 128-bit ones. Version 1 snapshots only ever
-    /// lived in the kvstore, which this STM no longer reads.
+    /// partition. Each replica digests what it applies itself, so replicas on
+    /// different builds never compare digests otherwise. Version 1 snapshots
+    /// only ever lived in the kvstore, which this STM no longer reads.
     struct state_snapshot
       : serde::envelope<
           state_snapshot,
-          serde::version<3>,
-          serde::compat_version<3>> {
+          serde::version<4>,
+          serde::compat_version<4>> {
         int64_t window_ms{0};
         int64_t generation{0};
         model::timestamp max_timestamp{model::timestamp::min()};
         iobuf entries;
-        /// Bytes per record in `entries`. Always packed_entry_size when this
-        /// build writes it; decode_snapshot() sets legacy_packed_entry_size
-        /// for a version 2 snapshot.
+        /// Bytes per record in `entries`: packed_entry_size.
         uint32_t entry_size{packed_entry_size};
 
         auto serde_fields() {
@@ -158,48 +152,9 @@ private:
         }
     };
 
-    /// Version 2 of state_snapshot, read only. Its own envelope because a
-    /// reader refuses data older than its compat version, and version 3's is
-    /// 3 so that version 2 binaries refuse it.
-    struct state_snapshot_v2
-      : serde::envelope<
-          state_snapshot_v2,
-          serde::version<2>,
-          serde::compat_version<2>> {
-        int64_t window_ms{0};
-        int64_t generation{0};
-        model::timestamp max_timestamp{model::timestamp::min()};
-        iobuf entries;
-
-        auto serde_fields() {
-            return std::tie(window_ms, generation, max_timestamp, entries);
-        }
-    };
-
-    /// Deserialize a snapshot of any version this build reads: 3, or 2 in
-    /// its legacy entry layout. Throws serde_exception for anything else.
+    /// Deserialize a snapshot. Throws serde_exception for one this build
+    /// does not read.
     static state_snapshot decode_snapshot(iobuf);
-
-    ss::future<result<kafka_result>> do_replicate(
-      model::record_batch,
-      raft::replicate_options,
-      ss::lw_shared_ptr<available_promise<>>);
-
-    /// A request whose batch this leader admitted but raft has not yet
-    /// confirmed appended. The identities it introduced are in the index, so
-    /// the requests behind it see them, but not yet in the log. A request
-    /// that drops a record against one of them waits for the outcome before
-    /// it is acknowledged, and a snapshot leaves them out. `appended` resolves
-    /// true once the batch is appended at the request's consistency level,
-    /// false once it is known never to have been and its entries are reverted.
-    struct inflight_request {
-        ss::shared_promise<bool> appended;
-    };
-    using inflight_ptr = ss::lw_shared_ptr<inflight_request>;
-    using pending_identities = chunked_hash_map<
-      dedup_identity_digest,
-      inflight_ptr,
-      dedup_identity_digest_hash>;
 
     /// Serialize the index's live entries, yielding between chunks. The
     /// produce path mutates the index meanwhile; the filter's walk accounts

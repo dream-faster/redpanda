@@ -22,16 +22,16 @@ namespace cluster {
 /// \brief A fixed-width, process-stable digest of a dedup identity.
 ///
 /// The index stores this instead of the identity bytes, so an entry costs the
-/// same regardless of how large the Kafka key or header value is. Two
-/// independently seeded xxhash64 passes are computed, and 96 bits are kept:
-/// all of `lo` and the low half of `hi`, whose upper half is always zero (see
+/// same regardless of how large the Kafka key or header value is. One
+/// XXH3-128 pass is computed, and 96 bits are kept: all of `lo` (its low 64
+/// bits) and the low half of `hi`, whose upper half is always zero (see
 /// dedup_compact_index, which stores exactly those 12 bytes). At the
 /// supported 10^7-entry upper limit, the chance that a new identity matches
 /// some indexed one is on the order of 10^-22 per lookup, far below the
 /// window-edge and generation-change boundaries the feature already documents
 /// as best-effort.
 ///
-/// xxhash64 is not collision-resistant against a chosen-input attacker, which
+/// XXH3 is not collision-resistant against a chosen-input attacker, which
 /// is deliberate: a producer that wants to suppress another producer's
 /// identity can already do so directly by writing that identity first, since
 /// dedup is first-wins on whatever identity it is given. Digesting adds no
@@ -59,7 +59,7 @@ dedup_canonical_digest(dedup_identity_digest d) noexcept {
     return {.hi = d.hi & dedup_digest_hi_mask, .lo = d.lo};
 }
 
-/// The digest is already avalanched by xxhash64, so the map takes one half
+/// The digest is already avalanched by XXH3, so the map takes one half
 /// verbatim rather than paying to re-mix it.
 struct dedup_identity_digest_hash {
     using is_avalanching = void;

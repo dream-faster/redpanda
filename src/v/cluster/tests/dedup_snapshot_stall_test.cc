@@ -179,7 +179,7 @@ void fill(dedup_window_filter& filter, size_t entries) {
         // hash, picking a segment by its high bits and a slot by its low
         // ones. Anything whose high bits barely move across the range -- a
         // counter, or ~counter -- puts every key in one segment, which then
-        // cannot split and refuses most of them. A real xxhash64 digest is
+        // cannot split and refuses most of them. A real XXH3-128 digest is
         // spread; the multiplier here is what keeps the synthetic one spread
         // too.
         seed.entries.push_back(
