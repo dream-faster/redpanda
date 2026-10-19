@@ -3705,7 +3705,10 @@ TEST(DedupDeferredLookup, EntriesKeptUnindexedAreFoundOnceBuilt) {
 // Without the lookup table an identity applied twice is kept twice; building
 // it keeps one, with the newer timestamp, as populate() would have.
 TEST(DedupDeferredLookup, BuildingMergesRepeatsToTheNewest) {
-    cluster::dedup_window_filter f(1500ms);
+    // An hour, so nothing ages out before the build: the window's edge is
+    // what tells which of the three timestamps was kept.
+    constexpr int64_t window = 3'600'000;
+    cluster::dedup_window_filter f(std::chrono::milliseconds{window});
     f.defer_lookup();
     f.populate(iobuf::from("x"), ts(1000));
     f.populate(iobuf::from("y"), ts(1000));
@@ -3719,8 +3722,9 @@ TEST(DedupDeferredLookup, BuildingMergesRepeatsToTheNewest) {
     const auto x = cluster::dedup_digest_of(iobuf::from("x"));
     ASSERT_TRUE(entries.contains({x.hi, x.lo}));
     EXPECT_EQ(entries.at({x.hi, x.lo}), 3000);
-    // Within the window of 3000, not of 1000 or 2000.
-    EXPECT_FALSE(f.filter(make_batch("x", "v", ts(4000))).has_value());
+    // Within the window of 3000, and of neither 1000 nor 2000.
+    EXPECT_FALSE(
+      f.filter(make_batch("x", "v", ts(3000 + window - 1))).has_value());
 }
 
 // The same applied stream, repeats and all, ends in the same index whether
@@ -3769,9 +3773,11 @@ TEST(DedupDeferredLookup, CeilingAndExpiryHoldWhileDeferred) {
     cluster::dedup_window_filter capped_eager(3'600'000ms, 1'000);
     capped.defer_lookup();
     for (int i = 0; i < 10'000; ++i) {
+        // Spread over the cursor's histogram: an index packed into one narrow
+        // range is never trimmed for capacity (see finish_pass()).
         const auto key = iobuf::from(fmt::format("c{}", i));
-        capped.populate(key.copy(), ts(1000 + i));
-        capped_eager.populate(key.copy(), ts(1000 + i));
+        capped.populate(key.copy(), ts(1000 + i * 100));
+        capped_eager.populate(key.copy(), ts(1000 + i * 100));
         ASSERT_LE(capped.map_size(), 1'000u);
     }
     EXPECT_GT(capped.capacity_evicted_entries(), 0u);
