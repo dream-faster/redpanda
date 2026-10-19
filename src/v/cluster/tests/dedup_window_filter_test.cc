@@ -1774,7 +1774,8 @@ model::record_batch make_varied_batch() {
 // byte at a time only for a field that spans two: wherever the boundaries
 // fall, it reads what a single fragment yields.
 TEST(DedupIdentityWalk, IsIndependentOfFragmentation) {
-    const auto batch = make_varied_batch();
+    const auto batch = refragmented(
+      make_varied_batch(), [] { return std::numeric_limits<size_t>::max(); });
     ASSERT_EQ(fragments_of(batch.data()), 1u);
     const std::optional<ss::sstring> header{"dedup-id"};
     const auto by_key = walk_spans(batch, std::nullopt);
