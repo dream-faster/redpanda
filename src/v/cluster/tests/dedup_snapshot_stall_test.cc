@@ -126,7 +126,6 @@ struct clock {
     using rep = duration::rep;
     using period = duration::period;
     using time_point = std::chrono::time_point<clock>;
-    static constexpr bool is_steady = true;
 
     static time_point now() noexcept {
         timespec ts{};
