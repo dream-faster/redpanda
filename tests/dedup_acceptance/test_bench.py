@@ -74,6 +74,11 @@ class Scenario:
     # Producers send in pairs, both of a pair the same identities in the same
     # order, so each identity arrives twice at about the same time.
     redundant: bool = False
+    # How many records the second producer of a pair runs ahead of the
+    # first. At 0 a request from either holds only identities the other
+    # sent in the same tick; ahead, every request holds some the other has
+    # in flight and some it has not sent yet.
+    lead: int = 0
     header: bool = False
     compression: str = "none"
     # 1: one broker; 3: three brokers, every partition on all of them.
@@ -125,6 +130,15 @@ SCENARIOS = [
         replicas=3,
         note="two producers send every key at about the same time",
     ),
+    Scenario(
+        "rf3 key, redundant producers, one ahead",
+        dedup=True,
+        redundant=True,
+        lead=1,
+        replicas=3,
+        note="as above, one producer a record ahead: every request partly "
+        "duplicates one in flight",
+    ),
     Scenario("rf3 baseline, lz4", dedup=False, replicas=3, compression="lz4"),
     Scenario(
         "rf3 key, redundant producers, lz4",
@@ -137,9 +151,10 @@ SCENARIOS = [
 
 
 def _produce_worker(args) -> tuple[float, int]:
-    brokers, topic, worker, n, dup_every, redundant, header, compression = args
+    brokers, topic, worker, n, dup_every, redundant, lead, header, compression = args
     # A redundant pair shares its identities: both send stream worker // 2.
     stream = worker // 2 if redundant else worker
+    shift = lead if redundant and worker % 2 else 0
     p = Producer(
         {
             "bootstrap.servers": brokers,
@@ -163,7 +178,7 @@ def _produce_worker(args) -> tuple[float, int]:
 
     start = time.monotonic()
     for i in range(n):
-        ident = i // dup_every if dup_every else i
+        ident = (i // dup_every if dup_every else i) + shift
         key = f"w{stream}-{ident:012d}".encode()
         kw = {"headers": [(HEADER, key)]} if header else {}
         while True:
@@ -189,8 +204,7 @@ def _latency(brokers: str, topic: str, s: Scenario) -> dict[str, float]:
     errors = 0
     lock = threading.Lock()
 
-    def run(prefix: str) -> None:
-        nonlocal errors
+    def make_producer() -> Producer:
         p = Producer(
             {
                 "bootstrap.servers": brokers,
@@ -201,6 +215,13 @@ def _latency(brokers: str, topic: str, s: Scenario) -> dict[str, float]:
                 "message.timeout.ms": 120_000,
             }
         )
+        # Metadata and connections up front, so neither producer's start is
+        # held back by them.
+        p.list_topics(topic, timeout=30)
+        return p
+
+    def run(p: Producer, start: float, shift: int) -> None:
+        nonlocal errors
         mine: list[float] = []
         failed = 0
 
@@ -213,7 +234,6 @@ def _latency(brokers: str, topic: str, s: Scenario) -> dict[str, float]:
 
         total = int(LATENCY_RATE * LATENCY_SECONDS)
         per_tick = max(1, LATENCY_RATE // 1000)
-        start = time.monotonic()
         sent = 0
         while sent < total:
             due = start + sent / LATENCY_RATE
@@ -222,7 +242,7 @@ def _latency(brokers: str, topic: str, s: Scenario) -> dict[str, float]:
                 time.sleep(due - now)
             for _ in range(min(per_tick, total - sent)):
                 ident = sent // s.duplicate_every if s.duplicate_every else sent
-                key = f"{prefix}-{ident:012d}".encode()
+                key = f"lat-{ident + shift:012d}".encode()
                 kw = {"headers": [(HEADER, key)]} if s.header else {}
                 p.produce(topic, value=VALUE, key=key, on_delivery=cb, **kw)
                 sent += 1
@@ -232,8 +252,15 @@ def _latency(brokers: str, topic: str, s: Scenario) -> dict[str, float]:
             latencies.extend(mine)
             errors += failed
 
-    producers = 2 if s.redundant else 1
-    threads = [threading.Thread(target=run, args=("lat",)) for _ in range(producers)]
+    # In step: the redundant pair shares one schedule, so each identity is
+    # sent by both within the same millisecond tick and the second copy
+    # arrives while the first is still being replicated.
+    producers = [make_producer() for _ in range(2 if s.redundant else 1)]
+    start = time.monotonic() + 0.5
+    threads = [
+        threading.Thread(target=run, args=(p, start, s.lead * i))
+        for i, p in enumerate(producers)
+    ]
     for th in threads:
         th.start()
     for th in threads:
@@ -287,6 +314,7 @@ def _run(c: Cluster, s: Scenario) -> dict:
                     per,
                     s.duplicate_every,
                     s.redundant,
+                    s.lead,
                     s.header,
                     s.compression,
                 )
