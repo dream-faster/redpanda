@@ -682,8 +682,7 @@ TEST(DedupWindowFilter, SplicedRebuildMatchesTheBuilder) {
             }
             std::vector<bool> dropped;
             for (const auto& spec : specs) {
-                dropped.push_back(
-                  spec.key && !seen.insert(*spec.key).second);
+                dropped.push_back(spec.key && !seen.insert(*spec.key).second);
             }
             const auto kept = std::ranges::count(dropped, false);
 

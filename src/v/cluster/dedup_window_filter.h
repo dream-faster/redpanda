@@ -248,12 +248,13 @@ void for_each_dedup_identity(
                               : std::numeric_limits<int64_t>::max();
         }
         bool go_on = false;
-        if constexpr (std::is_invocable_v<
-                        F&,
-                        dedup_identity_lookup,
-                        dedup_identity_digest,
-                        model::timestamp,
-                        const dedup_record_span&>) {
+        if constexpr (
+          std::is_invocable_v<
+            F&,
+            dedup_identity_lookup,
+            dedup_identity_digest,
+            model::timestamp,
+            const dedup_record_span&>) {
             go_on = emit(
               lookup,
               digest,
