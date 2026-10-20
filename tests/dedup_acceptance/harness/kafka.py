@@ -153,19 +153,31 @@ def topic_config(brokers: str, name: str) -> dict[str, str]:
 def wait_for_leaders(
     brokers: str, topic: str, partitions: int, timeout_s: float = 60
 ) -> None:
+    # Asked of every broker, not one: a new client takes its metadata from
+    # whichever it reaches first, and a broker learns of new partitions a
+    # moment after the controller does. One still behind fails the client's
+    # next produce to them with an unknown partition, which it does not retry.
     deadline = time.monotonic() + timeout_s
+    behind = brokers.split(",")
     while time.monotonic() < deadline:
-        md = admin(brokers).list_topics(topic, timeout=10)
-        t = md.topics.get(topic)
-        if (
-            t is not None
-            and t.error is None
-            and len(t.partitions) == partitions
-            and all(p.leader >= 0 for p in t.partitions.values())
-        ):
+        behind = [b for b in behind if not _has_leaders(b, topic, partitions)]
+        if not behind:
             return
         time.sleep(0.5)
-    raise AssertionError(f"{topic} has no leader for every partition")
+    raise AssertionError(
+        f"{topic} has no leader for every partition on brokers {behind}"
+    )
+
+
+def _has_leaders(broker: str, topic: str, partitions: int) -> bool:
+    md = admin(broker).list_topics(topic, timeout=10)
+    t = md.topics.get(topic)
+    return (
+        t is not None
+        and t.error is None
+        and len(t.partitions) == partitions
+        and all(p.leader >= 0 for p in t.partitions.values())
+    )
 
 
 def delete_records(brokers: str, topic: str, partition: int, before_offset: int) -> int:
