@@ -348,7 +348,23 @@ wait_group() {
 }
 
 wait_group 2 upgrade-group || fail "group lost"
-rpk 1 topic list | grep -q compacted || fail "compacted topic lost"
+# The same bounded wait for the topic list: a node that has just rejoined can
+# answer before its metadata has caught up, and a check that asks once and
+# discards the output leaves nothing to tell that from a lost topic.
+wait_topic() {
+  local id="$1" topic="$2" out
+  for _ in $(seq 1 30); do
+    out=$(rpk "$id" topic list 2>&1) || true
+    if grep -qw "$topic" <<<"$out"; then
+      return 0
+    fi
+    sleep 2
+  done
+  echo "--- topic list as seen from node $id"
+  echo "$out"
+  return 1
+}
+wait_topic 1 compacted || fail "compacted topic lost"
 rpk 0 cluster config get controller_snapshot_max_age_sec | grep -q '^5$' ||
   fail "cluster config lost"
 
