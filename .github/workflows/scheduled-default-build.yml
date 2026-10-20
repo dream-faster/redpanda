@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   default-build:
-    runs-on: ubicloud-standard-4
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
