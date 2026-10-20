@@ -1079,11 +1079,18 @@ void dedup_window_filter::replace_oldest_visited(model::timestamp incoming) {
     // CapacityEvictionFailsOpenWhenNoSliceCanBeFreed), and only an entry
     // strictly older than the incoming one is replaced, so an index whose
     // entries all share the incoming timestamp keeps them.
-    if (_sweep_pos >= _index.size()) {
-        // The step ended with the cursor at the end, so there is nothing ahead
-        // of it in this pass. Wrap as the next step would, and look at the
-        // start of the next pass instead: on a small index that is every
-        // entry, and an empty window would replace nothing.
+    if (
+      _sweep_pos > 0
+      && _sweep_pos + capacity_emergency_budget > _index.size()) {
+        // Fewer than a window's worth of entries are left ahead of the cursor,
+        // and the array's tail is the newest arrivals: the oldest of a few of
+        // them is still a recent identity, which a resend would then get
+        // through. Wrap as the next step would, and look at the start of the
+        // next pass instead -- on a small index that is every entry. The tail
+        // goes unvisited this pass, so the pass bounds nothing.
+        if (_sweep_pos < _index.size()) {
+            _pass_saw_all = false;
+        }
         _sweep_pos = 0;
         finish_pass();
     }
