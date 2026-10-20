@@ -33,7 +33,7 @@ concurrency:
 jobs:
   acceptance:
     # Clusters of up to four brokers run side by side with the producers.
-    runs-on: ubicloud-standard-4
+    runs-on: ubuntu-24.04
     timeout-minutes: 150
     permissions:
       contents: read
