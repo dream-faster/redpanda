@@ -46,7 +46,7 @@ What changed in this PR, per record:
 The index itself takes at most about 31 bytes an entry, down from 50 with the
 general-purpose hash map it used before (measured by
 `dedup_snapshot_stall_test` at several sizes, which checks that this plus the
-20-byte packed snapshot entry fits the 52 bytes per entry the shard budget
+16-byte packed snapshot entry fits the 48 bytes per entry the shard budget
 turns memory into entries with).
 
 ## End to end: `test_bench.py`
