@@ -35,9 +35,8 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
-#include <memory>
-#include <new>
 #include <optional>
+#include <span>
 #include <stdexcept>
 #include <type_traits>
 #include <vector>
@@ -58,9 +57,9 @@ dedup_identity_digest dedup_digest_of(const iobuf& identity);
 ///
 /// One XXH3-128 pass, where two seeded xxhash64 passes used to read the
 /// identity twice. An identity nearly always lies in one piece of its batch's
-/// buffer, so the digester holds on to the first piece -- which must stay
-/// valid until digest() -- and hashes it in one call; only a second piece
-/// sets up the streaming state.
+/// buffer, so the digester holds on to the first piece and hashes it in one
+/// call; only a second piece sets up the streaming state, which lives in the
+/// digester itself rather than on the heap.
 class dedup_digester {
 public:
     dedup_digester() = default;
@@ -70,41 +69,35 @@ public:
     dedup_digester& operator=(dedup_digester&&) = delete;
     ~dedup_digester() = default;
 
+    /// Does not copy: the first non-empty piece is read only by digest(), or
+    /// by the update() that brings a second one, so it must stay valid and
+    /// unchanged until then.
     void update(const char* data, size_t size) {
+        if (size == 0) {
+            return;
+        }
         if (_state) {
-            XXH3_128bits_update(_state.get(), data, size);
+            XXH3_128bits_update(&*_state, data, size);
         } else if (_first == nullptr) {
             _first = data;
             _first_size = size;
         } else {
-            _state.reset(XXH3_createState());
-            if (!_state) [[unlikely]] {
-                throw std::bad_alloc();
-            }
-            XXH3_128bits_reset(_state.get());
-            XXH3_128bits_update(_state.get(), _first, _first_size);
-            XXH3_128bits_update(_state.get(), data, size);
+            XXH3_128bits_reset(&_state.emplace());
+            XXH3_128bits_update(&*_state, _first, _first_size);
+            XXH3_128bits_update(&*_state, data, size);
         }
     }
     /// In dedup_canonical_digest() form: the 96 bits the index keeps.
     dedup_identity_digest digest() const {
-        XXH128_hash_t h{};
-        if (_state) {
-            h = XXH3_128bits_digest(_state.get());
-        } else {
-            h = XXH3_128bits(_first, _first_size);
-        }
+        const XXH128_hash_t h = _state ? XXH3_128bits_digest(&*_state)
+                                       : XXH3_128bits(_first, _first_size);
         return dedup_canonical_digest({.hi = h.high64, .lo = h.low64});
     }
 
 private:
-    struct free_state {
-        void operator()(XXH3_state_t* s) const noexcept { XXH3_freeState(s); }
-    };
-
     const char* _first{nullptr};
     size_t _first_size{0};
-    std::unique_ptr<XXH3_state_t, free_state> _state;
+    std::optional<XXH3_state_t> _state;
 };
 
 struct dedup_index_entry {
@@ -135,8 +128,6 @@ enum class dedup_identity_lookup {
 /// Where one record lies in its batch's records buffer, as offsets from the
 /// start of the buffer, for a caller that copies records out of it.
 struct dedup_record_span {
-    /// The record's length varint.
-    size_t begin{0};
     /// The first byte the length counts: the attributes.
     size_t body{0};
     /// The offset delta varint, and the first byte after it.
@@ -144,7 +135,6 @@ struct dedup_record_span {
     size_t after_offset_delta{0};
     /// One past the record's last byte.
     size_t end{0};
-    int64_t timestamp_delta{0};
 };
 
 /// \brief Reads a batch's records buffer for for_each_dedup_identity().
@@ -172,15 +162,11 @@ public:
     /// vint::max_length bytes, and what there is of it at the buffer's end.
     int64_t read_varlong() noexcept {
         if (_e - _p >= static_cast<ptrdiff_t>(vint::max_length)) [[likely]] {
-            uint64_t v = 0;
-            for (uint32_t shift = 0; shift < 64; shift += 7) {
-                const auto b = static_cast<uint8_t>(*_p++);
-                v |= uint64_t{b & 0x7fU} << shift;
-                if ((b & 0x80U) == 0) {
-                    break;
-                }
-            }
-            return vint::decode_zigzag(v);
+            const auto [v, n] = vint::deserialize(
+              std::span<const uint8_t>(
+                reinterpret_cast<const uint8_t*>(_p), vint::max_length));
+            _p += n;
+            return v;
         }
         return read_varlong_slow();
     }
@@ -237,20 +223,22 @@ private:
             load();
         }
     }
+    // Gathers the varint's bytes across fragments for vint::deserialize().
     int64_t read_varlong_slow() noexcept {
-        uint64_t v = 0;
-        for (uint32_t shift = 0; shift < 64; shift += 7) {
+        std::array<uint8_t, vint::max_length> buf{};
+        size_t n = 0;
+        while (n < buf.size()) {
             settle();
             if (_p == _e) {
                 break;
             }
             const auto b = static_cast<uint8_t>(*_p++);
-            v |= uint64_t{b & 0x7fU} << shift;
+            buf[n++] = b;
             if ((b & 0x80U) == 0) {
                 break;
             }
         }
-        return vint::decode_zigzag(v);
+        return vint::deserialize(std::span<const uint8_t>(buf.data(), n)).first;
     }
 
     iobuf::const_iterator _it;
@@ -324,7 +312,6 @@ void for_each_dedup_identity(
         // The length counts the bytes after itself. Whatever dedup does not
         // read is skipped as one span to this end, rather than header by
         // header.
-        [[maybe_unused]] const size_t begin = parser.bytes_consumed();
         const auto size = read_length();
         if (size < 0) [[unlikely]] {
             throw std::out_of_range(
@@ -412,12 +399,10 @@ void for_each_dedup_identity(
               digest,
               model::timestamp{ts},
               dedup_record_span{
-                .begin = begin,
                 .body = body,
                 .offset_delta = offset_delta,
                 .after_offset_delta = after_offset_delta,
-                .end = record_end,
-                .timestamp_delta = ts_delta});
+                .end = record_end});
         } else {
             go_on = emit(lookup, digest, model::timestamp{ts});
         }
@@ -872,8 +857,11 @@ public:
     /// and two thirds of the memory. defer_lookup() frees the lookup table,
     /// and populate() and restores keep entries that way until
     /// build_lookup(), which indexes them all in bulk, yielding as it goes.
-    /// filter_request() and revert_request() need lookup_ready(); a build
-    /// that defer_lookup(), clear() or a restore interrupts leaves it false.
+    /// filter_request() and revert_request() need lookup_ready(). A build
+    /// that defer_lookup() interrupts, or that fails, leaves it false until
+    /// the next build_lookup(); one that clear() or a restore interrupts
+    /// stops, and the index that replaced the one it was building is fully
+    /// indexed unless deferred, so it is true again.
     void defer_lookup();
     ss::future<> build_lookup();
     bool lookup_ready() const {

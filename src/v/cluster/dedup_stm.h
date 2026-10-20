@@ -140,11 +140,14 @@ private:
     ///   on entry_size, and rebuilds as above.
     ///
     /// The break runs both ways: an older binary rejects a newer snapshot on
-    /// compat version and rebuilds the same way, so a raft snapshot crossing a
-    /// rolling upgrade in either direction costs a rebuild, not a failed
-    /// partition. Each replica digests what it applies itself, so replicas on
-    /// different builds never compare digests otherwise. Version 1 snapshots
-    /// only ever lived in the kvstore, which this STM no longer reads.
+    /// compat version the same way, so a raft snapshot crossing a rolling
+    /// upgrade in either direction never fails the partition. It is not
+    /// rebuilt from, though: a raft snapshot installs where the log before
+    /// its offset is gone, so the identities only it held are lost on that
+    /// replica, which indexes from the snapshot offset on. Each replica
+    /// digests what it applies itself, so replicas on different builds never
+    /// compare digests otherwise. Version 1 snapshots only ever lived in the
+    /// kvstore, which this STM no longer reads.
     struct state_snapshot
       : serde::envelope<
           state_snapshot,
@@ -214,10 +217,12 @@ private:
     void setup_metrics();
 
     /// Wait until every request in \p introducers is known appended. An
-    /// error if one never was, or did not resolve within the sync timeout:
-    /// the identities a request dropped against it may have no durable copy.
-    ss::future<std::optional<errc>>
-    wait_for_introducers(const std::vector<inflight_ptr>& introducers);
+    /// error if one never was, or did not resolve within the sync timeout or
+    /// before \p as fired: the identities a request dropped against it may
+    /// have no durable copy.
+    ss::future<std::optional<errc>> wait_for_introducers(
+      const std::vector<inflight_ptr>& introducers,
+      std::optional<std::reference_wrapper<ss::abort_source>> as);
 
     /// Resolve an in-flight request: drop its identities from the pending
     /// set, revert its insertions if the batch was never appended, and
@@ -280,12 +285,18 @@ private:
     // Requests admitted and not yet settled. While any is, the lookup table
     // stays: settle() may have to revert one (see do_apply()).
     size_t _unsettled{0};
-    /// Last offset of a batch this leader admitted for a request with weaker
-    /// acks than quorum_ack, which raft reports appended before it commits.
-    /// Every other identity in the index that is not pending is committed,
-    /// so this is all an all-duplicate quorum-ack request has to wait to
-    /// commit; see do_replicate().
+    /// Last offset, in _relaxed_admitted_term, of a batch this leader admitted
+    /// and raft reported done before it committed: one with weaker acks than
+    /// quorum_ack, or a quorum-ack one under write caching, which raft
+    /// reports once a majority appended it, flushed or not. Every other
+    /// identity in the index that is not pending is committed, so this is
+    /// all an all-duplicate quorum-ack request has to wait to commit; see
+    /// do_replicate().
     model::offset _relaxed_admitted_offset{model::offset::min()};
+    /// A later term may have truncated what an earlier one admitted, and its
+    /// sync committed whatever survived, so the offset above only fences
+    /// requests in the term it was recorded in.
+    model::term_id _relaxed_admitted_term;
     /// Committed batches do_apply() could not read; see do_apply().
     uint64_t _batches_skipped{0};
     uint64_t _lookup_builds{0};
