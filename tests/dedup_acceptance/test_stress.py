@@ -767,9 +767,15 @@ def test_many_small_idle_partitions_do_not_starve_a_busy_one(
     # A twentieth of the shard is what each idle partition held. The busy one
     # takes room from them until it is within a tenth of their size, where it
     # counts as one of the largest and trims itself instead: parity with the
-    # idle partitions, less that margin, is the designed steady state.
+    # idle partitions, less that margin, is the designed steady state. Whether
+    # it is among the largest is decided once per cursor step, so the step
+    # that crosses the margin can trim up to a step's worth below it -- at
+    # most the 64 entries of the step taken at the ceiling.
     share = limit // idle
-    assert m.sum(PART_ENTRIES, topic=t, partition=str(idle)) >= share - share // 10
+    step = 64
+    assert (
+        m.sum(PART_ENTRIES, topic=t, partition=str(idle)) >= share - share // 10 - step
+    )
     newest = [f"busy-{i}".encode() for i in range(busy - 500, busy)]
     assert _readmitted(c, t, idle, newest) == 0
 
