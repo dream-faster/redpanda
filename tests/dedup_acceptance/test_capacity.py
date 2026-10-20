@@ -398,6 +398,212 @@ def test_lowering_the_shard_limit_takes_effect_on_restart(make_cluster, pytestco
     assert c.node(0).metrics().sum(SHARD_ENTRIES) <= 1000
 
 
+# -- changing the limits without a restart -----------------------------------
+
+LIVE_LIMITS = ("dedup_max_entries_per_partition", "dedup_max_entries_per_shard")
+
+
+def require_live_limits(c: Cluster, pytestconfig) -> None:
+    """Builds that apply both limits without a restart say so in the cluster
+    config schema."""
+    schema = c.config_schema()
+    if any(schema[p]["needs_restart"] for p in LIVE_LIMITS):
+        msg = "image needs a restart to change the dedup entry limits"
+        if pytestconfig.getoption("--require-new-build"):
+            pytest.fail(msg)
+        pytest.skip(msg)
+
+
+def set_live(c: Cluster, **values) -> None:
+    """Change cluster properties and wait for every node to apply them,
+    asserting none of them asks for a restart to do so."""
+    status = c.wait_config_applied(c.set_config(**values))
+    assert not any(s["restart"] for s in status), status
+
+
+def readmitted(c: Cluster, t: str, partition: int, keys: list[bytes]) -> int:
+    """How many of `keys`, sent again now, the partition admits: the ones its
+    index no longer remembers."""
+    now = int(time.time() * 1000)
+    return admitted_on_resend(
+        c, t, partition, [Rec(k, b"again", timestamp_ms=now) for k in keys]
+    )
+
+
+def recent(n: int, behind_s: int = 60):
+    """Ascending timestamps ending `behind_s` seconds ago: newer than anything
+    spread_timestamps() wrote, and never ahead of the broker's clock."""
+    start = int(time.time() * 1000) - behind_s * 1000 - n
+    return lambda i: start + i
+
+
+def test_limits_change_without_a_restart(make_cluster, pytestconfig):
+    c = make_cluster(
+        nodes=1, smp=2, cluster_config={"dedup_max_entries_per_shard": 4000}
+    )
+    require_new_build(c, pytestconfig)
+    require_live_limits(c, pytestconfig)
+    started = c.node(0).metrics().sum("vectorized_application_uptime")
+    assert [v for _, v in c.node(0).metrics().select(SHARD_MAX)] == [4000, 4000]
+
+    set_live(c, dedup_max_entries_per_shard=9000, dedup_max_entries_per_partition=700)
+    kafka.eventually(lambda: _assert_shard_max(c, [9000, 9000]), timeout_s=30)
+    # 0 derives the limit from shard memory again, as it does at startup.
+    set_live(c, dedup_max_entries_per_shard=0)
+    kafka.eventually(lambda: _assert_derived_shard_max(c), timeout_s=30)
+    # The same process throughout.
+    assert c.node(0).metrics().sum("vectorized_application_uptime") >= started
+
+
+def test_raising_the_shard_limit_live_indexes_new_identities(
+    make_cluster, pytestconfig
+):
+    c = make_cluster(
+        nodes=1, smp=1, cluster_config={"dedup_max_entries_per_shard": 1000}
+    )
+    require_new_build(c, pytestconfig)
+    require_live_limits(c, pytestconfig)
+    t = topic_on_one_node(c, 2)
+    for p in range(2):
+        kafka.produce_bulk(
+            c.brokers,
+            t,
+            p,
+            [f"p{p}-{i}".encode() for i in range(1500)],
+            timestamp_ms=spread_timestamps(1500, 3600),
+        )
+    m = c.node(0).metrics()
+    assert m.sum(SHARD_ENTRIES) <= 1000
+    held = m.sum(SHARD_ENTRIES)
+
+    set_live(c, dedup_max_entries_per_shard=20_000)
+    kafka.eventually(lambda: _assert_shard_max(c, [20_000]), timeout_s=30)
+    unindexed = c.node(0).metrics().sum(UNINDEXED, topic=t)
+    fresh = [f"fresh-{i}".encode() for i in range(3000)]
+    kafka.produce_bulk(c.brokers, t, 0, fresh, timestamp_ms=recent(len(fresh)))
+    m = c.node(0).metrics()
+    # Every new identity was indexed, on top of what the shard already held
+    # (less the few of its oldest entries that may have aged out since).
+    assert m.sum(UNINDEXED, topic=t) == unindexed
+    assert m.sum(SHARD_ENTRIES) >= 0.9 * held + len(fresh)
+    assert m.sum(SHARD_ENTRIES) <= 20_000
+    assert readmitted(c, t, 0, fresh) == 0
+
+
+def test_raising_the_partition_ceiling_live_indexes_new_identities(
+    make_cluster, pytestconfig
+):
+    c = make_cluster(
+        nodes=1, smp=1, cluster_config={"dedup_max_entries_per_partition": 500}
+    )
+    require_new_build(c, pytestconfig)
+    require_live_limits(c, pytestconfig)
+    t = topic_on_one_node(c, 1)
+    keys = [f"k{i}".encode() for i in range(3000)]
+    kafka.produce_bulk(
+        c.brokers, t, 0, keys, timestamp_ms=spread_timestamps(len(keys), 3600)
+    )
+    m = c.node(0).metrics()
+    assert m.sum(PART_ENTRIES, topic=t) <= 500
+    held = m.sum(PART_ENTRIES, topic=t)
+
+    set_live(c, dedup_max_entries_per_partition=10_000)
+    unindexed = c.node(0).metrics().sum(UNINDEXED, topic=t)
+    fresh = [f"fresh-{i}".encode() for i in range(3000)]
+    kafka.produce_bulk(c.brokers, t, 0, fresh, timestamp_ms=recent(len(fresh)))
+    m = c.node(0).metrics()
+    assert m.sum(UNINDEXED, topic=t) == unindexed
+    assert m.sum(PART_ENTRIES, topic=t) >= 0.9 * held + len(fresh)
+    assert readmitted(c, t, 0, fresh) == 0
+
+
+def test_lowering_the_partition_ceiling_live_keeps_the_newest(
+    make_cluster, pytestconfig
+):
+    """Lowered below what an index holds, the ceiling drops nothing at once;
+    the index shrinks back with its traffic, a bounded number of its oldest
+    entries per new identity, and indexes the new identities meanwhile."""
+    c = make_cluster(nodes=1, smp=1)
+    require_new_build(c, pytestconfig)
+    require_live_limits(c, pytestconfig)
+    t = topic_on_one_node(c, 1)
+    old = [f"old-{i}".encode() for i in range(5000)]
+    kafka.produce_bulk(
+        c.brokers, t, 0, old, timestamp_ms=spread_timestamps(len(old), 3600)
+    )
+    assert c.node(0).metrics().sum(PART_ENTRIES, topic=t) == 5000
+
+    set_live(c, dedup_max_entries_per_partition=500)
+    # Nothing is trimmed without traffic.
+    time.sleep(2)
+    m = c.node(0).metrics()
+    assert m.sum(PART_ENTRIES, topic=t) == 5000
+    unindexed = m.sum(UNINDEXED, topic=t)
+
+    fresh = [f"fresh-{i}".encode() for i in range(300)]
+    kafka.produce_bulk(c.brokers, t, 0, fresh, timestamp_ms=recent(len(fresh)))
+    m = c.node(0).metrics()
+    assert m.sum(PART_ENTRIES, topic=t) <= 500
+    assert m.sum(EVICTED, topic=t) >= 4500
+    # Shrinking took old entries and left the new identities indexed.
+    assert m.sum(UNINDEXED, topic=t) - unindexed <= 20
+    assert readmitted(c, t, 0, fresh[-100:]) <= 5
+    # It stays under the new ceiling.
+    more = [f"more-{i}".encode() for i in range(2000)]
+    kafka.produce_bulk(c.brokers, t, 0, more, timestamp_ms=recent(len(more), 30))
+    assert c.node(0).metrics().sum(PART_ENTRIES, topic=t) <= 500
+    # The oldest identities were let go.
+    assert readmitted(c, t, 0, old[:100]) >= 90
+
+
+def test_lowering_the_shard_limit_live_shrinks_the_shard(make_cluster, pytestconfig):
+    """Lowered below what the shard holds, the shard limit drops nothing at
+    once. New identities anywhere on the shard then trim its largest indices,
+    an idle one's included, until the shard is back under."""
+    c = make_cluster(
+        nodes=1, smp=1, cluster_config={"dedup_max_entries_per_shard": 8000}
+    )
+    require_new_build(c, pytestconfig)
+    require_live_limits(c, pytestconfig)
+    t = topic_on_one_node(c, 2)
+    for p in range(2):
+        kafka.produce_bulk(
+            c.brokers,
+            t,
+            p,
+            [f"p{p}-{i}".encode() for i in range(3000)],
+            timestamp_ms=spread_timestamps(3000, 3600),
+        )
+    assert c.node(0).metrics().sum(SHARD_ENTRIES) == 6000
+
+    set_live(c, dedup_max_entries_per_shard=1000)
+    kafka.eventually(lambda: _assert_shard_max(c, [1000]), timeout_s=30)
+    m = c.node(0).metrics()
+    assert m.sum(SHARD_ENTRIES) == 6000
+    unindexed = m.sum(UNINDEXED, topic=t)
+
+    fresh = [f"fresh-{i}".encode() for i in range(500)]
+    kafka.produce_bulk(c.brokers, t, 0, fresh, timestamp_ms=recent(len(fresh)))
+    m = c.node(0).metrics()
+    assert m.sum(SHARD_ENTRIES) <= 1000
+    assert m.sum(SHARD_ENTRIES) == m.sum(PART_ENTRIES)
+    # The idle partition gave up room too.
+    assert m.sum(PART_ENTRIES, topic=t, partition="1") < 3000
+    assert m.sum(UNINDEXED, topic=t) - unindexed <= 10
+    assert readmitted(c, t, 0, fresh[-50:]) <= 5
+
+
+def _assert_shard_max(c: Cluster, want: list[int]):
+    got = sorted(v for _, v in c.node(0).metrics().select(SHARD_MAX))
+    assert got == sorted(want), got
+
+
+def _assert_derived_shard_max(c: Cluster):
+    # The default limit is far above anything set explicitly above.
+    got = [v for _, v in c.node(0).metrics().select(SHARD_MAX)]
+    assert len(got) == 2 and all(v > 100_000 for v in got), got
+
+
 def test_dedup_snapshots_are_files_and_the_kvstore_stays_small(
     make_cluster, pytestconfig
 ):
