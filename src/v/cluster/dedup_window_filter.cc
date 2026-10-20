@@ -934,7 +934,7 @@ void dedup_window_filter::restart_pass() {
 
 void dedup_window_filter::sweep_for_new_identity() {
     reclaim_expired_elsewhere();
-    sweep_step(sweep_budget, /*spread=*/true);
+    sweep_step(sweep_budget);
 }
 
 void dedup_window_filter::reclaim_expired_elsewhere() {
@@ -976,7 +976,7 @@ void dedup_window_filter::reclaim_expired_step(size_t budget) {
     }
 }
 
-void dedup_window_filter::sweep_step(size_t budget, bool spread) {
+void dedup_window_filter::sweep_step(size_t budget) {
     if (building()) {
         return;
     }
@@ -1003,11 +1003,6 @@ void dedup_window_filter::sweep_step(size_t budget, bool spread) {
     if (_sweep_skipped) {
         restart_pass();
     }
-    const bool spreading = spread && !counting;
-    if (spreading) {
-        budget = spread_sweep_budget;
-    }
-    bool erased_expired = false;
 
     for (size_t step = 0; step < budget; ++step) {
         if (_index.empty()) {
@@ -1026,15 +1021,10 @@ void dedup_window_filter::sweep_step(size_t budget, bool spread) {
         ++_sweep_visits;
         const auto stamp = model::timestamp{_index.timestamp_at(_sweep_pos)};
         if (!is_live(stamp.value(), cutoff)) {
-            if (spreading && erased_expired) {
-                // The next step starts here.
-                return;
-            }
             // Expired: it can never match again, so dropping it costs no
             // coverage. The cursor does not advance -- the erase moved the
             // array's last, still unvisited, entry into this slot.
             erase_at(_sweep_pos);
-            erased_expired = true;
             continue;
         }
         if (

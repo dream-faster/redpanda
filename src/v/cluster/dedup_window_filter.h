@@ -1038,11 +1038,7 @@ private:
     /// wraps at the end of the value array, so successive calls walk the whole
     /// index in bounded slices instead of one pass. This is the only eviction
     /// the produce and apply paths perform.
-    ///
-    /// A \p spread step, the one each new identity takes, erases at most one
-    /// expired entry while the index and its shard are far from their limits
-    /// (see spread_sweep_budget).
-    void sweep_step(size_t budget, bool spread = false);
+    void sweep_step(size_t budget);
 
     /// One bounded sweep step taken because a new identity stamped
     /// \p incoming arrived with the index at the hard ceiling. Returns whether
@@ -1181,17 +1177,6 @@ private:
     // every replica, the followers stalled together ~0.5s later and left no
     // one free to complete an acks=all quorum.
     static constexpr size_t sweep_budget = 8;
-    // The visits a spread step may make far from every limit, where it stops
-    // at the second expired entry instead. Expired entries lie together, in
-    // arrival order, so the step erases one and the next step the next. In a
-    // window's steady state that measured 13-20% less per new identity than
-    // eight visits erasing every expired entry they find, on indices of
-    // 0.8-3M entries, with about three visits per identity and 2-8% fewer
-    // entries held, the cursor reaching expired ones sooner. A backlog of
-    // expired entries -- a window just shortened -- drains at one per new
-    // identity until the index nears a limit, where the step erases all it
-    // finds again.
-    static constexpr size_t spread_sweep_budget = 32;
     // Extra entries the cursor may visit when a new identity arrives with the
     // index exactly at the hard ceiling: enough to find something freeable
     // while the soft limit keeps the tail trimmed, small enough to pay on

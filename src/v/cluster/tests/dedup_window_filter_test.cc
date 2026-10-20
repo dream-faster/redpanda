@@ -1113,9 +1113,7 @@ TEST(DedupWindowFilter, LeaderAndFollowerPathsConvergeAcrossTheEntryLimit) {
 // array. Both are reset when the array is replaced, rather than carried into a
 // map they no longer refer to.
 TEST(DedupWindowFilter, RestoreAndClearResetTheSweepCursor) {
-    // A ceiling the index is past half of, so a step erases every expired
-    // entry it visits rather than one (see spread_sweep_budget).
-    cluster::dedup_window_filter f(1000ms, 500);
+    cluster::dedup_window_filter f(1000ms);
     for (size_t i = 0; i < 300; ++i) {
         f.populate(iobuf::from(fmt::format("s-{}", i)), ts(0));
     }
@@ -2701,9 +2699,9 @@ TEST(DedupShardBudget, ExpirySweepsGiveEntriesBack) {
     cluster::dedup_window_filter f(1000ms, 1'000, budget);
     populate_n(f, "old", 64, 1000, 0);
     ASSERT_EQ(budget->entries, 64u);
-    // Each new identity far past the window sweeps an expired entry out.
+    // Each new identity far past the window sweeps eight expired entries.
     populate_n(f, "new", 4, 1'000'000, 0);
-    EXPECT_LE(f.map_size(), 64u);
+    EXPECT_LT(f.map_size(), 64u);
     EXPECT_EQ(budget->entries, f.map_size());
 }
 
@@ -3956,28 +3954,5 @@ TEST(DedupShardBudget, IdleIndicesFilledFarFromTheLimitStillGiveRoom) {
           busy.filter(make_batch(fmt::format("busy-{}", i), "dup", ts(now)))
             .has_value())
           << "busy-" << i;
-    }
-}
-
-// Far from every limit a new identity's step erases one expired entry and
-// stops at the next; past half of a limit it erases all it visits. Both
-// paths take the same steps, so leader and follower hold the same entries.
-TEST(DedupWindowFilter, SweepPacesExpiryByHowNearALimitTheIndexIs) {
-    auto run = [](size_t ceiling, bool leader) {
-        cluster::dedup_window_filter f(1000ms, ceiling);
-        for (size_t i = 0; i < 64; ++i) {
-            f.populate(iobuf::from(fmt::format("old-{}", i)), ts(1000));
-        }
-        if (leader) {
-            EXPECT_TRUE(
-              f.filter(make_batch("new", "v", ts(1'000'000))).has_value());
-        } else {
-            f.populate(iobuf::from("new"), ts(1'000'000));
-        }
-        return f.map_size();
-    };
-    for (const bool leader : {false, true}) {
-        EXPECT_EQ(run(10'000, leader), 64u - 1u + 1u) << leader;
-        EXPECT_EQ(run(100, leader), 64u - 8u + 1u) << leader;
     }
 }
