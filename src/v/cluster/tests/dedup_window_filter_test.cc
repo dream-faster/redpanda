@@ -3916,3 +3916,43 @@ TEST(DedupDeferredLookup, DeferredIndexesShareTheShardBudget) {
     ASSERT_TRUE(follower.lookup_ready());
     EXPECT_EQ(budget->entries, leader.map_size() + follower.map_size());
 }
+
+// The acceptance scenario of ManySmallIdleIndicesCannotStarveABusyOne at its
+// real scale and timestamps: the first idle indices fill while the shard is
+// below half, where their sweeps have nothing to do, and the busy one must
+// still grow to parity with them and keep every one of its newest identities.
+TEST(DedupShardBudget, IdleIndicesFilledFarFromTheLimitStillGiveRoom) {
+    constexpr size_t shard_limit = 20'000;
+    constexpr size_t idle_count = 20;
+    constexpr size_t share = shard_limit / idle_count;
+    constexpr auto window = std::chrono::milliseconds{3'600'000};
+    constexpr size_t no_ceiling = 1'000'000'000;
+    const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                          std::chrono::system_clock::now().time_since_epoch())
+                          .count();
+    auto budget = make_budget(shard_limit);
+    std::vector<std::unique_ptr<cluster::dedup_window_filter>> idle;
+    for (size_t j = 0; j < idle_count; ++j) {
+        idle.push_back(
+          std::make_unique<cluster::dedup_window_filter>(
+            window, no_ceiling, budget));
+        populate_n(
+          *idle.back(),
+          fmt::format("idle{}", j),
+          share,
+          now - 3'000'000 + static_cast<int64_t>(j) * 10'000);
+    }
+    cluster::dedup_window_filter busy(window, no_ceiling, budget);
+    constexpr size_t busy_count = 20'000;
+    populate_n(
+      busy, "busy", busy_count, now - 1'000'000, 1'000'000 / busy_count);
+    EXPECT_LE(budget->entries, shard_limit);
+    EXPECT_EQ(busy.unindexed_records(), 0);
+    EXPECT_GE(busy.map_size(), share - share / 10 - 64);
+    for (size_t i = busy_count - 500; i < busy_count; ++i) {
+        EXPECT_FALSE(
+          busy.filter(make_batch(fmt::format("busy-{}", i), "dup", ts(now)))
+            .has_value())
+          << "busy-" << i;
+    }
+}
