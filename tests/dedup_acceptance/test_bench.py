@@ -83,6 +83,9 @@ class Scenario:
     compression: str = "none"
     # 1: one broker; 3: three brokers, every partition on all of them.
     replicas: int = 1
+    # The topic's dedup window. At 2 s the index is in its steady state within
+    # moments: entries expire as fast as new identities arrive.
+    window_ms: int = 3_600_000
     cluster_config: dict = field(default_factory=dict)
     note: str = ""
 
@@ -140,6 +143,21 @@ SCENARIOS = [
         "duplicates one in flight",
     ),
     Scenario("rf3 baseline, lz4", dedup=False, replicas=3, compression="lz4"),
+    Scenario(
+        "rf3 key, 50% duplicates, 2 s window",
+        dedup=True,
+        duplicate_every=2,
+        replicas=3,
+        window_ms=2_000,
+        note="steady state: entries expire as fast as they arrive",
+    ),
+    Scenario(
+        "rf3 key, redundant producers, 2 s window",
+        dedup=True,
+        redundant=True,
+        replicas=3,
+        window_ms=2_000,
+    ),
     Scenario(
         "rf3 key, redundant producers, lz4",
         dedup=True,
@@ -295,7 +313,7 @@ def _run(c: Cluster, s: Scenario) -> dict:
     topic = kafka.unique("bench")
     cfg = {}
     if s.dedup:
-        cfg[kafka.DEDUP_WINDOW] = str(3_600_000)
+        cfg[kafka.DEDUP_WINDOW] = str(s.window_ms)
         if s.header:
             cfg[kafka.DEDUP_KEY_HEADER] = HEADER
     kafka.create_topic(c.brokers, topic, PARTITIONS, s.replicas, cfg)
