@@ -58,7 +58,8 @@ public:
     /// snapshot's max_timestamp. See state_snapshot.
     static constexpr size_t packed_entry_size = sizeof(uint64_t)
                                                 + 2 * sizeof(uint32_t);
-    /// The layout before: the timestamp in full. Still read.
+    /// The timestamp in full instead: written when the window is longer than
+    /// a 32-bit age spans, and read from a snapshot of an earlier build.
     static constexpr size_t wide_entry_size = 2 * sizeof(uint64_t)
                                               + sizeof(uint32_t);
 
@@ -133,9 +134,10 @@ private:
     ///   cannot be restored, and this build refuses them on compat version.
     ///   Written with wide_entry_size entries at first, then with
     ///   packed_entry_size ones: an entry's timestamp as a 32-bit age below
-    ///   max_timestamp, which covers more than the index's own span (see
-    ///   dedup_compact_index). Both are read; a build that reads only the
-    ///   first refuses the second on entry_size, and rebuilds as above.
+    ///   max_timestamp, which covers every live entry of a window up to
+    ///   2^32 - 1 ms (49.7 days). A longer window is still written wide.
+    ///   Both are read; a build that reads only the first refuses the second
+    ///   on entry_size, and rebuilds as above.
     ///
     /// The break runs both ways: an older binary rejects a newer snapshot on
     /// compat version and rebuilds the same way, so a raft snapshot crossing a
@@ -153,7 +155,7 @@ private:
         model::timestamp max_timestamp{model::timestamp::min()};
         iobuf entries;
         /// Bytes per record in `entries`: packed_entry_size, or
-        /// wide_entry_size for a snapshot written before it.
+        /// wide_entry_size for a long window or an earlier build.
         uint32_t entry_size{packed_entry_size};
 
         auto serde_fields() {

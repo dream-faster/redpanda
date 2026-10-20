@@ -294,44 +294,56 @@ ss::future<iobuf> dedup_stm::serialize_snapshot(
     // Entries are staged in a fixed local buffer and appended a chunk at a
     // time, so the pass costs a memcpy per entry rather than an iobuf append
     // per entry.
-    constexpr size_t chunk_entries = 16_KiB / packed_entry_size;
-    std::array<char, chunk_entries * packed_entry_size> chunk{};
+    std::array<char, 16_KiB> chunk{};
     iobuf entries;
-    // Ages are taken below the watermark as the walk starts. One inserted
-    // meanwhile with a newer timestamp is written at the watermark: older
-    // than it was, which can only let a duplicate of it through.
+    // Ages are taken below the watermark as the walk starts, and every entry
+    // live then is at most a window below it, so a window a 32-bit age cannot
+    // span is written wide. One inserted meanwhile with a newer timestamp is
+    // written at the watermark, older than it is: its batch lies past the
+    // offset the snapshot covers, and replaying it after a restore puts the
+    // newer timestamp back.
     model::timestamp max_timestamp;
+    uint32_t entry_size = packed_entry_size;
     for (;;) {
         max_timestamp = state.max_timestamp();
+        entry_size = static_cast<uint32_t>(
+          state.window().count() > std::numeric_limits<uint32_t>::max()
+            ? wide_entry_size
+            : packed_entry_size);
+        const size_t chunk_bytes = chunk.size() - chunk.size() % entry_size;
         size_t staged = 0;
         const bool complete = co_await state.for_each_live_entry_async(
           [&](dedup_identity_digest identity, model::timestamp timestamp) {
               if (pending && pending->contains(identity)) {
                   return;
               }
-              const auto age = std::max<__int128>(
-                0, __int128{max_timestamp.value()} - timestamp.value());
-              if (age > std::numeric_limits<uint32_t>::max()) {
-                  // Older than any window the index keeps an entry in.
-                  return;
-              }
-              char* out = chunk.data() + staged * packed_entry_size;
+              char* out = chunk.data() + staged;
               const auto lo = ss::cpu_to_le(identity.lo);
               const auto hi = ss::cpu_to_le(
                 static_cast<uint32_t>(identity.hi & dedup_digest_hi_mask));
-              const auto le_age = ss::cpu_to_le(static_cast<uint32_t>(age));
               std::memcpy(out, &lo, sizeof(lo));
               std::memcpy(out + sizeof(lo), &hi, sizeof(hi));
-              std::memcpy(
-                out + sizeof(lo) + sizeof(hi), &le_age, sizeof(le_age));
-              if (++staged == chunk_entries) {
-                  entries.append(chunk.data(), staged * packed_entry_size);
+              out += sizeof(lo) + sizeof(hi);
+              if (entry_size == wide_entry_size) {
+                  const auto ts = ss::cpu_to_le(timestamp.value());
+                  std::memcpy(out, &ts, sizeof(ts));
+              } else {
+                  const auto age = std::clamp<__int128>(
+                    __int128{max_timestamp.value()} - timestamp.value(),
+                    0,
+                    std::numeric_limits<uint32_t>::max());
+                  const auto le_age = ss::cpu_to_le(static_cast<uint32_t>(age));
+                  std::memcpy(out, &le_age, sizeof(le_age));
+              }
+              staged += entry_size;
+              if (staged == chunk_bytes) {
+                  entries.append(chunk.data(), staged);
                   staged = 0;
               }
           });
         if (complete) {
             if (staged > 0) {
-                entries.append(chunk.data(), staged * packed_entry_size);
+                entries.append(chunk.data(), staged);
             }
             break;
         }
@@ -348,7 +360,7 @@ ss::future<iobuf> dedup_stm::serialize_snapshot(
         .generation = generation,
         .max_timestamp = max_timestamp,
         .entries = std::move(entries),
-        .entry_size = packed_entry_size});
+        .entry_size = entry_size});
 }
 
 namespace {

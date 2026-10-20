@@ -540,6 +540,68 @@ TEST(dedup_stm_snapshot, timestamps_round_trip_as_ages) {
     EXPECT_EQ(got, ages);
 }
 
+namespace {
+
+// Snapshots an index holding a block of entries `old_age` below its watermark
+// and a few at it, then restores it. The old entries come first, so they fill
+// an index block of their own and keep their timestamps exactly at any age.
+// Returns the entry layout written and the restored ages, sorted.
+std::pair<uint32_t, std::vector<int64_t>>
+round_trip_an_old_block(std::chrono::milliseconds window, int64_t old_age) {
+    constexpr int64_t newest = 1'700'000'000'000;
+    constexpr size_t old_count = dedup_compact_index::block_entries;
+    constexpr size_t new_count = 3;
+    dedup_index_snapshot seed{.max_timestamp = model::timestamp{newest}};
+    for (size_t i = 0; i < old_count + new_count; ++i) {
+        const int64_t age = i < old_count ? old_age : 0;
+        seed.entries.push_back(
+          {.identity = {.hi = i + 1, .lo = (i + 7) * 0x9e37'79b9'7f4a'7c15ULL},
+           .timestamp = model::timestamp{newest - age}});
+    }
+    dedup_window_filter source(window);
+    source.restore(seed);
+    auto buffer = dedup_stm_test_accessor::serialize(source, 3);
+    const auto entry_size
+      = dedup_stm_test_accessor::snapshot_layout(buffer.copy()).first;
+    dedup_window_filter target(window);
+    int64_t generation = 0;
+    dedup_stm_test_accessor::restore(target, generation, std::move(buffer));
+    std::vector<int64_t> ages;
+    for (const auto& e : target.snapshot().entries) {
+        ages.push_back(newest - e.timestamp.value());
+    }
+    std::ranges::sort(ages);
+    return {entry_size, ages};
+}
+
+std::vector<int64_t> ages_of_an_old_block(int64_t old_age) {
+    std::vector<int64_t> ages(3, 0);
+    ages.resize(3 + dedup_compact_index::block_entries, old_age);
+    return ages;
+}
+
+} // namespace
+
+// A window a 32-bit age spans keeps the 16-byte layout up to its edge; a
+// longer one writes the timestamps in full rather than lose the entries a
+// 32-bit age cannot reach.
+TEST(dedup_stm_snapshot, a_window_beyond_32_bit_ages_is_written_wide) {
+    constexpr int64_t max_age = std::numeric_limits<uint32_t>::max();
+    constexpr int64_t day = 86'400'000;
+    const std::vector<std::pair<int64_t, size_t>> cases{
+      {max_age, dedup_stm::packed_entry_size},
+      {max_age + 1, dedup_stm::wide_entry_size},
+      {60 * day, dedup_stm::wide_entry_size},
+    };
+    for (const auto& [window_ms, layout] : cases) {
+        const auto [entry_size, ages] = round_trip_an_old_block(
+          std::chrono::milliseconds{window_ms}, window_ms);
+        EXPECT_EQ(entry_size, layout) << "window " << window_ms;
+        EXPECT_EQ(ages, ages_of_an_old_block(window_ms))
+          << "window " << window_ms;
+    }
+}
+
 // --- The yielding walk the snapshot is written from ---
 //
 // for_each_live_entry_async() suspends between chunks of the index while the
