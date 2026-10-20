@@ -114,3 +114,18 @@ larger records and the walk has to read past the key to reach the header.
 Compressed batches are decompressed to read their identities on every
 replica, which is what puts the lz4 overhead above the plain one in
 relative terms.
+
+### Replicated, and in the steady state
+
+The `rf3` scenarios run three brokers with one core each, every partition on
+all three, and sum the CPU of all three brokers: what dedup costs a
+replicated topic is the leader's filter plus every follower's apply. The
+`2 s window` ones keep the index in its steady state, entries expiring as
+fast as new identities arrive, which is where a long-running topic spends
+its life and where the expiry sweep is paid for.
+
+Each node's data directory is created under `$TMPDIR`. On ext4 the brokers
+spend more of their CPU submitting disk writes than on XFS, the filesystem
+production runs on: the no-dedup `rf3 baseline` cost a tenth to a sixth
+less per record with `TMPDIR` on an XFS mount. Point it at one for numbers
+closer to a deployment's.
