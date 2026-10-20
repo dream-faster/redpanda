@@ -143,20 +143,23 @@ private:
     /// - 5: digests are 80 bits, and an entry packs into narrow_entry_size
     ///   bytes: digest lo, the low 16 bits of digest hi, the age. This build
     ///   reads version 4 too: its digests, cut to 80 bits, are what this build
-    ///   computes for the same identities. A version-4 build can only compare
-    ///   96 bits, so it refuses version 5 on compat version and rebuilds.
+    ///   computes for the same identities, so the compat version stays 4. A
+    ///   version-4 build can only compare 96 bits; it refuses a version-5
+    ///   snapshot on entry_size, which it reads as one it does not know, and
+    ///   rebuilds.
     ///
     /// The break runs both ways: an older binary rejects a newer snapshot on
-    /// compat version and rebuilds the same way, so a raft snapshot crossing a
-    /// rolling upgrade in either direction costs a rebuild, not a failed
-    /// partition. Each replica digests what it applies itself, so replicas on
-    /// different builds never compare digests otherwise. Version 1 snapshots
-    /// only ever lived in the kvstore, which this STM no longer reads.
+    /// compat version or entry_size and rebuilds the same way, so a raft
+    /// snapshot crossing a rolling upgrade in either direction costs a rebuild,
+    /// not a failed partition. Each replica digests what it applies itself, so
+    /// replicas on different builds never compare digests otherwise. Version 1
+    /// snapshots only ever lived in the kvstore, which this STM no longer
+    /// reads.
     struct state_snapshot
       : serde::envelope<
           state_snapshot,
           serde::version<5>,
-          serde::compat_version<5>> {
+          serde::compat_version<4>> {
         int64_t window_ms{0};
         int64_t generation{0};
         model::timestamp max_timestamp{model::timestamp::min()};

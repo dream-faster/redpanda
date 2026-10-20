@@ -1502,11 +1502,12 @@ TEST(DedupIdentityDigest, SeparatesDistinctIdentities) {
 // These constants were computed independently (python-xxhash, XXH3-128 with
 // the default seed: high64 and low64), so this also cross-checks the
 // implementation rather than just pinning whatever it happens to produce. The
-// digest keeps the low half of the high64 only (see dedup_canonical_digest()).
+// digest keeps the low 16 bits of the high64 only (see
+// dedup_canonical_digest()).
 TEST(DedupIdentityDigest, IsPinnedForSnapshotCompatibility) {
     const auto d = cluster::dedup_digest_of(iobuf::from("dedup-identity"));
     EXPECT_EQ(d.hi, 0x02c4f10fa4cd5644ULL & cluster::dedup_digest_hi_mask);
-    EXPECT_EQ(d.hi, 0xa4cd5644ULL);
+    EXPECT_EQ(d.hi, 0x5644ULL);
     EXPECT_EQ(d.lo, 0x8cbfa3df121a84d9ULL);
 }
 
