@@ -952,6 +952,9 @@ public:
     /// delta is what proves there is no O(index) work on the produce or apply
     /// path. Exposed for tests rather than as a metric.
     size_t sweep_visits() const { return _sweep_visits; }
+    /// Timestamp below which the cursor trims an index near a limit; see
+    /// _capacity_cutoff. Exposed for tests.
+    model::timestamp capacity_cutoff() const { return _capacity_cutoff; }
     /// Produce requests rebuilt because some, but not all, of their records
     /// were dropped. These are the only requests that pay for a batch rebuild
     /// and a recompression, so this is the rate that drives the dedup
@@ -1322,6 +1325,8 @@ private:
     // single moment, so the frame is fixed for the pass.
     std::array<size_t, capacity_evict_buckets> _pass_counts{};
     size_t _pass_visited{0};
+    // The pass in progress visited an entry without counting it.
+    bool _pass_uncounted{false};
     int64_t _pass_lo{0};
     int64_t _pass_span{0};
     int64_t _pass_width{1};
@@ -1352,7 +1357,8 @@ private:
     // pass completed. timestamp::min() means that pass found no bucket prefix
     // small enough to cut, so nothing is dropped for capacity -- more than a
     // quarter shares one narrow range, and dropping it would throw away
-    // coverage nobody asked to lose.
+    // coverage nobody asked to lose -- or that it did not count every entry
+    // it visited (see finish_pass()).
     model::timestamp _capacity_cutoff{model::timestamp::min()};
     size_t _sweep_visits{0};
     size_t _dropped_records{0};

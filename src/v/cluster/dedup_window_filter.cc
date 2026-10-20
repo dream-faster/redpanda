@@ -866,6 +866,7 @@ void dedup_window_filter::invalidate_walks() {
 void dedup_window_filter::begin_pass() {
     _pass_counts.fill(0);
     _pass_visited = 0;
+    _pass_uncounted = false;
     _pass_saw_all = true;
     _pass_rebase_expired = _index.expired_by_rebase();
     // The frame the pass measures entries against, frozen for its duration:
@@ -906,7 +907,11 @@ void dedup_window_filter::finish_pass() {
         accumulated += _pass_counts[bucket];
         ++bucket;
     }
-    if (accumulated == 0) {
+    // A pass that counted only part of what it visited -- the sweep began
+    // counting partway through it -- would take its quarter of that part
+    // alone, and the entries it left uncounted below the cutoff could make
+    // the cutoff mark most of the index. The next pass counts every entry.
+    if (accumulated == 0 || _pass_uncounted) {
         _capacity_cutoff = model::timestamp::min();
     } else {
         _capacity_cutoff = model::timestamp{
@@ -1042,6 +1047,7 @@ void dedup_window_filter::sweep_step(size_t budget) {
             count_in_pass(stamp);
         } else {
             _pass_oldest = std::min(_pass_oldest, stamp.value());
+            _pass_uncounted = true;
         }
         ++_sweep_pos;
     }

@@ -3986,3 +3986,37 @@ TEST(DedupShardBudget, IdleIndicesFilledFarFromTheLimitStillGiveRoom) {
           << "busy-" << i;
     }
 }
+
+// The sweep counts toward the capacity cutoff only near a limit, and here a
+// neighbour brings the shard near one partway through a pass. A cutoff taken
+// from what that pass counted, its newest entries, would mark most of the
+// index; it ends with none, and the next pass, which counts every entry,
+// marks at most a quarter.
+TEST(DedupShardBudget, CountingFromPartwayThroughAPassMarksAtMostAQuarter) {
+    constexpr auto window = std::chrono::milliseconds{100'000};
+    constexpr size_t no_ceiling = 1'000'000'000;
+    auto budget = make_budget(2'000);
+    cluster::dedup_window_filter f(window, no_ceiling, budget);
+    cluster::dedup_window_filter neighbour(window, no_ceiling, budget);
+    const auto marked = [&f] {
+        size_t n = 0;
+        f.for_each_live_entry([&f, &n](const auto&, model::timestamp t) {
+            n += t < f.capacity_cutoff() ? 1 : 0;
+        });
+        return n;
+    };
+    // Nothing expires and nothing is near a limit: the sweep rests.
+    populate_n(f, "old", 400, 1000, 100);
+    // The oldest entry expires, so the sweep runs, counting nothing.
+    populate_n(f, "new", 40, 101'001, 0);
+    ASSERT_GT(f.sweep_visits(), 0u);
+    ASSERT_EQ(f.capacity_cutoff(), model::timestamp::min());
+    // Half the shard's limit: from here on the sweep counts.
+    populate_n(neighbour, "n", 700, 101'001, 0);
+    ASSERT_GE(budget->entries, 1'000u);
+    for (size_t i = 0; i < 200; ++i) {
+        f.populate(iobuf::from(fmt::format("late-{}", i)), ts(101'001));
+        ASSERT_LE(marked(), f.map_size() / 4 + 1) << "late-" << i;
+    }
+    EXPECT_GT(f.capacity_cutoff(), model::timestamp::min());
+}
