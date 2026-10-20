@@ -296,44 +296,56 @@ ss::future<iobuf> dedup_stm::serialize_snapshot(
     // Entries are staged in a fixed local buffer and appended a chunk at a
     // time, so the pass costs a memcpy per entry rather than an iobuf append
     // per entry.
-    constexpr size_t chunk_entries = 16_KiB / packed_entry_size;
-    std::array<char, chunk_entries * packed_entry_size> chunk{};
+    std::array<char, 16_KiB> chunk{};
     iobuf entries;
-    // Ages are taken below the watermark as the walk starts. One inserted
-    // meanwhile with a newer timestamp is written at the watermark: older
-    // than it was, which can only let a duplicate of it through.
+    // Ages are taken below the watermark as the walk starts, and every entry
+    // live then is at most a window below it, so a window a 32-bit age cannot
+    // span is written wide. One inserted meanwhile with a newer timestamp is
+    // written at the watermark, older than it is: its batch lies past the
+    // offset the snapshot covers, and replaying it after a restore puts the
+    // newer timestamp back.
     model::timestamp max_timestamp;
+    uint32_t entry_size = packed_entry_size;
     for (;;) {
         max_timestamp = state.max_timestamp();
+        entry_size = static_cast<uint32_t>(
+          state.window().count() > std::numeric_limits<uint32_t>::max()
+            ? wide_entry_size
+            : packed_entry_size);
+        const size_t chunk_bytes = chunk.size() - chunk.size() % entry_size;
         size_t staged = 0;
         const bool complete = co_await state.for_each_live_entry_async(
           [&](dedup_identity_digest identity, model::timestamp timestamp) {
               if (pending && pending->contains(identity)) {
                   return;
               }
-              const auto age = std::max<__int128>(
-                0, __int128{max_timestamp.value()} - timestamp.value());
-              if (age > std::numeric_limits<uint32_t>::max()) {
-                  // Older than any window the index keeps an entry in.
-                  return;
-              }
-              char* out = chunk.data() + staged * packed_entry_size;
+              char* out = chunk.data() + staged;
               const auto lo = ss::cpu_to_le(identity.lo);
               const auto hi = ss::cpu_to_le(
                 static_cast<uint32_t>(identity.hi & dedup_digest_hi_mask));
-              const auto le_age = ss::cpu_to_le(static_cast<uint32_t>(age));
               std::memcpy(out, &lo, sizeof(lo));
               std::memcpy(out + sizeof(lo), &hi, sizeof(hi));
-              std::memcpy(
-                out + sizeof(lo) + sizeof(hi), &le_age, sizeof(le_age));
-              if (++staged == chunk_entries) {
-                  entries.append(chunk.data(), staged * packed_entry_size);
+              out += sizeof(lo) + sizeof(hi);
+              if (entry_size == wide_entry_size) {
+                  const auto ts = ss::cpu_to_le(timestamp.value());
+                  std::memcpy(out, &ts, sizeof(ts));
+              } else {
+                  const auto age = std::clamp<__int128>(
+                    __int128{max_timestamp.value()} - timestamp.value(),
+                    0,
+                    std::numeric_limits<uint32_t>::max());
+                  const auto le_age = ss::cpu_to_le(static_cast<uint32_t>(age));
+                  std::memcpy(out, &le_age, sizeof(le_age));
+              }
+              staged += entry_size;
+              if (staged == chunk_bytes) {
+                  entries.append(chunk.data(), staged);
                   staged = 0;
               }
           });
         if (complete) {
             if (staged > 0) {
-                entries.append(chunk.data(), staged * packed_entry_size);
+                entries.append(chunk.data(), staged);
             }
             break;
         }
@@ -350,7 +362,7 @@ ss::future<iobuf> dedup_stm::serialize_snapshot(
         .generation = generation,
         .max_timestamp = max_timestamp,
         .entries = std::move(entries),
-        .entry_size = packed_entry_size});
+        .entry_size = entry_size});
 }
 
 namespace {
@@ -546,18 +558,27 @@ ss::future<> dedup_stm::do_apply(const model::record_batch& batch) {
             // lookup's loads a few records ahead (see populate()).
             chunked_vector<dedup_index_entry> entries;
             entries.reserve(static_cast<size_t>(readable.record_count()));
-            for_each_dedup_identity(
-              readable,
-              _state.key_header(),
-              [&entries](
-                dedup_identity_lookup lookup,
-                dedup_identity_digest digest,
-                model::timestamp ts) {
-                  if (lookup == dedup_identity_lookup::identity) {
-                      entries.push_back({.identity = digest, .timestamp = ts});
-                  }
-                  return true;
-              });
+            try {
+                for_each_dedup_identity(
+                  readable,
+                  _state.key_header(),
+                  [&entries](
+                    dedup_identity_lookup lookup,
+                    dedup_identity_digest digest,
+                    model::timestamp ts) {
+                      if (lookup == dedup_identity_lookup::identity) {
+                          entries.push_back(
+                            {.identity = digest, .timestamp = ts});
+                      }
+                      return true;
+                  });
+            } catch (...) {
+                // The records ahead of an unreadable one are still indexed, as
+                // they are on a replica keeping its entries unindexed, so
+                // every replica agrees.
+                _state.populate(entries);
+                throw;
+            }
             _state.populate(entries);
         }
     } catch (const std::bad_alloc&) {
@@ -671,7 +692,8 @@ ss::future<result<kafka_result>> dedup_stm::do_replicate(
             ss::lowres_clock::now() - started)
             .count());
         if (!_state.lookup_ready()) {
-            // Applying as a follower again deferred it meanwhile.
+            // Applying as a follower again deferred it meanwhile, or the
+            // build this request waited for failed.
             co_return errc::not_leader;
         }
     }
@@ -769,7 +791,6 @@ ss::future<result<kafka_result>> dedup_stm::do_replicate(
     if (filtered.batch) {
         mine = ss::make_lw_shared<inflight_request>();
         mine->undo = &filtered.undo;
-        ++_unsettled;
         _unregistered.push_back(mine);
         if (_snapshots_walking > 0) {
             register_pending();
@@ -784,18 +805,28 @@ ss::future<result<kafka_result>> dedup_stm::do_replicate(
         //
         // An identity in the index that is no longer pending came from a
         // committed batch -- applied, restored from a snapshot, or admitted
-        // by a quorum-ack request raft confirmed -- unless a request with
-        // weaker acks admitted it: raft reports those appended on the
-        // leader alone. So only those need the commit index to catch up,
-        // and only while it is behind the last of them. Waiting for the
-        // dirty offset instead held every all-duplicate request for a
+        // by a request raft reported done only once it committed -- unless
+        // raft reported its batch done earlier: on the leader's own append
+        // for weaker acks, on a majority's unflushed append under write
+        // caching. So only those need the commit index to catch up, and
+        // only while it is behind the last of them. Waiting for the dirty
+        // offset instead held every all-duplicate request for a
         // replication round trip whatever it dropped against.
         enqueued->set_value();
-        if (auto failed = co_await wait_for_introducers(depends_on); failed) {
-            co_return *failed;
+        if (!depends_on.empty()) {
+            auto failed = co_await wait_for_introducers(depends_on, opts.as);
+            if (failed) {
+                co_return *failed;
+            }
+        }
+        if (opts.consistency != raft::consistency_level::quorum_ack) {
+            co_return kafka_result{
+              .last_offset = from_log_offset(_raft->committed_offset()),
+              .last_term = _raft->term(),
+              .replicated_record_count = 0};
         }
         if (
-          opts.consistency == raft::consistency_level::quorum_ack
+          _relaxed_admitted_term == _insync_term
           && _relaxed_admitted_offset > _raft->committed_offset()) {
             const auto fence = _relaxed_admitted_offset;
             // Commit-based, not visibility-based: last_visible_index() can
@@ -824,34 +855,33 @@ ss::future<result<kafka_result>> dedup_stm::do_replicate(
                   ex);
                 co_return errc::timeout;
             }
-            // The wait is on an offset, not on an offset in a term:
-            // event_manager::wait() resolves as soon as the commit index
-            // reaches `fence`, whoever wrote the entry sitting there. A new
-            // leader that truncated this term's tail and replicated its own
-            // records advances the commit index just the same, so without
-            // this check the wait can resolve on records that *replaced* the
-            // introducing write -- and this request would report a write the
-            // log does not hold. Nothing else guards it: a request that
-            // replicates is covered by opts.expected_term, but a fully
-            // deduplicated one never replicates.
-            //
-            // Revalidating the term is what makes the wait mean what this
-            // branch needs, because within one unbroken term the entries at
-            // or below the `fence` read above are this leader's own and
-            // cannot have been truncated -- truncation requires a higher
-            // term. raft::replication_monitor would report truncation
-            // directly, but it is documented as raft-internal and points
-            // other subsystems back at event_manager.
-            if (!_raft->is_leader() || _raft->term() != _insync_term) {
-                vlog(
-                  clusterlog.debug,
-                  "{} dedup fence for {} resolved after losing term {}, "
-                  "failing the request for retry",
-                  _raft->ntp(),
-                  fence,
-                  _insync_term);
-                co_return errc::not_leader;
-            }
+        }
+        // The wait above is on an offset, not on an offset in a term:
+        // event_manager::wait() resolves as soon as the commit index reaches
+        // the fence, whoever wrote the entry sitting there. A new leader that
+        // truncated this term's tail and replicated its own records advances
+        // the commit index just the same, so without this check the wait can
+        // resolve on records that *replaced* the introducing write -- and
+        // this request would report a write the log does not hold. Nothing
+        // else guards it: a request that replicates is covered by
+        // opts.expected_term, but a fully deduplicated one never replicates.
+        // Without a fence to wait for, the check still keeps a request that
+        // lost leadership waiting on its introducers from reporting success.
+        //
+        // Revalidating the term is what makes the wait mean what this branch
+        // needs, because within one unbroken term the entries at or below the
+        // fence are this leader's own and cannot have been truncated --
+        // truncation requires a higher term. raft::replication_monitor would
+        // report truncation directly, but it is documented as raft-internal
+        // and points other subsystems back at event_manager.
+        if (!_raft->is_leader() || _raft->term() != _insync_term) {
+            vlog(
+              clusterlog.debug,
+              "{} dedup all-duplicate request lost term {} while waiting, "
+              "failing it for retry",
+              _raft->ntp(),
+              _insync_term);
+            co_return errc::not_leader;
         }
         co_return kafka_result{
           .last_offset = from_log_offset(_raft->committed_offset()),
@@ -867,6 +897,11 @@ ss::future<result<kafka_result>> dedup_stm::do_replicate(
     const auto evictions_before = _self_filtered_evictions;
     const auto term = _insync_term;
     auto stages = _raft->replicate_in_stages(std::move(*filtered.batch), opts);
+    // Counted only now, as every path from here ends in settle(): a throw
+    // above (an allocation) would otherwise keep the lookup table for good.
+    // Nothing since filter_request() suspended, so do_apply() has not had a
+    // chance to drop it.
+    ++_unsettled;
     auto enqueued_result = co_await ss::coroutine::as_future(
       std::move(stages.request_enqueued));
     if (enqueued_result.failed()) {
@@ -921,16 +956,26 @@ ss::future<result<kafka_result>> dedup_stm::do_replicate(
         settle(mine, filtered.undo, false, self_key);
         co_return result.error();
     }
-    if (opts.consistency != raft::consistency_level::quorum_ack) {
-        // Appended on this leader, maybe nowhere else yet; see the
-        // all-duplicate branch above. Recorded before settle() releases the
-        // requests waiting on this one.
-        _relaxed_admitted_offset = std::max(
-          _relaxed_admitted_offset, result.value().last_offset);
+    if (
+      const auto& appended = result.value();
+      appended.last_offset > _raft->committed_offset()) {
+        // Reported done before it committed; see the all-duplicate branch
+        // above. Recorded before settle() releases the requests waiting on
+        // this one.
+        if (appended.last_term > _relaxed_admitted_term) {
+            _relaxed_admitted_term = appended.last_term;
+            _relaxed_admitted_offset = appended.last_offset;
+        } else if (appended.last_term == _relaxed_admitted_term) {
+            _relaxed_admitted_offset = std::max(
+              _relaxed_admitted_offset, appended.last_offset);
+        }
     }
     settle(mine, filtered.undo, true, std::nullopt);
-    if (auto failed = co_await wait_for_introducers(depends_on); failed) {
-        co_return *failed;
+    if (!depends_on.empty()) {
+        auto failed = co_await wait_for_introducers(depends_on, opts.as);
+        if (failed) {
+            co_return *failed;
+        }
     }
 
     kafka_result response{
@@ -942,13 +987,17 @@ ss::future<result<kafka_result>> dedup_stm::do_replicate(
     co_return response;
 }
 
-ss::future<std::optional<errc>>
-dedup_stm::wait_for_introducers(const std::vector<inflight_ptr>& introducers) {
+ss::future<std::optional<errc>> dedup_stm::wait_for_introducers(
+  const std::vector<inflight_ptr>& introducers,
+  std::optional<std::reference_wrapper<ss::abort_source>> as) {
+    // One deadline for all of them: the wait is for this request's
+    // acknowledgment, which sync_timeout bounds however many it waits on.
+    const auto deadline = model::timeout_clock::now() + _sync_timeout();
     for (const auto& introducer : introducers) {
+        auto appended = introducer->appended.get_shared_future();
         auto waited = co_await ss::coroutine::as_future(
-          ss::with_timeout(
-            model::timeout_clock::now() + _sync_timeout(),
-            introducer->appended.get_shared_future()));
+          as ? ssx::with_timeout_abortable(std::move(appended), deadline, *as)
+             : ss::with_timeout(deadline, std::move(appended)));
         const bool unknown = waited.failed();
         if (unknown) {
             waited.ignore_ready_future();

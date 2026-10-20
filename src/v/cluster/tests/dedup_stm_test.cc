@@ -26,6 +26,7 @@
 #include <seastar/core/byteorder.hh>
 #include <seastar/core/sleep.hh>
 #include <seastar/core/with_timeout.hh>
+#include <seastar/util/defer.hh>
 
 #include <gtest/gtest.h>
 
@@ -97,10 +98,17 @@ struct dedup_stm_test_accessor {
         const auto digest = dedup_digest_of(iobuf::from(key));
         stm._state.populate(digest, ts);
         stm._pending.insert_or_assign(digest, introducer);
+        // Registered, as a request whose identity another one needed is, so
+        // that settle() takes it out of the pending set again.
+        introducer->registered = true;
+        // As do_replicate() counts an admitted request, so that settle()
+        // has one to discount.
+        ++stm._unsettled;
     }
 
-    /// Settle what introduce() set up, as dedup_stm::settle() does for a
-    /// request raft did (\p appended) or did not append.
+    /// Settle what introduce() set up, as for a request raft did (\p
+    /// appended) or did not append. A no-op once it is settled, so a test can
+    /// also call it on exit to release requests still waiting on it.
     static void settle_introduction(
       dedup_stm& stm,
       std::string_view key,
@@ -108,16 +116,17 @@ struct dedup_stm_test_accessor {
       const dedup_stm::inflight_ptr& introducer,
       bool appended) {
         const auto digest = dedup_digest_of(iobuf::from(key));
-        stm._pending.erase(digest);
-        if (!appended) {
-            dedup_request_undo undo;
-            undo.entries.push_back(
-              {.identity = digest,
-               .applied_timestamp = ts,
-               .previous_timestamp = std::nullopt});
-            stm._state.revert_request(undo);
+        if (
+          auto it = stm._pending.find(digest);
+          it == stm._pending.end() || it->second != introducer) {
+            return;
         }
-        introducer->appended.set_value(appended);
+        dedup_request_undo undo;
+        undo.entries.push_back(
+          {.identity = digest,
+           .applied_timestamp = ts,
+           .previous_timestamp = std::nullopt});
+        stm.settle(introducer, undo, appended, std::nullopt);
     }
 
     static const dedup_window_filter& state(const dedup_stm& stm) {
@@ -134,6 +143,18 @@ struct dedup_stm_test_accessor {
 
     static uint64_t batches_skipped(const dedup_stm& stm) {
         return stm._batches_skipped;
+    }
+
+    static model::offset relaxed_admitted_offset(const dedup_stm& stm) {
+        return stm._relaxed_admitted_offset;
+    }
+
+    /// Record what do_replicate() records for a batch raft reported done
+    /// before it committed.
+    static void record_relaxed_admission(
+      dedup_stm& stm, model::offset offset, model::term_id term) {
+        stm._relaxed_admitted_offset = offset;
+        stm._relaxed_admitted_term = term;
     }
 
     static void
@@ -172,24 +193,22 @@ struct dedup_stm_test_accessor {
 
 namespace {
 
-model::record_batch make_batch(
-  std::string_view key, std::string_view value, model::timestamp timestamp) {
-    storage::record_batch_builder builder(
-      model::record_batch_type::raft_data, model::offset{0});
-    builder.set_timestamp(timestamp);
-    builder.add_raw_kv(iobuf::from(key), iobuf::from(value));
-    return std::move(builder).build();
-}
-
 model::record_batch make_batch_of(
-  std::initializer_list<std::string_view> keys, model::timestamp timestamp) {
+  std::initializer_list<std::string_view> keys,
+  model::timestamp timestamp,
+  std::string_view value = "value") {
     storage::record_batch_builder builder(
       model::record_batch_type::raft_data, model::offset{0});
     builder.set_timestamp(timestamp);
     for (auto key : keys) {
-        builder.add_raw_kv(iobuf::from(key), iobuf::from("value"));
+        builder.add_raw_kv(iobuf::from(key), iobuf::from(value));
     }
     return std::move(builder).build();
+}
+
+model::record_batch make_batch(
+  std::string_view key, std::string_view value, model::timestamp timestamp) {
+    return make_batch_of({key}, timestamp, value);
 }
 
 // Build a single-record batch with a Kafka key and, optionally, one header
@@ -365,7 +384,8 @@ struct v2_state_snapshot
     }
 };
 
-/// Version 3: the current layout, with digests of two seeded xxhash64 passes.
+/// Version 3: the layout version 4 still uses, with digests of two seeded
+/// xxhash64 passes.
 struct v3_state_snapshot
   : serde::
       envelope<v3_state_snapshot, serde::version<3>, serde::compat_version<3>> {
@@ -425,6 +445,37 @@ TEST(dedup_stm_snapshot, xxhash64_readers_refuse_the_current_layout) {
     EXPECT_THROW(
       serde::from_iobuf<v3_state_snapshot>(std::move(buffer)),
       serde::serde_exception);
+}
+
+// The digest a snapshot carries is the one this build takes of the identity:
+// once restored, producing the same key again is a duplicate and adds no
+// entry.
+TEST(dedup_stm_snapshot, a_restored_identity_matches_its_key) {
+    const auto digest = dedup_digest_of(iobuf::from("key"));
+    iobuf entries;
+    const auto lo = ss::cpu_to_le(digest.lo);
+    const auto hi = ss::cpu_to_le(static_cast<uint32_t>(digest.hi));
+    const auto le_ts = ss::cpu_to_le(int64_t{1'000'000});
+    entries.append(reinterpret_cast<const char*>(&lo), sizeof(lo));
+    entries.append(reinterpret_cast<const char*>(&hi), sizeof(hi));
+    entries.append(reinterpret_cast<const char*>(&le_ts), sizeof(le_ts));
+
+    dedup_window_filter target(1h);
+    int64_t generation = 0;
+    dedup_stm_test_accessor::restore(
+      target,
+      generation,
+      dedup_stm_test_accessor::state_snapshot_with_entries(
+        std::move(entries), model::timestamp{1'000'000}));
+    ASSERT_EQ(target.map_size(), 1u);
+    EXPECT_EQ(target.snapshot().entries[0].identity, digest);
+
+    EXPECT_FALSE(
+      target.filter(make_batch("key", "v", model::timestamp{1'000'100}))
+        .has_value());
+    target.populate(iobuf::from("key"), model::timestamp{1'000'200});
+    EXPECT_EQ(target.map_size(), 1u);
+    EXPECT_EQ(target.unindexed_records(), 0u);
 }
 
 // An entry size this build does not know is refused rather than misread.
@@ -538,6 +589,68 @@ TEST(dedup_stm_snapshot, timestamps_round_trip_as_ages) {
     }
     std::ranges::sort(got);
     EXPECT_EQ(got, ages);
+}
+
+namespace {
+
+// Snapshots an index holding a block of entries `old_age` below its watermark
+// and a few at it, then restores it. The old entries come first, so they fill
+// an index block of their own and keep their timestamps exactly at any age.
+// Returns the entry layout written and the restored ages, sorted.
+std::pair<uint32_t, std::vector<int64_t>>
+round_trip_an_old_block(std::chrono::milliseconds window, int64_t old_age) {
+    constexpr int64_t newest = 1'700'000'000'000;
+    constexpr size_t old_count = dedup_compact_index::block_entries;
+    constexpr size_t new_count = 3;
+    dedup_index_snapshot seed{.max_timestamp = model::timestamp{newest}};
+    for (size_t i = 0; i < old_count + new_count; ++i) {
+        const int64_t age = i < old_count ? old_age : 0;
+        seed.entries.push_back(
+          {.identity = {.hi = i + 1, .lo = (i + 7) * 0x9e37'79b9'7f4a'7c15ULL},
+           .timestamp = model::timestamp{newest - age}});
+    }
+    dedup_window_filter source(window);
+    source.restore(seed);
+    auto buffer = dedup_stm_test_accessor::serialize(source, 3);
+    const auto entry_size
+      = dedup_stm_test_accessor::snapshot_layout(buffer.copy()).first;
+    dedup_window_filter target(window);
+    int64_t generation = 0;
+    dedup_stm_test_accessor::restore(target, generation, std::move(buffer));
+    std::vector<int64_t> ages;
+    for (const auto& e : target.snapshot().entries) {
+        ages.push_back(newest - e.timestamp.value());
+    }
+    std::ranges::sort(ages);
+    return {entry_size, ages};
+}
+
+std::vector<int64_t> ages_of_an_old_block(int64_t old_age) {
+    std::vector<int64_t> ages(3, 0);
+    ages.resize(3 + dedup_compact_index::block_entries, old_age);
+    return ages;
+}
+
+} // namespace
+
+// A window a 32-bit age spans keeps the 16-byte layout up to its edge; a
+// longer one writes the timestamps in full rather than lose the entries a
+// 32-bit age cannot reach.
+TEST(dedup_stm_snapshot, a_window_beyond_32_bit_ages_is_written_wide) {
+    constexpr int64_t max_age = std::numeric_limits<uint32_t>::max();
+    constexpr int64_t day = 86'400'000;
+    const std::vector<std::pair<int64_t, size_t>> cases{
+      {max_age, dedup_stm::packed_entry_size},
+      {max_age + 1, dedup_stm::wide_entry_size},
+      {60 * day, dedup_stm::wide_entry_size},
+    };
+    for (const auto& [window_ms, layout] : cases) {
+        const auto [entry_size, ages] = round_trip_an_old_block(
+          std::chrono::milliseconds{window_ms}, window_ms);
+        EXPECT_EQ(entry_size, layout) << "window " << window_ms;
+        EXPECT_EQ(ages, ages_of_an_old_block(window_ms))
+          << "window " << window_ms;
+    }
 }
 
 // --- The yielding walk the snapshot is written from ---
@@ -1233,6 +1346,12 @@ TEST_F_CORO(
     auto introducer = dedup_stm_test_accessor::make_inflight();
     dedup_stm_test_accessor::introduce(
       *stm, "k1", model::timestamp{1000}, introducer);
+    // A failed assertion must not leave the request waiting on it until the
+    // sync timeout, holding up the fixture's teardown.
+    auto release = ss::defer([&] {
+        dedup_stm_test_accessor::settle_introduction(
+          *stm, "k1", model::timestamp{1000}, introducer, false);
+    });
 
     auto stages = stm->replicate_in_stages(
       make_batch_of({"k1", "k2"}, model::timestamp{1000}),
@@ -1268,6 +1387,10 @@ TEST_F_CORO(
     auto introducer = dedup_stm_test_accessor::make_inflight();
     dedup_stm_test_accessor::introduce(
       *stm, "k1", model::timestamp{1000}, introducer);
+    auto release = ss::defer([&] {
+        dedup_stm_test_accessor::settle_introduction(
+          *stm, "k1", model::timestamp{1000}, introducer, false);
+    });
     auto stages = stm->replicate_in_stages(
       make_batch_of({"k1", "k2"}, model::timestamp{1000}),
       raft::replicate_options(raft::consistency_level::quorum_ack));
@@ -1305,6 +1428,10 @@ TEST_F_CORO(dedup_stm_fixture, all_duplicate_is_enqueued_before_introducer) {
     auto introducer = dedup_stm_test_accessor::make_inflight();
     dedup_stm_test_accessor::introduce(
       *stm, "k1", model::timestamp{1000}, introducer);
+    auto release = ss::defer([&] {
+        dedup_stm_test_accessor::settle_introduction(
+          *stm, "k1", model::timestamp{1000}, introducer, false);
+    });
     auto stages = stm->replicate_in_stages(
       make_batch_of({"k1"}, model::timestamp{1000}),
       raft::replicate_options(raft::consistency_level::quorum_ack));
@@ -1365,10 +1492,21 @@ TEST_F_CORO(dedup_stm_fixture, committed_duplicate_skips_the_commit_fence) {
     set_dedup_config(1h);
     auto leader = co_await wait_for_leader(10s);
     co_await produce(leader, "k1", "v", model::timestamp{1000});
+    const auto before = node(leader).raft()->dirty_offset();
 
     replication_gate gate(node(leader));
     auto blocked = produce_batch(
       leader, make_batch_of({"k9"}, model::timestamp{1000}));
+    // k9 on the leader's log, uncommitted: a fence on the dirty offset would
+    // now hold the duplicate until the gate opens.
+    const auto deadline = model::timeout_clock::now() + 5s;
+    while (node(leader).raft()->dirty_offset() <= before) {
+        ASSERT_TRUE_CORO(model::timeout_clock::now() < deadline);
+        co_await ss::sleep(1ms);
+    }
+    ASSERT_LT_CORO(
+      node(leader).raft()->committed_offset(),
+      node(leader).raft()->dirty_offset());
 
     auto duplicate = co_await ss::with_timeout(
       model::timeout_clock::now() + 5s,
@@ -1398,10 +1536,15 @@ TEST_F_CORO(dedup_stm_fixture, relaxed_introducer_is_fenced_until_committed) {
     auto appended = co_await std::move(relaxed.replicate_finished);
     ASSERT_TRUE_CORO(appended.has_value());
     const auto relaxed_offset = node(leader).raft()->dirty_offset();
+    ASSERT_EQ_CORO(
+      dedup_stm_test_accessor::relaxed_admitted_offset(*stm), relaxed_offset);
 
     auto duplicate = produce_batch(
       leader, make_batch_of({"k1"}, model::timestamp{1000}));
+    // Nothing can commit while the gate is closed, so the duplicate can only
+    // resolve by skipping the fence; long enough for that to show.
     co_await ss::sleep(500ms);
+    ASSERT_LT_CORO(node(leader).raft()->committed_offset(), relaxed_offset);
     ASSERT_FALSE_CORO(duplicate.available());
 
     gate.release();
@@ -1480,6 +1623,29 @@ TEST_F_CORO(dedup_stm_fixture, snapshot_leaves_out_requests_in_flight) {
     ASSERT_TRUE_CORO(appended.has_value());
 }
 
+// What a leader admitted with relaxed acks in an earlier term was either
+// truncated by a later one or committed by its sync, so it fences nothing:
+// here the earlier term's offset lies past the end of the log, where a fence
+// on it would wait for unrelated writes.
+TEST_F_CORO(
+  dedup_stm_fixture, relaxed_admission_of_an_earlier_term_is_not_fenced) {
+    co_await initialize_state_machines();
+    set_dedup_config(1h);
+    auto leader = co_await wait_for_leader(10s);
+    co_await produce(leader, "k1", "v", model::timestamp{1000});
+    auto stm = get_stm<0>(node(leader));
+    dedup_stm_test_accessor::record_relaxed_admission(
+      *stm,
+      node(leader).raft()->dirty_offset() + model::offset{100},
+      node(leader).raft()->term() - model::term_id{1});
+
+    auto duplicate = co_await ss::with_timeout(
+      model::timeout_clock::now() + 5s,
+      produce_batch(leader, make_batch_of({"k1"}, model::timestamp{1000})));
+    ASSERT_TRUE_CORO(duplicate.has_value());
+    ASSERT_EQ_CORO(duplicate.value().replicated_record_count, 0);
+}
+
 // A committed batch whose records cannot be read is skipped, not retried:
 // the STM manager would otherwise retry it forever, and with it hold up every
 // raft snapshot of the partition and the log's prefix truncation.
@@ -1518,6 +1684,38 @@ TEST_F_CORO(dedup_stm_fixture, unreadable_batch_is_skipped_not_retried) {
     co_await wait_for_stms(node(leader).raft()->committed_offset());
     for (auto& [_, n] : nodes()) {
         ASSERT_EQ_CORO(get_stm<0>(*n)->map_size(), 1);
+    }
+}
+
+// The records of a skipped batch ahead of the unreadable one are indexed, on
+// every replica: digesting a batch before indexing any of it must not change
+// what an unreadable record leaves behind.
+TEST_F_CORO(dedup_stm_fixture, unreadable_record_keeps_the_ones_before_it) {
+    co_await initialize_state_machines();
+    set_dedup_config(1000ms);
+    auto leader = co_await wait_for_leader(10s);
+
+    // Only the last record is cut short.
+    auto good = make_batch_of({"a", "b", "c"}, model::timestamp{1000});
+    auto header = good.header();
+    auto data = good.data().copy();
+    data.trim_back(4);
+    header.size_bytes = static_cast<int32_t>(
+      model::packed_record_batch_header_size + data.size_bytes());
+    header.crc = model::crc_record_batch(header, data);
+    header.header_crc = model::internal_header_only_crc(header);
+    model::record_batch broken(
+      header, std::move(data), model::record_batch::tag_ctor_ng{});
+
+    auto result = co_await node(leader).raft()->replicate(
+      std::move(broken),
+      raft::replicate_options(raft::consistency_level::quorum_ack));
+    ASSERT_TRUE_CORO(result.has_value());
+    co_await wait_for_stms(node(leader).raft()->committed_offset());
+    for (auto& [_, n] : nodes()) {
+        auto stm = get_stm<0>(*n);
+        ASSERT_EQ_CORO(dedup_stm_test_accessor::batches_skipped(*stm), 1);
+        ASSERT_EQ_CORO(stm->map_size(), 2);
     }
 }
 

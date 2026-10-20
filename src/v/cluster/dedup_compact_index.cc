@@ -194,8 +194,10 @@ void dedup_compact_index::prefetch(
     }
     // The home slot's entry: where find() reads first when the key is
     // present and was not displaced, which at the table's load is most keys.
-    if (*slot != 0) {
-        const size_t pos = slot_pos(*slot);
+    // A displaced occupant's entry is one find() never reads.
+    const uint32_t s = *slot;
+    if (s != 0 && slot_dist(s) == 0) {
+        const size_t pos = slot_pos(s);
         if (pos < _size) {
             __builtin_prefetch(&entry(pos));
             __builtin_prefetch(&_meta[pos >> block_shift]);
@@ -622,8 +624,9 @@ bool dedup_compact_index::slot_index(uint64_t h, uint32_t pos) {
 }
 
 void dedup_compact_index::drop_lookup() noexcept {
-    _segments.clear();
-    _directory.clear();
+    // Swapped out rather than cleared, so the arrays' capacity goes too.
+    decltype(_segments){}.swap(_segments);
+    decltype(_directory){}.swap(_directory);
     _depth = 0;
     _indexed = 0;
     _preparing = false;

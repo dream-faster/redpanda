@@ -60,7 +60,8 @@ public:
     /// snapshot's max_timestamp. See state_snapshot.
     static constexpr size_t packed_entry_size = sizeof(uint64_t)
                                                 + 2 * sizeof(uint32_t);
-    /// The layout before: the timestamp in full. Still read.
+    /// The timestamp in full instead: written when the window is longer than
+    /// a 32-bit age spans, and read from a snapshot of an earlier build.
     static constexpr size_t wide_entry_size = 2 * sizeof(uint64_t)
                                               + sizeof(uint32_t);
 
@@ -135,16 +136,20 @@ private:
     ///   cannot be restored, and this build refuses them on compat version.
     ///   Written with wide_entry_size entries at first, then with
     ///   packed_entry_size ones: an entry's timestamp as a 32-bit age below
-    ///   max_timestamp, which covers more than the index's own span (see
-    ///   dedup_compact_index). Both are read; a build that reads only the
-    ///   first refuses the second on entry_size, and rebuilds as above.
+    ///   max_timestamp, which covers every live entry of a window up to
+    ///   2^32 - 1 ms (49.7 days). A longer window is still written wide.
+    ///   Both are read; a build that reads only the first refuses the second
+    ///   on entry_size, and rebuilds as above.
     ///
     /// The break runs both ways: an older binary rejects a newer snapshot on
-    /// compat version and rebuilds the same way, so a raft snapshot crossing a
-    /// rolling upgrade in either direction costs a rebuild, not a failed
-    /// partition. Each replica digests what it applies itself, so replicas on
-    /// different builds never compare digests otherwise. Version 1 snapshots
-    /// only ever lived in the kvstore, which this STM no longer reads.
+    /// compat version the same way, so a raft snapshot crossing a rolling
+    /// upgrade in either direction never fails the partition. It is not
+    /// rebuilt from, though: a raft snapshot installs where the log before
+    /// its offset is gone, so the identities only it held are lost on that
+    /// replica, which indexes from the snapshot offset on. Each replica
+    /// digests what it applies itself, so replicas on different builds never
+    /// compare digests otherwise. Version 1 snapshots only ever lived in the
+    /// kvstore, which this STM no longer reads.
     struct state_snapshot
       : serde::envelope<
           state_snapshot,
@@ -155,7 +160,7 @@ private:
         model::timestamp max_timestamp{model::timestamp::min()};
         iobuf entries;
         /// Bytes per record in `entries`: packed_entry_size, or
-        /// wide_entry_size for a snapshot written before it.
+        /// wide_entry_size for a long window or an earlier build.
         uint32_t entry_size{packed_entry_size};
 
         auto serde_fields() {
@@ -222,10 +227,12 @@ private:
     void setup_metrics();
 
     /// Wait until every request in \p introducers is known appended. An
-    /// error if one never was, or did not resolve within the sync timeout:
-    /// the identities a request dropped against it may have no durable copy.
-    ss::future<std::optional<errc>>
-    wait_for_introducers(const std::vector<inflight_ptr>& introducers);
+    /// error if one never was, or did not resolve within the sync timeout or
+    /// before \p as fired: the identities a request dropped against it may
+    /// have no durable copy.
+    ss::future<std::optional<errc>> wait_for_introducers(
+      const std::vector<inflight_ptr>& introducers,
+      std::optional<std::reference_wrapper<ss::abort_source>> as);
 
     /// Put every unregistered request's identities into _pending, oldest
     /// request first, so a newer one's registration wins as it would have.
@@ -311,12 +318,18 @@ private:
     // Requests admitted and not yet settled. While any is, the lookup table
     // stays: settle() may have to revert one (see do_apply()).
     size_t _unsettled{0};
-    /// Last offset of a batch this leader admitted for a request with weaker
-    /// acks than quorum_ack, which raft reports appended before it commits.
-    /// Every other identity in the index that is not pending is committed,
-    /// so this is all an all-duplicate quorum-ack request has to wait to
-    /// commit; see do_replicate().
+    /// Last offset, in _relaxed_admitted_term, of a batch this leader admitted
+    /// and raft reported done before it committed: one with weaker acks than
+    /// quorum_ack, or a quorum-ack one under write caching, which raft
+    /// reports once a majority appended it, flushed or not. Every other
+    /// identity in the index that is not pending is committed, so this is
+    /// all an all-duplicate quorum-ack request has to wait to commit; see
+    /// do_replicate().
     model::offset _relaxed_admitted_offset{model::offset::min()};
+    /// A later term may have truncated what an earlier one admitted, and its
+    /// sync committed whatever survived, so the offset above only fences
+    /// requests in the term it was recorded in.
+    model::term_id _relaxed_admitted_term;
     /// Committed batches do_apply() could not read; see do_apply().
     uint64_t _batches_skipped{0};
     uint64_t _lookup_builds{0};
