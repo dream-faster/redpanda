@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import random
+import statistics
 import threading
 import time
 from collections import Counter
@@ -594,10 +595,11 @@ def test_topic_churn_returns_the_budget(make_cluster, pytestconfig):
     partition gives its entries back, so the shard's count returns to what
     the surviving topics hold and the budget cannot leak.
 
-    Allocated memory is compared only once the broker has warmed up: its own
-    caches grow by a couple of hundred MiB over the first rounds and then
-    stay put, with or without dedup. A leaked index would instead keep
-    growing, by several MiB a round at this size."""
+    Allocated memory is judged by how much it grows a round once the broker
+    has warmed up: its own caches grow by a couple of hundred MiB in one step,
+    with or without dedup, sometimes only after the warm-up rounds. A leaked
+    index would instead grow every round, by several MiB at this size, so
+    the median round's growth catches it while one step does not."""
     c = make_cluster(nodes=1, smp=1, memory="1G")
     require_new_build(c, pytestconfig)
     keeper = topic_on_one_node(c, 1)
@@ -607,7 +609,7 @@ def test_topic_churn_returns_the_budget(make_cluster, pytestconfig):
     per = 50_000
     warmup = scaled(20)
     measured = scaled(8)
-    warm_alloc = 0.0
+    allocs: list[float] = []
     for round_ in range(warmup + measured):
         t = topic_on_one_node(c, 2)
         for p in range(2):
@@ -622,11 +624,11 @@ def test_topic_churn_returns_the_budget(make_cluster, pytestconfig):
             assert got == 5000, got
 
         kafka.eventually(released, timeout_s=60)
-        if round_ == warmup - 1:
-            warm_alloc = c.node(0).metrics().sum("vectorized_memory_allocated_memory")
-    alloc = c.node(0).metrics().sum("vectorized_memory_allocated_memory")
-    assert alloc < warm_alloc + 16 * 2**20, (
-        f"allocated memory grew from {warm_alloc} to {alloc} over {measured} rounds"
+        if round_ >= warmup - 1:
+            allocs.append(c.node(0).metrics().sum("vectorized_memory_allocated_memory"))
+    growth = [b - a for a, b in zip(allocs, allocs[1:])]
+    assert statistics.median(growth) < 2**20, (
+        f"allocated memory grew every round: {[int(g) for g in growth]} bytes"
     )
     assert_memory_healthy(c)
 
