@@ -97,16 +97,16 @@ enum class dedup_identity_lookup {
 /// Where one record lies in its batch's records buffer, as offsets from the
 /// start of the buffer, for a caller that copies records out of it.
 struct dedup_record_span {
-    /// The record's length varint.
-    size_t begin{0};
-    /// The first byte the length counts: the attributes.
+    /// The first byte the record's length counts: the attributes.
     size_t body{0};
-    /// The offset delta varint, and the first byte after it.
-    size_t offset_delta{0};
-    size_t after_offset_delta{0};
     /// One past the record's last byte.
     size_t end{0};
     int64_t timestamp_delta{0};
+    /// Where the offset delta varint starts, counted from body, and its
+    /// size. Bytes suffice: a varint is at most vint::max_length bytes long
+    /// and only the attributes and the timestamp delta come before it.
+    uint8_t offset_delta_at{0};
+    uint8_t offset_delta_size{0};
 };
 
 /// \brief Walk a batch's records reading only what dedup needs.
@@ -171,7 +171,6 @@ void for_each_dedup_identity(
         // The length counts the bytes after itself. Whatever dedup does not
         // read is skipped as one span to this end, rather than header by
         // header.
-        [[maybe_unused]] const size_t begin = parser.bytes_consumed();
         const auto size = read_length();
         if (size < 0) [[unlikely]] {
             throw std::out_of_range(
@@ -180,11 +179,9 @@ void for_each_dedup_identity(
         const size_t body = parser.bytes_consumed();
         const size_t record_end = body + static_cast<size_t>(size);
         parser.skip(1); // attributes
-        auto [ts_delta, _tv] = parser.read_varlong();
-        [[maybe_unused]] const size_t offset_delta = parser.bytes_consumed();
-        parser.read_varlong();
-        [[maybe_unused]] const size_t after_offset_delta
-          = parser.bytes_consumed();
+        auto [ts_delta, ts_delta_size] = parser.read_varlong();
+        [[maybe_unused]] const auto [_od, offset_delta_size]
+          = parser.read_varlong();
         const auto key_len = read_length();
         auto lookup = dedup_identity_lookup::no_identity;
         dedup_identity_digest digest;
@@ -260,12 +257,11 @@ void for_each_dedup_identity(
               digest,
               model::timestamp{ts},
               dedup_record_span{
-                .begin = begin,
                 .body = body,
-                .offset_delta = offset_delta,
-                .after_offset_delta = after_offset_delta,
                 .end = record_end,
-                .timestamp_delta = ts_delta});
+                .timestamp_delta = ts_delta,
+                .offset_delta_at = static_cast<uint8_t>(1 + ts_delta_size),
+                .offset_delta_size = offset_delta_size});
         } else {
             go_on = emit(lookup, digest, model::timestamp{ts});
         }

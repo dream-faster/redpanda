@@ -1571,6 +1571,7 @@ redpanda_cc_gtest(
         "//src/v/model:batch_compression",
         "//src/v/storage:record_batch_builder",
         "//src/v/test_utils:gtest",
+        "//src/v/utils:vint",
         "@fmt",
         "@googletest//:gtest",
         "@seastar",
