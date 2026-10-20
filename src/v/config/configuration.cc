@@ -452,13 +452,15 @@ configuration::configuration()
       "dedup_max_entries_per_partition",
       "Maximum number of distinct deduplication identities retained by each "
       "partition replica. Once the limit is reached, new identities are "
-      "admitted without being indexed until expired entries are evicted. Each "
-      "broker reads this value once at startup, so a change does not take "
-      "effect atomically across the cluster: during a rolling restart a "
-      "not-yet-restarted leader still enforces the old limit while a restarted "
-      "follower enforces the new one, and the index divergence that results is "
-      "not reconciled afterwards.",
-      {.needs_restart = needs_restart::yes,
+      "admitted without being indexed until expired entries are evicted. "
+      "Changes apply without a restart. Raising the limit takes effect at "
+      "once; after lowering it, an index above the new limit keeps indexing "
+      "new identities and drops its oldest ones as they arrive until it is "
+      "back under, and an idle index keeps its entries until it gets traffic. "
+      "Each broker applies a change when it receives it, so replicas can "
+      "briefly enforce different limits, and the index divergence that "
+      "results is not reconciled afterwards.",
+      {.needs_restart = needs_restart::no,
        .example = "1000000",
        .visibility = visibility::tunable},
       cluster::DEFAULT_DEDUP_MAX_ENTRIES_PER_PARTITION,
@@ -472,8 +474,10 @@ configuration::configuration()
       "alone does not bound one shard's memory. Once the shard nears the "
       "limit, partitions adding new identities drop their oldest ones; at the "
       "limit, new identities are admitted without being indexed. 0 derives "
-      "the limit from the shard's memory. Read once at startup.",
-      {.needs_restart = needs_restart::yes,
+      "the limit from the shard's memory. Changes apply without a restart; "
+      "after lowering the limit, new identities on the shard drop the oldest "
+      "entries of its largest indices until it is back under.",
+      {.needs_restart = needs_restart::no,
        .example = "4000000",
        .visibility = visibility::tunable},
       cluster::DEFAULT_DEDUP_MAX_ENTRIES_PER_SHARD)

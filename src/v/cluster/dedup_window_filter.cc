@@ -50,6 +50,10 @@ dedup_window_filter::dedup_window_filter(
     begin_pass();
 }
 
+void dedup_window_filter::set_max_entries(size_t max_entries) {
+    _max_entries = std::min(max_entries, dedup_compact_index::max_size);
+}
+
 dedup_window_filter::~dedup_window_filter() {
     if (_shard_budget) {
         _shard_budget->entries -= _budget_accounted;
@@ -810,13 +814,23 @@ bool dedup_window_filter::make_room_for_one(model::timestamp incoming) {
     // the index is. The cursor advances either way, so successive attempts
     // walk the index and eventually complete a pass, recomputing the cutoff.
     ++_capacity_sweeps;
+    const auto own_before = _index.size();
+    const auto shard_before = _shard_budget ? _shard_budget->entries : 0;
     sweep_step(capacity_emergency_budget);
-    if (
-      at_capacity() && _shard_budget && _index.size() < _max_entries
-      && !_index.empty()) {
+    const bool may_replace = _index.size() > _max_entries
+                             || (_shard_budget && _index.size() < _max_entries);
+    if (at_capacity() && !_index.empty() && may_replace) {
         replace_oldest_visited(incoming);
     }
-    return !at_capacity();
+    return !at_capacity() || shrank_over_limit(own_before, shard_before);
+}
+
+bool dedup_window_filter::shrank_over_limit(
+  size_t own_before, size_t shard_before) const {
+    const bool over
+      = own_before > _max_entries
+        || (_shard_budget && shard_before > _shard_budget->max_entries);
+    return over && own_before >= _index.size() + 2;
 }
 
 void dedup_window_filter::replace_oldest_visited(model::timestamp incoming) {
@@ -832,9 +846,10 @@ void dedup_window_filter::replace_oldest_visited(model::timestamp incoming) {
     // slot, and behind the cursor that entry would go unvisited -- unexpired
     // and uncounted -- for the rest of the pass.
     //
-    // Only for the shard budget. At its own ceiling an index still admits
-    // unindexed what it cannot make room for (see
-    // CapacityEvictionFailsOpenWhenNoSliceCanBeFreed), and only an entry
+    // Only for the shard budget, or for an index above its own ceiling, which
+    // only a ceiling lowered at runtime leaves it at. Exactly at its own
+    // ceiling an index still admits unindexed what it cannot make room for
+    // (see CapacityEvictionFailsOpenWhenNoSliceCanBeFreed), and only an entry
     // strictly older than the incoming one is replaced, so an index whose
     // entries all share the incoming timestamp keeps them.
     if (_sweep_pos >= _index.size()) {
@@ -850,12 +865,31 @@ void dedup_window_filter::replace_oldest_visited(model::timestamp incoming) {
     // new identity would then leave every new identity unindexed for good.
     // Bounded by the window either way.
     size_t need = 1;
-    if (_shard_budget && _shard_budget->entries >= _shard_budget->max_entries) {
-        need = std::min(
-          _shard_budget->entries - _shard_budget->max_entries + 1,
-          capacity_emergency_budget);
+    if (_index.size() > _max_entries) {
+        need = _index.size() - _max_entries + 1;
     }
+    if (_shard_budget && _shard_budget->entries >= _shard_budget->max_entries) {
+        need = std::max(
+          need, _shard_budget->entries - _shard_budget->max_entries + 1);
+    }
+    need = std::min(need, capacity_emergency_budget);
+    // Above a limit, rather than at it: a lowered limit, or a restore that
+    // claimed room before others filled it.
+    const bool over_limit
+      = _index.size() > _max_entries
+        || (_shard_budget && _shard_budget->entries > _shard_budget->max_entries);
     for (; need > 0 && _sweep_pos < _index.size(); --need) {
+        if (
+          over_limit && _index.size() > capacity_emergency_budget
+          && _sweep_pos + capacity_emergency_budget > _index.size()) {
+            // Too few entries left ahead for a full window: wrap, as above.
+            // The array's tail is where new identities were just appended, so
+            // the oldest of a short window there is likely one of them, and
+            // replacing many per insert would otherwise drop the newest
+            // identities while older ones stay.
+            _sweep_pos = 0;
+            finish_pass();
+        }
         const auto begin = _sweep_pos;
         const auto end = std::min(
           begin + capacity_emergency_budget, _index.size());
@@ -868,10 +902,17 @@ void dedup_window_filter::replace_oldest_visited(model::timestamp incoming) {
             }
         }
         if (!oldest || !(_index.timestamp_at(*oldest) < incoming.value())) {
-            return;
+            break;
         }
         erase_at(*oldest);
         ++_capacity_evicted_entries;
+    }
+    if (over_limit) {
+        // Up to capacity_emergency_budget entries a call shrinks this index
+        // far faster than largest() refreshes. Left cached as the largest, an
+        // index trimming itself would go on counting as the largest until it
+        // was empty, while a larger one kept everything.
+        stop_being_largest();
     }
 }
 
@@ -894,6 +935,7 @@ bool dedup_window_filter::take_room_from_largest(model::timestamp incoming) {
         // now, so nothing freed from it is room for anyone else.
         return false;
     }
+    const auto shard_before = _shard_budget->entries;
     // The largest index's own cursor decides what goes, so it loses its
     // oldest entries as it would at its own ceiling -- once its next pass has
     // found them. That is a change to another partition's index driven by
@@ -901,7 +943,11 @@ bool dedup_window_filter::take_room_from_largest(model::timestamp incoming) {
     // shard with different neighbours, can diverge: the same best-effort
     // divergence the shard budget already accepts.
     largest->make_room_for_one(incoming);
-    return !at_capacity();
+    // Above the limit, as in make_room_for_one(): the insert may go ahead
+    // once the shard has shrunk by two.
+    return !at_capacity()
+           || (shard_before > _shard_budget->max_entries
+               && shard_before >= _shard_budget->entries + 2);
 }
 
 dedup_index_snapshot dedup_window_filter::snapshot() const {
