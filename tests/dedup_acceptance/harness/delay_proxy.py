@@ -13,6 +13,10 @@ from __future__ import annotations
 import asyncio
 import threading
 
+# What one direction of a connection may hold before the proxy stops reading
+# from its sender.
+_MAX_QUEUED_BYTES = 64 << 20
+
 
 class DelayProxy:
     def __init__(self, listen_port: int, target_port: int, delay_s: float):
@@ -61,23 +65,40 @@ class DelayProxy:
     async def _pipe(self, reader, writer) -> None:
         loop = asyncio.get_running_loop()
         queue: asyncio.Queue = asyncio.Queue()
+        queued = 0
+        drained = asyncio.Event()
 
         async def send() -> None:
-            while True:
-                due, data = await queue.get()
-                if data is None:
-                    break
-                wait = due - loop.time()
-                if wait > 0:
-                    await asyncio.sleep(wait)
-                writer.write(data)
-                await writer.drain()
-            writer.close()
+            nonlocal queued
+            try:
+                while True:
+                    due, data = await queue.get()
+                    if data is None:
+                        break
+                    wait = due - loop.time()
+                    if wait > 0:
+                        await asyncio.sleep(wait)
+                    writer.write(data)
+                    await writer.drain()
+                    queued -= len(data)
+                    drained.set()
+            finally:
+                writer.close()
 
         sender = asyncio.create_task(send())
         try:
-            while data := await reader.read(1 << 16):
+            while not sender.done() and (data := await reader.read(1 << 16)):
                 queue.put_nowait((loop.time() + self.delay_s, data))
+                queued += len(data)
+                # Stop reading while the receiver is that far behind, so it
+                # pushes back on the sender as a direct connection would.
+                while queued > _MAX_QUEUED_BYTES and not sender.done():
+                    drained.clear()
+                    waiter = asyncio.ensure_future(drained.wait())
+                    await asyncio.wait(
+                        {waiter, sender}, return_when=asyncio.FIRST_COMPLETED
+                    )
+                    waiter.cancel()
         except (ConnectionError, OSError):
             pass
         finally:

@@ -19,7 +19,9 @@
 #include "model/batch_builder.h"
 #include "model/batch_compression.h"
 #include "model/record.h"
+#include "model/record_utils.h"
 #include "storage/record_batch_builder.h"
+#include "utils/vint.h"
 
 #include <seastar/core/future.hh>
 #include <seastar/core/lowres_clock.hh>
@@ -27,7 +29,9 @@
 #include <fmt/format.h>
 #include <gtest/gtest.h>
 
+#include <array>
 #include <chrono>
+#include <cstddef>
 #include <cstring>
 #include <functional>
 #include <iterator>
@@ -135,11 +139,13 @@ struct record_spec {
     std::vector<std::pair<ss::sstring, ss::sstring>> headers{};
 };
 
-model::record_batch
-make_batch_of(const std::vector<record_spec>& specs, model::timestamp base_ts) {
+model::record_batch make_batch_of(
+  const std::vector<record_spec>& specs,
+  model::timestamp base_ts,
+  model::timestamp_type ts_type = model::timestamp_type::create_time) {
     model::batch_builder builder;
     builder.set_batch_type(model::record_batch_type::raft_data);
-    builder.set_batch_timestamp(model::timestamp_type::create_time, base_ts);
+    builder.set_batch_timestamp(ts_type, base_ts);
     int32_t offset_delta = 0;
     for (const auto& spec : specs) {
         chunked_vector<model::record_header> hdrs;
@@ -641,7 +647,9 @@ model::record_batch rebuild_through_builder(
 
 // Partial drops across the shapes that move bytes around: offset deltas whose
 // varints shrink (record 64 onwards re-numbered below 64), null keys, empty
-// and large values, headers, negative and large timestamp deltas, every codec.
+// and large values, headers, negative and large timestamp deltas, every codec,
+// both timestamp types, and identities taken from keys or from a header
+// anywhere among a record's headers.
 TEST(DedupWindowFilter, SplicedRebuildMatchesTheBuilder) {
     std::mt19937_64 rng(17);
     const std::vector<model::compression> codecs{
@@ -650,14 +658,26 @@ TEST(DedupWindowFilter, SplicedRebuildMatchesTheBuilder) {
       model::compression::snappy,
       model::compression::lz4,
       model::compression::zstd};
+    const ss::sstring dedup_header{"dedup-id"};
     for (auto codec : codecs) {
         for (int round = 0; round < 20; ++round) {
+            const bool header_mode = round % 2 == 1;
+            const auto ts_type = round % 4 < 2
+                                   ? model::timestamp_type::create_time
+                                   : model::timestamp_type::append_time;
             const size_t n = 1 + rng() % 300;
             std::vector<record_spec> specs;
+            std::vector<std::optional<ss::sstring>> identities;
             for (size_t i = 0; i < n; ++i) {
                 record_spec spec;
-                if (rng() % 10 != 0) {
-                    spec.key = fmt::format("k{}", rng() % (n / 2 + 1));
+                std::optional<ss::sstring> identity;
+                if (header_mode || rng() % 10 != 0) {
+                    identity = fmt::format("k{}", rng() % (n / 2 + 1));
+                }
+                if (!header_mode) {
+                    spec.key = identity;
+                } else if (rng() % 10 != 0) {
+                    spec.key = fmt::format("key-{}", rng());
                 }
                 spec.value = ss::sstring(
                   rng() % 4 == 0 ? rng() % 3000 : rng() % 40, 'v');
@@ -667,16 +687,26 @@ TEST(DedupWindowFilter, SplicedRebuildMatchesTheBuilder) {
                     spec.headers.emplace_back(
                       fmt::format("h{}", h), fmt::format("value-{}", rng()));
                 }
+                if (header_mode) {
+                    const auto at = static_cast<std::ptrdiff_t>(
+                      rng() % (spec.headers.size() + 1));
+                    spec.headers.emplace(
+                      spec.headers.begin() + at, dedup_header, *identity);
+                }
+                identities.push_back(std::move(identity));
                 specs.push_back(std::move(spec));
             }
-            auto batch = make_batch_of(specs, ts(1'000'000));
+            auto batch = make_batch_of(specs, ts(1'000'000), ts_type);
             if (codec != model::compression::none) {
                 batch = model::compress_batch_sync(codec, std::move(batch));
             }
 
-            // Index some keys up front, so records drop across requests as
-            // well as within this one.
+            // Index some identities up front, so records drop across requests
+            // as well as within this one.
             cluster::dedup_window_filter f(3'600'000ms);
+            if (header_mode) {
+                f.set_key_header(dedup_header);
+            }
             std::set<ss::sstring> seen;
             for (size_t i = 0; i < n / 2; ++i) {
                 auto key = fmt::format("k{}", rng() % (n / 2 + 1));
@@ -684,12 +714,13 @@ TEST(DedupWindowFilter, SplicedRebuildMatchesTheBuilder) {
                 seen.insert(key);
             }
             std::vector<bool> dropped;
-            for (const auto& spec : specs) {
-                dropped.push_back(spec.key && !seen.insert(*spec.key).second);
+            for (const auto& identity : identities) {
+                dropped.push_back(identity && !seen.insert(*identity).second);
             }
             const auto kept = std::ranges::count(dropped, false);
 
             auto result = f.filter_request(batch.copy());
+            ASSERT_FALSE(result.missing_required_header);
             if (kept == static_cast<int64_t>(n)) {
                 ASSERT_TRUE(result.batch);
                 EXPECT_EQ(*result.batch, batch);
@@ -721,8 +752,120 @@ TEST(DedupWindowFilter, SplicedRebuildMatchesTheBuilder) {
                 EXPECT_EQ(got.data(), expected.data());
             }
             EXPECT_EQ(keys_of(got), keys_of(expected));
+            EXPECT_EQ(headers_of(got), headers_of(expected));
         }
     }
+}
+
+// A client-controlled timestamp delta that would carry the rebuilt batch's
+// max timestamp past int64 saturates it instead, as the identity walk does
+// for the record's own timestamp.
+TEST(DedupWindowFilter, SplicedMaxTimestampSaturates) {
+    const int64_t huge = std::numeric_limits<int64_t>::max() - 5;
+    // Built against a zero base, which the builder's own max timestamp can
+    // carry, and rebased after.
+    auto batch = make_batch_of(
+      {{.key = "a", .value = "dup", .timestamp_delta = 0},
+       {.key = "b", .value = "kept", .timestamp_delta = huge}},
+      ts(0));
+    batch.header().first_timestamp = ts(1'000'000);
+    batch.header().max_timestamp = ts(std::numeric_limits<int64_t>::max());
+    batch.header().reset_size_checksum_metadata(batch.data());
+
+    cluster::dedup_window_filter f(3'600'000ms);
+    f.populate(iobuf::from("a"), ts(1'000'000));
+    auto result = f.filter_request(std::move(batch));
+    ASSERT_TRUE(result.batch);
+    EXPECT_EQ(keys_of(*result.batch), (std::vector<ss::sstring>{"b"}));
+    EXPECT_EQ(timestamp_deltas_of(*result.batch), (std::vector<int64_t>{huge}));
+    EXPECT_EQ(result.batch->header().first_timestamp, ts(1'000'000));
+    EXPECT_EQ(
+      result.batch->header().max_timestamp,
+      ts(std::numeric_limits<int64_t>::max()));
+}
+
+namespace {
+
+// Appends v as a varint of at least `width` bytes, padded with redundant
+// continuation bytes: valid, and accepted by every decoder, but never what an
+// encoder writes.
+void append_padded_varint(iobuf& out, int64_t v, size_t width) {
+    std::array<uint8_t, vint::max_length> buf{};
+    auto n = vint::serialize(v, buf.data());
+    for (; n < width; ++n) {
+        buf[n - 1] |= 0x80;
+        buf[n] = 0;
+    }
+    out.append(reinterpret_cast<const char*>(buf.data()), n);
+}
+
+// One record with no headers, its length and offset delta varints at least
+// `framing_width` bytes and every other varint at least `field_width`.
+iobuf padded_record(
+  std::string_view key,
+  std::string_view value,
+  int64_t timestamp_delta,
+  int32_t offset_delta,
+  size_t framing_width,
+  size_t field_width) {
+    iobuf body;
+    const char attributes = 0;
+    body.append(&attributes, 1);
+    append_padded_varint(body, timestamp_delta, field_width);
+    append_padded_varint(body, offset_delta, framing_width);
+    append_padded_varint(body, static_cast<int64_t>(key.size()), field_width);
+    body.append(key.data(), key.size());
+    append_padded_varint(body, static_cast<int64_t>(value.size()), field_width);
+    body.append(value.data(), value.size());
+    append_padded_varint(body, 0, field_width); // header count
+    iobuf out;
+    append_padded_varint(
+      out, static_cast<int64_t>(body.size_bytes()), framing_width);
+    out.append(std::move(body));
+    return out;
+}
+
+} // namespace
+
+// Varints longer than they need be, as a client may write them. The splice
+// re-encodes the two it rewrites, each record's length and offset delta, and
+// copies the rest as they are.
+TEST(DedupWindowFilter, SplicedRecordsKeepNonMinimalVarints) {
+    constexpr size_t padded = 4;
+    iobuf records;
+    records.append(padded_record("a", "dup", 0, 0, padded, padded));
+    records.append(padded_record("b", "kept", 5, 1, padded, padded));
+    records.append(padded_record("c", "also kept", 9, 2, padded, padded));
+    // A header for three records over the same timestamps, its records
+    // swapped for the padded ones.
+    auto shape = make_batch_of(
+      {{.key = "a", .value = "", .timestamp_delta = 0},
+       {.key = "b", .value = "", .timestamp_delta = 5},
+       {.key = "c", .value = "", .timestamp_delta = 9}},
+      ts(1'000'000));
+    model::record_batch batch(
+      shape.header(), std::move(records), model::record_batch::tag_ctor_ng{});
+    batch.header().reset_size_checksum_metadata(batch.data());
+    ASSERT_EQ(keys_of(batch), (std::vector<ss::sstring>{"a", "b", "c"}));
+
+    cluster::dedup_window_filter f(3'600'000ms);
+    f.populate(iobuf::from("a"), ts(1'000'000));
+    auto result = f.filter_request(std::move(batch));
+    ASSERT_TRUE(result.batch);
+    const auto& got = *result.batch;
+
+    iobuf expected;
+    expected.append(padded_record("b", "kept", 5, 0, 0, padded));
+    expected.append(padded_record("c", "also kept", 9, 1, 0, padded));
+    EXPECT_EQ(got.data(), expected);
+    EXPECT_EQ(got.record_count(), 2);
+    EXPECT_EQ(got.header().last_offset_delta, 1);
+    EXPECT_EQ(got.header().max_timestamp, ts(1'000'009));
+    EXPECT_EQ(got.header().crc, model::crc_record_batch(got));
+    EXPECT_EQ(keys_of(got), (std::vector<ss::sstring>{"b", "c"}));
+    EXPECT_EQ(values_of(got), (std::vector<ss::sstring>{"kept", "also kept"}));
+    EXPECT_EQ(offset_deltas_of(got), (std::vector<int32_t>{0, 1}));
+    EXPECT_EQ(timestamp_deltas_of(got), (std::vector<int64_t>{5, 9}));
 }
 
 // A compressed batch is correctly decompressed before key inspection.
@@ -1425,9 +1568,9 @@ TEST(DedupIdentityDigest, SeparatesDistinctIdentities) {
     EXPECT_EQ(ab, cluster::dedup_digest_of(iobuf::from("ab")));
 }
 
-// The digest is persisted in snapshots and compared across replicas, so the
-// seeds and the algorithm are part of the on-disk format: changing either
-// silently invalidates every existing index without a serde version bump.
+// The digest is persisted in snapshots, so the algorithm and its seed are part
+// of the on-disk format: changing either silently invalidates every existing
+// index unless state_snapshot's compat version is bumped with it.
 // These constants were computed independently (python-xxhash, XXH3-128 with
 // the default seed: high64 and low64), so this also cross-checks the
 // implementation rather than just pinning whatever it happens to produce. The

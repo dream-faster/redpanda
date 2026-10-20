@@ -75,15 +75,10 @@ def test_upgrade_drops_legacy_kvstore_snapshots(upgrade_cluster, image):
     seeded = {p: keys_for(p, 150_000) for p in range(4)}
     for p, ks in seeded.items():
         kafka.produce_bulk(c.brokers, t, p, ks, value=b"x" * 64)
-
-    # The old build keeps every partition's latest dedup snapshot in the
-    # kvstore: ~30 bytes an entry. It writes them in the background, so the
-    # last partitions' may land after the produce returns.
-    def _old_kv_full() -> None:
-        old_kv = c.node(0).metrics().sum(KVSTORE_BYTES)
-        assert old_kv > 5 * 1024 * 1024, f"old build's kvstore held only {old_kv} bytes"
-
-    kafka.eventually(_old_kv_full, timeout_s=60)
+    # Four fifths of what was seeded is more than three of the four
+    # partitions' snapshots can hold, and less than all four do with their
+    # open segment (a twelfth of each) left out.
+    kafka.eventually(lambda: _assert_legacy_snapshots(c, 600_000), timeout_s=60)
 
     c.node(0).restart(image=image)
     assert "longer kept in the kvstore" in c.node(0).logs()
@@ -109,6 +104,17 @@ def test_upgrade_drops_legacy_kvstore_snapshots(upgrade_cluster, image):
 def _assert_entries(c: Cluster, t: str, want: int) -> None:
     got = c.node(0).metrics().sum(PART_ENTRIES, topic=t)
     assert got >= want, (got, want)
+
+
+def _assert_legacy_snapshots(c: Cluster, entries: int) -> None:
+    """The old build keeps every partition's latest dedup snapshot in the
+    kvstore, 30 bytes an entry (a version 1 wire_entry). It writes one in the
+    background each time the partition's log rolls a segment, so the last
+    ones may land after the produce returns, and each leaves out the records
+    of the segment still open."""
+    want = entries * 30 * 4 // 5
+    got = c.node(0).metrics().sum(KVSTORE_BYTES)
+    assert got > want, f"old build's kvstore held {got} bytes, want > {want}"
 
 
 def test_upgrade_into_less_memory(upgrade_cluster, image):

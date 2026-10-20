@@ -580,7 +580,9 @@ dedup_window_filter::filter_request(model::record_batch batch) {
         iobuf records_data = std::move(data).finish();
 
         // As model::batch_builder::build_header() lays it out for the same
-        // records.
+        // records, but for a max timestamp that saturates where the builder
+        // would overflow: the deltas are client-controlled, as in
+        // for_each_dedup_identity().
         model::record_batch_attributes attrs;
         if (header.attrs.is_control()) {
             attrs.set_control_type();
