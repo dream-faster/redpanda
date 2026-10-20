@@ -143,11 +143,15 @@ struct dedup_stm_test_accessor {
           .get();
     }
 
-    static iobuf state_snapshot_with_entry_bytes(size_t bytes) {
+    static iobuf state_snapshot_with_entry_bytes(
+      size_t bytes, size_t entry_size = dedup_stm::narrow_entry_size) {
         auto entries = iobuf::from(std::string(bytes, 'x'));
         return serde::to_iobuf(
           dedup_stm::state_snapshot{
-            .window_ms = 1000, .generation = 1, .entries = std::move(entries)});
+            .window_ms = 1000,
+            .generation = 1,
+            .entries = std::move(entries),
+            .entry_size = static_cast<uint32_t>(entry_size)});
     }
 
     /// \p entries in the wide layout (digest lo, low 32 bits of digest hi,
@@ -285,16 +289,22 @@ TEST(dedup_stm_snapshot, pending_identities_are_left_out) {
 }
 
 TEST(dedup_stm_snapshot, misaligned_entries_are_rejected) {
-    dedup_window_filter target(1h);
-    int64_t generation = 0;
-    EXPECT_THROW(
-      dedup_stm_test_accessor::restore(
-        target,
-        generation,
-        dedup_stm_test_accessor::state_snapshot_with_entry_bytes(
-          dedup_stm::narrow_entry_size + 1)),
-      serde::serde_exception);
-    EXPECT_EQ(target.map_size(), 0u);
+    for (const size_t entry_size :
+         {dedup_stm::narrow_entry_size,
+          dedup_stm::packed_entry_size,
+          dedup_stm::wide_entry_size}) {
+        dedup_window_filter target(1h);
+        int64_t generation = 0;
+        EXPECT_THROW(
+          dedup_stm_test_accessor::restore(
+            target,
+            generation,
+            dedup_stm_test_accessor::state_snapshot_with_entry_bytes(
+              entry_size + 1, entry_size)),
+          serde::serde_exception)
+          << entry_size;
+        EXPECT_EQ(target.map_size(), 0u);
+    }
 }
 
 namespace {
