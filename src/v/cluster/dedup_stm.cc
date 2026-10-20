@@ -155,6 +155,13 @@ void dedup_stm::setup_metrics() {
           [this] { return _state.map_size(); },
           sm::description("Number of identities in the dedup index."),
           labels),
+        sm::make_gauge(
+          "index_memory_bytes",
+          [this] { return _state.memory_usage(); },
+          sm::description(
+            "Memory the dedup index holds: its entries, and the lookup table "
+            "while this replica filters (a follower keeps none)."),
+          labels),
       },
       {},
       {sm::shard_label, metrics::partition_label});
