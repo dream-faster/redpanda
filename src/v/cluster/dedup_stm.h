@@ -27,6 +27,8 @@
 #include <seastar/core/shared_future.hh>
 #include <seastar/core/shared_ptr.hh>
 
+#include <deque>
+
 namespace cluster {
 
 struct dedup_stm_test_accessor;
@@ -63,6 +65,8 @@ public:
     /// timestamp as an age (packed) or in full (wide).
     static constexpr size_t packed_entry_size = sizeof(uint64_t)
                                                 + 2 * sizeof(uint32_t);
+    /// The timestamp in full instead: written when the window is longer than
+    /// a 32-bit age spans, and read from a snapshot of an earlier build.
     static constexpr size_t wide_entry_size = 2 * sizeof(uint64_t)
                                               + sizeof(uint32_t);
 
@@ -137,15 +141,17 @@ private:
     ///   cannot be restored, and this build refuses them on compat version.
     ///   Written with wide_entry_size entries at first, then with
     ///   packed_entry_size ones: an entry's timestamp as a 32-bit age below
-    ///   max_timestamp, which covers more than the index's own span (see
-    ///   dedup_compact_index). Both are read; a build that reads only the
-    ///   first refuses the second on entry_size, and rebuilds as above.
+    ///   max_timestamp, which covers every live entry of a window up to
+    ///   2^32 - 1 ms (49.7 days). A longer window is still written wide.
+    ///   Both are read; a build that reads only the first refuses the second
+    ///   on entry_size, and rebuilds as above.
     /// - 5: digests are 80 bits, and an entry packs into narrow_entry_size
     ///   bytes: digest lo, the low 16 bits of digest hi, the age. This build
     ///   reads version 4 too: its digests, cut to 80 bits, are what this build
     ///   computes for the same identities, so the compat version stays 4. A
     ///   version-4 build can only compare 96 bits; it refuses a version-5
-    ///   snapshot on entry_size, which it reads as one it does not know.
+    ///   snapshot on entry_size, which it reads as one it does not know. A
+    ///   window longer than a 32-bit age spans is still written wide.
     ///
     /// The break runs both ways: an older binary rejects a newer snapshot on
     /// compat version or entry_size, never failing the partition. For a local
@@ -168,8 +174,9 @@ private:
         int64_t generation{0};
         model::timestamp max_timestamp{model::timestamp::min()};
         iobuf entries;
-        /// Bytes per record in `entries`: narrow_entry_size, or
-        /// packed_entry_size or wide_entry_size for a version-4 snapshot.
+        /// Bytes per record in `entries`: narrow_entry_size, wide_entry_size
+        /// for a long window, or packed_entry_size or wide_entry_size for a
+        /// version-4 snapshot.
         uint32_t entry_size{narrow_entry_size};
 
         auto serde_fields() {
@@ -236,14 +243,19 @@ private:
     void setup_metrics();
 
     /// Wait until every request in \p introducers is known appended. An
-    /// error if one never was, or did not resolve within the sync timeout:
-    /// the identities a request dropped against it may have no durable copy.
-    ss::future<std::optional<errc>>
-    wait_for_introducers(const std::vector<inflight_ptr>& introducers);
+    /// error if one never was, or did not resolve within the sync timeout or
+    /// before \p as fired: the identities a request dropped against it may
+    /// have no durable copy.
+    ss::future<std::optional<errc>> wait_for_introducers(
+      const std::vector<inflight_ptr>& introducers,
+      std::optional<std::reference_wrapper<ss::abort_source>> as);
 
     /// Put every unregistered request's identities into _pending, oldest
     /// request first, so a newer one's registration wins as it would have.
     void register_pending();
+    /// Take \p request off _unregistered, if it is there, and forget its
+    /// undo log.
+    void unlist(const inflight_ptr& request) noexcept;
     /// The request in flight that introduced \p identity, if any.
     inflight_ptr pending_introducer(const dedup_identity_digest& identity);
     inflight_ptr lookup_registered(const dedup_identity_digest& identity) const;
@@ -306,8 +318,9 @@ private:
     /// inflight_request. Bounded by the records in flight.
     pending_identities _pending;
     /// Requests in flight whose identities are not in _pending yet, oldest
-    /// first. All of them are newer than any request that is.
-    std::vector<inflight_ptr> _unregistered;
+    /// first. All of them are newer than any request that is. The front may
+    /// be marked registered: register_pending() threw partway through it.
+    std::deque<inflight_ptr> _unregistered;
     /// Snapshots being written: while one is, requests register at once, so
     /// it leaves out everything in flight.
     size_t _snapshots_walking{0};
@@ -321,12 +334,18 @@ private:
     // Requests admitted and not yet settled. While any is, the lookup table
     // stays: settle() may have to revert one (see do_apply()).
     size_t _unsettled{0};
-    /// Last offset of a batch this leader admitted for a request with weaker
-    /// acks than quorum_ack, which raft reports appended before it commits.
-    /// Every other identity in the index that is not pending is committed,
-    /// so this is all an all-duplicate quorum-ack request has to wait to
-    /// commit; see do_replicate().
+    /// Last offset, in _relaxed_admitted_term, of a batch this leader admitted
+    /// and raft reported done before it committed: one with weaker acks than
+    /// quorum_ack, or a quorum-ack one under write caching, which raft
+    /// reports once a majority appended it, flushed or not. Every other
+    /// identity in the index that is not pending is committed, so this is
+    /// all an all-duplicate quorum-ack request has to wait to commit; see
+    /// do_replicate().
     model::offset _relaxed_admitted_offset{model::offset::min()};
+    /// A later term may have truncated what an earlier one admitted, and its
+    /// sync committed whatever survived, so the offset above only fences
+    /// requests in the term it was recorded in.
+    model::term_id _relaxed_admitted_term;
     /// Committed batches do_apply() could not read; see do_apply().
     uint64_t _batches_skipped{0};
     uint64_t _lookup_builds{0};

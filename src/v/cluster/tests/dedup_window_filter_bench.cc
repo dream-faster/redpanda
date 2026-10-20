@@ -146,6 +146,29 @@ void walk_identities_then_populate(
       });
 }
 
+// What dedup_stm::do_apply() runs: the identities digested first, then
+// indexed in one populate(), which prefetches each lookup a few ahead.
+void walk_identities_then_batch_populate(
+  cluster::dedup_window_filter& filter,
+  const model::record_batch& batch,
+  const std::optional<ss::sstring>& key_header) {
+    chunked_vector<cluster::dedup_index_entry> entries;
+    entries.reserve(static_cast<size_t>(batch.record_count()));
+    cluster::for_each_dedup_identity(
+      batch,
+      key_header,
+      [&entries](
+        cluster::dedup_identity_lookup lookup,
+        cluster::dedup_identity_digest digest,
+        model::timestamp ts) {
+          if (lookup == cluster::dedup_identity_lookup::identity) {
+              entries.push_back({.identity = digest, .timestamp = ts});
+          }
+          return true;
+      });
+    filter.populate(entries);
+}
+
 constexpr size_t snapshot_entries = 1'000'000;
 
 void fill(cluster::dedup_window_filter& filter, size_t entries) {
@@ -263,14 +286,27 @@ PERF_TEST(dedup_apply_path, record_parse_only) {
     return inner_iters * records_per_batch;
 }
 
-// The apply path as a follower runs it for every committed batch: walk the
-// identities, populate() each.
+// The apply path with one populate() per identity as it is walked, for the
+// before/after of the batched populate() below.
 PERF_TEST(dedup_apply_path, identity_walk_then_populate) {
     cluster::dedup_window_filter filter(60s);
     auto batches = make_batches(inner_iters, /*headers=*/false);
     perf_tests::start_measuring_time();
     for (auto& b : batches) {
         walk_identities_then_populate(filter, b, std::nullopt);
+    }
+    perf_tests::stop_measuring_time();
+    return inner_iters * records_per_batch;
+}
+
+// The apply path as a follower runs it for every committed batch: walk the
+// identities, then populate() them all at once.
+PERF_TEST(dedup_apply_path, identity_walk_then_batch_populate) {
+    cluster::dedup_window_filter filter(60s);
+    auto batches = make_batches(inner_iters, /*headers=*/false);
+    perf_tests::start_measuring_time();
+    for (auto& b : batches) {
+        walk_identities_then_batch_populate(filter, b, std::nullopt);
     }
     perf_tests::stop_measuring_time();
     return inner_iters * records_per_batch;

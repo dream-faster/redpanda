@@ -141,7 +141,7 @@ Guarantees:
   The per-partition ceiling does not bound a shard: partitions are placed on
   shards by count, not by index size, so several saturated indices can share
   one shard's memory. `dedup_max_entries_per_shard` (0, the default, derives it
-  from 15% of shard memory at ~52 bytes an entry) caps the sum. Every index on
+  from 15% of shard memory at ~48 bytes an entry) caps the sum. Every index on
   the shard reports its size into one shared `dedup_shard_budget`; the same
   cursor trims a partition that inserts while the shard is within a tenth of
   its limit, and at the limit a new identity with nothing freeable in its own
@@ -490,9 +490,12 @@ and the index rebuilds from the log within one window.
 
 The payload (`state_snapshot` version 3) carries the entries as one packed blob
 of 20-byte records (digest lo, the low 32 bits of digest hi, timestamp;
-little-endian), written straight from the index. A snapshot therefore costs one
-serialized copy of the live entries. Version 2 snapshots (24-byte records with
-all 64 bits of digest hi) are still read, keeping the 96 bits the index uses.
+little-endian), written straight from the index. Version 4 keeps that layout
+only for a window longer than 2^32 ms, and otherwise packs an entry into 16
+bytes, its timestamp as a 32-bit age below the snapshot's watermark. A snapshot
+therefore costs one serialized copy of the live entries. Version 2 snapshots
+(24-byte records with all 64 bits of digest hi) are still read, keeping the 96
+bits the index uses.
 Versions 0 and 1 are refused on compat version, and the index is rebuilt from
 the log; a version 2 binary refuses version 3 the same way, rather than
 restoring 96-bit digests it would never match against its 128-bit ones.
@@ -698,8 +701,8 @@ STM (`dedup_stm_test.cc`, single-node raft fixture as today):
   topics only. Compressed batches are the expensive case: the walk cannot
   read identities out of a compressed batch, so every replica decompresses
   every committed batch of a dedup topic.
-- Snapshots: O(active keys), 20 bytes an entry, written in chunks with the
-  reactor yielded between them.
+- Snapshots: O(active keys), 16 bytes an entry (20 for a window longer than
+  2^32 ms), written in chunks with the reactor yielded between them.
 - Measured: `//src/v/cluster/tests:dedup_window_filter_rpbench` (per-record
   cost of each path, run in the `unit-tests` workflow) and
   `tests/dedup_acceptance/test_bench.py` (end-to-end records/s and broker CPU

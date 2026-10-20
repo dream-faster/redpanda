@@ -20,6 +20,7 @@
 #include <seastar/core/coroutine.hh>
 #include <seastar/core/future.hh>
 #include <seastar/core/memory.hh>
+#include <seastar/core/thread_cputime_clock.hh>
 #include <seastar/coroutine/maybe_yield.hh>
 #include <seastar/util/later.hh>
 
@@ -28,7 +29,6 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
-#include <ctime>
 #include <iostream>
 #include <memory>
 
@@ -121,20 +121,7 @@ namespace {
 /// CPU to someone else. On a busy shared CI runner that is tens of
 /// milliseconds at a time, and it made these limits fail on code that
 /// passes them on a quiet one.
-struct clock {
-    using duration = std::chrono::nanoseconds;
-    using rep = duration::rep;
-    using period = duration::period;
-    using time_point = std::chrono::time_point<clock>;
-
-    static time_point now() noexcept {
-        timespec ts{};
-        ::clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
-        return time_point(
-          std::chrono::seconds(ts.tv_sec)
-          + std::chrono::nanoseconds(ts.tv_nsec));
-    }
-};
+using clock = ss::thread_cputime_clock;
 
 int64_t us(clock::duration d) {
     return std::chrono::duration_cast<std::chrono::microseconds>(d).count();

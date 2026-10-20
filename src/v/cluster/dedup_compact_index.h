@@ -58,8 +58,9 @@ struct dedup_identity_digest {
 inline constexpr uint64_t dedup_digest_hi_mask = 0xffffULL;
 
 /// The digest as the index keeps it. Digests computed by this build are
-/// already in this form; one read from a snapshot written before the index
-/// kept 80 bits is not.
+/// already in this form; one read from a version-4 snapshot, which kept 96
+/// bits, is not. The index masks whatever it is handed regardless, so a wider
+/// digest finds the same entry.
 constexpr dedup_identity_digest
 dedup_canonical_digest(dedup_identity_digest d) noexcept {
     return {.hi = d.hi & dedup_digest_hi_mask, .lo = d.lo};
