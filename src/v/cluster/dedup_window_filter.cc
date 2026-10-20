@@ -9,6 +9,7 @@
 
 #include "cluster/dedup_window_filter.h"
 
+#include "base/vassert.h"
 #include "hashing/xx.h"
 #include "model/batch_compression.h"
 #include "model/record.h"
@@ -207,7 +208,8 @@ bool within_window(int64_t a, int64_t b, int64_t window) {
 class exact_iobuf_writer {
 public:
     explicit exact_iobuf_writer(size_t size)
-      : _left(size) {}
+      : _size(size)
+      , _left(size) {}
 
     void append(const char* src, size_t n) {
         while (n > 0) {
@@ -232,6 +234,13 @@ public:
     }
     iobuf finish() && {
         flush();
+        // Also what keeps the fragments free of slack: they were allocated
+        // to add up to the size, so writing that many bytes filled them.
+        vassert(
+          _out.size_bytes() == _size,
+          "dedup rebuild wrote {} bytes, sized for {}",
+          _out.size_bytes(),
+          _size);
         return std::move(_out);
     }
 
@@ -257,6 +266,7 @@ private:
         _p = _e = nullptr;
     }
 
+    size_t _size;
     size_t _left;
     iobuf _out;
     ss::temporary_buffer<char> _buf;
@@ -411,7 +421,8 @@ dedup_window_filter::filter_request(model::record_batch batch) {
         dedup_identity_digest identity;
         model::timestamp timestamp;
         // The record's length less its offset delta's bytes, the part of it
-        // a rebuild keeps as it is.
+        // a rebuild keeps as it is. Saturated: a record this long, which only
+        // decompression can produce, cannot be kept in a rebuilt batch.
         uint32_t unchanged{0};
         bool has_identity{false};
         bool dropped{false};
@@ -433,12 +444,14 @@ dedup_window_filter::filter_request(model::record_batch batch) {
               missing_header = true;
               return false;
           }
+          const size_t unchanged
+            = (span.end - span.body)
+              - (span.after_offset_delta - span.offset_delta);
           records.push_back(
             {.identity = digest,
              .timestamp = clamp_to_broker_time(ts),
-             .unchanged = static_cast<uint32_t>(
-               (span.end - span.body)
-               - (span.after_offset_delta - span.offset_delta)),
+             .unchanged = static_cast<uint32_t>(std::min<size_t>(
+               unchanged, std::numeric_limits<uint32_t>::max())),
              .has_identity = lookup == dedup_identity_lookup::identity});
           return true;
       });
@@ -516,6 +529,17 @@ dedup_window_filter::filter_request(model::record_batch batch) {
                 size += vint::vint_size(length) + static_cast<size_t>(length);
             }
         }
+        // A batch's size is an int32, which also bounds any record whose
+        // `unchanged` saturated.
+        if (
+          size > static_cast<size_t>(std::numeric_limits<int32_t>::max())
+                   - model::packed_record_batch_header_size) [[unlikely]] {
+            throw std::out_of_range(
+              fmt::format(
+                "dedup: rebuilt batch of {} bytes of records is larger than "
+                "a batch can be",
+                size));
+        }
         exact_iobuf_writer data(size);
         // One reader finds each record's fields, the other copies the bytes
         // between them. The walk above already checked every length against
@@ -571,7 +595,10 @@ dedup_window_filter::filter_request(model::record_batch batch) {
         auto max_timestamp = base_ts;
         if (
           header.attrs.timestamp_type() == model::timestamp_type::create_time) {
-            max_timestamp = model::timestamp{base_ts() + max_timestamp_delta};
+            // Saturating, as the walk's per-record timestamps are: the delta
+            // is client-controlled.
+            max_timestamp = model::timestamp{
+              saturating_add(base_ts(), max_timestamp_delta)};
         }
         model::record_batch_header out{
           .header_crc = 0,

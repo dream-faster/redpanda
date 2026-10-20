@@ -1830,8 +1830,10 @@ TEST(DedupWindowFilter, SplicedRebuildIsIndependentOfFragmentation) {
     }
 }
 
-// A rebuilt batch larger than an iobuf fragment is split across several, none
-// of them with room left over to keep allocated behind the batch.
+// A rebuilt batch larger than an iobuf fragment is split across several, each
+// as large as a fragment can be but the last. That none keeps room allocated
+// behind the batch is the writer's own assertion: a trimmed buffer reports
+// its trimmed size as its capacity.
 TEST(DedupWindowFilter, LargeRebuildIsWrittenInFullFragments) {
     std::vector<record_spec> specs;
     for (size_t i = 0; i < 600; ++i) {
@@ -1850,8 +1852,12 @@ TEST(DedupWindowFilter, LargeRebuildIsWrittenInFullFragments) {
       fragments_of(data),
       (data.size_bytes() + iobuf::max_linearize_size - 1)
         / iobuf::max_linearize_size);
+    size_t left = data.size_bytes();
     for (const auto& frag : data) {
-        EXPECT_EQ(frag.size(), frag.capacity());
+        const auto want = std::min<size_t>(left, iobuf::max_linearize_size);
+        EXPECT_EQ(frag.size(), want);
+        EXPECT_EQ(frag.capacity(), want);
+        left -= std::min(left, frag.size());
     }
     std::vector<bool> dropped(600, false);
     for (size_t i = 400; i < 600; ++i) {
@@ -1860,6 +1866,29 @@ TEST(DedupWindowFilter, LargeRebuildIsWrittenInFullFragments) {
     const auto expected = rebuild_through_builder(batch, dropped);
     EXPECT_EQ(got.batch->header(), expected.header());
     EXPECT_EQ(data, expected.data());
+}
+
+// A rebuilt batch's max timestamp saturates where the base timestamp plus the
+// largest kept delta would overflow, as the walk's per-record timestamps do.
+TEST(DedupWindowFilter, RebuiltMaxTimestampSaturates) {
+    // The base is set after building: the builder adds the delta itself.
+    auto batch = make_batch_of(
+      {{.key = "a", .value = "1"},
+       {.key = "b", .value = "2", .timestamp_delta = 1000},
+       {.key = "a", .value = "3"}},
+      ts(1'000'000));
+    batch.header().first_timestamp = model::timestamp{
+      std::numeric_limits<int64_t>::max() - 10};
+    cluster::dedup_window_filter f(3'600'000ms);
+    auto got = f.filter_request(std::move(batch));
+    ASSERT_TRUE(got.batch);
+    ASSERT_EQ(got.batch->record_count(), 2);
+    EXPECT_EQ(
+      got.batch->header().first_timestamp,
+      model::timestamp{std::numeric_limits<int64_t>::max() - 10});
+    EXPECT_EQ(
+      got.batch->header().max_timestamp,
+      model::timestamp{std::numeric_limits<int64_t>::max()});
 }
 
 // Identities that reach the index as digests (the apply path) land in the
