@@ -286,6 +286,9 @@ private:
     model::offset _relaxed_admitted_offset{model::offset::min()};
     /// Committed batches do_apply() could not read; see do_apply().
     uint64_t _batches_skipped{0};
+    uint64_t _lookup_builds{0};
+    // Builds of at least this many entries are logged at info.
+    static constexpr size_t lookup_build_log_threshold = 100'000;
     /// Whether start() applied a local snapshot; see start().
     bool _local_snapshot_applied{false};
     metrics::internal_metric_groups _metrics;

@@ -28,6 +28,7 @@
 #include "storage/types.h"
 
 #include <seastar/core/byteorder.hh>
+#include <seastar/core/lowres_clock.hh>
 #include <seastar/core/memory.hh>
 #include <seastar/core/metrics.hh>
 #include <seastar/core/with_timeout.hh>
@@ -80,6 +81,13 @@ void dedup_stm::setup_metrics() {
           "records_dropped",
           [this] { return _state.dropped_records(); },
           sm::description("Number of records dropped as duplicates."),
+          labels),
+        sm::make_counter(
+          "lookup_builds",
+          [this] { return _lookup_builds; },
+          sm::description(
+            "Number of times a request waited for this replica to index the "
+            "entries it kept unindexed while it was not leading."),
           labels),
         sm::make_counter(
           "records_skew_clamped",
@@ -630,7 +638,20 @@ ss::future<result<kafka_result>> dedup_stm::do_replicate(
     }
     if (!_state.lookup_ready()) {
         // Leading since entries went in unindexed: index them all first.
+        const auto entries = _state.map_size();
+        const auto started = ss::lowres_clock::now();
         co_await _state.build_lookup();
+        ++_lookup_builds;
+        vlogl(
+          clusterlog,
+          entries >= lookup_build_log_threshold ? ss::log_level::info
+                                                : ss::log_level::debug,
+          "{} dedup lookup built for {} entries in {}ms",
+          _raft->ntp(),
+          entries,
+          std::chrono::duration_cast<std::chrono::milliseconds>(
+            ss::lowres_clock::now() - started)
+            .count());
         if (!_state.lookup_ready()) {
             // Applying as a follower again deferred it meanwhile.
             co_return errc::not_leader;
