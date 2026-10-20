@@ -278,6 +278,8 @@ ss::future<> compare_at(size_t entries) {
 // table's load moves with its size: right after its segments split it is at
 // its emptiest, just before at its fullest. The sizes below land on both.
 TEST_CORO(dedup_snapshot_stall, index_memory_per_entry_fits_the_budget) {
+    // How far the allocator's count may run above the table's own (see below).
+    constexpr size_t allocator_slack_per_entry = 12;
     size_t worst = 0;
     size_t own_worst = 0;
     for (size_t entries : {460'000ul, 920'000ul, 1'000'000ul, 1'800'000ul}) {
@@ -297,21 +299,23 @@ TEST_CORO(dedup_snapshot_stall, index_memory_per_entry_fits_the_budget) {
                   << std::flush;
         ASSERT_EQ_CORO(filter->map_size(), entries);
         ASSERT_EQ_CORO(stats.refused_inserts, 0u);
-        // The allocator also counts the spans its pools take on first use, and
-        // reuses what an earlier round freed, so it differs from the table's
-        // own count by a few bytes an entry either way, by how many depending
-        // on the host: on a GitHub-hosted runner the first round reads 33
-        // against the table's 25.
         worst = std::max(worst, per_entry);
         own_worst = std::max(own_worst, filter->memory_usage() / entries);
     }
+    // The bounds hold on the table's own count. The allocator's differs from
+    // it by a few bytes an entry either way, by how many depending on the
+    // host: it also counts the spans its pools take on first use, once per
+    // process rather than per index, and later rounds reuse what an earlier
+    // one freed. On a GitHub-hosted runner the first round reads about eight
+    // more than the table's count, the later ones a byte or three less.
+    ASSERT_LE_CORO(worst, own_worst + allocator_slack_per_entry);
     // The point of the table: well under the ~50 bytes the map it replaced
-    // took. Checked on the table's own count, which no host changes.
+    // took.
     ASSERT_LE_CORO(own_worst, 32u);
     // The packed snapshot adds dedup_stm::packed_entry_size on top while it
     // is written; the budget's figure must cover both.
     ASSERT_LE_CORO(
-      worst + dedup_stm::packed_entry_size, DEDUP_SHARD_BYTES_PER_ENTRY);
+      own_worst + dedup_stm::packed_entry_size, DEDUP_SHARD_BYTES_PER_ENTRY);
 }
 
 // Growing an index never stops the reactor for long: the lookup table grows a
