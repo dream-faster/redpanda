@@ -840,9 +840,10 @@ TEST(DedupWindowFilter, SplicedRecordsKeepNonMinimalVarints) {
        {.key = "b", .value = "", .timestamp_delta = 5},
        {.key = "c", .value = "", .timestamp_delta = 9}},
       ts(1'000'000));
+    auto header = shape.header();
+    header.reset_size_checksum_metadata(records);
     model::record_batch batch(
-      shape.header(), std::move(records), model::record_batch::tag_ctor_ng{});
-    batch.header().reset_size_checksum_metadata(batch.data());
+      header, std::move(records), model::record_batch::tag_ctor_ng{});
     ASSERT_EQ(keys_of(batch), (std::vector<ss::sstring>{"a", "b", "c"}));
 
     cluster::dedup_window_filter f(3'600'000ms);
