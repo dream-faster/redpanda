@@ -106,9 +106,15 @@ def test_acks_zero(cluster, dedup_topic):
     # takes writes is dropped with no error the producer could see. One
     # acknowledged write first proves the leader is ready.
     kafka.produce_ok(cluster.brokers, t, keyed("ready"))
-    kafka.produce(cluster.brokers, t, keyed("a", "b", "a"), acks="0")
-    kafka.produce(cluster.brokers, t, keyed("a", "c"), acks="0")
+    # One producer for both, kept open until the records are read back: an
+    # acks=0 send is done once it is written to the socket, and closing the
+    # connection straight after can drop a request the broker had not yet
+    # read.
+    p = kafka.producer(cluster.brokers, acks="0")
+    kafka.produce(cluster.brokers, t, keyed("a", "b", "a"), acks="0", p=p)
+    kafka.produce(cluster.brokers, t, keyed("a", "c"), acks="0", p=p)
     kafka.eventually(lambda: _assert_keys(cluster, t, [b"ready", b"a", b"b", b"c"]))
+    del p
 
 
 def _assert_keys(cluster, t, want, partition=0):
