@@ -619,8 +619,9 @@ bool dedup_compact_index::slot_index(uint64_t h, uint32_t pos) {
 }
 
 void dedup_compact_index::drop_lookup() noexcept {
-    _segments.clear();
-    _directory.clear();
+    // Swapped out rather than cleared, so the arrays' capacity goes too.
+    decltype(_segments){}.swap(_segments);
+    decltype(_directory){}.swap(_directory);
     _depth = 0;
     _indexed = 0;
     _preparing = false;
