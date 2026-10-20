@@ -1042,6 +1042,95 @@ TEST(DedupWindowFilter, CapacityEvictionFailsOpenWhenNoSliceCanBeFreed) {
     EXPECT_EQ(f.unindexed_records(), 1u);
 }
 
+// dedup_max_entries_per_partition changes without a restart. Raised, an index
+// that was admitting new identities unindexed at its old ceiling indexes them
+// at once.
+TEST(DedupWindowFilter, RaisedCeilingIndexesNewIdentitiesAtOnce) {
+    cluster::dedup_window_filter f(1h, 4);
+    for (int i = 0; i < 4; ++i) {
+        f.populate(iobuf::from(fmt::format("id-{}", i)), ts(1000));
+    }
+    // One timestamp, so nothing is freeable at the old ceiling.
+    ASSERT_TRUE(f.filter(make_batch("extra", "v", ts(1000))).has_value());
+    ASSERT_EQ(f.unindexed_records(), 1u);
+
+    f.set_max_entries(8);
+    EXPECT_EQ(f.max_entries(), 8u);
+    ASSERT_TRUE(f.filter(make_batch("extra", "v", ts(1000))).has_value());
+    EXPECT_EQ(f.unindexed_records(), 1u);
+    EXPECT_EQ(f.map_size(), 5u);
+    EXPECT_FALSE(f.filter(make_batch("extra", "dup", ts(1001))).has_value());
+}
+
+// Lowered below what the index holds, the ceiling drops nothing at once (that
+// would be work proportional to the index). Each new identity frees a bounded
+// number of the oldest entries and is still indexed, so the index shrinks back
+// under the new ceiling with its traffic, keeping the newest identities.
+TEST(DedupWindowFilter, LoweredCeilingShrinksWithTrafficKeepingTheNewest) {
+    constexpr size_t old_cap = 1'000;
+    constexpr size_t new_cap = 100;
+    cluster::dedup_window_filter f(std::chrono::hours(24), old_cap);
+    // One timestamp, so the soft limit trims nothing on the way up.
+    for (size_t i = 0; i < old_cap; ++i) {
+        f.populate(iobuf::from(fmt::format("old-{}", i)), ts(1000));
+    }
+    ASSERT_EQ(f.map_size(), old_cap);
+
+    f.set_max_entries(new_cap);
+    EXPECT_EQ(f.map_size(), old_cap);
+
+    // Up to 64 freed per new identity, so about 15 bring it back under.
+    int fresh = 0;
+    const int64_t now = 2'000'000;
+    while (f.map_size() > new_cap) {
+        ASSERT_LT(fresh, 20) << f.map_size();
+        ASSERT_TRUE(
+          f.filter(
+             make_batch(fmt::format("new-{}", fresh), "v", ts(now + fresh)))
+            .has_value());
+        ++fresh;
+    }
+    EXPECT_EQ(f.unindexed_records(), 0u);
+    EXPECT_GE(f.capacity_evicted_entries(), old_cap - new_cap);
+    for (int i = 0; i < fresh; ++i) {
+        EXPECT_FALSE(
+          f.filter(make_batch(fmt::format("new-{}", i), "dup", ts(now + 100)))
+            .has_value())
+          << "new-" << i;
+    }
+    // And it stays under from then on.
+    for (int i = 0; i < 500; ++i) {
+        f.populate(iobuf::from(fmt::format("more-{}", i)), ts(now + 200 + i));
+        ASSERT_LE(f.map_size(), new_cap);
+    }
+}
+
+// The follower's path shrinks the same way as the leader's.
+TEST(DedupWindowFilter, LoweredCeilingShrinksOnTheApplyPathToo) {
+    cluster::dedup_window_filter leader(std::chrono::hours(24), 1'000);
+    cluster::dedup_window_filter follower(std::chrono::hours(24), 1'000);
+    for (size_t i = 0; i < 1'000; ++i) {
+        const auto key = fmt::format("old-{}", i);
+        const auto stamp = ts(1000 + static_cast<int64_t>(i % 10) * 1000);
+        ASSERT_TRUE(leader.filter(make_batch(key, "v", stamp)).has_value());
+        follower.populate(iobuf::from(key), stamp);
+    }
+    leader.set_max_entries(100);
+    follower.set_max_entries(100);
+    for (int i = 0; i < 50; ++i) {
+        const auto key = fmt::format("new-{}", i);
+        const auto stamp = ts(2'000'000 + i);
+        ASSERT_TRUE(leader.filter(make_batch(key, "v", stamp)).has_value());
+        follower.populate(iobuf::from(key), stamp);
+    }
+    EXPECT_EQ(leader.map_size(), follower.map_size());
+    EXPECT_LE(follower.map_size(), 100u);
+    EXPECT_EQ(leader.unindexed_records(), follower.unindexed_records());
+    EXPECT_EQ(
+      leader.capacity_evicted_entries(), follower.capacity_evicted_entries());
+    EXPECT_EQ(leader.snapshot(), follower.snapshot());
+}
+
 // No path into the filter may do work proportional to the index, and a
 // saturated index is the case that used to break that: with nothing freeable,
 // every admitted record re-scanned the whole map and re-ran a whole histogram
@@ -2735,6 +2824,88 @@ TEST(DedupShardBudget, OwnCeilingStillApplies) {
     populate_n(capped, "c", 500, 300'000, 100);
     EXPECT_LE(capped.map_size(), 50u);
     EXPECT_EQ(big.map_size(), 900u);
+}
+
+// dedup_max_entries_per_shard changes without a restart. Raised, a shard that
+// had nothing left to free indexes new identities at once.
+TEST(DedupShardBudget, RaisedShardLimitIndexesNewIdentitiesAtOnce) {
+    constexpr size_t shard_limit = 50;
+    auto budget = make_budget(shard_limit);
+    cluster::dedup_window_filter full(100s, 1'000, budget);
+    cluster::dedup_window_filter other(100s, 1'000, budget);
+    // One timestamp, so nothing on the shard is freeable.
+    populate_n(full, "full", shard_limit, 1000, 0);
+    ASSERT_EQ(budget->entries, shard_limit);
+    ASSERT_TRUE(other.filter(make_batch("new", "v", ts(1000))).has_value());
+    ASSERT_EQ(other.unindexed_records(), 1u);
+
+    budget->max_entries = 2 * shard_limit;
+    ASSERT_TRUE(other.filter(make_batch("new", "v", ts(1000))).has_value());
+    EXPECT_EQ(other.unindexed_records(), 1u);
+    EXPECT_EQ(other.map_size(), 1u);
+    EXPECT_EQ(full.map_size(), shard_limit);
+    EXPECT_FALSE(other.filter(make_batch("new", "dup", ts(1001))).has_value());
+}
+
+// Lowered below what the shard holds, the shard limit drops nothing at once.
+// New identities anywhere on the shard free a bounded number of entries from
+// its largest indices -- the idle one's too -- and are still indexed, until the
+// shard is back under. Run with either index registered first: on a tie the
+// first is what largest() caches, and an index that frees up to 64 entries an
+// insert must not go on counting as the largest from a stale cache until it
+// has trimmed itself empty while the other keeps everything.
+namespace {
+
+void lowered_shard_limit_shrinks_the_shard(bool busy_registered_first) {
+    auto budget = make_budget(2'000);
+    std::unique_ptr<cluster::dedup_window_filter> idle;
+    std::unique_ptr<cluster::dedup_window_filter> busy;
+    for (const bool make_busy :
+         {busy_registered_first, !busy_registered_first}) {
+        (make_busy ? busy : idle)
+          = std::make_unique<cluster::dedup_window_filter>(
+            std::chrono::hours(24), 10'000, budget);
+    }
+    // One timestamp, so shard pressure trims nothing on the way up.
+    populate_n(*idle, "idle", 900, 1000, 0);
+    populate_n(*busy, "busy", 900, 1000, 0);
+    ASSERT_EQ(budget->entries, 1'800u);
+
+    constexpr size_t new_limit = 200;
+    budget->max_entries = new_limit;
+    EXPECT_EQ(budget->entries, 1'800u);
+
+    // Up to 64 freed per new identity, so about 26 bring it back under.
+    int fresh = 0;
+    const int64_t now = 2'000'000;
+    while (budget->entries > new_limit) {
+        ASSERT_LT(fresh, 40) << budget->entries;
+        busy->populate(
+          iobuf::from(fmt::format("new-{}", fresh)), ts(now + fresh));
+        ++fresh;
+        ASSERT_EQ(budget->entries, idle->map_size() + busy->map_size());
+    }
+    EXPECT_EQ(busy->unindexed_records(), 0u);
+    // The idle index gave up room too: the busy one did not trim only itself.
+    EXPECT_LT(idle->map_size(), 900u - 64);
+    EXPECT_GT(busy->map_size(), new_limit / 4);
+    for (int i = 0; i < fresh; ++i) {
+        EXPECT_FALSE(
+          busy
+            ->filter(make_batch(fmt::format("new-{}", i), "dup", ts(now + 100)))
+            .has_value())
+          << "new-" << i;
+    }
+}
+
+} // namespace
+
+TEST(DedupShardBudget, LoweredShardLimitShrinksTheShardWithTraffic) {
+    lowered_shard_limit_shrinks_the_shard(false);
+}
+
+TEST(DedupShardBudget, LoweredShardLimitShrinksTheLargestNotTheCachedOne) {
+    lowered_shard_limit_shrinks_the_shard(true);
 }
 
 // Filters leave the budget's registry when destroyed, so a later filter never

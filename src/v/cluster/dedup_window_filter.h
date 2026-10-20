@@ -357,7 +357,10 @@ struct dedup_shard_budget {
       : max_entries(max_entries) {}
 
     size_t entries{0};
-    const size_t max_entries;
+    /// dedup_max_entries_per_shard, resolved. Changes at runtime: lowering it
+    /// below `entries` leaves the shard over its limit until inserts have
+    /// trimmed it back (see dedup_window_filter::make_room_for_one()).
+    size_t max_entries;
     /// Held while a partition's snapshot is read and restored at startup, so
     /// at most one snapshot file is in memory per shard at a time. Partition
     /// starts are not otherwise bounded, and a snapshot can be as large as
@@ -455,10 +458,10 @@ struct dedup_shard_budget {
 class dedup_window_filter {
 public:
     // Shared with the cluster-level dedup_max_entries_per_partition setting,
-    // which is what actually supplies this in production
-    // (application_start.cc). The constructor parameter keeps the filter
-    // independent of configuration plumbing and makes small-capacity behavior
-    // directly testable.
+    // which is what actually supplies this in production (dedup_stm_factory,
+    // which also applies changes to it; see set_max_entries()). The
+    // constructor parameter keeps the filter independent of configuration
+    // plumbing and makes small-capacity behavior directly testable.
     static constexpr size_t default_max_entries
       = DEFAULT_DEDUP_MAX_ENTRIES_PER_PARTITION;
 
@@ -767,6 +770,17 @@ public:
         return _index.stats();
     }
     size_t max_entries() const { return _max_entries; }
+    /// \brief Change the per-partition ceiling (dedup_max_entries_per_partition
+    /// changed at runtime).
+    ///
+    /// Raising it takes effect on the next insert. Lowering it below
+    /// map_size() drops nothing at once, which would be work proportional to
+    /// the index: each new identity then frees up to capacity_emergency_budget
+    /// of the oldest entries ahead of the cursor and is still indexed, so the
+    /// index shrinks to the new ceiling with its traffic while keeping the
+    /// newest identities. An idle index keeps its entries until it gets
+    /// traffic or the shard budget takes room from it.
+    void set_max_entries(size_t max_entries);
     const dedup_shard_budget* shard_budget() const {
         return _shard_budget.get();
     }
@@ -892,12 +906,26 @@ private:
 
     /// One bounded sweep step taken because a new identity stamped
     /// \p incoming arrived with the index at the hard ceiling. Returns whether
-    /// it freed a slot; if not, the caller admits the record unindexed.
+    /// the caller may insert it; if not, the caller admits the record
+    /// unindexed.
+    ///
+    /// The index or the shard can stand above its limit, not only at it: the
+    /// limit was lowered at runtime, or a restore claimed room before others
+    /// filled it. There a step freeing one slot is not enough to get back
+    /// under, so the insert may also go ahead once the step has freed at
+    /// least two entries (shrank_over_limit()): the total still falls with
+    /// every new identity, and the newest identities stay indexed while it
+    /// does rather than the oldest.
     bool make_room_for_one(model::timestamp incoming);
+    /// Whether this index or the shard was above its limit, holding
+    /// \p own_before and \p shard_before entries, and this index has since
+    /// freed at least two of them.
+    bool shrank_over_limit(size_t own_before, size_t shard_before) const;
 
-    /// At the shard limit, when the bounded step found nothing below the
-    /// capacity cutoff: drop the oldest entry the step just walked past, if it
-    /// is older than \p incoming.
+    /// At the shard limit, or above this index's own, when the bounded step
+    /// found nothing below the capacity cutoff: drop the oldest entries just
+    /// ahead of the cursor that are older than \p incoming, as many as it
+    /// takes to get back under the limit, up to capacity_emergency_budget.
     void replace_oldest_visited(model::timestamp incoming);
 
     /// At the shard limit: take one bounded sweep step on the largest index
@@ -1035,7 +1063,7 @@ private:
     static constexpr size_t capacity_evict_buckets = 512;
 
     std::chrono::milliseconds _window;
-    const size_t _max_entries;
+    size_t _max_entries;
     ss::lw_shared_ptr<dedup_shard_budget> _shard_budget;
     // This filter's contribution to _shard_budget->entries.
     size_t _budget_accounted{0};
