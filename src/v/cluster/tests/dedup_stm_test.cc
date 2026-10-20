@@ -132,6 +132,18 @@ struct dedup_stm_test_accessor {
         return stm._batches_skipped;
     }
 
+    static model::offset relaxed_admitted_offset(const dedup_stm& stm) {
+        return stm._relaxed_admitted_offset;
+    }
+
+    /// Record what do_replicate() records for a batch raft reported done
+    /// before it committed.
+    static void record_relaxed_admission(
+      dedup_stm& stm, model::offset offset, model::term_id term) {
+        stm._relaxed_admitted_offset = offset;
+        stm._relaxed_admitted_term = term;
+    }
+
     static void
     restore(dedup_window_filter& state, int64_t& generation, iobuf buffer) {
         dedup_stm::restore_snapshot(
@@ -1286,10 +1298,21 @@ TEST_F_CORO(dedup_stm_fixture, committed_duplicate_skips_the_commit_fence) {
     set_dedup_config(1h);
     auto leader = co_await wait_for_leader(10s);
     co_await produce(leader, "k1", "v", model::timestamp{1000});
+    const auto before = node(leader).raft()->dirty_offset();
 
     replication_gate gate(node(leader));
     auto blocked = produce_batch(
       leader, make_batch_of({"k9"}, model::timestamp{1000}));
+    // k9 on the leader's log, uncommitted: a fence on the dirty offset would
+    // now hold the duplicate until the gate opens.
+    const auto deadline = model::timeout_clock::now() + 5s;
+    while (node(leader).raft()->dirty_offset() <= before) {
+        ASSERT_TRUE_CORO(model::timeout_clock::now() < deadline);
+        co_await ss::sleep(1ms);
+    }
+    ASSERT_LT_CORO(
+      node(leader).raft()->committed_offset(),
+      node(leader).raft()->dirty_offset());
 
     auto duplicate = co_await ss::with_timeout(
       model::timeout_clock::now() + 5s,
@@ -1319,10 +1342,15 @@ TEST_F_CORO(dedup_stm_fixture, relaxed_introducer_is_fenced_until_committed) {
     auto appended = co_await std::move(relaxed.replicate_finished);
     ASSERT_TRUE_CORO(appended.has_value());
     const auto relaxed_offset = node(leader).raft()->dirty_offset();
+    ASSERT_EQ_CORO(
+      dedup_stm_test_accessor::relaxed_admitted_offset(*stm), relaxed_offset);
 
     auto duplicate = produce_batch(
       leader, make_batch_of({"k1"}, model::timestamp{1000}));
+    // Nothing can commit while the gate is closed, so the duplicate can only
+    // resolve by skipping the fence; long enough for that to show.
     co_await ss::sleep(500ms);
+    ASSERT_LT_CORO(node(leader).raft()->committed_offset(), relaxed_offset);
     ASSERT_FALSE_CORO(duplicate.available());
 
     gate.release();
@@ -1330,6 +1358,29 @@ TEST_F_CORO(dedup_stm_fixture, relaxed_introducer_is_fenced_until_committed) {
     ASSERT_TRUE_CORO(acknowledged.has_value());
     ASSERT_EQ_CORO(acknowledged.value().replicated_record_count, 0);
     ASSERT_GE_CORO(node(leader).raft()->committed_offset(), relaxed_offset);
+}
+
+// What a leader admitted with relaxed acks in an earlier term was either
+// truncated by a later one or committed by its sync, so it fences nothing:
+// here the earlier term's offset lies past the end of the log, where a fence
+// on it would wait for unrelated writes.
+TEST_F_CORO(
+  dedup_stm_fixture, relaxed_admission_of_an_earlier_term_is_not_fenced) {
+    co_await initialize_state_machines();
+    set_dedup_config(1h);
+    auto leader = co_await wait_for_leader(10s);
+    co_await produce(leader, "k1", "v", model::timestamp{1000});
+    auto stm = get_stm<0>(node(leader));
+    dedup_stm_test_accessor::record_relaxed_admission(
+      *stm,
+      node(leader).raft()->dirty_offset() + model::offset{100},
+      node(leader).raft()->term() - model::term_id{1});
+
+    auto duplicate = co_await ss::with_timeout(
+      model::timeout_clock::now() + 5s,
+      produce_batch(leader, make_batch_of({"k1"}, model::timestamp{1000})));
+    ASSERT_TRUE_CORO(duplicate.has_value());
+    ASSERT_EQ_CORO(duplicate.value().replicated_record_count, 0);
 }
 
 // A committed batch whose records cannot be read is skipped, not retried:
