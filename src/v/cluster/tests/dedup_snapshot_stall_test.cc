@@ -300,8 +300,8 @@ TEST_CORO(dedup_snapshot_stall, index_memory_per_entry_fits_the_budget) {
         // The allocator also counts the spans its pools take on first use, and
         // reuses what an earlier round freed, so it differs from the table's
         // own count by a few bytes an entry either way, by how many depending
-        // on the host: on a GitHub-hosted runner the first round reads 33
-        // against the table's 25.
+        // on the host: on a GitHub-hosted runner the first round reads about
+        // eight more than the table's own count.
         worst = std::max(worst, per_entry);
         own_worst = std::max(own_worst, filter->memory_usage() / entries);
     }
