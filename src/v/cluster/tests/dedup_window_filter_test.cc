@@ -1422,9 +1422,9 @@ TEST(DedupIdentityDigest, SeparatesDistinctIdentities) {
     EXPECT_EQ(ab, cluster::dedup_digest_of(iobuf::from("ab")));
 }
 
-// The digest is persisted in snapshots and compared across replicas, so the
-// seeds and the algorithm are part of the on-disk format: changing either
-// silently invalidates every existing index without a serde version bump.
+// The digest is persisted in snapshots, so the algorithm and its seed are part
+// of the on-disk format: changing either silently invalidates every existing
+// index unless state_snapshot's compat version is bumped with it.
 // These constants were computed independently (python-xxhash, XXH3-128 with
 // the default seed: high64 and low64), so this also cross-checks the
 // implementation rather than just pinning whatever it happens to produce. The

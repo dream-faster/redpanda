@@ -361,7 +361,8 @@ struct v2_state_snapshot
     }
 };
 
-/// Version 3: the current layout, with digests of two seeded xxhash64 passes.
+/// Version 3: the layout version 4 still uses, with digests of two seeded
+/// xxhash64 passes.
 struct v3_state_snapshot
   : serde::
       envelope<v3_state_snapshot, serde::version<3>, serde::compat_version<3>> {
@@ -421,6 +422,37 @@ TEST(dedup_stm_snapshot, xxhash64_readers_refuse_the_current_layout) {
     EXPECT_THROW(
       serde::from_iobuf<v3_state_snapshot>(std::move(buffer)),
       serde::serde_exception);
+}
+
+// The digest a snapshot carries is the one this build takes of the identity:
+// once restored, producing the same key again is a duplicate and adds no
+// entry.
+TEST(dedup_stm_snapshot, a_restored_identity_matches_its_key) {
+    const auto digest = dedup_digest_of(iobuf::from("key"));
+    iobuf entries;
+    const auto lo = ss::cpu_to_le(digest.lo);
+    const auto hi = ss::cpu_to_le(static_cast<uint32_t>(digest.hi));
+    const auto le_ts = ss::cpu_to_le(int64_t{1'000'000});
+    entries.append(reinterpret_cast<const char*>(&lo), sizeof(lo));
+    entries.append(reinterpret_cast<const char*>(&hi), sizeof(hi));
+    entries.append(reinterpret_cast<const char*>(&le_ts), sizeof(le_ts));
+
+    dedup_window_filter target(1h);
+    int64_t generation = 0;
+    dedup_stm_test_accessor::restore(
+      target,
+      generation,
+      dedup_stm_test_accessor::state_snapshot_with_entries(
+        std::move(entries), model::timestamp{1'000'000}));
+    ASSERT_EQ(target.map_size(), 1u);
+    EXPECT_EQ(target.snapshot().entries[0].identity, digest);
+
+    EXPECT_FALSE(
+      target.filter(make_batch("key", "v", model::timestamp{1'000'100}))
+        .has_value());
+    target.populate(iobuf::from("key"), model::timestamp{1'000'200});
+    EXPECT_EQ(target.map_size(), 1u);
+    EXPECT_EQ(target.unindexed_records(), 0u);
 }
 
 // An entry size this build does not know is refused rather than misread.

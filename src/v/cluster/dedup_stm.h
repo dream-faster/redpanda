@@ -129,11 +129,14 @@ private:
     ///   cannot be restored, and this build refuses them on compat version.
     ///
     /// The break runs both ways: an older binary rejects a newer snapshot on
-    /// compat version and rebuilds the same way, so a raft snapshot crossing a
-    /// rolling upgrade in either direction costs a rebuild, not a failed
-    /// partition. Each replica digests what it applies itself, so replicas on
-    /// different builds never compare digests otherwise. Version 1 snapshots
-    /// only ever lived in the kvstore, which this STM no longer reads.
+    /// compat version the same way, so a raft snapshot crossing a rolling
+    /// upgrade in either direction never fails the partition. It is not
+    /// rebuilt from, though: a raft snapshot installs where the log before
+    /// its offset is gone, so the identities only it held are lost on that
+    /// replica, which indexes from the snapshot offset on. Each replica
+    /// digests what it applies itself, so replicas on different builds never
+    /// compare digests otherwise. Version 1 snapshots only ever lived in the
+    /// kvstore, which this STM no longer reads.
     struct state_snapshot
       : serde::envelope<
           state_snapshot,
