@@ -79,7 +79,7 @@ jobs:
 
   build:
     needs: toolchain
-    runs-on: ubicloud-standard-8
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       packages: read

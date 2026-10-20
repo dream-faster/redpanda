@@ -116,9 +116,9 @@ for the admin API:
 ## Where it stands
 
 CI is `.github/workflows/slim-build.yml`: a `toolchain` job that builds and
-caches a bazel toolchain image in GHCR, then a `build` job on
-`ubicloud-standard-8` running inside that container, with the bazel repo cache,
-disk cache and bazelisk cache all restored from `/mnt`. It does
+caches a bazel toolchain image in GHCR, then a `build` job on a
+GitHub-hosted `ubuntu-24.04` runner inside that container, with the bazel
+repo cache, disk cache and bazelisk cache all restored from `/mnt`. It does
 `build --nobuild //...` then `build --config=release //src/v/redpanda:redpanda`.
 
 It took eleven rounds to go green. Almost every failure was the same shape:
