@@ -203,6 +203,15 @@ void dedup_compact_index::prefetch(
     }
 }
 
+void dedup_compact_index::prefetch_slot(size_t pos) const noexcept {
+    if (pos >= _indexed || !lookup_ready()) {
+        return;
+    }
+    const uint64_t h = hash_of(entry(pos));
+    const segment* seg = _directory[directory_index(h)];
+    __builtin_prefetch(&seg->slots[static_cast<uint32_t>(h) & seg->mask]);
+}
+
 size_t dedup_compact_index::block_size(size_t b) const noexcept {
     const size_t begin = b << block_shift;
     return _size <= begin ? 0 : std::min(block_entries, _size - begin);
