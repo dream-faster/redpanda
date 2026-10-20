@@ -331,6 +331,15 @@ TEST(DedupWindowFilter, FilterRequestReportsDroppedIdentities) {
     ASSERT_EQ(all.dropped.size(), 2u);
     EXPECT_EQ(all.dropped[0], cluster::dedup_digest_of(iobuf::from("c")));
     EXPECT_EQ(all.dropped[1], cluster::dedup_digest_of(iobuf::from("a")));
+
+    // A repeat of a record earlier in the same request is not reported: that
+    // request is its own introducer.
+    auto repeats = f.filter_request(make_multi_batch(
+      {{"d", "8"}, {"d", "9"}, {"a", "10"}, {"d", "11"}}, ts(1300)));
+    ASSERT_TRUE(repeats.batch.has_value());
+    EXPECT_EQ(record_count(*repeats.batch), 1);
+    ASSERT_EQ(repeats.dropped.size(), 1u);
+    EXPECT_EQ(repeats.dropped[0], cluster::dedup_digest_of(iobuf::from("a")));
 }
 
 // A record's timestamp delta is client-controlled. One that carries the

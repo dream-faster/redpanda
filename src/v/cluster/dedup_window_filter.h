@@ -449,9 +449,11 @@ struct dedup_request_undo {
 struct dedup_filter_result {
     std::optional<model::record_batch> batch;
     dedup_request_undo undo;
-    /// The identity of every record dropped as a duplicate, in record order.
-    /// The caller uses them to find the requests that introduced those
-    /// identities and are still in flight (see dedup_stm::do_replicate()).
+    /// The identity of every record dropped as a duplicate of one an earlier
+    /// request introduced, in record order. The caller uses them to find the
+    /// requests that introduced those identities and are still in flight (see
+    /// dedup_stm::do_replicate()). A record repeating one earlier in the same
+    /// request is left out: its introducer is the request itself.
     chunked_vector<dedup_identity_digest> dropped;
     /// True iff header mode is active and some record in the request lacked
     /// the configured header: the caller must fail the whole request rather
@@ -972,10 +974,13 @@ private:
     /// broker time, so log replay is unaffected.
     model::timestamp clamp_to_broker_time(model::timestamp);
 
+    /// Whether \p identity is in the index within the window of \p ts. If it
+    /// is, \p matched is set to the position it was found at.
     bool is_duplicate(
       dedup_identity_digest identity,
       model::timestamp ts,
-      dedup_request_undo* undo);
+      dedup_request_undo* undo,
+      size_t* matched = nullptr);
 
     /// The sweeping every new identity pays for, on the leader's path and
     /// the follower's alike: reclaim_expired_elsewhere(), then sweep_step().

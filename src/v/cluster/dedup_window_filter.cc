@@ -327,7 +327,8 @@ dedup_window_filter::clamp_to_broker_time(model::timestamp ts) {
 bool dedup_window_filter::is_duplicate(
   dedup_identity_digest identity,
   model::timestamp ts,
-  dedup_request_undo* undo) {
+  dedup_request_undo* undo,
+  size_t* matched) {
     dassert(lookup_ready(), "dedup: lookup without a lookup table");
     note_shard_time(ts);
     const auto pos = _index.find(identity);
@@ -337,6 +338,9 @@ bool dedup_window_filter::is_duplicate(
           stored_ts.value() != dedup_compact_index::expired
           && within_window(ts.value(), stored_ts.value(), _window.count())) {
             ++_dropped_records;
+            if (matched) {
+                *matched = pos;
+            }
             return true;
         }
         _max_ts = std::max(_max_ts, ts);
@@ -476,6 +480,11 @@ dedup_window_filter::filter_request(model::record_batch batch) {
     undo.entries.reserve(static_cast<size_t>(total));
     chunked_vector<dedup_identity_digest> dropped;
     int32_t kept = 0;
+    // Positions from here on hold only what this request inserts: an erase
+    // moves the array's last entry into its hole, and while the array is
+    // longer than this, its last entry is one of this request's. A record
+    // found there repeats one earlier in the request.
+    const size_t own_from = _index.size();
     const size_t n = records.size();
     const auto identity_at =
       [&records](size_t j) -> const dedup_identity_digest* {
@@ -484,10 +493,13 @@ dedup_window_filter::filter_request(model::record_batch batch) {
     for (size_t i = 0; i < n; ++i) {
         prefetch_ahead(i, n, identity_at);
         auto& c = records[i];
+        size_t matched = 0;
         c.dropped = c.has_identity
-                    && is_duplicate(c.identity, c.timestamp, &undo);
+                    && is_duplicate(c.identity, c.timestamp, &undo, &matched);
         if (c.dropped) {
-            dropped.push_back(c.identity);
+            if (matched < own_from) {
+                dropped.push_back(c.identity);
+            }
         } else {
             ++kept;
         }
