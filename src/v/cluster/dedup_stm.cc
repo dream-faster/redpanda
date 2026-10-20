@@ -710,18 +710,28 @@ ss::future<result<kafka_result>> dedup_stm::do_replicate(
         //
         // An identity in the index that is no longer pending came from a
         // committed batch -- applied, restored from a snapshot, or admitted
-        // by a quorum-ack request raft confirmed -- unless a request with
-        // weaker acks admitted it: raft reports those appended on the
-        // leader alone. So only those need the commit index to catch up,
-        // and only while it is behind the last of them. Waiting for the
-        // dirty offset instead held every all-duplicate request for a
+        // by a request raft reported done only once it committed -- unless
+        // raft reported its batch done earlier: on the leader's own append
+        // for weaker acks, on a majority's unflushed append under write
+        // caching. So only those need the commit index to catch up, and
+        // only while it is behind the last of them. Waiting for the dirty
+        // offset instead held every all-duplicate request for a
         // replication round trip whatever it dropped against.
         enqueued->set_value();
-        if (auto failed = co_await wait_for_introducers(depends_on); failed) {
-            co_return *failed;
+        if (!depends_on.empty()) {
+            auto failed = co_await wait_for_introducers(depends_on, opts.as);
+            if (failed) {
+                co_return *failed;
+            }
+        }
+        if (opts.consistency != raft::consistency_level::quorum_ack) {
+            co_return kafka_result{
+              .last_offset = from_log_offset(_raft->committed_offset()),
+              .last_term = _raft->term(),
+              .replicated_record_count = 0};
         }
         if (
-          opts.consistency == raft::consistency_level::quorum_ack
+          _relaxed_admitted_term == _insync_term
           && _relaxed_admitted_offset > _raft->committed_offset()) {
             const auto fence = _relaxed_admitted_offset;
             // Commit-based, not visibility-based: last_visible_index() can
@@ -750,34 +760,33 @@ ss::future<result<kafka_result>> dedup_stm::do_replicate(
                   ex);
                 co_return errc::timeout;
             }
-            // The wait is on an offset, not on an offset in a term:
-            // event_manager::wait() resolves as soon as the commit index
-            // reaches `fence`, whoever wrote the entry sitting there. A new
-            // leader that truncated this term's tail and replicated its own
-            // records advances the commit index just the same, so without
-            // this check the wait can resolve on records that *replaced* the
-            // introducing write -- and this request would report a write the
-            // log does not hold. Nothing else guards it: a request that
-            // replicates is covered by opts.expected_term, but a fully
-            // deduplicated one never replicates.
-            //
-            // Revalidating the term is what makes the wait mean what this
-            // branch needs, because within one unbroken term the entries at
-            // or below the `fence` read above are this leader's own and
-            // cannot have been truncated -- truncation requires a higher
-            // term. raft::replication_monitor would report truncation
-            // directly, but it is documented as raft-internal and points
-            // other subsystems back at event_manager.
-            if (!_raft->is_leader() || _raft->term() != _insync_term) {
-                vlog(
-                  clusterlog.debug,
-                  "{} dedup fence for {} resolved after losing term {}, "
-                  "failing the request for retry",
-                  _raft->ntp(),
-                  fence,
-                  _insync_term);
-                co_return errc::not_leader;
-            }
+        }
+        // The wait above is on an offset, not on an offset in a term:
+        // event_manager::wait() resolves as soon as the commit index reaches
+        // the fence, whoever wrote the entry sitting there. A new leader that
+        // truncated this term's tail and replicated its own records advances
+        // the commit index just the same, so without this check the wait can
+        // resolve on records that *replaced* the introducing write -- and
+        // this request would report a write the log does not hold. Nothing
+        // else guards it: a request that replicates is covered by
+        // opts.expected_term, but a fully deduplicated one never replicates.
+        // Without a fence to wait for, the check still keeps a request that
+        // lost leadership waiting on its introducers from reporting success.
+        //
+        // Revalidating the term is what makes the wait mean what this branch
+        // needs, because within one unbroken term the entries at or below the
+        // fence are this leader's own and cannot have been truncated --
+        // truncation requires a higher term. raft::replication_monitor would
+        // report truncation directly, but it is documented as raft-internal
+        // and points other subsystems back at event_manager.
+        if (!_raft->is_leader() || _raft->term() != _insync_term) {
+            vlog(
+              clusterlog.debug,
+              "{} dedup all-duplicate request lost term {} while waiting, "
+              "failing it for retry",
+              _raft->ntp(),
+              _insync_term);
+            co_return errc::not_leader;
         }
         co_return kafka_result{
           .last_offset = from_log_offset(_raft->committed_offset()),
@@ -844,16 +853,26 @@ ss::future<result<kafka_result>> dedup_stm::do_replicate(
         settle(mine, filtered.undo, false, self_key);
         co_return result.error();
     }
-    if (opts.consistency != raft::consistency_level::quorum_ack) {
-        // Appended on this leader, maybe nowhere else yet; see the
-        // all-duplicate branch above. Recorded before settle() releases the
-        // requests waiting on this one.
-        _relaxed_admitted_offset = std::max(
-          _relaxed_admitted_offset, result.value().last_offset);
+    if (
+      const auto& appended = result.value();
+      appended.last_offset > _raft->committed_offset()) {
+        // Reported done before it committed; see the all-duplicate branch
+        // above. Recorded before settle() releases the requests waiting on
+        // this one.
+        if (appended.last_term > _relaxed_admitted_term) {
+            _relaxed_admitted_term = appended.last_term;
+            _relaxed_admitted_offset = appended.last_offset;
+        } else if (appended.last_term == _relaxed_admitted_term) {
+            _relaxed_admitted_offset = std::max(
+              _relaxed_admitted_offset, appended.last_offset);
+        }
     }
     settle(mine, filtered.undo, true, std::nullopt);
-    if (auto failed = co_await wait_for_introducers(depends_on); failed) {
-        co_return *failed;
+    if (!depends_on.empty()) {
+        auto failed = co_await wait_for_introducers(depends_on, opts.as);
+        if (failed) {
+            co_return *failed;
+        }
     }
 
     kafka_result response{
@@ -865,13 +884,17 @@ ss::future<result<kafka_result>> dedup_stm::do_replicate(
     co_return response;
 }
 
-ss::future<std::optional<errc>>
-dedup_stm::wait_for_introducers(const std::vector<inflight_ptr>& introducers) {
+ss::future<std::optional<errc>> dedup_stm::wait_for_introducers(
+  const std::vector<inflight_ptr>& introducers,
+  std::optional<std::reference_wrapper<ss::abort_source>> as) {
+    // One deadline for all of them: the wait is for this request's
+    // acknowledgment, which sync_timeout bounds however many it waits on.
+    const auto deadline = model::timeout_clock::now() + _sync_timeout();
     for (const auto& introducer : introducers) {
+        auto appended = introducer->appended.get_shared_future();
         auto waited = co_await ss::coroutine::as_future(
-          ss::with_timeout(
-            model::timeout_clock::now() + _sync_timeout(),
-            introducer->appended.get_shared_future()));
+          as ? ssx::with_timeout_abortable(std::move(appended), deadline, *as)
+             : ss::with_timeout(deadline, std::move(appended)));
         const bool unknown = waited.failed();
         if (unknown) {
             waited.ignore_ready_future();
