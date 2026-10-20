@@ -33,8 +33,6 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
-#include <memory>
-#include <new>
 #include <optional>
 #include <stdexcept>
 #include <type_traits>
@@ -56,9 +54,9 @@ dedup_identity_digest dedup_digest_of(const iobuf& identity);
 ///
 /// One XXH3-128 pass, where two seeded xxhash64 passes used to read the
 /// identity twice. An identity nearly always lies in one piece of its batch's
-/// buffer, so the digester holds on to the first piece -- which must stay
-/// valid until digest() -- and hashes it in one call; only a second piece
-/// sets up the streaming state.
+/// buffer, so the digester holds on to the first piece and hashes it in one
+/// call; only a second piece sets up the streaming state, which lives in the
+/// digester itself rather than on the heap.
 class dedup_digester {
 public:
     dedup_digester() = default;
@@ -68,41 +66,35 @@ public:
     dedup_digester& operator=(dedup_digester&&) = delete;
     ~dedup_digester() = default;
 
+    /// Does not copy: the first non-empty piece is read only by digest(), or
+    /// by the update() that brings a second one, so it must stay valid and
+    /// unchanged until then.
     void update(const char* data, size_t size) {
+        if (size == 0) {
+            return;
+        }
         if (_state) {
-            XXH3_128bits_update(_state.get(), data, size);
+            XXH3_128bits_update(&*_state, data, size);
         } else if (_first == nullptr) {
             _first = data;
             _first_size = size;
         } else {
-            _state.reset(XXH3_createState());
-            if (!_state) [[unlikely]] {
-                throw std::bad_alloc();
-            }
-            XXH3_128bits_reset(_state.get());
-            XXH3_128bits_update(_state.get(), _first, _first_size);
-            XXH3_128bits_update(_state.get(), data, size);
+            XXH3_128bits_reset(&_state.emplace());
+            XXH3_128bits_update(&*_state, _first, _first_size);
+            XXH3_128bits_update(&*_state, data, size);
         }
     }
     /// In dedup_canonical_digest() form: the 96 bits the index keeps.
     dedup_identity_digest digest() const {
-        XXH128_hash_t h{};
-        if (_state) {
-            h = XXH3_128bits_digest(_state.get());
-        } else {
-            h = XXH3_128bits(_first, _first_size);
-        }
+        const XXH128_hash_t h = _state ? XXH3_128bits_digest(&*_state)
+                                       : XXH3_128bits(_first, _first_size);
         return dedup_canonical_digest({.hi = h.high64, .lo = h.low64});
     }
 
 private:
-    struct free_state {
-        void operator()(XXH3_state_t* s) const noexcept { XXH3_freeState(s); }
-    };
-
     const char* _first{nullptr};
     size_t _first_size{0};
-    std::unique_ptr<XXH3_state_t, free_state> _state;
+    std::optional<XXH3_state_t> _state;
 };
 
 struct dedup_index_entry {
