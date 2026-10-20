@@ -1705,12 +1705,10 @@ struct walked_span {
     cluster::dedup_record_span span;
 
     bool operator==(const walked_span& o) const {
-        return w == o.w && span.begin == o.span.begin
-               && span.body == o.span.body
+        return w == o.w && span.body == o.span.body
                && span.offset_delta == o.span.offset_delta
                && span.after_offset_delta == o.span.after_offset_delta
-               && span.end == o.span.end
-               && span.timestamp_delta == o.span.timestamp_delta;
+               && span.end == o.span.end;
     }
 };
 

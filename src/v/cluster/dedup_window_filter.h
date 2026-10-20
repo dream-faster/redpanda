@@ -37,6 +37,7 @@
 #include <memory>
 #include <new>
 #include <optional>
+#include <span>
 #include <stdexcept>
 #include <type_traits>
 #include <vector>
@@ -134,8 +135,6 @@ enum class dedup_identity_lookup {
 /// Where one record lies in its batch's records buffer, as offsets from the
 /// start of the buffer, for a caller that copies records out of it.
 struct dedup_record_span {
-    /// The record's length varint.
-    size_t begin{0};
     /// The first byte the length counts: the attributes.
     size_t body{0};
     /// The offset delta varint, and the first byte after it.
@@ -143,7 +142,6 @@ struct dedup_record_span {
     size_t after_offset_delta{0};
     /// One past the record's last byte.
     size_t end{0};
-    int64_t timestamp_delta{0};
 };
 
 /// \brief Reads a batch's records buffer for for_each_dedup_identity().
@@ -171,15 +169,11 @@ public:
     /// vint::max_length bytes, and what there is of it at the buffer's end.
     int64_t read_varlong() noexcept {
         if (_e - _p >= static_cast<ptrdiff_t>(vint::max_length)) [[likely]] {
-            uint64_t v = 0;
-            for (uint32_t shift = 0; shift < 64; shift += 7) {
-                const auto b = static_cast<uint8_t>(*_p++);
-                v |= uint64_t{b & 0x7fU} << shift;
-                if ((b & 0x80U) == 0) {
-                    break;
-                }
-            }
-            return vint::decode_zigzag(v);
+            const auto [v, n] = vint::deserialize(
+              std::span<const uint8_t>(
+                reinterpret_cast<const uint8_t*>(_p), vint::max_length));
+            _p += n;
+            return v;
         }
         return read_varlong_slow();
     }
@@ -236,20 +230,22 @@ private:
             load();
         }
     }
+    // Gathers the varint's bytes across fragments for vint::deserialize().
     int64_t read_varlong_slow() noexcept {
-        uint64_t v = 0;
-        for (uint32_t shift = 0; shift < 64; shift += 7) {
+        std::array<uint8_t, vint::max_length> buf{};
+        size_t n = 0;
+        while (n < buf.size()) {
             settle();
             if (_p == _e) {
                 break;
             }
             const auto b = static_cast<uint8_t>(*_p++);
-            v |= uint64_t{b & 0x7fU} << shift;
+            buf[n++] = b;
             if ((b & 0x80U) == 0) {
                 break;
             }
         }
-        return vint::decode_zigzag(v);
+        return vint::deserialize(std::span<const uint8_t>(buf.data(), n)).first;
     }
 
     iobuf::const_iterator _it;
@@ -323,7 +319,6 @@ void for_each_dedup_identity(
         // The length counts the bytes after itself. Whatever dedup does not
         // read is skipped as one span to this end, rather than header by
         // header.
-        [[maybe_unused]] const size_t begin = parser.bytes_consumed();
         const auto size = read_length();
         if (size < 0) [[unlikely]] {
             throw std::out_of_range(
@@ -411,12 +406,10 @@ void for_each_dedup_identity(
               digest,
               model::timestamp{ts},
               dedup_record_span{
-                .begin = begin,
                 .body = body,
                 .offset_delta = offset_delta,
                 .after_offset_delta = after_offset_delta,
-                .end = record_end,
-                .timestamp_delta = ts_delta});
+                .end = record_end});
         } else {
             go_on = emit(lookup, digest, model::timestamp{ts});
         }
