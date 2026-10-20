@@ -379,6 +379,8 @@ class Cluster:
             "enable_leader_balancer": False,
             "auto_create_topics_enabled": False,
             "partition_autobalancing_mode": "off",
+            # A test that moves a replica to a core must find it there.
+            "core_balancing_continuous": False,
             "log_segment_size_min": 1024 * 1024,
             "storage_min_free_bytes": 0,
             **(cluster_config or {}),
