@@ -34,12 +34,14 @@
 #include <seastar/core/with_timeout.hh>
 #include <seastar/coroutine/as_future.hh>
 #include <seastar/coroutine/maybe_yield.hh>
+#include <seastar/util/defer.hh>
 
 #include <algorithm>
 #include <array>
 #include <cstring>
 #include <limits>
 #include <new>
+#include <ranges>
 #include <vector>
 
 namespace cluster {
@@ -746,21 +748,34 @@ ss::future<result<kafka_result>> dedup_stm::do_replicate(
     // are settled; the retry drops those against themselves and admits the
     // reverted ones afresh.
     std::vector<inflight_ptr> depends_on;
+    if (filtered.dropped.size() > scan_dropped_limit) {
+        register_pending();
+    }
     for (const auto& identity : filtered.dropped) {
-        if (auto it = _pending.find(identity); it != _pending.end()) {
-            if (std::ranges::find(depends_on, it->second) == depends_on.end()) {
-                depends_on.push_back(it->second);
+        if (auto introducer = pending_introducer(identity)) {
+            if (std::ranges::find(depends_on, introducer) == depends_on.end()) {
+                depends_on.push_back(std::move(introducer));
             }
         }
     }
     inflight_ptr mine;
     if (filtered.batch) {
         mine = ss::make_lw_shared<inflight_request>();
+        mine->undo = &filtered.undo;
         ++_unsettled;
-        for (const auto& entry : filtered.undo.entries) {
-            _pending.insert_or_assign(entry.identity, mine);
+        _unregistered.push_back(mine);
+        if (_snapshots_walking > 0) {
+            register_pending();
         }
     }
+    // settle() takes it off the list on every path out of here; this covers
+    // one that throws, so the list never keeps a pointer into this frame.
+    auto unlisted = ss::defer([this, &mine]() noexcept {
+        if (mine && mine->undo && !mine->registered) {
+            std::erase(_unregistered, mine);
+            mine->undo = nullptr;
+        }
+    });
 
     if (!filtered.batch) {
         // Every record was a duplicate: nothing to replicate, so nothing for
@@ -879,6 +894,9 @@ ss::future<result<kafka_result>> dedup_stm::do_replicate(
     auto result = replicated.get();
     if (!result) {
         if (result.error() == raft::errc::timeout) {
+            // Its undo log moves out of this frame, and its identities stay
+            // pending for as long as the outcome is unknown.
+            register_pending();
             // The batch may or may not have been appended; see
             // resolve_after_timeout(). Its identities stay pending until
             // that is known, so a retry of one of them neither gets
@@ -954,6 +972,49 @@ dedup_stm::wait_for_introducers(const std::vector<inflight_ptr>& introducers) {
     co_return std::nullopt;
 }
 
+void dedup_stm::register_pending() {
+    for (auto& request : _unregistered) {
+        for (const auto& entry : request->undo->entries) {
+            _pending.insert_or_assign(entry.identity, request);
+        }
+        request->registered = true;
+    }
+    _unregistered.clear();
+}
+
+dedup_stm::inflight_ptr
+dedup_stm::pending_introducer(const dedup_identity_digest& identity) {
+    // Newest first, each request's log from its end: an identity two
+    // requests introduced is the newer one's, as registration in order
+    // makes it, and a record repeating one in the request just before it
+    // is found at once. The scan is bounded: past it, the requests are
+    // registered and looked up instead.
+    size_t budget = scan_entries_limit;
+    for (const auto& request : std::views::reverse(_unregistered)) {
+        for (const auto& entry : std::views::reverse(request->undo->entries)) {
+            if (entry.identity == identity) {
+                return request;
+            }
+            if (--budget == 0) {
+                break;
+            }
+        }
+        if (budget == 0) {
+            register_pending();
+            break;
+        }
+    }
+    return lookup_registered(identity);
+}
+
+dedup_stm::inflight_ptr
+dedup_stm::lookup_registered(const dedup_identity_digest& identity) const {
+    if (auto it = _pending.find(identity); it != _pending.end()) {
+        return it->second;
+    }
+    return nullptr;
+}
+
 void dedup_stm::settle(
   const inflight_ptr& mine,
   const dedup_request_undo& undo,
@@ -963,16 +1024,21 @@ void dedup_stm::settle(
         // Nothing was admitted, so nothing is pending.
         return;
     }
-    for (const auto& entry : undo.entries) {
-        // Only this request's own registrations: a later request may have
-        // written a newer timestamp for the same identity and registered
-        // itself in its place.
-        if (
-          auto it = _pending.find(entry.identity);
-          it != _pending.end() && it->second == mine) {
-            _pending.erase(it);
+    if (!mine->registered) {
+        std::erase(_unregistered, mine);
+    } else {
+        for (const auto& entry : undo.entries) {
+            // Only this request's own registrations: a later request may have
+            // written a newer timestamp for the same identity and registered
+            // itself in its place.
+            if (
+              auto it = _pending.find(entry.identity);
+              it != _pending.end() && it->second == mine) {
+                _pending.erase(it);
+            }
         }
     }
+    mine->undo = nullptr;
     if (!appended) {
         _state.revert_request(undo);
         if (self_key) {
@@ -1043,6 +1109,9 @@ ss::future<iobuf> dedup_stm::take_raft_snapshot(model::offset) {
     // target offset. populate() is idempotent (max-timestamp-wins), so a
     // replica installing this snapshot and replaying the remaining log
     // converges to exactly this state; see the log-derived dedup RFC.
+    register_pending();
+    ++_snapshots_walking;
+    auto walked = ss::defer([this]() noexcept { --_snapshots_walking; });
     co_return co_await serialize_snapshot(_state, _generation, &_pending);
 }
 
@@ -1121,7 +1190,12 @@ ss::future<raft::stm_snapshot>
 dedup_stm::take_local_snapshot(ssx::semaphore_units apply_units) {
     // The walk yields, but the apply lock is held throughout, so the offset
     // read after it is the one the entries cover.
+    register_pending();
+    ++_snapshots_walking;
+    auto walked = ss::defer([this]() noexcept { --_snapshots_walking; });
     auto buffer = co_await serialize_snapshot(_state, _generation, &_pending);
+    walked.cancel();
+    --_snapshots_walking;
     auto offset = last_applied_offset();
     apply_units.return_all();
     // The 0 here is stm_snapshot_header::version, a channel this STM does
