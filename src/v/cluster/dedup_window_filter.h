@@ -1139,6 +1139,9 @@ private:
     bool over_shard_soft_limit() const;
     /// Whether the shard is within reclaim_margin_divisor of its limit.
     bool over_shard_reclaim_limit() const;
+    /// Whether this index or its shard is within
+    /// capacity_count_margin_divisor of its limit.
+    bool counts_for_capacity() const;
     /// Whether no index on the shard is larger than this one by more than a
     /// tenth of its size; those are the indices whose cursors trim under shard
     /// pressure. Requires a shard budget.
@@ -1175,6 +1178,12 @@ private:
     // entry. Dropping an expired entry costs no coverage, so starting earlier
     // costs only the bounded step.
     static constexpr size_t reclaim_margin_divisor = 5;
+    // Margin below a limit, as a divisor of it, from which the sweep counts
+    // the entries it visits toward the capacity cutoff: half. Below it no
+    // trim is near -- an index growing from half its limit to the soft limit
+    // takes several passes, each of which measures a fresh cutoff -- and the
+    // count is most of what a visit costs once the window is full.
+    static constexpr size_t capacity_count_margin_divisor = 2;
 
     // Fraction of the index the capacity cutoff designates as droppable:
     // size/capacity_evict_divisor, so a quarter, measured over a completed

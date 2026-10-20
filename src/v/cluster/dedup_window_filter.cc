@@ -160,6 +160,17 @@ bool dedup_window_filter::over_shard_soft_limit() const {
                 _shard_budget->max_entries, capacity_soft_margin_divisor);
 }
 
+bool dedup_window_filter::counts_for_capacity() const {
+    if (
+      _index.size()
+      >= soft_limit_of(_max_entries, capacity_count_margin_divisor)) {
+        return true;
+    }
+    return _shard_budget
+           && _shard_budget->entries >= soft_limit_of(
+                _shard_budget->max_entries, capacity_count_margin_divisor);
+}
+
 bool dedup_window_filter::over_shard_reclaim_limit() const {
     return _shard_budget
            && _shard_budget->entries >= soft_limit_of(
@@ -934,6 +945,9 @@ void dedup_window_filter::sweep_step(size_t budget) {
     // shard back under it.
     const bool largest_here = _shard_budget && over_shard_soft_limit()
                               && among_the_largest();
+    // Far from every limit the cutoff decides nothing, so the visit skips the
+    // histogram. The oldest timestamp is still taken: it frames the next pass.
+    const bool counting = counts_for_capacity();
     // The cursor reads entries in order, but erasing an expired one reads its
     // lookup slot, at random in the table. Start loading the slots of those
     // the next step will erase; by then they have had a step's worth of
@@ -980,7 +994,11 @@ void dedup_window_filter::sweep_step(size_t budget) {
             ++_capacity_evicted_entries;
             continue;
         }
-        count_in_pass(stamp);
+        if (counting) {
+            count_in_pass(stamp);
+        } else {
+            _pass_oldest = std::min(_pass_oldest, stamp.value());
+        }
         ++_sweep_pos;
     }
 }

@@ -882,6 +882,31 @@ TEST(DedupWindowFilter, CapacityEvictionKeepsDedupWorkingWhenSaturated) {
     EXPECT_FALSE(f.filter(make_batch("id-40", "v", ts(80000))).has_value());
 }
 
+// Below half its limit the sweep counts nothing toward the capacity cutoff.
+// An index that grew from far below its limit has still measured one by the
+// time it trims, and trims its oldest entries, not its newest.
+TEST(DedupWindowFilter, CapacityTrimsTheOldestAfterGrowingFromFarBelow) {
+    constexpr size_t cap = 20'000;
+    constexpr size_t identities = cap + cap / 2;
+    cluster::dedup_window_filter f(1000s, cap);
+    const auto stamp = [](size_t i) {
+        return ts(1000 + static_cast<int64_t>(i) * 10);
+    };
+    for (size_t i = 0; i < identities; ++i) {
+        f.populate(iobuf::from(fmt::format("id-{}", i)), stamp(i));
+        ASSERT_LE(f.map_size(), f.max_entries());
+    }
+    EXPECT_EQ(f.unindexed_records(), 0u);
+    EXPECT_GT(f.capacity_evicted_entries(), 0u);
+    for (size_t i = identities - cap / 4; i < identities; ++i) {
+        ASSERT_FALSE(
+          f.filter(make_batch(fmt::format("id-{}", i), "v", stamp(i)))
+            .has_value())
+          << i;
+    }
+    EXPECT_TRUE(f.filter(make_batch("id-0", "v", stamp(0))).has_value());
+}
+
 // A timestamp cutoff cannot drop a bounded slice when more than that slice
 // shares one narrow timestamp range. Over-evicting would throw away coverage
 // nobody asked to lose, so the record is admitted unindexed instead -- the old
