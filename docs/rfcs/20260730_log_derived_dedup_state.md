@@ -118,11 +118,19 @@ Guarantees:
   identity is admitted without being indexed. This fail-open behavior keeps
   produce available and bounds both steady-state index memory and future
   snapshot size even when producer timestamps do not advance or the configured
-  window and identity cardinality are unexpectedly large. Changing
-  the cluster property requires a broker restart, and that restart is not
-  atomic across the cluster -- mid-rollout, replicas of the same partition
-  enforce different ceilings, which the property's own description now spells
-  out. Because a saturated index degrades dedup coverage silently, every
+  window and identity cardinality are unexpectedly large. The cluster
+  property, like `dedup_max_entries_per_shard`, changes without a restart:
+  each shard's `dedup_stm_factory` watches both and applies a change to every
+  index on the shard. Raising either takes effect on the next insert.
+  Lowering either drops nothing at once, which would be work proportional to
+  the index; instead, while an index or the shard stands above its limit, each
+  new identity frees up to 64 of the oldest entries ahead of the cursor and is
+  still indexed, so the total shrinks with traffic while the newest identities
+  stay covered. An idle index above a lowered per-partition ceiling keeps its
+  entries until it gets traffic (the shard limit still takes room from it).
+  The change is not atomic across the cluster -- each broker applies it when
+  it receives it, so replicas of the same partition briefly enforce different
+  ceilings, which the property's own description spells out. Because a saturated index degrades dedup coverage silently, every
   record admitted unindexed is counted in the `dedup:partition` metric group's
   `records_unindexed` counter, and the condition is logged at warn once per
   five minutes per shard. Live identities dropped to make room are counted
@@ -579,7 +587,14 @@ bounded step at the shard limit finds nothing below the cutoff, it replaces the
 oldest entry just ahead of the cursor if that is older than the incoming
 identity, so a pass whose trimmable entries were used up early (by log replay
 after a restart, say) keeps indexing new identities instead of admitting them
-unindexed until the cursor wraps.
+unindexed until the cursor wraps. Above a limit -- the shard's, or an index's
+own once a lowered ceiling leaves it there -- it replaces as many as it takes
+to get back under, up to 64, and the insert goes ahead once two have gone, so
+the total falls with every new identity. There, with fewer than 64 entries
+ahead of the cursor, it wraps rather than look at a short window, since the
+array's tail is where new identities were just appended; and an index freeing
+that many per insert drops itself from the shard's largest-index cache, which
+would otherwise keep naming it until it had trimmed itself empty.
 
 The original design notes follow.
 

@@ -359,12 +359,14 @@ private:
 class dedup_stm_factory : public state_machine_factory {
 public:
     /// One factory per shard, so the budget it hands its STMs is the shard's.
-    /// max_entries_per_shard of 0 derives the limit from shard memory.
+    /// max_entries_per_shard of 0 derives the limit from shard memory. Both
+    /// limits are watched: a change applies to every index on the shard
+    /// without a restart (see dedup_window_filter::set_max_entries()).
     dedup_stm_factory(
       storage::kvstore&,
       config::binding<std::chrono::milliseconds> sync_timeout,
-      size_t max_entries,
-      size_t max_entries_per_shard);
+      config::binding<size_t> max_entries,
+      config::binding<size_t> max_entries_per_shard);
 
     bool is_applicable_for(const storage::ntp_config&) const final;
 
@@ -375,10 +377,13 @@ public:
 
 private:
     void setup_metrics();
+    void apply_partition_limit();
+    void apply_shard_limit();
 
     storage::kvstore& _kvstore;
     config::binding<std::chrono::milliseconds> _sync_timeout;
-    size_t _max_entries;
+    config::binding<size_t> _max_entries;
+    config::binding<size_t> _max_entries_per_shard;
     ss::lw_shared_ptr<dedup_shard_budget> _shard_budget;
     metrics::internal_metric_groups _metrics;
 };
