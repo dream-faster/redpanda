@@ -26,6 +26,7 @@
 #include <seastar/core/byteorder.hh>
 #include <seastar/core/sleep.hh>
 #include <seastar/core/with_timeout.hh>
+#include <seastar/util/defer.hh>
 
 #include <gtest/gtest.h>
 
@@ -99,8 +100,9 @@ struct dedup_stm_test_accessor {
         stm._pending.insert_or_assign(digest, introducer);
     }
 
-    /// Settle what introduce() set up, as dedup_stm::settle() does for a
-    /// request raft did (\p appended) or did not append.
+    /// Settle what introduce() set up, as for a request raft did (\p
+    /// appended) or did not append. A no-op once it is settled, so a test can
+    /// also call it on exit to release requests still waiting on it.
     static void settle_introduction(
       dedup_stm& stm,
       std::string_view key,
@@ -108,16 +110,17 @@ struct dedup_stm_test_accessor {
       const dedup_stm::inflight_ptr& introducer,
       bool appended) {
         const auto digest = dedup_digest_of(iobuf::from(key));
-        stm._pending.erase(digest);
-        if (!appended) {
-            dedup_request_undo undo;
-            undo.entries.push_back(
-              {.identity = digest,
-               .applied_timestamp = ts,
-               .previous_timestamp = std::nullopt});
-            stm._state.revert_request(undo);
+        if (
+          auto it = stm._pending.find(digest);
+          it == stm._pending.end() || it->second != introducer) {
+            return;
         }
-        introducer->appended.set_value(appended);
+        dedup_request_undo undo;
+        undo.entries.push_back(
+          {.identity = digest,
+           .applied_timestamp = ts,
+           .previous_timestamp = std::nullopt});
+        stm.settle(introducer, undo, appended, std::nullopt);
     }
 
     static size_t pending_size(const dedup_stm& stm) {
@@ -179,24 +182,22 @@ struct dedup_stm_test_accessor {
 
 namespace {
 
-model::record_batch make_batch(
-  std::string_view key, std::string_view value, model::timestamp timestamp) {
-    storage::record_batch_builder builder(
-      model::record_batch_type::raft_data, model::offset{0});
-    builder.set_timestamp(timestamp);
-    builder.add_raw_kv(iobuf::from(key), iobuf::from(value));
-    return std::move(builder).build();
-}
-
 model::record_batch make_batch_of(
-  std::initializer_list<std::string_view> keys, model::timestamp timestamp) {
+  std::initializer_list<std::string_view> keys,
+  model::timestamp timestamp,
+  std::string_view value = "value") {
     storage::record_batch_builder builder(
       model::record_batch_type::raft_data, model::offset{0});
     builder.set_timestamp(timestamp);
     for (auto key : keys) {
-        builder.add_raw_kv(iobuf::from(key), iobuf::from("value"));
+        builder.add_raw_kv(iobuf::from(key), iobuf::from(value));
     }
     return std::move(builder).build();
+}
+
+model::record_batch make_batch(
+  std::string_view key, std::string_view value, model::timestamp timestamp) {
+    return make_batch_of({key}, timestamp, value);
 }
 
 // Build a single-record batch with a Kafka key and, optionally, one header
@@ -1166,6 +1167,12 @@ TEST_F_CORO(
     auto introducer = dedup_stm_test_accessor::make_inflight();
     dedup_stm_test_accessor::introduce(
       *stm, "k1", model::timestamp{1000}, introducer);
+    // A failed assertion must not leave the request waiting on it until the
+    // sync timeout, holding up the fixture's teardown.
+    auto release = ss::defer([&] {
+        dedup_stm_test_accessor::settle_introduction(
+          *stm, "k1", model::timestamp{1000}, introducer, false);
+    });
 
     auto stages = stm->replicate_in_stages(
       make_batch_of({"k1", "k2"}, model::timestamp{1000}),
@@ -1201,6 +1208,10 @@ TEST_F_CORO(
     auto introducer = dedup_stm_test_accessor::make_inflight();
     dedup_stm_test_accessor::introduce(
       *stm, "k1", model::timestamp{1000}, introducer);
+    auto release = ss::defer([&] {
+        dedup_stm_test_accessor::settle_introduction(
+          *stm, "k1", model::timestamp{1000}, introducer, false);
+    });
     auto stages = stm->replicate_in_stages(
       make_batch_of({"k1", "k2"}, model::timestamp{1000}),
       raft::replicate_options(raft::consistency_level::quorum_ack));
@@ -1238,6 +1249,10 @@ TEST_F_CORO(dedup_stm_fixture, all_duplicate_is_enqueued_before_introducer) {
     auto introducer = dedup_stm_test_accessor::make_inflight();
     dedup_stm_test_accessor::introduce(
       *stm, "k1", model::timestamp{1000}, introducer);
+    auto release = ss::defer([&] {
+        dedup_stm_test_accessor::settle_introduction(
+          *stm, "k1", model::timestamp{1000}, introducer, false);
+    });
     auto stages = stm->replicate_in_stages(
       make_batch_of({"k1"}, model::timestamp{1000}),
       raft::replicate_options(raft::consistency_level::quorum_ack));

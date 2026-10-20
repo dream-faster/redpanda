@@ -226,10 +226,12 @@ private:
     void setup_metrics();
 
     /// Wait until every request in \p introducers is known appended. An
-    /// error if one never was, or did not resolve within the sync timeout:
-    /// the identities a request dropped against it may have no durable copy.
-    ss::future<std::optional<errc>>
-    wait_for_introducers(const std::vector<inflight_ptr>& introducers);
+    /// error if one never was, or did not resolve within the sync timeout or
+    /// before \p as fired: the identities a request dropped against it may
+    /// have no durable copy.
+    ss::future<std::optional<errc>> wait_for_introducers(
+      const std::vector<inflight_ptr>& introducers,
+      std::optional<std::reference_wrapper<ss::abort_source>> as);
 
     /// Resolve an in-flight request: drop its identities from the pending
     /// set, revert its insertions if the batch was never appended, and

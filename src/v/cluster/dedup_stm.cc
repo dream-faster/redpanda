@@ -704,8 +704,11 @@ ss::future<result<kafka_result>> dedup_stm::do_replicate(
         // offset instead held every all-duplicate request for a
         // replication round trip whatever it dropped against.
         enqueued->set_value();
-        if (auto failed = co_await wait_for_introducers(depends_on); failed) {
-            co_return *failed;
+        if (!depends_on.empty()) {
+            auto failed = co_await wait_for_introducers(depends_on, opts.as);
+            if (failed) {
+                co_return *failed;
+            }
         }
         if (opts.consistency != raft::consistency_level::quorum_ack) {
             co_return kafka_result{
@@ -851,8 +854,11 @@ ss::future<result<kafka_result>> dedup_stm::do_replicate(
         }
     }
     settle(mine, filtered.undo, true, std::nullopt);
-    if (auto failed = co_await wait_for_introducers(depends_on); failed) {
-        co_return *failed;
+    if (!depends_on.empty()) {
+        auto failed = co_await wait_for_introducers(depends_on, opts.as);
+        if (failed) {
+            co_return *failed;
+        }
     }
 
     kafka_result response{
@@ -864,13 +870,17 @@ ss::future<result<kafka_result>> dedup_stm::do_replicate(
     co_return response;
 }
 
-ss::future<std::optional<errc>>
-dedup_stm::wait_for_introducers(const std::vector<inflight_ptr>& introducers) {
+ss::future<std::optional<errc>> dedup_stm::wait_for_introducers(
+  const std::vector<inflight_ptr>& introducers,
+  std::optional<std::reference_wrapper<ss::abort_source>> as) {
+    // One deadline for all of them: the wait is for this request's
+    // acknowledgment, which sync_timeout bounds however many it waits on.
+    const auto deadline = model::timeout_clock::now() + _sync_timeout();
     for (const auto& introducer : introducers) {
+        auto appended = introducer->appended.get_shared_future();
         auto waited = co_await ss::coroutine::as_future(
-          ss::with_timeout(
-            model::timeout_clock::now() + _sync_timeout(),
-            introducer->appended.get_shared_future()));
+          as ? ssx::with_timeout_abortable(std::move(appended), deadline, *as)
+             : ss::with_timeout(deadline, std::move(appended)));
         const bool unknown = waited.failed();
         if (unknown) {
             waited.ignore_ready_future();
