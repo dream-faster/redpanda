@@ -86,7 +86,7 @@ public:
             XXH3_128bits_update(_state.get(), data, size);
         }
     }
-    /// In dedup_canonical_digest() form: the 96 bits the index keeps.
+    /// In dedup_canonical_digest() form: the 80 bits the index keeps.
     dedup_identity_digest digest() const {
         XXH128_hash_t h{};
         if (_state) {
@@ -544,9 +544,9 @@ struct dedup_shard_budget {
 /// (revert_request).
 ///
 /// Memory is bounded three ways. Each entry costs the same regardless of
-/// identity size, because the index stores a 96-bit digest of the identity
+/// identity size, because the index stores an 80-bit digest of the identity
 /// rather than its bytes, in a table built for this (dedup_compact_index):
-/// about 22 bytes per entry. Entries older than the window (relative to the
+/// about 20 bytes per entry. Entries older than the window (relative to the
 /// most recent timestamp seen) can never cause a drop again, and a cursor
 /// that advances a few entries per new identity drops them as it goes.
 /// Finally, a hard per-partition entry limit prevents a large window,

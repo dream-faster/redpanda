@@ -296,8 +296,8 @@ ss::future<iobuf> dedup_stm::serialize_snapshot(
     // Entries are staged in a fixed local buffer and appended a chunk at a
     // time, so the pass costs a memcpy per entry rather than an iobuf append
     // per entry.
-    constexpr size_t chunk_entries = 16_KiB / packed_entry_size;
-    std::array<char, chunk_entries * packed_entry_size> chunk{};
+    constexpr size_t chunk_entries = 16_KiB / narrow_entry_size;
+    std::array<char, chunk_entries * narrow_entry_size> chunk{};
     iobuf entries;
     // Ages are taken below the watermark as the walk starts. One inserted
     // meanwhile with a newer timestamp is written at the watermark: older
@@ -317,23 +317,23 @@ ss::future<iobuf> dedup_stm::serialize_snapshot(
                   // Older than any window the index keeps an entry in.
                   return;
               }
-              char* out = chunk.data() + staged * packed_entry_size;
+              char* out = chunk.data() + staged * narrow_entry_size;
               const auto lo = ss::cpu_to_le(identity.lo);
               const auto hi = ss::cpu_to_le(
-                static_cast<uint32_t>(identity.hi & dedup_digest_hi_mask));
+                static_cast<uint16_t>(identity.hi & dedup_digest_hi_mask));
               const auto le_age = ss::cpu_to_le(static_cast<uint32_t>(age));
               std::memcpy(out, &lo, sizeof(lo));
               std::memcpy(out + sizeof(lo), &hi, sizeof(hi));
               std::memcpy(
                 out + sizeof(lo) + sizeof(hi), &le_age, sizeof(le_age));
               if (++staged == chunk_entries) {
-                  entries.append(chunk.data(), staged * packed_entry_size);
+                  entries.append(chunk.data(), staged * narrow_entry_size);
                   staged = 0;
               }
           });
         if (complete) {
             if (staged > 0) {
-                entries.append(chunk.data(), staged * packed_entry_size);
+                entries.append(chunk.data(), staged * narrow_entry_size);
             }
             break;
         }
@@ -350,7 +350,7 @@ ss::future<iobuf> dedup_stm::serialize_snapshot(
         .generation = generation,
         .max_timestamp = max_timestamp,
         .entries = std::move(entries),
-        .entry_size = packed_entry_size});
+        .entry_size = narrow_entry_size});
 }
 
 namespace {
@@ -369,9 +369,12 @@ ss::future<> for_each_packed_entry(
     while (parser.bytes_left() > 0) {
         dedup_identity_digest identity;
         identity.lo = ss::le_to_cpu(parser.consume_type<uint64_t>());
-        identity.hi = ss::le_to_cpu(parser.consume_type<uint32_t>());
+        // A version-4 entry's 32 bits are cut to the index's 16 on insert.
+        identity.hi = entry_size == dedup_stm::narrow_entry_size
+                        ? ss::le_to_cpu(parser.consume_type<uint16_t>())
+                        : ss::le_to_cpu(parser.consume_type<uint32_t>());
         int64_t ts{};
-        if (entry_size == dedup_stm::packed_entry_size) {
+        if (entry_size != dedup_stm::wide_entry_size) {
             const auto age = ss::le_to_cpu(parser.consume_type<uint32_t>());
             ts = static_cast<int64_t>(std::max<__int128>(
               std::numeric_limits<int64_t>::min(),
@@ -395,7 +398,9 @@ dedup_stm::state_snapshot dedup_stm::decode_snapshot(iobuf buffer) {
 ss::future<> dedup_stm::restore_snapshot(
   dedup_window_filter& state, int64_t& generation, state_snapshot snapshot) {
     const size_t entry_size = snapshot.entry_size;
-    if (entry_size != packed_entry_size && entry_size != wide_entry_size) {
+    if (
+      entry_size != narrow_entry_size && entry_size != packed_entry_size
+      && entry_size != wide_entry_size) {
         throw serde::serde_exception(
           ssx::sformat(
             "dedup snapshot entries of unknown size {}", entry_size));

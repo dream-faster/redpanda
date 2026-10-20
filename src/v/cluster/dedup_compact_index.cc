@@ -167,7 +167,7 @@ size_t dedup_compact_index::find(
             if (
               e.lo_lo == static_cast<uint32_t>(h)
               && e.lo_hi == static_cast<uint32_t>(h >> 32)
-              && e.hi == static_cast<uint32_t>(key.hi)) {
+              && e.hi == static_cast<uint16_t>(key.hi)) {
                 return pos;
             }
         }
@@ -591,7 +591,7 @@ void dedup_compact_index::write_entry(
     auto& e = entry(_size);
     e.lo_lo = static_cast<uint32_t>(key.lo);
     e.lo_hi = static_cast<uint32_t>(key.lo >> 32);
-    e.hi = static_cast<uint32_t>(key.hi);
+    e.hi = static_cast<uint16_t>(key.hi);
     e.rel = 0;
     ++_size;
     e.rel = encode(b, ts);

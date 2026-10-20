@@ -42,9 +42,9 @@ namespace cluster {
 
 struct dedup_stm_test_accessor {
     static size_t snapshot_size(iobuf snapshot) {
-        return serde::from_iobuf<dedup_stm::state_snapshot>(std::move(snapshot))
-                 .entries.size_bytes()
-               / dedup_stm::packed_entry_size;
+        auto parsed = serde::from_iobuf<dedup_stm::state_snapshot>(
+          std::move(snapshot));
+        return parsed.entries.size_bytes() / parsed.entry_size;
     }
 
     /// The entry layout and the entries' size in bytes of a snapshot.
@@ -292,7 +292,7 @@ TEST(dedup_stm_snapshot, misaligned_entries_are_rejected) {
         target,
         generation,
         dedup_stm_test_accessor::state_snapshot_with_entry_bytes(
-          dedup_stm::packed_entry_size + 1)),
+          dedup_stm::narrow_entry_size + 1)),
       serde::serde_exception);
     EXPECT_EQ(target.map_size(), 0u);
 }
@@ -503,8 +503,8 @@ TEST(dedup_stm_snapshot, packed_format_is_smaller_than_version_1) {
     source.restore(seed);
     const auto packed
       = dedup_stm_test_accessor::serialize(source, 0).size_bytes();
-    static_assert(dedup_stm::packed_entry_size == 16);
-    EXPECT_LE(packed, count * dedup_stm::packed_entry_size + 64);
+    static_assert(dedup_stm::narrow_entry_size == 14);
+    EXPECT_LE(packed, count * dedup_stm::narrow_entry_size + 64);
     EXPECT_LT(packed, v1_snapshot_with(count).size_bytes());
 }
 
@@ -525,7 +525,7 @@ TEST(dedup_stm_snapshot, timestamps_round_trip_as_ages) {
     auto buffer = dedup_stm_test_accessor::serialize(source, 3);
     ASSERT_EQ(
       dedup_stm_test_accessor::snapshot_layout(buffer.copy()).first,
-      dedup_stm::packed_entry_size);
+      dedup_stm::narrow_entry_size);
     ASSERT_EQ(
       dedup_stm_test_accessor::snapshot_size(buffer.copy()), ages.size());
     dedup_window_filter target(std::chrono::milliseconds{37 * day});
@@ -760,6 +760,59 @@ TEST(dedup_stm_snapshot, a_repeated_identity_restores_to_the_newer_timestamp) {
     const auto restored = target.snapshot().entries;
     ASSERT_EQ(restored.size(), 1u);
     EXPECT_EQ(restored[0].timestamp, model::timestamp{walk_base_ts + 9});
+}
+
+namespace {
+
+/// Version 4: 96-bit digests, in the packed layout (digest lo, the low 32
+/// bits of digest hi, the age below max_timestamp).
+struct v4_state_snapshot
+  : serde::
+      envelope<v4_state_snapshot, serde::version<4>, serde::compat_version<4>> {
+    int64_t window_ms{0};
+    int64_t generation{0};
+    model::timestamp max_timestamp{model::timestamp::min()};
+    iobuf entries;
+    uint32_t entry_size{dedup_stm::packed_entry_size};
+
+    auto serde_fields() {
+        return std::tie(
+          window_ms, generation, max_timestamp, entries, entry_size);
+    }
+};
+
+} // namespace
+
+// A version-4 snapshot keeps 32 bits of digest hi where this build keeps 16.
+// Cut on restore, its entries are the digests this build computes for the same
+// identities, so an upgrade keeps its index.
+TEST(dedup_stm_snapshot, version_4_snapshots_restore_cut_to_80_bits) {
+    const auto id = dedup_digest_of(iobuf::from("k"));
+    ASSERT_EQ(id.hi & ~dedup_digest_hi_mask, 0u);
+    auto entries = iobuf{};
+    const auto lo = ss::cpu_to_le(id.lo);
+    // The upper 16 of the 32 bits a version-4 build kept.
+    const auto hi = ss::cpu_to_le(static_cast<uint32_t>(id.hi | 0xbeef'0000U));
+    const auto age = ss::cpu_to_le(uint32_t{0});
+    entries.append(reinterpret_cast<const char*>(&lo), sizeof(lo));
+    entries.append(reinterpret_cast<const char*>(&hi), sizeof(hi));
+    entries.append(reinterpret_cast<const char*>(&age), sizeof(age));
+    dedup_window_filter target(1h);
+    int64_t generation = 0;
+    dedup_stm_test_accessor::restore(
+      target,
+      generation,
+      serde::to_iobuf(
+        v4_state_snapshot{
+          .window_ms = 3'600'000,
+          .generation = 6,
+          .max_timestamp = model::timestamp{walk_base_ts},
+          .entries = std::move(entries)}));
+    EXPECT_EQ(generation, 6);
+    ASSERT_EQ(target.map_size(), 1u);
+    EXPECT_FALSE(
+      target.filter(make_batch("k", "again", model::timestamp{walk_base_ts}))
+        .has_value());
 }
 
 struct dedup_stm_fixture : raft::stm_raft_fixture<dedup_stm> {

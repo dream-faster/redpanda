@@ -23,11 +23,11 @@ namespace cluster {
 ///
 /// The index stores this instead of the identity bytes, so an entry costs the
 /// same regardless of how large the Kafka key or header value is. One
-/// XXH3-128 pass is computed, and 96 bits are kept: all of `lo` (its low 64
-/// bits) and the low half of `hi`, whose upper half is always zero (see
-/// dedup_compact_index, which stores exactly those 12 bytes). At the
+/// XXH3-128 pass is computed, and 80 bits are kept: all of `lo` (its low 64
+/// bits) and the low 16 bits of `hi`, whose other bits are always zero (see
+/// dedup_compact_index, which stores exactly those 10 bytes). At the
 /// supported 10^7-entry upper limit, the chance that a new identity matches
-/// some indexed one is on the order of 10^-22 per lookup, far below the
+/// some indexed one is on the order of 10^-17 per lookup, far below the
 /// window-edge and generation-change boundaries the feature already documents
 /// as best-effort.
 ///
@@ -49,11 +49,11 @@ struct dedup_identity_digest {
 };
 
 /// The bits of dedup_identity_digest::hi that are part of the identity.
-inline constexpr uint64_t dedup_digest_hi_mask = 0xffff'ffffULL;
+inline constexpr uint64_t dedup_digest_hi_mask = 0xffffULL;
 
 /// The digest as the index keeps it. Digests computed by this build are
 /// already in this form; one read from a snapshot written before the index
-/// kept 96 bits is not.
+/// kept 80 bits is not.
 constexpr dedup_identity_digest
 dedup_canonical_digest(dedup_identity_digest d) noexcept {
     return {.hi = d.hi & dedup_digest_hi_mask, .lo = d.lo};
@@ -117,14 +117,14 @@ private:
     std::array<size_t, size_t{1} << radix_bits> _counts{};
 };
 
-/// \brief The dedup index's table: identity digest to record timestamp, at 16
+/// \brief The dedup index's table: identity digest to record timestamp, at 14
 /// bytes per entry plus a 4-byte lookup slot.
 ///
 /// The general-purpose map this replaced kept a 24-byte value and an 8-byte
 /// bucket at up to 80% load: about 50 bytes an entry with allocation overhead.
-/// Here an entry is a 12-byte digest and a 4-byte timestamp, and the lookup
-/// table holds only the entry's position: 22-25 bytes an entry, so the same
-/// memory holds about twice the identities.
+/// Here an entry is a 10-byte digest and a 4-byte timestamp, and the lookup
+/// table holds only the entry's position: 20-23 bytes an entry, so the same
+/// memory holds more than twice the identities.
 ///
 /// Entries live in a dense array in insertion order, and erasing one moves the
 /// array's last entry into its place. That is the layout the filter's sweep
@@ -335,14 +335,19 @@ public:
     size_t work() const noexcept { return _work; }
 
 private:
+    // Packed to 2-byte alignment: 14 bytes, not 16 with padding. An entry
+    // can straddle two cache lines, which a standalone benchmark put at a few
+    // percent on a lookup.
+#pragma pack(push, 2)
     struct packed_entry {
         uint32_t lo_lo;
         uint32_t lo_hi;
-        uint32_t hi;
+        uint16_t hi;
         /// 0: expired. Otherwise the timestamp is the block's base + rel - 1.
         uint32_t rel;
     };
-    static_assert(sizeof(packed_entry) == 16);
+#pragma pack(pop)
+    static_assert(sizeof(packed_entry) == 14);
 
     struct block_meta {
         int64_t base{0};

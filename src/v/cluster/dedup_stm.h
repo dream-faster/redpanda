@@ -53,12 +53,16 @@ struct dedup_stm_test_accessor;
 class dedup_stm : public raft::persisted_stm<> {
 public:
     static constexpr std::string_view name = "dedup_stm";
-    /// Bytes one index entry occupies in a snapshot: digest lo, the 32 bits
+    /// Bytes one index entry occupies in a snapshot: digest lo, the 16 bits
     /// of digest hi the index keeps, and the timestamp as its age below the
     /// snapshot's max_timestamp. See state_snapshot.
+    static constexpr size_t narrow_entry_size = sizeof(uint64_t)
+                                                + sizeof(uint16_t)
+                                                + sizeof(uint32_t);
+    /// Version 4's layouts, still read: 32 bits of digest hi, and the
+    /// timestamp as an age (packed) or in full (wide).
     static constexpr size_t packed_entry_size = sizeof(uint64_t)
                                                 + 2 * sizeof(uint32_t);
-    /// The layout before: the timestamp in full. Still read.
     static constexpr size_t wide_entry_size = 2 * sizeof(uint64_t)
                                               + sizeof(uint32_t);
 
@@ -117,7 +121,7 @@ private:
     /// Version history, each a compat break: a reader that cannot read a
     /// version discards the snapshot and rebuilds the index from the log (see
     /// try_restore_snapshot()); the index is advisory and log-derived, so that
-    /// is correct, only slower. This build reads version 4 only:
+    /// is correct, only slower. This build reads versions 4 and 5:
     ///
     /// - 0: full identity bytes per entry.
     /// - 1: a 128-bit digest per entry, each its own serde envelope.
@@ -136,6 +140,11 @@ private:
     ///   max_timestamp, which covers more than the index's own span (see
     ///   dedup_compact_index). Both are read; a build that reads only the
     ///   first refuses the second on entry_size, and rebuilds as above.
+    /// - 5: digests are 80 bits, and an entry packs into narrow_entry_size
+    ///   bytes: digest lo, the low 16 bits of digest hi, the age. This build
+    ///   reads version 4 too: its digests, cut to 80 bits, are what this build
+    ///   computes for the same identities. A version-4 build can only compare
+    ///   96 bits, so it refuses version 5 on compat version and rebuilds.
     ///
     /// The break runs both ways: an older binary rejects a newer snapshot on
     /// compat version and rebuilds the same way, so a raft snapshot crossing a
@@ -146,15 +155,15 @@ private:
     struct state_snapshot
       : serde::envelope<
           state_snapshot,
-          serde::version<4>,
-          serde::compat_version<4>> {
+          serde::version<5>,
+          serde::compat_version<5>> {
         int64_t window_ms{0};
         int64_t generation{0};
         model::timestamp max_timestamp{model::timestamp::min()};
         iobuf entries;
-        /// Bytes per record in `entries`: packed_entry_size, or
-        /// wide_entry_size for a snapshot written before it.
-        uint32_t entry_size{packed_entry_size};
+        /// Bytes per record in `entries`: narrow_entry_size, or
+        /// packed_entry_size or wide_entry_size for a version-4 snapshot.
+        uint32_t entry_size{narrow_entry_size};
 
         auto serde_fields() {
             return std::tie(
