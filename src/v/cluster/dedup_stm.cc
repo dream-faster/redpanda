@@ -947,21 +947,14 @@ void dedup_stm::settle(
         // Nothing was admitted, so nothing is pending.
         return;
     }
-    if (_unsettled == 1 && _pending.size() * 4 >= _pending.bucket_count()) {
-        // No other request is unsettled, so every pending identity is this
-        // one's: nothing to look up one by one. Unless the table is mostly
-        // empty buckets, which clearing would sweep for nothing.
-        _pending.clear();
-    } else {
-        for (const auto& entry : undo.entries) {
-            // Only this request's own registrations: a later request may have
-            // written a newer timestamp for the same identity and registered
-            // itself in its place.
-            if (
-              auto it = _pending.find(entry.identity);
-              it != _pending.end() && it->second == mine) {
-                _pending.erase(it);
-            }
+    for (const auto& entry : undo.entries) {
+        // Only this request's own registrations: a later request may have
+        // written a newer timestamp for the same identity and registered
+        // itself in its place.
+        if (
+          auto it = _pending.find(entry.identity);
+          it != _pending.end() && it->second == mine) {
+            _pending.erase(it);
         }
     }
     if (!appended) {

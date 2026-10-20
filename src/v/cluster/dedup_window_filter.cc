@@ -852,7 +852,6 @@ void dedup_window_filter::begin_pass() {
       saturating_sub(_max_ts.value(), _pass_lo), 0);
     _pass_width = _pass_span / static_cast<int64_t>(capacity_evict_buckets - 1)
                   + 1;
-    _pass_inverse_width = 1.0 / static_cast<double>(_pass_width);
     _pass_oldest = no_pass_oldest;
 }
 
@@ -989,9 +988,9 @@ void dedup_window_filter::sweep_step(size_t budget) {
 void dedup_window_filter::count_in_pass(model::timestamp stamp, size_t times) {
     // restore() can clamp _max_ts below an entry's own timestamp, and the
     // frame is a pass old, so an offset outside the window is reachable.
-    const auto offset = static_cast<uint64_t>(std::clamp<__int128>(
+    const auto offset = static_cast<int64_t>(std::clamp<__int128>(
       static_cast<__int128>(stamp.value()) - _pass_lo, 0, _pass_span));
-    _pass_counts[pass_bucket(offset)] += times;
+    _pass_counts[static_cast<size_t>(offset / _pass_width)] += times;
     _pass_visited += times;
     if (times > 0) {
         _pass_oldest = std::min(_pass_oldest, stamp.value());

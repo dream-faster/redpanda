@@ -1293,23 +1293,6 @@ private:
     int64_t _pass_lo{0};
     int64_t _pass_span{0};
     int64_t _pass_width{1};
-    double _pass_inverse_width{1.0};
-    /// offset / _pass_width, exactly, for an offset in [0, _pass_span]: the
-    /// sweep takes it for every entry it visits, and a multiply by the
-    /// reciprocal with the rounding corrected costs a fraction of a 64-bit
-    /// division.
-    size_t pass_bucket(uint64_t offset) const noexcept {
-        const auto width = static_cast<uint64_t>(_pass_width);
-        auto q = static_cast<uint64_t>(
-          static_cast<double>(offset) * _pass_inverse_width);
-        while (q > 0 && static_cast<unsigned __int128>(q) * width > offset) {
-            --q;
-        }
-        while (static_cast<unsigned __int128>(q + 1) * width <= offset) {
-            ++q;
-        }
-        return static_cast<size_t>(q);
-    }
     // Oldest timestamp the pass in progress has visited, which the next pass
     // starts its frame from.
     static constexpr int64_t no_pass_oldest
