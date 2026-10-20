@@ -758,6 +758,14 @@ ss::future<> dedup_window_filter::build_lookup() {
     const auto interrupted = [this, epoch] {
         return _lookup_deferred || _index_epoch != epoch;
     };
+    // A throw part way (an allocation) must not leave the table part built:
+    // nothing would resume it, building() would hold off every trim, and the
+    // next build expects nothing indexed.
+    auto unwind = ss::defer([this, epoch]() noexcept {
+        if (_index_epoch == epoch && !_index.fully_indexed()) {
+            _index.drop_lookup();
+        }
+    });
     _index.begin_bulk_index();
     while (_index.prepare_step(build_prepare_chunk)) {
         co_await ss::coroutine::maybe_yield();

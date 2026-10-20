@@ -872,8 +872,11 @@ public:
     /// and two thirds of the memory. defer_lookup() frees the lookup table,
     /// and populate() and restores keep entries that way until
     /// build_lookup(), which indexes them all in bulk, yielding as it goes.
-    /// filter_request() and revert_request() need lookup_ready(); a build
-    /// that defer_lookup(), clear() or a restore interrupts leaves it false.
+    /// filter_request() and revert_request() need lookup_ready(). A build
+    /// that defer_lookup() interrupts, or that fails, leaves it false until
+    /// the next build_lookup(); one that clear() or a restore interrupts
+    /// stops, and the index that replaced the one it was building is fully
+    /// indexed unless deferred, so it is true again.
     void defer_lookup();
     ss::future<> build_lookup();
     bool lookup_ready() const {
