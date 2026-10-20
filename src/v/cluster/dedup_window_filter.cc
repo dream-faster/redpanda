@@ -335,9 +335,10 @@ dedup_window_filter::filter_request(model::record_batch batch) {
     // in header mode one record missing the configured header rejects the
     // entire request, and the index must not have been mutated by then.
     // Digesting each identity up front is what makes deferring cheap -- what
-    // has to survive the pass is 32 bytes per record, not the records
-    // themselves, whose iobufs would otherwise pin a multiple of the batch
-    // size for the duration of the call.
+    // has to survive the pass is 64 bytes per record, the identity and where
+    // the record lies, not the records themselves, whose iobufs would
+    // otherwise pin a multiple of the batch size for the duration of the
+    // call.
     struct classified {
         dedup_identity_digest identity;
         model::timestamp timestamp;
@@ -425,8 +426,25 @@ dedup_window_filter::filter_request(model::record_batch batch) {
     // undone before an error propagates: the request fails and nothing of it
     // stays behind.
     try {
+        // A survivor's length once its offset delta is re-encoded as
+        // offset_delta: what reserving exactly and writing the length need.
+        const auto spliced_size =
+          [](const dedup_record_span& span, int32_t offset_delta) {
+              return static_cast<int64_t>(
+                       span.end - span.body - span.offset_delta_size)
+                     + static_cast<int64_t>(vint::vint_size(offset_delta));
+          };
+        size_t spliced_bytes = 0;
+        int32_t offset_delta = 0;
+        for (const auto& c : records) {
+            if (!c.dropped) {
+                const auto record_size = spliced_size(c.span, offset_delta++);
+                spliced_bytes += vint::vint_size(record_size)
+                                 + static_cast<size_t>(record_size);
+            }
+        }
         iobuf data;
-        data.reserve_memory(readable.data().size_bytes());
+        data.reserve_memory(spliced_bytes);
         iobuf_const_parser parser(readable.data());
         std::array<uint8_t, vint::max_length> varint{};
         const auto append_varint = [&data, &varint](int64_t v) {
@@ -441,26 +459,25 @@ dedup_window_filter::filter_request(model::record_batch batch) {
             });
         };
         int64_t max_timestamp_delta = std::numeric_limits<int64_t>::min();
-        int32_t offset_delta = 0;
+        offset_delta = 0;
         for (const auto& c : records) {
             if (c.dropped) {
                 continue;
             }
             const auto& span = c.span;
-            const auto unchanged = static_cast<int64_t>(
-              (span.end - span.body)
-              - (span.after_offset_delta - span.offset_delta));
-            append_varint(
-              unchanged + static_cast<int64_t>(vint::vint_size(offset_delta)));
-            copy(span.body, span.offset_delta);
+            const auto offset_delta_begin = span.body + span.offset_delta_at;
+            append_varint(spliced_size(span, offset_delta));
+            copy(span.body, offset_delta_begin);
             append_varint(offset_delta++);
-            copy(span.after_offset_delta, span.end);
+            copy(offset_delta_begin + span.offset_delta_size, span.end);
             max_timestamp_delta = std::max(
               max_timestamp_delta, span.timestamp_delta);
         }
 
         // As model::batch_builder::build_header() lays it out for the same
-        // records.
+        // records, but for a max timestamp that saturates where the builder
+        // would overflow: the deltas are client-controlled, as in
+        // for_each_dedup_identity().
         model::record_batch_attributes attrs;
         if (header.attrs.is_control()) {
             attrs.set_control_type();
@@ -475,7 +492,14 @@ dedup_window_filter::filter_request(model::record_batch batch) {
         auto max_timestamp = base_ts;
         if (
           header.attrs.timestamp_type() == model::timestamp_type::create_time) {
-            max_timestamp = model::timestamp{base_ts() + max_timestamp_delta};
+            int64_t max_ts{};
+            if (__builtin_add_overflow(base_ts(), max_timestamp_delta, &max_ts))
+              [[unlikely]] {
+                max_ts = max_timestamp_delta < 0
+                           ? std::numeric_limits<int64_t>::min()
+                           : std::numeric_limits<int64_t>::max();
+            }
+            max_timestamp = model::timestamp{max_ts};
         }
         model::record_batch_header out{
           .header_crc = 0,

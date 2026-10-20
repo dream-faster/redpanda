@@ -763,10 +763,12 @@ TEST(DedupCompactIndex, PrefetchChangesNothing) {
         present.push_back(dedup_canonical_digest(random_digest(seed)));
         ASSERT_TRUE(idx.push_back(present.back(), 1'000 + i));
         // Present and absent keys, as the table splits and grows under it.
+        const auto growing = idx.work();
         for (auto st : stages) {
             idx.prefetch(present[i / 2], st);
             idx.prefetch(random_digest(seed), st);
         }
+        ASSERT_EQ(idx.work(), growing);
     }
     const auto work = idx.work();
     for (size_t i = 0; i < present.size(); i += 7) {
