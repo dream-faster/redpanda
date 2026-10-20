@@ -27,6 +27,8 @@
 #include <seastar/core/shared_future.hh>
 #include <seastar/core/shared_ptr.hh>
 
+#include <deque>
+
 namespace cluster {
 
 struct dedup_stm_test_accessor;
@@ -228,6 +230,9 @@ private:
     /// Put every unregistered request's identities into _pending, oldest
     /// request first, so a newer one's registration wins as it would have.
     void register_pending();
+    /// Take \p request off _unregistered, if it is there, and forget its
+    /// undo log.
+    void unlist(const inflight_ptr& request) noexcept;
     /// The request in flight that introduced \p identity, if any.
     inflight_ptr pending_introducer(const dedup_identity_digest& identity);
     inflight_ptr lookup_registered(const dedup_identity_digest& identity) const;
@@ -290,8 +295,9 @@ private:
     /// inflight_request. Bounded by the records in flight.
     pending_identities _pending;
     /// Requests in flight whose identities are not in _pending yet, oldest
-    /// first. All of them are newer than any request that is.
-    std::vector<inflight_ptr> _unregistered;
+    /// first. All of them are newer than any request that is. The front may
+    /// be marked registered: register_pending() threw partway through it.
+    std::deque<inflight_ptr> _unregistered;
     /// Snapshots being written: while one is, requests register at once, so
     /// it leaves out everything in flight.
     size_t _snapshots_walking{0};

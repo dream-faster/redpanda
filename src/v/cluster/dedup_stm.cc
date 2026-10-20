@@ -759,6 +759,13 @@ ss::future<result<kafka_result>> dedup_stm::do_replicate(
         }
     }
     inflight_ptr mine;
+    // settle() takes it off the list on every path out of here; this covers
+    // one that throws, so the list never keeps a pointer into this frame.
+    auto unlisted = ss::defer([this, &mine]() noexcept {
+        if (mine && mine->undo) {
+            unlist(mine);
+        }
+    });
     if (filtered.batch) {
         mine = ss::make_lw_shared<inflight_request>();
         mine->undo = &filtered.undo;
@@ -768,14 +775,6 @@ ss::future<result<kafka_result>> dedup_stm::do_replicate(
             register_pending();
         }
     }
-    // settle() takes it off the list on every path out of here; this covers
-    // one that throws, so the list never keeps a pointer into this frame.
-    auto unlisted = ss::defer([this, &mine]() noexcept {
-        if (mine && mine->undo && !mine->registered) {
-            std::erase(_unregistered, mine);
-            mine->undo = nullptr;
-        }
-    });
 
     if (!filtered.batch) {
         // Every record was a duplicate: nothing to replicate, so nothing for
@@ -973,13 +972,28 @@ dedup_stm::wait_for_introducers(const std::vector<inflight_ptr>& introducers) {
 }
 
 void dedup_stm::register_pending() {
-    for (auto& request : _unregistered) {
+    while (!_unregistered.empty()) {
+        const auto& request = _unregistered.front();
+        // Marked first and unlisted after: should an insert throw, settle()
+        // still erases what went in, and the request stays listed for a scan
+        // to find and the next call to finish.
+        request->registered = true;
         for (const auto& entry : request->undo->entries) {
             _pending.insert_or_assign(entry.identity, request);
         }
-        request->registered = true;
+        _unregistered.pop_front();
     }
-    _unregistered.clear();
+}
+
+void dedup_stm::unlist(const inflight_ptr& request) noexcept {
+    // Requests mostly settle in the order they were admitted. A registered
+    // one is listed only at the front.
+    if (!_unregistered.empty() && _unregistered.front() == request) {
+        _unregistered.pop_front();
+    } else if (!request->registered) {
+        std::erase(_unregistered, request);
+    }
+    request->undo = nullptr;
 }
 
 dedup_stm::inflight_ptr
@@ -1024,9 +1038,7 @@ void dedup_stm::settle(
         // Nothing was admitted, so nothing is pending.
         return;
     }
-    if (!mine->registered) {
-        std::erase(_unregistered, mine);
-    } else {
+    if (mine->registered) {
         for (const auto& entry : undo.entries) {
             // Only this request's own registrations: a later request may have
             // written a newer timestamp for the same identity and registered
@@ -1038,7 +1050,7 @@ void dedup_stm::settle(
             }
         }
     }
-    mine->undo = nullptr;
+    unlist(mine);
     if (!appended) {
         _state.revert_request(undo);
         if (self_key) {
