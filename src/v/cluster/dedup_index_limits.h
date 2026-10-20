@@ -30,9 +30,9 @@ inline constexpr size_t DEFAULT_DEDUP_MAX_ENTRIES_PER_SHARD = 0;
 // Share of shard memory the derived limit allows the dedup indices to use.
 inline constexpr size_t DEDUP_SHARD_MEMORY_PERCENT = 15;
 // Memory one entry costs while a snapshot of it is in flight: the index's
-// 16-byte entry and its lookup slot with the allocator's overhead (up to ~31
+// 14-byte entry and its lookup slot with the allocator's overhead (up to ~28
 // bytes, depending on how full the lookup table's segments are; measured by
-// dedup_snapshot_stall_test) plus its 16-byte serialized form. A replica
+// dedup_snapshot_stall_test) plus its 14-byte serialized form. A replica
 // that is not leading keeps no lookup slots (see
 // dedup_window_filter::defer_lookup()), but any of them can lead.
 inline constexpr size_t DEDUP_SHARD_BYTES_PER_ENTRY = 48;

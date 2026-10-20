@@ -25,11 +25,17 @@ namespace cluster {
 /// same regardless of how large the Kafka key or header value is. One
 /// XXH3-128 pass is computed, and 80 bits are kept: all of `lo` (its low 64
 /// bits) and the low 16 bits of `hi`, whose other bits are always zero (see
-/// dedup_compact_index, which stores exactly those 10 bytes). At the
-/// supported 10^7-entry upper limit, the chance that a new identity matches
-/// some indexed one is on the order of 10^-17 per lookup, far below the
-/// window-edge and generation-change boundaries the feature already documents
-/// as best-effort.
+/// dedup_compact_index, which stores exactly those 10 bytes).
+///
+/// Keeping fewer bits than the identity has means two identities can share a
+/// digest, and that is a lossy outcome: a new identity whose digest matches
+/// an indexed one is taken for a duplicate, and its record is discarded like
+/// one. Each lookup of a new identity risks this with probability the number
+/// of indexed entries over 2^80: about 8 * 10^-19 at the default 10^6-entry
+/// limit, 8 * 10^-18 at the 10^7-entry maximum. At a sustained 10^6 new
+/// identities a second into a full 10^7-entry index, that is one record
+/// dropped in about 4,000 years per partition. Keeping 96 bits made it 2^16
+/// times less likely, at 2 more bytes an entry.
 ///
 /// XXH3 is not collision-resistant against a chosen-input attacker, which
 /// is deliberate: a producer that wants to suppress another producer's
@@ -144,10 +150,11 @@ private:
 /// the block's entries cannot all be kept together with room above them, those
 /// more than retained_span behind the block's newest are stored as expired.
 ///
-/// Expired is the only lossy outcome, and it can only make an entry stop
-/// matching -- a duplicate admitted, never a record dropped. With a dedup
-/// window up to retained_span (about 37 days), every entry it turns expired
-/// was outside the window already. Timestamps are otherwise exact.
+/// Expired is the only lossy outcome of the encoding, and it can only make an
+/// entry stop matching -- a duplicate admitted, never a record dropped (a
+/// digest match by chance can drop one; see dedup_identity_digest). With a
+/// dedup window up to retained_span (about 37 days), every entry it turns
+/// expired was outside the window already. Timestamps are otherwise exact.
 ///
 /// ## Lookup
 ///
@@ -261,7 +268,7 @@ public:
     ///
     /// Positions [0, indexed()) are in the lookup table, and find() sees only
     /// them; those from indexed() on were appended by append_unindexed() and
-    /// are only in the entry array, at 16 bytes an entry and no lookup cost.
+    /// are only in the entry array, at 14 bytes an entry and no lookup cost.
     /// A replica that is not filtering needs nothing but the entries, and
     /// indexes them in bulk once it is: begin_bulk_index(), prepare_step()
     /// until it returns false, then index_next() up to size(). push_back()

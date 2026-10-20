@@ -145,16 +145,20 @@ private:
     ///   reads version 4 too: its digests, cut to 80 bits, are what this build
     ///   computes for the same identities, so the compat version stays 4. A
     ///   version-4 build can only compare 96 bits; it refuses a version-5
-    ///   snapshot on entry_size, which it reads as one it does not know, and
-    ///   rebuilds.
+    ///   snapshot on entry_size, which it reads as one it does not know.
     ///
     /// The break runs both ways: an older binary rejects a newer snapshot on
-    /// compat version or entry_size and rebuilds the same way, so a raft
-    /// snapshot crossing a rolling upgrade in either direction costs a rebuild,
-    /// not a failed partition. Each replica digests what it applies itself, so
-    /// replicas on different builds never compare digests otherwise. Version 1
-    /// snapshots only ever lived in the kvstore, which this STM no longer
-    /// reads.
+    /// compat version or entry_size, never failing the partition. For a local
+    /// snapshot -- a rollback reading what the newer build wrote -- that costs
+    /// a rebuild from the log. A raft snapshot has no log behind it to rebuild
+    /// from: a replica that rejects one keeps none of the identities it
+    /// covers, and if it leads before they leave the window it admits their
+    /// duplicates. Snapshots are not feature-gated, so during a rolling
+    /// upgrade a leader on this build that sends one to a version-4 follower
+    /// leaves that follower in this state. Each replica digests what it
+    /// applies itself, so replicas on different builds never compare digests
+    /// otherwise. Version 1 snapshots only ever lived in the kvstore, which
+    /// this STM no longer reads.
     struct state_snapshot
       : serde::envelope<
           state_snapshot,

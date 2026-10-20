@@ -1094,8 +1094,8 @@ private:
     void note_erase_behind_cursor(size_t index);
     /// Called when the whole entry array is discarded.
     void invalidate_walks();
-    /// Entries emitted between preemption checks. 20 bytes each on the wire,
-    /// so about 80 KiB of snapshot per check.
+    /// Entries emitted between preemption checks. 14 bytes each on the wire,
+    /// so about 56 KiB of snapshot per check.
     static constexpr size_t walk_chunk = 4096;
     /// Restored entries between reports to the shard budget. A power of two.
     static constexpr size_t restore_sync_interval = 4096;
