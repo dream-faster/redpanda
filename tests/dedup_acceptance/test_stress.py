@@ -770,7 +770,8 @@ def test_many_small_idle_partitions_do_not_starve_a_busy_one(
     # idle partitions, less that margin, is the designed steady state. Whether
     # it is among the largest is decided once per cursor step, so the step
     # that crosses the margin can trim up to a step's worth below it -- at
-    # most the 64 entries of the step taken at the ceiling.
+    # most the 64 entries of the step taken at the ceiling
+    # (dedup_window_filter::capacity_emergency_budget).
     share = limit // idle
     step = 64
     assert (
