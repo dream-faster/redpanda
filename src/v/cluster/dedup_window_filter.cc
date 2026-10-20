@@ -948,17 +948,6 @@ void dedup_window_filter::sweep_step(size_t budget) {
     // Far from every limit the cutoff decides nothing, so the visit skips the
     // histogram. The oldest timestamp is still taken: it frames the next pass.
     const bool counting = counts_for_capacity();
-    // The cursor reads entries in order, but erasing an expired one reads its
-    // lookup slot, at random in the table. Start loading the slots of those
-    // the next step will erase; by then they have had a step's worth of
-    // records to arrive.
-    for (size_t pos = _sweep_pos + budget;
-         pos < std::min(_sweep_pos + 2 * budget, _index.size());
-         ++pos) {
-        if (!is_live(_index.timestamp_at(pos), cutoff)) {
-            _index.prefetch_slot(pos);
-        }
-    }
 
     for (size_t step = 0; step < budget; ++step) {
         if (_index.empty()) {

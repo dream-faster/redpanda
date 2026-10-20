@@ -234,11 +234,6 @@ public:
     /// A hint only: it changes nothing, and is safe for any key at any time.
     void prefetch(const dedup_identity_digest&, prefetch_stage) const noexcept;
 
-    /// Start loading the lookup slot erase_at(\p pos) reads first: one at
-    /// random in the table, where the entries are walked in order. A hint
-    /// only; nothing for an entry that is not indexed.
-    void prefetch_slot(size_t pos) const noexcept;
-
     /// The identity at \p pos, in dedup_canonical_digest() form.
     dedup_identity_digest identity_at(size_t pos) const noexcept {
         const auto& e = entry(pos);
