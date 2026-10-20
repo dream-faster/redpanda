@@ -98,6 +98,9 @@ struct dedup_stm_test_accessor {
         const auto digest = dedup_digest_of(iobuf::from(key));
         stm._state.populate(digest, ts);
         stm._pending.insert_or_assign(digest, introducer);
+        // As do_replicate() counts an admitted request, so that settle()
+        // has one to discount.
+        ++stm._unsettled;
     }
 
     /// Settle what introduce() set up, as for a request raft did (\p
