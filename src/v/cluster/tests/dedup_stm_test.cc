@@ -1373,6 +1373,38 @@ TEST_F_CORO(dedup_stm_fixture, unreadable_batch_is_skipped_not_retried) {
     }
 }
 
+// The records of a skipped batch ahead of the unreadable one are indexed, on
+// every replica: digesting a batch before indexing any of it must not change
+// what an unreadable record leaves behind.
+TEST_F_CORO(dedup_stm_fixture, unreadable_record_keeps_the_ones_before_it) {
+    co_await initialize_state_machines();
+    set_dedup_config(1000ms);
+    auto leader = co_await wait_for_leader(10s);
+
+    // Only the last record is cut short.
+    auto good = make_batch_of({"a", "b", "c"}, model::timestamp{1000});
+    auto header = good.header();
+    auto data = good.data().copy();
+    data.trim_back(4);
+    header.size_bytes = static_cast<int32_t>(
+      model::packed_record_batch_header_size + data.size_bytes());
+    header.crc = model::crc_record_batch(header, data);
+    header.header_crc = model::internal_header_only_crc(header);
+    model::record_batch broken(
+      header, std::move(data), model::record_batch::tag_ctor_ng{});
+
+    auto result = co_await node(leader).raft()->replicate(
+      std::move(broken),
+      raft::replicate_options(raft::consistency_level::quorum_ack));
+    ASSERT_TRUE_CORO(result.has_value());
+    co_await wait_for_stms(node(leader).raft()->committed_offset());
+    for (auto& [_, n] : nodes()) {
+        auto stm = get_stm<0>(*n);
+        ASSERT_EQ_CORO(dedup_stm_test_accessor::batches_skipped(*stm), 1);
+        ASSERT_EQ_CORO(stm->map_size(), 2);
+    }
+}
+
 TEST_F_CORO(dedup_stm_fixture, concurrent_independent_keys_are_admitted) {
     co_await initialize_state_machines();
     set_dedup_config(1000ms);

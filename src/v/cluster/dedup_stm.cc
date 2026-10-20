@@ -499,18 +499,26 @@ ss::future<> dedup_stm::do_apply(const model::record_batch& batch) {
         // lookup's loads a few records ahead (see populate()).
         chunked_vector<dedup_index_entry> entries;
         entries.reserve(static_cast<size_t>(readable.record_count()));
-        for_each_dedup_identity(
-          readable,
-          _state.key_header(),
-          [&entries](
-            dedup_identity_lookup lookup,
-            dedup_identity_digest digest,
-            model::timestamp ts) {
-              if (lookup == dedup_identity_lookup::identity) {
-                  entries.push_back({.identity = digest, .timestamp = ts});
-              }
-              return true;
-          });
+        try {
+            for_each_dedup_identity(
+              readable,
+              _state.key_header(),
+              [&entries](
+                dedup_identity_lookup lookup,
+                dedup_identity_digest digest,
+                model::timestamp ts) {
+                  if (lookup == dedup_identity_lookup::identity) {
+                      entries.push_back({.identity = digest, .timestamp = ts});
+                  }
+                  return true;
+              });
+        } catch (...) {
+            // The records ahead of an unreadable one are still indexed, as
+            // they were when each was indexed as soon as it was walked, so
+            // replicas on either side of an upgrade agree.
+            _state.populate(entries);
+            throw;
+        }
         _state.populate(entries);
     } catch (const std::bad_alloc&) {
         throw;
