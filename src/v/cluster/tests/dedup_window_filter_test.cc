@@ -882,6 +882,36 @@ TEST(DedupWindowFilter, CapacityEvictionKeepsDedupWorkingWhenSaturated) {
     EXPECT_FALSE(f.filter(make_batch("id-40", "v", ts(80000))).has_value());
 }
 
+// While every entry is younger than the window, the cursor has nothing to
+// expire and, away from every limit, nothing to trim or count, so new
+// identities pay for no visits. Once the cutoff passes the oldest entry it
+// sweeps again, frees what expired, and stops again after a pass that saw
+// every entry.
+TEST(DedupWindowFilter, SweepWaitsUntilSomethingCanHaveExpired) {
+    constexpr int64_t window_ms = 10'000;
+    cluster::dedup_window_filter f(
+      std::chrono::milliseconds(window_ms), 100'000);
+    for (int64_t i = 0; i < 1000; ++i) {
+        f.populate(iobuf::from(fmt::format("old-{}", i)), ts(1000 + i));
+    }
+    EXPECT_EQ(f.sweep_visits(), 0u);
+    EXPECT_EQ(f.map_size(), 1000u);
+
+    for (int64_t i = 0; i < 2000; ++i) {
+        f.populate(iobuf::from(fmt::format("new-{}", i)), ts(30'000 + i));
+    }
+    EXPECT_GT(f.sweep_visits(), 0u);
+    EXPECT_EQ(f.map_size(), 2000u);
+    EXPECT_TRUE(f.filter(make_batch("old-0", "v", ts(32'000))).has_value());
+    EXPECT_FALSE(f.filter(make_batch("new-0", "v", ts(32'000))).has_value());
+
+    const auto before = f.sweep_visits();
+    for (int64_t i = 0; i < 100; ++i) {
+        f.populate(iobuf::from(fmt::format("later-{}", i)), ts(32'001 + i));
+    }
+    EXPECT_EQ(f.sweep_visits(), before);
+}
+
 // Below half its limit the sweep counts nothing toward the capacity cutoff.
 // An index that grew from far below its limit has still measured one by the
 // time it trims, and trims its oldest entries, not its newest. Without one it

@@ -1058,6 +1058,10 @@ private:
     void finish_pass();
     /// Add \p stamp to the histogram of the pass in progress, \p times over.
     void count_in_pass(model::timestamp stamp, size_t times = 1);
+    /// Lower _oldest_bound to the timestamp stored at \p pos.
+    void note_stored(size_t pos) {
+        _oldest_bound = std::min(_oldest_bound, _index.timestamp_at(pos));
+    }
 
     /// Erase the entry the cursor is on. The map moves its last entry into
     /// the freed slot, so the caller must re-examine the same index rather
@@ -1077,6 +1081,9 @@ private:
     /// the map will move into its place for every walk that has passed the
     /// index but not reached the end of the array.
     void note_erase(size_t index);
+    /// Mark the pass incomplete if an erase at \p index moves an entry where
+    /// the cursor has already been.
+    void note_erase_behind_cursor(size_t index);
     /// Called when the whole entry array is discarded.
     void invalidate_walks();
     /// Entries emitted between preemption checks. 20 bytes each on the wire,
@@ -1117,6 +1124,8 @@ private:
             // Twice in the snapshot is twice here, until build_lookup().
             if (!_index.append_unindexed(identity, ts.value())) {
                 ++_truncated_entries;
+            } else {
+                note_stored(_index.size() - 1);
             }
             return;
         }
@@ -1127,6 +1136,8 @@ private:
             }
         } else if (!_index.push_back(identity, ts.value())) {
             ++_truncated_entries;
+        } else {
+            note_stored(_index.size() - 1);
         }
     }
     /// Account for the restored entries.
@@ -1307,6 +1318,20 @@ private:
     static constexpr int64_t no_pass_oldest
       = std::numeric_limits<int64_t>::max();
     int64_t _pass_oldest{no_pass_oldest};
+    // No entry is older than this: the oldest a complete pass saw, lowered by
+    // every timestamp stored since. While the expiry cutoff is below it the
+    // cursor has nothing to find, and away from every limit nothing to trim
+    // or count either, so the sweep skips its visits. A pass is complete when
+    // no erase behind the cursor moved an unvisited entry there. A block's
+    // re-base can turn older entries into expired ones below the bound; they
+    // can never match, and go once the cutoff passes the bound.
+    int64_t _oldest_bound{std::numeric_limits<int64_t>::max()};
+    bool _pass_saw_all{true};
+    // expired_by_rebase() at the start of this pass, and as of the last
+    // complete one: a re-base since then may have left expired entries the
+    // bound says nothing about.
+    size_t _pass_rebase_expired{0};
+    size_t _rebase_expired_seen{0};
     // Timestamp below which the oldest quarter of the index lay when the last
     // pass completed. timestamp::min() means that pass found no bucket prefix
     // small enough to cut, so nothing is dropped for capacity -- more than a

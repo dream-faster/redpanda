@@ -372,6 +372,7 @@ bool dedup_window_filter::is_duplicate(
         ++_unindexed_records;
         return false;
     }
+    note_stored(_index.size() - 1);
     sync_shard_budget();
     if (undo) {
         undo->entries.push_back(
@@ -658,8 +659,10 @@ void dedup_window_filter::revert_request(const dedup_request_undo& undo) {
         }
         if (entry.previous_timestamp) {
             _index.set_timestamp_at(pos, entry.previous_timestamp->value());
+            note_stored(pos);
         } else {
             note_erase(pos);
+            note_erase_behind_cursor(pos);
             _index.erase_at(pos);
         }
     }
@@ -722,6 +725,7 @@ void dedup_window_filter::populate(
         ++_unindexed_records;
         return;
     }
+    note_stored(_index.size() - 1);
     sync_shard_budget();
 }
 
@@ -740,6 +744,7 @@ void dedup_window_filter::populate_unindexed(
         ++_unindexed_records;
         return;
     }
+    note_stored(_index.size() - 1);
     sync_shard_budget();
 }
 
@@ -807,8 +812,17 @@ ss::future<> dedup_window_filter::build_lookup() {
 
 void dedup_window_filter::erase_at(size_t index) {
     note_erase(index);
+    note_erase_behind_cursor(index);
     _index.erase_at(index);
     sync_shard_budget();
+}
+
+void dedup_window_filter::note_erase_behind_cursor(size_t index) {
+    // The array's last entry moves to \p index, where this pass's cursor has
+    // been already: the pass will not see it.
+    if (index < _sweep_pos && index + 1 != _index.size()) {
+        _pass_saw_all = false;
+    }
 }
 
 void dedup_window_filter::note_erase(size_t index) {
@@ -840,6 +854,8 @@ void dedup_window_filter::invalidate_walks() {
 void dedup_window_filter::begin_pass() {
     _pass_counts.fill(0);
     _pass_visited = 0;
+    _pass_saw_all = true;
+    _pass_rebase_expired = _index.expired_by_rebase();
     // The frame the pass measures entries against, frozen for its duration:
     // _max_ts advances while the cursor walks, and buckets shifting underneath
     // it would describe no single moment. Rounding the width up keeps
@@ -883,6 +899,10 @@ void dedup_window_filter::finish_pass() {
     } else {
         _capacity_cutoff = model::timestamp{
           _pass_lo + static_cast<int64_t>(bucket) * _pass_width};
+    }
+    if (_pass_saw_all) {
+        _oldest_bound = _pass_oldest;
+        _rebase_expired_seen = _pass_rebase_expired;
     }
     begin_pass();
 }
@@ -948,6 +968,12 @@ void dedup_window_filter::sweep_step(size_t budget) {
     // Far from every limit the cutoff decides nothing, so the visit skips the
     // histogram. The oldest timestamp is still taken: it frames the next pass.
     const bool counting = counts_for_capacity();
+    if (
+      !counting && _oldest_bound >= cutoff
+      && _index.expired_by_rebase() == _rebase_expired_seen) {
+        // Nothing has expired, and nothing is near a limit to trim for.
+        return;
+    }
 
     for (size_t step = 0; step < budget; ++step) {
         if (_index.empty()) {
@@ -1224,6 +1250,8 @@ void dedup_window_filter::clear() {
     _shard_time_seen = std::numeric_limits<int64_t>::min();
     _capacity_cutoff = model::timestamp::min();
     _pass_oldest = no_pass_oldest;
+    _oldest_bound = std::numeric_limits<int64_t>::max();
+    _rebase_expired_seen = 0;
     begin_pass();
 }
 
