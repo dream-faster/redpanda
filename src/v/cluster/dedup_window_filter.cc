@@ -919,6 +919,19 @@ void dedup_window_filter::finish_pass() {
     begin_pass();
 }
 
+void dedup_window_filter::restart_pass() {
+    // The pass the skipped steps interrupted is framed as of when it began:
+    // for an index that filled while its sweep had nothing to do, that is the
+    // empty index's frame, which puts every entry in one bucket. That pass
+    // would end without a cutoff, and the index would go a whole pass more
+    // without one just as it nears a limit, where the cutoff decides what it
+    // gives up. The bound frames a fresh pass over the index as it is now.
+    _sweep_skipped = false;
+    _sweep_pos = 0;
+    _pass_oldest = _oldest_bound;
+    begin_pass();
+}
+
 void dedup_window_filter::sweep_for_new_identity() {
     reclaim_expired_elsewhere();
     sweep_step(sweep_budget);
@@ -984,7 +997,11 @@ void dedup_window_filter::sweep_step(size_t budget) {
       !counting && _oldest_bound >= cutoff
       && _index.expired_by_rebase() == _rebase_expired_seen) {
         // Nothing has expired, and nothing is near a limit to trim for.
+        _sweep_skipped = true;
         return;
+    }
+    if (_sweep_skipped) {
+        restart_pass();
     }
 
     for (size_t step = 0; step < budget; ++step) {
@@ -1264,6 +1281,7 @@ void dedup_window_filter::clear() {
     _pass_oldest = no_pass_oldest;
     _oldest_bound = std::numeric_limits<int64_t>::max();
     _rebase_expired_seen = 0;
+    _sweep_skipped = false;
     begin_pass();
 }
 

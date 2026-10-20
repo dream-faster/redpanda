@@ -1061,6 +1061,9 @@ private:
     /// Turn a completed pass's histogram into the next capacity cutoff and
     /// start the following pass.
     void finish_pass();
+    /// Abandon the pass in progress for one framed from _oldest_bound,
+    /// starting at the front of the index.
+    void restart_pass();
     /// Add \p stamp to the histogram of the pass in progress, \p times over.
     void count_in_pass(model::timestamp stamp, size_t times = 1);
     /// Lower _oldest_bound to the timestamp stored at \p pos.
@@ -1337,6 +1340,9 @@ private:
     // bound says nothing about.
     size_t _pass_rebase_expired{0};
     size_t _rebase_expired_seen{0};
+    // A step was skipped since the cursor last moved, so the pass in progress
+    // is stale: see restart_pass().
+    bool _sweep_skipped{false};
     // Timestamp below which the oldest quarter of the index lay when the last
     // pass completed. timestamp::min() means that pass found no bucket prefix
     // small enough to cut, so nothing is dropped for capacity -- more than a
