@@ -462,7 +462,7 @@ TEST(dedup_stm_snapshot, a_restored_identity_matches_its_key) {
     dedup_stm_test_accessor::restore(
       target,
       generation,
-      dedup_stm_test_accessor::state_snapshot_with_entries(
+      dedup_stm_test_accessor::state_snapshot_with_wide_entries(
         std::move(entries), model::timestamp{1'000'000}));
     ASSERT_EQ(target.map_size(), 1u);
     EXPECT_EQ(target.snapshot().entries[0].identity, digest);
