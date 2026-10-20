@@ -438,11 +438,40 @@ class Cluster:
             time.sleep(1)
         raise AssertionError(f"cluster not healthy after {timeout_s}s: {last}")
 
-    def set_config(self, **values) -> None:
+    def set_config(self, **values) -> int:
+        """Upsert cluster properties. Returns the new config version, which
+        wait_config_applied() waits for."""
         r = self.any_node().admin(
             "PUT", "/v1/cluster_config", json={"upsert": values, "remove": []}
         )
         r.raise_for_status()
+        return int(r.json()["config_version"])
+
+    def config_status(self) -> list[dict]:
+        r = self.any_node().admin("GET", "/v1/cluster_config/status")
+        r.raise_for_status()
+        return r.json()
+
+    def wait_config_applied(self, version: int, timeout_s: float = 60) -> list[dict]:
+        """Wait until every running node reports config `version` (or later)
+        applied, and return the nodes' statuses."""
+        running = {n.node_id for n in self.nodes if n.is_running()}
+        deadline = time.monotonic() + timeout_s
+        status: list[dict] = []
+        while time.monotonic() < deadline:
+            status = self.config_status()
+            applied = {
+                s["node_id"] for s in status if s.get("config_version", -1) >= version
+            }
+            if running <= applied:
+                return status
+            time.sleep(0.5)
+        raise AssertionError(f"config version {version} not applied: {status}")
+
+    def config_schema(self) -> dict[str, dict]:
+        r = self.any_node().admin("GET", "/v1/cluster_config/schema")
+        r.raise_for_status()
+        return r.json()["properties"]
 
     # -- partitions --------------------------------------------------------
 
