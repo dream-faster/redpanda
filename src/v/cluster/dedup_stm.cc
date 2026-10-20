@@ -624,7 +624,8 @@ ss::future<result<kafka_result>> dedup_stm::do_replicate(
             ss::lowres_clock::now() - started)
             .count());
         if (!_state.lookup_ready()) {
-            // Applying as a follower again deferred it meanwhile.
+            // Applying as a follower again deferred it meanwhile, or the
+            // build this request waited for failed.
             co_return errc::not_leader;
         }
     }
@@ -711,7 +712,6 @@ ss::future<result<kafka_result>> dedup_stm::do_replicate(
     inflight_ptr mine;
     if (filtered.batch) {
         mine = ss::make_lw_shared<inflight_request>();
-        ++_unsettled;
         for (const auto& entry : filtered.undo.entries) {
             _pending.insert_or_assign(entry.identity, mine);
         }
@@ -808,6 +808,11 @@ ss::future<result<kafka_result>> dedup_stm::do_replicate(
     const auto evictions_before = _self_filtered_evictions;
     const auto term = _insync_term;
     auto stages = _raft->replicate_in_stages(std::move(*filtered.batch), opts);
+    // Counted only now, as every path from here ends in settle(): a throw
+    // above (an allocation) would otherwise keep the lookup table for good.
+    // Nothing since filter_request() suspended, so do_apply() has not had a
+    // chance to drop it.
+    ++_unsettled;
     auto enqueued_result = co_await ss::coroutine::as_future(
       std::move(stages.request_enqueued));
     if (enqueued_result.failed()) {
