@@ -1195,6 +1195,9 @@ void dedup_window_filter::replace_oldest_visited(model::timestamp incoming) {
             // the oldest of a short window there is likely one of them, and
             // replacing many per insert would otherwise drop the newest
             // identities while older ones stay.
+            if (_sweep_pos < _index.size()) {
+                _pass_saw_all = false;
+            }
             _sweep_pos = 0;
             finish_pass();
         }
