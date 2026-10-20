@@ -260,6 +260,9 @@ _RETRIABLE = {
     # was fetched while the partition had no leader.
     KafkaError._UNKNOWN_PARTITION,
     KafkaError._UNKNOWN_TOPIC,
+    # A metadata update after a restart replaced the broker handle a request
+    # was waiting on.
+    KafkaError._DESTROY_BROKER,
 }
 
 
