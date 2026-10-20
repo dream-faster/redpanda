@@ -355,37 +355,60 @@ ss::future<iobuf> dedup_stm::serialize_snapshot(
 
 namespace {
 
-/// Decode the packed entries of a state_snapshot, yielding every few
-/// thousand so a large restore shares the reactor.
-template<typename Emit>
-ss::future<> for_each_packed_entry(
-  const iobuf& packed,
-  size_t entry_size,
-  model::timestamp max_timestamp,
-  Emit emit) {
+/// Decode the packed entries of a state_snapshot laid out \p entry_size bytes
+/// each, yielding every few thousand so a large restore shares the reactor.
+template<size_t entry_size, typename Emit>
+ss::future<> for_each_entry_of_size(
+  const iobuf& packed, model::timestamp max_timestamp, Emit emit) {
     constexpr size_t entries_per_yield = 4096;
     iobuf_const_parser parser(packed);
     size_t n = 0;
     while (parser.bytes_left() > 0) {
         dedup_identity_digest identity;
         identity.lo = ss::le_to_cpu(parser.consume_type<uint64_t>());
-        // A version-4 entry's 32 bits are cut to the index's 16 on insert.
-        identity.hi = entry_size == dedup_stm::narrow_entry_size
-                        ? ss::le_to_cpu(parser.consume_type<uint16_t>())
-                        : ss::le_to_cpu(parser.consume_type<uint32_t>());
+        if constexpr (entry_size == dedup_stm::narrow_entry_size) {
+            identity.hi = ss::le_to_cpu(parser.consume_type<uint16_t>());
+        } else {
+            // A version-4 entry's 32 bits are cut to the index's 16 on
+            // insert.
+            identity.hi = ss::le_to_cpu(parser.consume_type<uint32_t>());
+        }
         int64_t ts{};
-        if (entry_size != dedup_stm::wide_entry_size) {
+        if constexpr (entry_size == dedup_stm::wide_entry_size) {
+            ts = ss::le_to_cpu(parser.consume_type<int64_t>());
+        } else {
             const auto age = ss::le_to_cpu(parser.consume_type<uint32_t>());
             ts = static_cast<int64_t>(std::max<__int128>(
               std::numeric_limits<int64_t>::min(),
               __int128{max_timestamp.value()} - age));
-        } else {
-            ts = ss::le_to_cpu(parser.consume_type<int64_t>());
         }
         emit(identity, model::timestamp{ts});
         if ((++n % entries_per_yield) == 0) {
             co_await ss::coroutine::maybe_yield();
         }
+    }
+}
+
+template<typename Emit>
+ss::future<> for_each_packed_entry(
+  const iobuf& packed,
+  size_t entry_size,
+  model::timestamp max_timestamp,
+  Emit emit) {
+    switch (entry_size) {
+    case dedup_stm::narrow_entry_size:
+        return for_each_entry_of_size<dedup_stm::narrow_entry_size>(
+          packed, max_timestamp, std::move(emit));
+    case dedup_stm::packed_entry_size:
+        return for_each_entry_of_size<dedup_stm::packed_entry_size>(
+          packed, max_timestamp, std::move(emit));
+    case dedup_stm::wide_entry_size:
+        return for_each_entry_of_size<dedup_stm::wide_entry_size>(
+          packed, max_timestamp, std::move(emit));
+    default:
+        return ss::make_exception_future<>(serde::serde_exception(
+          ssx::sformat(
+            "dedup snapshot entries of unknown size {}", entry_size)));
     }
 }
 
