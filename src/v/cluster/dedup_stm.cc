@@ -615,8 +615,8 @@ ss::future<result<kafka_result>> dedup_stm::do_replicate(
         if (_state.unindexed_records() != unindexed_before) {
             // The index is at its ceiling, or the shard is at its own, and is
             // admitting new identities without remembering them, so their
-            // duplicates go undetected. Raising either limit needs a broker
-            // restart, so operators need to know this is happening.
+            // duplicates go undetected. Operators need to know this is
+            // happening, to raise either limit (no restart needed).
             thread_local static ss::logger::rate_limit rate(
               std::chrono::minutes(5));
             if (_state.map_size() >= _state.max_entries()) {
@@ -1098,19 +1098,45 @@ size_t resolve_shard_limit(size_t configured) {
 dedup_stm_factory::dedup_stm_factory(
   storage::kvstore& kvstore,
   config::binding<std::chrono::milliseconds> sync_timeout,
-  size_t max_entries,
-  size_t max_entries_per_shard)
+  config::binding<size_t> max_entries,
+  config::binding<size_t> max_entries_per_shard)
   : _kvstore(kvstore)
   , _sync_timeout(std::move(sync_timeout))
-  , _max_entries(max_entries)
+  , _max_entries(std::move(max_entries))
+  , _max_entries_per_shard(std::move(max_entries_per_shard))
   , _shard_budget(
       ss::make_lw_shared<dedup_shard_budget>(
-        resolve_shard_limit(max_entries_per_shard))) {
+        resolve_shard_limit(_max_entries_per_shard()))) {
     vlog(
       clusterlog.info,
       "Dedup indices on this shard are limited to {} entries in total",
       _shard_budget->max_entries);
+    _max_entries.watch([this] { apply_partition_limit(); });
+    _max_entries_per_shard.watch([this] { apply_shard_limit(); });
     setup_metrics();
+}
+
+void dedup_stm_factory::apply_partition_limit() {
+    // One assignment per index on the shard. Nothing is trimmed here: an index
+    // above a lowered ceiling shrinks back with its own traffic.
+    const auto limit = _max_entries();
+    for (auto* filter : _shard_budget->filters) {
+        filter->set_max_entries(limit);
+    }
+    vlog(
+      clusterlog.info,
+      "Dedup indices on this shard are now limited to {} entries each",
+      limit);
+}
+
+void dedup_stm_factory::apply_shard_limit() {
+    _shard_budget->max_entries = resolve_shard_limit(_max_entries_per_shard());
+    vlog(
+      clusterlog.info,
+      "Dedup indices on this shard are now limited to {} entries in total "
+      "({} held)",
+      _shard_budget->max_entries,
+      _shard_budget->entries);
 }
 
 void dedup_stm_factory::setup_metrics() {
@@ -1145,7 +1171,7 @@ void dedup_stm_factory::create(
   raft::consensus* raft,
   const cluster::stm_instance_config&) {
     auto stm = builder.create_stm<dedup_stm>(
-      raft, clusterlog, _kvstore, _sync_timeout, _max_entries, _shard_budget);
+      raft, clusterlog, _kvstore, _sync_timeout, _max_entries(), _shard_budget);
     raft->log()->stm_hookset()->add_stm(stm);
 }
 
