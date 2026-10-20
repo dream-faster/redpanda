@@ -75,10 +75,15 @@ def test_upgrade_drops_legacy_kvstore_snapshots(upgrade_cluster, image):
     seeded = {p: keys_for(p, 150_000) for p in range(4)}
     for p, ks in seeded.items():
         kafka.produce_bulk(c.brokers, t, p, ks, value=b"x" * 64)
-    old_kv = c.node(0).metrics().sum(KVSTORE_BYTES)
+
     # The old build keeps every partition's latest dedup snapshot in the
-    # kvstore: ~30 bytes an entry.
-    assert old_kv > 5 * 1024 * 1024, f"old build's kvstore held only {old_kv} bytes"
+    # kvstore: ~30 bytes an entry. It writes them in the background, so the
+    # last partitions' may land after the produce returns.
+    def _old_kv_full() -> None:
+        old_kv = c.node(0).metrics().sum(KVSTORE_BYTES)
+        assert old_kv > 5 * 1024 * 1024, f"old build's kvstore held only {old_kv} bytes"
+
+    kafka.eventually(_old_kv_full, timeout_s=60)
 
     c.node(0).restart(image=image)
     assert "longer kept in the kvstore" in c.node(0).logs()
