@@ -169,7 +169,18 @@ SCENARIOS = [
 
 
 def _produce_worker(args) -> tuple[float, int]:
-    brokers, topic, worker, n, dup_every, redundant, lead, header, compression = args
+    (
+        brokers,
+        topic,
+        worker,
+        n,
+        dup_every,
+        redundant,
+        lead,
+        header,
+        compression,
+        ready,
+    ) = args
     # A redundant pair shares its identities: both send stream worker // 2.
     stream = worker // 2 if redundant else worker
     shift = lead if redundant and worker % 2 else 0
@@ -194,6 +205,11 @@ def _produce_worker(args) -> tuple[float, int]:
         if err is not None:
             errors += 1
 
+    # Metadata and connections first, then every producer starts at once: a
+    # redundant pair's two copies of an identity arrive together rather than
+    # a process start apart.
+    p.list_topics(topic, timeout=30)
+    ready.wait(timeout=120)
     start = time.monotonic()
     for i in range(n):
         ident = (i // dup_every if dup_every else i) + shift
@@ -220,6 +236,7 @@ def _latency(brokers: str, topic: str, s: Scenario) -> dict[str, float]:
     LATENCY_RATE, and takes both producers' latencies."""
     latencies: list[float] = []
     errors = 0
+    failures: list[Exception] = []
     lock = threading.Lock()
 
     def make_producer() -> Producer:
@@ -270,19 +287,32 @@ def _latency(brokers: str, topic: str, s: Scenario) -> dict[str, float]:
             latencies.extend(mine)
             errors += failed
 
+    def run_or_record(p: Producer, start: float, shift: int) -> None:
+        # An exception in a thread does not reach the test by itself.
+        try:
+            run(p, start, shift)
+        except Exception as e:
+            with lock:
+                failures.append(e)
+
     # In step: the redundant pair shares one schedule, so each identity is
     # sent by both within the same millisecond tick and the second copy
     # arrives while the first is still being replicated.
     producers = [make_producer() for _ in range(2 if s.redundant else 1)]
     start = time.monotonic() + 0.5
     threads = [
-        threading.Thread(target=run, args=(p, start, s.lead * i))
+        threading.Thread(target=run_or_record, args=(p, start, s.lead * i))
         for i, p in enumerate(producers)
     ]
     for th in threads:
         th.start()
     for th in threads:
         th.join()
+    if failures:
+        raise failures[0]
+    assert latencies, (
+        f"no record of the latency phase was acknowledged ({errors} failed)"
+    )
     latencies.sort()
 
     def pct(q: float) -> float:
@@ -319,27 +349,31 @@ def _run(c: Cluster, s: Scenario) -> dict:
     kafka.create_topic(c.brokers, topic, PARTITIONS, s.replicas, cfg)
     kafka.wait_for_leaders(c.brokers, topic, PARTITIONS)
     per = RECORDS // PRODUCERS
-    before = _metrics(c)
-    t0 = time.monotonic()
-    with mp.get_context("spawn").Pool(PRODUCERS) as pool:
-        results = pool.map(
-            _produce_worker,
-            [
-                (
-                    c.brokers,
-                    topic,
-                    w,
-                    per,
-                    s.duplicate_every,
-                    s.redundant,
-                    s.lead,
-                    s.header,
-                    s.compression,
-                )
-                for w in range(PRODUCERS)
-            ],
-        )
-    wall = time.monotonic() - t0
+    ctx = mp.get_context("spawn")
+    with ctx.Manager() as manager:
+        ready = manager.Barrier(PRODUCERS)
+        before = _metrics(c)
+        t0 = time.monotonic()
+        with ctx.Pool(PRODUCERS) as pool:
+            results = pool.map(
+                _produce_worker,
+                [
+                    (
+                        c.brokers,
+                        topic,
+                        w,
+                        per,
+                        s.duplicate_every,
+                        s.redundant,
+                        s.lead,
+                        s.header,
+                        s.compression,
+                        ready,
+                    )
+                    for w in range(PRODUCERS)
+                ],
+            )
+        wall = time.monotonic() - t0
     after = _metrics(c)
     errors = sum(e for _, e in results)
     offered = per * PRODUCERS
@@ -430,6 +464,10 @@ def test_dedup_throughput(make_cluster, image, pytestconfig):
         by_config.setdefault(
             (s.replicas, tuple(sorted(s.cluster_config.items()))), []
         ).append(s)
+    redundant = any(s.redundant for group in by_config.values() for s in group)
+    assert not redundant or PRODUCERS % 2 == 0, (
+        f"redundant scenarios send in pairs, not from {PRODUCERS} producers"
+    )
     for (replicas, config), scenarios in by_config.items():
         c = make_cluster(
             nodes=replicas,
@@ -439,6 +477,7 @@ def test_dedup_throughput(make_cluster, image, pytestconfig):
             rpc_delay_ms=RPC_DELAY_MS if replicas > 1 else 0,
         )
         if config and not c.node(0).metrics().has(SHARD_ENTRIES):
+            c.stop()
             continue  # the shard budget does not exist in this build
         # Warm up the broker (allocator, page cache, connections) so the first
         # scenario is not charged for it.
@@ -450,6 +489,9 @@ def test_dedup_throughput(make_cluster, image, pytestconfig):
                 r = _run(c, s)
                 print(r, flush=True)
                 runs.setdefault(s.name, []).append(r)
+        # Not left idling on the host while the next group is measured; the
+        # fixture removes it, logs kept.
+        c.stop()
     rows = [_median(runs[s.name]) for s in SCENARIOS if s.name in runs]
     table = _table(rows, image)
     print("\n" + table)
