@@ -197,7 +197,10 @@ void dedup_compact_index::prefetch(
     if (*slot != 0) {
         const size_t pos = slot_pos(*slot);
         if (pos < _size) {
-            __builtin_prefetch(&entry(pos));
+            // At 14 bytes an entry can straddle two cache lines.
+            const auto* e = reinterpret_cast<const char*>(&entry(pos));
+            __builtin_prefetch(e);
+            __builtin_prefetch(e + sizeof(packed_entry) - 1);
             __builtin_prefetch(&_meta[pos >> block_shift]);
         }
     }
