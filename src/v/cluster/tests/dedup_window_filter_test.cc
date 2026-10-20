@@ -921,6 +921,36 @@ TEST(DedupWindowFilter, SweepWaitsUntilSomethingCanHaveExpired) {
     EXPECT_EQ(f.sweep_visits(), before);
 }
 
+// A revert can store an older timestamp where the pass in progress has been
+// already. That pass did not see it, so it bounds nothing: the sweep goes on
+// until a pass that does see it frees the expired entry, rather than resting
+// on a bound that entry is older than.
+TEST(DedupWindowFilter, RevertBehindTheCursorKeepsTheSweepGoing) {
+    cluster::dedup_window_filter f(std::chrono::milliseconds{10'000}, 100'000);
+    for (int i = 0; i < 20; ++i) {
+        f.populate(iobuf::from(fmt::format("y-{}", i)), ts(5000));
+    }
+    f.populate(iobuf::from("x"), ts(3000));
+    for (int i = 20; i < 30; ++i) {
+        f.populate(iobuf::from(fmt::format("y-{}", i)), ts(5000));
+    }
+    ASSERT_EQ(f.map_size(), 31u);
+
+    // "x" is older than the window here, so the request rewrites it, and its
+    // new identities move the cursor past it before the revert puts it back.
+    auto result = f.filter_request(make_multi_batch(
+      {{"x", "v"}, {"n-0", "v"}, {"n-1", "v"}, {"n-2", "v"}}, ts(14'000)));
+    ASSERT_TRUE(result.batch.has_value());
+    EXPECT_EQ(record_count(*result.batch), 4);
+    f.revert_request(result.undo);
+    ASSERT_EQ(f.map_size(), 31u);
+
+    for (int i = 0; i < 10; ++i) {
+        f.populate(iobuf::from(fmt::format("m-{}", i)), ts(14'000));
+    }
+    EXPECT_EQ(f.map_size(), 30u + 10u);
+}
+
 // Below half its limit the sweep counts nothing toward the capacity cutoff.
 // An index that grew from far below its limit has still measured one by the
 // time it trims, and trims its oldest entries, not its newest. Without one it

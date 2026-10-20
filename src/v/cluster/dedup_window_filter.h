@@ -1066,9 +1066,13 @@ private:
     void restart_pass();
     /// Add \p stamp to the histogram of the pass in progress, \p times over.
     void count_in_pass(model::timestamp stamp, size_t times = 1);
-    /// Lower _oldest_bound to the timestamp stored at \p pos.
+    /// Lower _oldest_bound to the timestamp stored at \p pos, and mark the
+    /// pass incomplete if the cursor has been there already.
     void note_stored(size_t pos) {
         _oldest_bound = std::min(_oldest_bound, _index.timestamp_at(pos));
+        if (pos < _sweep_pos) {
+            _pass_saw_all = false;
+        }
     }
 
     /// Erase the entry the cursor is on. The map moves its last entry into
@@ -1330,7 +1334,8 @@ private:
     // every timestamp stored since. While the expiry cutoff is below it the
     // cursor has nothing to find, and away from every limit nothing to trim
     // or count either, so the sweep skips its visits. A pass is complete when
-    // no erase behind the cursor moved an unvisited entry there. A block's
+    // nothing was stored behind the cursor -- a revert can restore an older
+    // timestamp there -- and no erase moved an unvisited entry there. A block's
     // re-base can turn older entries into expired ones below the bound; they
     // can never match, and go once the cutoff passes the bound.
     int64_t _oldest_bound{std::numeric_limits<int64_t>::max()};
