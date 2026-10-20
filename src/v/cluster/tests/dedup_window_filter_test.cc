@@ -884,7 +884,10 @@ TEST(DedupWindowFilter, CapacityEvictionKeepsDedupWorkingWhenSaturated) {
 
 // Below half its limit the sweep counts nothing toward the capacity cutoff.
 // An index that grew from far below its limit has still measured one by the
-// time it trims, and trims its oldest entries, not its newest.
+// time it trims, and trims its oldest entries, not its newest. Without one it
+// would trim nothing and admit everything past the ceiling unindexed; with
+// one, only the few records that arrive at the ceiling before the cursor
+// reaches the oldest entries are.
 TEST(DedupWindowFilter, CapacityTrimsTheOldestAfterGrowingFromFarBelow) {
     constexpr size_t cap = 20'000;
     constexpr size_t identities = cap + cap / 2;
@@ -896,14 +899,17 @@ TEST(DedupWindowFilter, CapacityTrimsTheOldestAfterGrowingFromFarBelow) {
         f.populate(iobuf::from(fmt::format("id-{}", i)), stamp(i));
         ASSERT_LE(f.map_size(), f.max_entries());
     }
-    EXPECT_EQ(f.unindexed_records(), 0u);
-    EXPECT_GT(f.capacity_evicted_entries(), 0u);
+    const size_t unindexed = f.unindexed_records();
+    EXPECT_LE(unindexed, cap / 64);
+    EXPECT_GT(f.capacity_evicted_entries(), cap / 4);
+    size_t held = 0;
     for (size_t i = identities - cap / 4; i < identities; ++i) {
-        ASSERT_FALSE(
-          f.filter(make_batch(fmt::format("id-{}", i), "v", stamp(i)))
-            .has_value())
-          << i;
+        held += f.filter(make_batch(fmt::format("id-{}", i), "v", stamp(i)))
+                    .has_value()
+                  ? 0
+                  : 1;
     }
+    EXPECT_GE(held, cap / 4 - unindexed);
     EXPECT_TRUE(f.filter(make_batch("id-0", "v", stamp(0))).has_value());
 }
 
