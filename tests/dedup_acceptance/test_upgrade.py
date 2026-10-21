@@ -75,13 +75,13 @@ def test_upgrade_drops_legacy_kvstore_snapshots(upgrade_cluster, image):
     seeded = {p: keys_for(p, 150_000) for p in range(4)}
     for p, ks in seeded.items():
         kafka.produce_bulk(c.brokers, t, p, ks, value=b"x" * 64)
-    # Four fifths of what was seeded is more than three of the four
-    # partitions' snapshots can hold, and less than all four do with their
-    # open segment (a twelfth of each) left out.
-    kafka.eventually(lambda: _assert_legacy_snapshots(c, 600_000), timeout_s=60)
+    store = kafka.eventually(
+        lambda: _old_snapshot_store(c, t, 4, 600_000), timeout_s=60
+    )
 
     c.node(0).restart(image=image)
-    assert "longer kept in the kvstore" in c.node(0).logs()
+    if store == "kvstore":
+        assert "longer kept in the kvstore" in c.node(0).logs()
     m = c.node(0).metrics()
     assert m.sum(KVSTORE_BYTES) < 256 * 1024, m.sum(KVSTORE_BYTES)
     kafka.eventually(
@@ -106,15 +106,30 @@ def _assert_entries(c: Cluster, t: str, want: int) -> None:
     assert got >= want, (got, want)
 
 
-def _assert_legacy_snapshots(c: Cluster, entries: int) -> None:
-    """The old build keeps every partition's latest dedup snapshot in the
-    kvstore, 30 bytes an entry (a version 1 wire_entry). It writes one in the
-    background each time the partition's log rolls a segment, so the last
-    ones may land after the produce returns, and each leaves out the records
-    of the segment still open."""
+def _old_snapshot_store(c: Cluster, t: str, partitions: int, entries: int) -> str:
+    """Where the old build keeps each partition's latest dedup snapshot, once
+    every partition has written one: "kvstore" for the builds before snapshot
+    files, 30 bytes an entry (a version 1 wire_entry), or "files". It writes
+    one in the background each time the partition's log rolls a segment, so
+    the last ones may land after the produce returns, and each leaves out the
+    records of the segment still open."""
+    # Four fifths of what was seeded is more than three of the four
+    # partitions' snapshots can hold, and less than all four do with their
+    # open segment (a twelfth of each) left out.
     want = entries * 30 * 4 // 5
     got = c.node(0).metrics().sum(KVSTORE_BYTES)
-    assert got > want, f"old build's kvstore held {got} bytes, want > {want}"
+    if got > want:
+        return "kvstore"
+    files = [
+        (c.node(0).partition_dir(t, p) / "dedup.snapshot").exists()
+        for p in range(partitions)
+    ]
+    if all(files):
+        return "files"
+    raise AssertionError(
+        f"old build's kvstore held {got} bytes, want > {want}, "
+        f"and its snapshot files are {files}"
+    )
 
 
 def test_upgrade_into_less_memory(upgrade_cluster, image):
