@@ -21,6 +21,7 @@
 #include "utils/vint.h"
 
 #include <seastar/core/coroutine.hh>
+#include <seastar/core/shared_future.hh>
 #include <seastar/core/shared_ptr.hh>
 #include <seastar/coroutine/maybe_yield.hh>
 #include <seastar/util/defer.hh>
@@ -885,6 +886,26 @@ public:
     /// ahead (see prefetch_ahead()).
     void populate(const chunked_vector<dedup_index_entry>& entries);
 
+    /// \brief Only filtering needs the lookup table.
+    ///
+    /// A replica that is not filtering only applies committed identities,
+    /// and it can keep them as they come, unindexed (see
+    /// dedup_compact_index): about a seventh of what indexing each one costs,
+    /// and two thirds of the memory. defer_lookup() frees the lookup table,
+    /// and populate() and restores keep entries that way until
+    /// build_lookup(), which indexes them all in bulk, yielding as it goes.
+    /// filter_request() and revert_request() need lookup_ready(). A build
+    /// that defer_lookup() interrupts, or that fails, leaves it false until
+    /// the next build_lookup(); one that clear() or a restore interrupts
+    /// stops, and the index that replaced the one it was building is fully
+    /// indexed unless deferred, so it is true again.
+    void defer_lookup();
+    ss::future<> build_lookup();
+    bool lookup_ready() const {
+        return !_lookup_deferred && _index.fully_indexed();
+    }
+    bool lookup_deferred() const { return _lookup_deferred; }
+
     /// \brief Reset all index state.
     void clear();
 
@@ -1157,6 +1178,13 @@ private:
     /// block (see dedup_compact_index) for as long as it stayed.
     void restore_entry(dedup_identity_digest identity, model::timestamp ts) {
         ts = std::min(ts, _max_ts);
+        if (!lookup_ready()) {
+            // Twice in the snapshot is twice here, until build_lookup().
+            if (!_index.append_unindexed(identity, ts.value())) {
+                ++_truncated_entries;
+            }
+            return;
+        }
         const auto pos = _index.find(identity);
         if (pos != dedup_compact_index::npos) {
             if (ts.value() > _index.timestamp_at(pos)) {
@@ -1272,6 +1300,23 @@ private:
     }
 
     dedup_compact_index _index;
+    // See defer_lookup().
+    bool _lookup_deferred{false};
+    // Bumped whenever _index is replaced, so a build_lookup() suspended over
+    // the old one stops.
+    uint64_t _index_epoch{0};
+    std::optional<ss::shared_promise<>> _building;
+    /// While build_lookup() is part way, the index can only erase what it
+    /// has not indexed yet: sweeps, reclaims and capacity trims wait.
+    bool building() const {
+        return _index.indexed() > 0 && !_index.fully_indexed();
+    }
+    void
+    populate_unindexed(dedup_identity_digest identity, model::timestamp ts);
+    // Entries build_lookup() indexes, and segments it allocates, between
+    // checks for preemption.
+    static constexpr size_t build_index_chunk = 1024;
+    static constexpr size_t build_prepare_chunk = 16;
     // Highest record timestamp seen; used as the reference "now" for eviction.
     model::timestamp _max_ts{model::timestamp::min()};
     // Cursor into the index's entry array, which is in insertion order.

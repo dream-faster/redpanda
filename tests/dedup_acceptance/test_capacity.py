@@ -628,10 +628,13 @@ def test_dedup_snapshots_are_files_and_the_kvstore_stays_small(
     for p in range(4):
         snap = c.node(0).partition_dir(t, p) / "dedup.snapshot"
         kafka.eventually(lambda snap=snap: _assert_exists(snap), timeout_s=60)
-    # And restarting from those files restores the indices.
+    # And restarting from those files restores the indices. Until a partition
+    # leads a produce request its entries stay unindexed, and an identity the
+    # snapshot holds from a batch committed but not yet applied when it was
+    # taken is replayed into it a second time; the first request merges them.
     c.node(0).restart()
     m = c.node(0).metrics()
-    kafka.eventually(lambda: _assert_entries(c, t, 200_000), timeout_s=60)
+    kafka.eventually(lambda: _assert_entries_at_least(c, t, 200_000), timeout_s=60)
     assert m.sum(KVSTORE_BYTES) < 256 * 1024
     now = int(time.time() * 1000)
     kafka.produce_ok(
@@ -644,6 +647,11 @@ def test_dedup_snapshots_are_files_and_the_kvstore_stays_small(
         partition=1,
     )
     assert len(kafka.consume_all(c.brokers, t, 1)) == 50_000
+    for p in (0, 2, 3):
+        kafka.produce_ok(
+            c.brokers, t, [Rec(f"p{p}-0".encode(), b"d", timestamp_ms=now)], partition=p
+        )
+    _assert_entries(c, t, 200_000)
 
 
 def _assert_exists(path):
@@ -653,3 +661,8 @@ def _assert_exists(path):
 def _assert_entries(c: Cluster, t: str, want: int):
     got = c.node(0).metrics().sum(PART_ENTRIES, topic=t)
     assert got == want, got
+
+
+def _assert_entries_at_least(c: Cluster, t: str, want: int):
+    got = c.node(0).metrics().sum(PART_ENTRIES, topic=t)
+    assert got >= want, got

@@ -270,6 +270,9 @@ private:
     /// Identities introduced by requests still in flight on this leader; see
     /// inflight_request. Bounded by the records in flight.
     pending_identities _pending;
+    // Requests admitted and not yet settled. While any is, the lookup table
+    // stays: settle() may have to revert one (see do_apply()).
+    size_t _unsettled{0};
     /// Last offset, in _relaxed_admitted_term, of a batch this leader admitted
     /// and raft reported done before it committed: one with weaker acks than
     /// quorum_ack, or a quorum-ack one under write caching, which raft
@@ -284,6 +287,9 @@ private:
     model::term_id _relaxed_admitted_term;
     /// Committed batches do_apply() could not read; see do_apply().
     uint64_t _batches_skipped{0};
+    uint64_t _lookup_builds{0};
+    // Builds of at least this many entries are logged at info.
+    static constexpr size_t lookup_build_log_threshold = 100'000;
     /// Whether start() applied a local snapshot; see start().
     bool _local_snapshot_applied{false};
     metrics::internal_metric_groups _metrics;

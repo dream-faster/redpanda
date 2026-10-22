@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <stdexcept>
@@ -145,7 +146,7 @@ void dedup_timestamp_selector::finish_pass() noexcept {
 
 size_t dedup_compact_index::find(
   const dedup_identity_digest& identity) const noexcept {
-    if (_directory.empty()) {
+    if (!lookup_ready()) {
         return npos;
     }
     const auto key = dedup_canonical_digest(identity);
@@ -177,7 +178,7 @@ size_t dedup_compact_index::find(
 
 void dedup_compact_index::prefetch(
   const dedup_identity_digest& identity, prefetch_stage stage) const noexcept {
-    if (_directory.empty()) {
+    if (!lookup_ready()) {
         return;
     }
     const uint64_t h = identity.lo;
@@ -516,12 +517,40 @@ bool dedup_compact_index::grow_for(uint64_t h) {
 
 bool dedup_compact_index::push_back(
   const dedup_identity_digest& identity, int64_t ts) {
+    vassert(
+      fully_indexed(),
+      "dedup_compact_index: push_back with {} of {} entries indexed",
+      _indexed,
+      _size);
     if (_size >= max_size) {
         ++_refused_inserts;
         return false;
     }
     // Room for the entry first: everything that can throw happens before
     // the lookup table names a position that does not exist.
+    make_room_for_entry();
+    const auto key = dedup_canonical_digest(identity);
+    if (!slot_index(key.lo, static_cast<uint32_t>(_size))) {
+        ++_refused_inserts;
+        return false;
+    }
+    write_entry(key, ts);
+    ++_indexed;
+    return true;
+}
+
+bool dedup_compact_index::append_unindexed(
+  const dedup_identity_digest& identity, int64_t ts) {
+    if (_size >= max_size) {
+        ++_refused_inserts;
+        return false;
+    }
+    make_room_for_entry();
+    write_entry(dedup_canonical_digest(identity), ts);
+    return true;
+}
+
+void dedup_compact_index::make_room_for_entry() {
     const size_t b = _size >> block_shift;
     if (b == 0 && _size == _first_block_capacity) {
         const size_t capacity = std::min(
@@ -545,33 +574,11 @@ bool dedup_compact_index::push_back(
           std::make_unique_for_overwrite<packed_entry[]>(block_entries));
         _meta.emplace_back();
     }
-    if (_directory.empty()) {
-        _segments.reserve(1);
-        _directory.reserve(1);
-        _segments.push_back(
-          std::make_unique<segment>(make_segment(min_segment_slots, 0)));
-        _directory.push_back(_segments.back().get());
-        _depth = 0;
-    }
+}
 
-    const auto key = dedup_canonical_digest(identity);
-    const uint64_t h = key.lo;
-    const auto pos = static_cast<uint32_t>(_size);
-    // Each round either inserts or grows the segment: doubling it, or
-    // splitting it one directory level deeper. Both are capped, so this ends.
-    for (;;) {
-        segment& seg = segment_for(h);
-        if (
-          seg.count < key_limit(seg.mask + 1, seg.depth, h)
-          && slot_insert(seg, h, pos)) {
-            break;
-        }
-        if (!grow_for(h)) {
-            ++_refused_inserts;
-            return false;
-        }
-    }
-
+void dedup_compact_index::write_entry(
+  const dedup_identity_digest& key, int64_t ts) {
+    const size_t b = _size >> block_shift;
     if ((_size & (block_entries - 1)) == 0) {
         // The block's first entry: centre its span on this timestamp, as a
         // re-base of a block holding only it would.
@@ -581,18 +588,146 @@ bool dedup_compact_index::push_back(
           .writes = 0};
     }
     auto& e = entry(_size);
-    e.lo_lo = static_cast<uint32_t>(h);
-    e.lo_hi = static_cast<uint32_t>(h >> 32);
+    e.lo_lo = static_cast<uint32_t>(key.lo);
+    e.lo_hi = static_cast<uint32_t>(key.lo >> 32);
     e.hi = static_cast<uint32_t>(key.hi);
     e.rel = 0;
     ++_size;
     e.rel = encode(b, ts);
-    return true;
+}
+
+bool dedup_compact_index::slot_index(uint64_t h, uint32_t pos) {
+    if (_directory.empty()) {
+        _segments.reserve(1);
+        _directory.reserve(1);
+        _segments.push_back(
+          std::make_unique<segment>(make_segment(min_segment_slots, 0)));
+        _directory.push_back(_segments.back().get());
+        _depth = 0;
+    }
+    // Each round either inserts or grows the segment: doubling it, or
+    // splitting it one directory level deeper. Both are capped, so this ends.
+    for (;;) {
+        segment& seg = segment_for(h);
+        if (
+          seg.count < key_limit(seg.mask + 1, seg.depth, h)
+          && slot_insert(seg, h, pos)) {
+            return true;
+        }
+        if (!grow_for(h)) {
+            return false;
+        }
+    }
+}
+
+void dedup_compact_index::drop_lookup() noexcept {
+    // Swapped out rather than cleared, so the arrays' capacity goes too.
+    decltype(_segments){}.swap(_segments);
+    decltype(_directory){}.swap(_directory);
+    _depth = 0;
+    _indexed = 0;
+    _preparing = false;
+    _prepared = 0;
+}
+
+void dedup_compact_index::begin_bulk_index() {
+    vassert(
+      _indexed == 0,
+      "dedup_compact_index: bulk indexing with {} entries indexed",
+      _indexed);
+    drop_lookup();
+    if (_size == 0) {
+        return;
+    }
+    // Keys per segment on average, below the fewest a full segment takes
+    // before it splits (key_limit()) by enough that a segment drawing a few
+    // standard deviations more than its share still fits.
+    constexpr size_t bulk_keys_per_segment = 2400;
+    uint32_t depth = 0;
+    while (depth < max_directory_depth
+           && (_size >> depth) > bulk_keys_per_segment) {
+        ++depth;
+    }
+    const size_t segments = size_t{1} << depth;
+    // Keys spread over the segments about as a Poisson draw does: room for
+    // four standard deviations over the average keeps the segments that get
+    // more from doubling, without sizing every segment for twice its share.
+    const size_t average = (_size + segments - 1) / segments;
+    const auto deviation = static_cast<size_t>(
+      std::sqrt(static_cast<double>(average)));
+    const size_t keys = average + 4 * deviation + 8;
+    _bulk_slots = std::clamp(
+      std::bit_ceil(static_cast<uint32_t>(keys / 7 * 8 + 8)),
+      min_segment_slots,
+      max_segment_slots);
+    _directory.assign(segments, nullptr);
+    _segments.reserve(segments);
+    _depth = depth;
+    _preparing = true;
+    _prepared = 0;
+}
+
+bool dedup_compact_index::prepare_step(size_t n) {
+    while (_preparing && n-- > 0) {
+        _segments.push_back(
+          std::make_unique<segment>(make_segment(_bulk_slots, _depth)));
+        _directory[_prepared] = _segments.back().get();
+        _preparing = ++_prepared < _directory.size();
+    }
+    return _preparing;
+}
+
+dedup_compact_index::index_outcome
+dedup_compact_index::index_next(size_t& duplicate_of) {
+    vassert(
+      _indexed < _size && !_preparing,
+      "dedup_compact_index: index_next at {} of {}, preparing: {}",
+      _indexed,
+      _size,
+      _preparing);
+    // The entries ahead are read in order, but each probes a segment of its
+    // own. Start loading the slot a later one probes first, and closer in,
+    // the entry that slot names, which the duplicate check reads.
+    constexpr size_t slot_ahead = 16;
+    constexpr size_t entry_ahead = 8;
+    if (_indexed + slot_ahead < _size && lookup_ready()) {
+        const uint64_t h = hash_of(entry(_indexed + slot_ahead));
+        const segment* seg = _directory[directory_index(h)];
+        __builtin_prefetch(&seg->slots[static_cast<uint32_t>(h) & seg->mask]);
+    }
+    if (_indexed + entry_ahead < _size && lookup_ready()) {
+        const uint64_t h = hash_of(entry(_indexed + entry_ahead));
+        const segment* seg = _directory[directory_index(h)];
+        const uint32_t home = seg->slots[static_cast<uint32_t>(h) & seg->mask];
+        if (home != 0 && slot_pos(home) < _indexed) {
+            __builtin_prefetch(&entry(slot_pos(home)));
+        }
+    }
+    const auto pos = _indexed;
+    const auto identity = identity_at(pos);
+    if (const auto found = find(identity); found != npos) {
+        duplicate_of = found;
+        return index_outcome::duplicate;
+    }
+    if (!slot_index(identity.lo, static_cast<uint32_t>(pos))) {
+        ++_refused_inserts;
+        return index_outcome::refused;
+    }
+    ++_indexed;
+    return index_outcome::indexed;
 }
 
 void dedup_compact_index::erase_at(size_t pos) {
     const size_t last = _size - 1;
-    {
+    // Erasing an indexed entry while some are not would move an unindexed
+    // one into the indexed part.
+    vassert(
+      pos >= _indexed || fully_indexed(),
+      "dedup_compact_index: erase of indexed {} with {} of {} indexed",
+      pos,
+      _indexed,
+      _size);
+    if (pos < _indexed) {
         const uint64_t h = hash_of(entry(pos));
         auto& seg = segment_for(h);
         slot_erase(seg, slot_of(seg, h, static_cast<uint32_t>(pos)));
@@ -600,15 +735,20 @@ void dedup_compact_index::erase_at(size_t pos) {
     if (pos != last) {
         const auto moved = entry(last);
         const auto ts = timestamp_at(last);
-        const uint64_t h = hash_of(moved);
-        auto& seg = segment_for(h);
-        const auto slot = slot_of(seg, h, static_cast<uint32_t>(last));
-        seg.slots[slot] = (seg.slots[slot] & ~slot_pos_mask)
-                          | (static_cast<uint32_t>(pos) + 1);
+        if (last < _indexed) {
+            const uint64_t h = hash_of(moved);
+            auto& seg = segment_for(h);
+            const auto slot = slot_of(seg, h, static_cast<uint32_t>(last));
+            seg.slots[slot] = (seg.slots[slot] & ~slot_pos_mask)
+                              | (static_cast<uint32_t>(pos) + 1);
+        }
         auto& e = entry(pos);
         e = moved;
         e.rel = 0;
         e.rel = encode(pos >> block_shift, ts);
+    }
+    if (fully_indexed()) {
+        --_indexed;
     }
     --_size;
     // Keep at most one empty block past the end, so popping and pushing
@@ -684,6 +824,9 @@ void dedup_compact_index::check_invariants() const {
     auto fail = [](const std::string& what) {
         throw std::logic_error("dedup_compact_index: " + what);
     };
+    if (_preparing) {
+        fail("the lookup table is still being allocated");
+    }
     if (_blocks.size() != _meta.size()) {
         fail("block and block metadata counts differ");
     }
@@ -720,6 +863,9 @@ void dedup_compact_index::check_invariants() const {
             i += span;
         }
     }
+    if (_indexed > _size) {
+        fail("more entries indexed than there are");
+    }
     std::vector<bool> seen(_size, false);
     size_t keys = 0;
     for (const auto& seg : _segments) {
@@ -734,8 +880,8 @@ void dedup_compact_index::check_invariants() const {
             }
             ++counted;
             const auto pos = slot_pos(s);
-            if (pos >= _size) {
-                fail("slot names a position past the end");
+            if (pos >= _indexed) {
+                fail("slot names a position that is not indexed");
             }
             if (seen[pos]) {
                 fail("two slots name one position");
@@ -762,13 +908,13 @@ void dedup_compact_index::check_invariants() const {
         }
         keys += counted;
     }
-    if (keys != _size) {
+    if (keys != _indexed) {
         fail(
           "lookup table holds " + std::to_string(keys) + " keys for "
-          + std::to_string(_size) + " entries");
+          + std::to_string(_indexed) + " indexed entries");
     }
     for (size_t pos = 0; pos < _size; ++pos) {
-        if (find(identity_at(pos)) != pos) {
+        if (pos < _indexed && find(identity_at(pos)) != pos) {
             fail("an entry is not found at its position");
         }
         const auto& m = _meta[pos >> block_shift];

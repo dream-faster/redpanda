@@ -330,6 +330,7 @@ bool dedup_window_filter::is_duplicate(
   dedup_identity_digest identity,
   model::timestamp ts,
   dedup_request_undo* undo) {
+    dassert(lookup_ready(), "dedup: lookup without a lookup table");
     note_shard_time(ts);
     const auto pos = _index.find(identity);
     if (pos != dedup_compact_index::npos) {
@@ -393,6 +394,13 @@ dedup_window_filter::filter(model::record_batch batch) {
 dedup_filter_result
 dedup_window_filter::filter_request(model::record_batch batch) {
     auto admitting = admit_batch();
+    vassert(
+      lookup_ready(),
+      "dedup: filtering without a lookup table (deferred: {}, {} of {} "
+      "indexed)",
+      _lookup_deferred,
+      _index.indexed(),
+      _index.size());
     // Decompress into a temporary so the original (possibly compressed) batch
     // can be returned untouched when nothing is filtered.
     std::optional<model::record_batch> decompressed;
@@ -648,6 +656,12 @@ dedup_window_filter::filter_request(model::record_batch batch) {
 }
 
 void dedup_window_filter::revert_request(const dedup_request_undo& undo) {
+    // Callers keep the lookup table while a request can still fail (see
+    // dedup_stm::_unsettled): without it, what this request inserted cannot
+    // be found to take back out.
+    vassert(
+      lookup_ready() || undo.entries.empty(),
+      "dedup: reverting a request without a lookup table");
     // Only this request's own entries are restored. If classifying it forced
     // a capacity eviction, the slice that eviction dropped is gone for good --
     // a failed request can cost coverage that was never its own. Bounded by
@@ -678,6 +692,12 @@ void dedup_window_filter::revert_request(const dedup_request_undo& undo) {
 void dedup_window_filter::populate(
   const chunked_vector<dedup_index_entry>& entries) {
     auto batch = admit_batch();
+    if (!lookup_ready()) {
+        for (const auto& e : entries) {
+            populate_unindexed(e.identity, e.timestamp);
+        }
+        return;
+    }
     const size_t n = entries.size();
     const auto identity_at = [&entries](size_t j) {
         return &entries[j].identity;
@@ -694,6 +714,10 @@ void dedup_window_filter::populate(const iobuf& key, model::timestamp ts) {
 
 void dedup_window_filter::populate(
   dedup_identity_digest identity, model::timestamp ts) {
+    if (!lookup_ready()) {
+        populate_unindexed(identity, ts);
+        return;
+    }
     ts = clamp_to_broker_time(ts);
     _max_ts = std::max(_max_ts, ts);
     note_shard_time(ts);
@@ -724,6 +748,95 @@ void dedup_window_filter::populate(
     }
     note_admitted(ts.value());
     sync_shard_budget();
+}
+
+void dedup_window_filter::populate_unindexed(
+  dedup_identity_digest identity, model::timestamp ts) {
+    ts = clamp_to_broker_time(ts);
+    _max_ts = std::max(_max_ts, ts);
+    note_shard_time(ts);
+    // As populate() does for a new identity. Without the lookup table there
+    // is no telling whether it is in the index already; if it is, the newer
+    // timestamp wins when build_lookup() finds the two.
+    sweep_for_new_identity();
+    if (
+      (at_capacity() && !take_room_from_largest(ts) && !make_room_for_one(ts))
+      || !_index.append_unindexed(identity, ts.value())) {
+        ++_unindexed_records;
+        return;
+    }
+    note_admitted(ts.value());
+    sync_shard_budget();
+}
+
+void dedup_window_filter::defer_lookup() {
+    if (_lookup_deferred) {
+        return;
+    }
+    _lookup_deferred = true;
+    _index.drop_lookup();
+}
+
+ss::future<> dedup_window_filter::build_lookup() {
+    _lookup_deferred = false;
+    if (lookup_ready()) {
+        co_return;
+    }
+    if (_building) {
+        co_await _building->get_shared_future();
+        co_return;
+    }
+    _building.emplace();
+    auto done = ss::defer([this]() noexcept {
+        _building->set_value();
+        _building.reset();
+    });
+    const auto epoch = _index_epoch;
+    const auto interrupted = [this, epoch] {
+        return _lookup_deferred || _index_epoch != epoch;
+    };
+    // A throw part way (an allocation) must not leave the table part built:
+    // nothing would resume it, building() would hold off every trim, and the
+    // next build expects nothing indexed.
+    auto unwind = ss::defer([this, epoch]() noexcept {
+        if (_index_epoch == epoch && !_index.fully_indexed()) {
+            _index.drop_lookup();
+        }
+    });
+    _index.begin_bulk_index();
+    while (_index.prepare_step(build_prepare_chunk)) {
+        co_await ss::coroutine::maybe_yield();
+        if (interrupted()) {
+            co_return;
+        }
+    }
+    size_t steps = 0;
+    while (!_index.fully_indexed()) {
+        size_t indexed_as = 0;
+        switch (_index.index_next(indexed_as)) {
+        case dedup_compact_index::index_outcome::indexed:
+            break;
+        case dedup_compact_index::index_outcome::duplicate: {
+            // Kept twice while unindexed: one entry, the newer timestamp.
+            const auto pos = _index.indexed();
+            if (_index.timestamp_at(pos) > _index.timestamp_at(indexed_as)) {
+                _index.set_timestamp_at(indexed_as, _index.timestamp_at(pos));
+            }
+            erase_at(pos);
+            break;
+        }
+        case dedup_compact_index::index_outcome::refused:
+            erase_at(_index.indexed());
+            ++_unindexed_records;
+            break;
+        }
+        if ((++steps % build_index_chunk) == 0) {
+            co_await ss::coroutine::maybe_yield();
+            if (interrupted()) {
+                co_return;
+            }
+        }
+    }
 }
 
 void dedup_window_filter::erase_at(size_t index) {
@@ -834,6 +947,9 @@ void dedup_window_filter::reclaim_expired_elsewhere() {
 }
 
 void dedup_window_filter::reclaim_expired_step(size_t budget) {
+    if (building()) {
+        return;
+    }
     const int64_t cutoff = reclaim_cutoff();
     for (size_t step = 0; step < budget && !_index.empty(); ++step) {
         if (_reclaim_pos >= _index.size()) {
@@ -850,6 +966,9 @@ void dedup_window_filter::reclaim_expired_step(size_t budget) {
 }
 
 void dedup_window_filter::sweep_step(size_t budget) {
+    if (building()) {
+        return;
+    }
     const int64_t cutoff = expiry_cutoff();
     // Only the largest indices trim themselves under shard pressure. If every
     // inserting partition trimmed itself instead, a small busy one would keep
@@ -939,6 +1058,9 @@ bool dedup_window_filter::shrank_over_limit(
 }
 
 void dedup_window_filter::replace_oldest_visited(model::timestamp incoming) {
+    if (building()) {
+        return;
+    }
     // The cutoff marks the oldest quarter as of the last completed pass, and
     // the cursor drops those entries as it reaches them. Under shard pressure
     // other partitions' inserts drive this cursor too -- log replay after a
@@ -1132,6 +1254,7 @@ size_t dedup_window_filter::begin_restore(size_t count) {
     // the index held does not inherit its bucket array.
     invalidate_walks();
     _index = {};
+    ++_index_epoch;
     sync_shard_budget();
     stop_being_largest();
     // Bounded by the shard's headroom as well as by this partition's ceiling.
@@ -1207,6 +1330,7 @@ void dedup_window_filter::clear() {
     // raft snapshot) all want it back.
     invalidate_walks();
     _index = {};
+    ++_index_epoch;
     _budget_reserved = 0;
     sync_shard_budget();
     stop_being_largest();

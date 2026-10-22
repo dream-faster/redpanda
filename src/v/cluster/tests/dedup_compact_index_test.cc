@@ -797,5 +797,195 @@ TEST(DedupTimestampSelector, NarrowRangesTakeFewPasses) {
     EXPECT_LE(passes, 2);
 }
 
+// A model of the entry array checked against the index through every mode:
+// pushes while fully indexed, unindexed appends (repeats included), erasures
+// wherever they are allowed, dropping the lookup table, bulk indexing with the
+// duplicates it reports merged as the filter merges them, and indexing a few
+// entries at a time without a bulk start.
+TEST(DedupCompactIndex, UnindexedEntriesMatchAModelThroughEveryMode) {
+    for (uint64_t seed = 0; seed < 40; ++seed) {
+        std::mt19937_64 rng(seed);
+        index_t idx;
+        std::vector<std::pair<dedup_identity_digest, int64_t>> model;
+        const uint64_t universe = 50 + rng() % 3000;
+        auto key = [](uint64_t k) {
+            uint64_t s = k * 7919 + 1;
+            return dedup_canonical_digest(random_digest(s));
+        };
+        auto stamp = [&rng] {
+            return int64_t{1'000'000} + static_cast<int64_t>(rng() % 100'000);
+        };
+        auto erase = [&](size_t pos) {
+            idx.erase_at(pos);
+            model[pos] = model.back();
+            model.pop_back();
+        };
+        auto index_one = [&] {
+            size_t dup = 0;
+            const auto outcome = idx.index_next(dup);
+            const size_t pos = idx.indexed();
+            if (outcome == index_t::index_outcome::duplicate) {
+                ASSERT_EQ(idx.identity_at(dup), model[pos].first);
+                if (model[pos].second > idx.timestamp_at(dup)) {
+                    idx.set_timestamp_at(dup, model[pos].second);
+                    model[dup].second = idx.timestamp_at(dup);
+                }
+                erase(pos);
+            } else if (outcome == index_t::index_outcome::refused) {
+                erase(pos);
+            }
+        };
+        const int steps = 2000 + static_cast<int>(rng() % 8000);
+        for (int step = 0; step < steps; ++step) {
+            const auto op = rng() % 100;
+            if (op < 30 && idx.fully_indexed()) {
+                const auto d = key(rng() % universe);
+                if (idx.find(d) == index_t::npos && idx.push_back(d, stamp())) {
+                    model.emplace_back(d, idx.timestamp_at(model.size()));
+                }
+            } else if (op < 60) {
+                const auto d = key(rng() % universe);
+                ASSERT_TRUE(idx.append_unindexed(d, stamp()));
+                model.emplace_back(d, idx.timestamp_at(model.size()));
+            } else if (op < 75 && !model.empty()) {
+                const size_t from = idx.fully_indexed() ? 0 : idx.indexed();
+                if (from < model.size()) {
+                    erase(from + rng() % (model.size() - from));
+                }
+            } else if (op < 80) {
+                idx.drop_lookup();
+            } else if (op < 85 && idx.indexed() == 0) {
+                idx.begin_bulk_index();
+                while (idx.prepare_step(1 + rng() % 7)) {
+                }
+                while (!idx.fully_indexed()) {
+                    index_one();
+                }
+            } else if (op < 90 && !idx.fully_indexed()) {
+                for (int k = 0; k < 5 && !idx.fully_indexed(); ++k) {
+                    index_one();
+                }
+            } else if (!model.empty()) {
+                const size_t pos = rng() % model.size();
+                idx.set_timestamp_at(pos, stamp());
+                model[pos].second = idx.timestamp_at(pos);
+            }
+            if (step % 500 != 0 && step != steps - 1) {
+                continue;
+            }
+            idx.check_invariants();
+            ASSERT_EQ(idx.size(), model.size()) << seed;
+            for (size_t pos = 0; pos < model.size(); ++pos) {
+                ASSERT_EQ(idx.identity_at(pos), model[pos].first) << seed;
+                ASSERT_EQ(idx.timestamp_at(pos), model[pos].second) << seed;
+            }
+            if (!idx.fully_indexed()) {
+                continue;
+            }
+            std::unordered_map<dedup_identity_digest, size_t, digest_hash> at;
+            for (size_t pos = 0; pos < model.size(); ++pos) {
+                ASSERT_TRUE(at.emplace(model[pos].first, pos).second)
+                  << "an identity twice in a fully indexed index, seed "
+                  << seed;
+            }
+            for (uint64_t k = 0; k < universe; k += 7) {
+                const auto it = at.find(key(k));
+                EXPECT_EQ(
+                  idx.find(key(k)), it == at.end() ? index_t::npos : it->second)
+                  << seed;
+            }
+        }
+    }
+}
+
+// Indexing in bulk sizes the lookup table up front: nothing is refused,
+// almost no segment splits, and it ends up no larger than one grown an insert
+// at a time from the same keys.
+TEST(DedupCompactIndex, BulkIndexingIsSizedUpFront) {
+    for (size_t n : {1ul, 100ul, 5000ul, 200'000ul}) {
+        index_t bulk;
+        index_t grown;
+        uint64_t keys = n;
+        for (size_t i = 0; i < n; ++i) {
+            const auto d = random_digest(keys);
+            ASSERT_TRUE(bulk.append_unindexed(d, static_cast<int64_t>(i)));
+            ASSERT_TRUE(grown.push_back(d, static_cast<int64_t>(i)));
+        }
+        EXPECT_EQ(bulk.indexed(), 0u);
+        EXPECT_EQ(bulk.find(grown.identity_at(0)), index_t::npos);
+        bulk.begin_bulk_index();
+        while (bulk.prepare_step(16)) {
+        }
+        size_t dup = 0;
+        while (!bulk.fully_indexed()) {
+            ASSERT_EQ(bulk.index_next(dup), index_t::index_outcome::indexed);
+        }
+        bulk.check_invariants();
+        for (size_t i = 0; i < n; ++i) {
+            ASSERT_EQ(bulk.find(grown.identity_at(i)), i);
+        }
+        const auto stats = bulk.stats();
+        EXPECT_EQ(stats.refused_inserts, 0u) << n;
+        EXPECT_LE(stats.segment_splits, stats.segments / 64 + 1) << n;
+        EXPECT_LE(
+          bulk.memory_usage(),
+          grown.memory_usage() + grown.memory_usage() / 10 + 512)
+          << n;
+    }
+}
+
+// Without the lookup table an entry is its 16 bytes.
+TEST(DedupCompactIndex, DroppingTheLookupLeavesTheEntries) {
+    index_t idx;
+    uint64_t keys = 9;
+    const size_t n = 100'000;
+    for (size_t i = 0; i < n; ++i) {
+        ASSERT_TRUE(idx.push_back(random_digest(keys), 5));
+    }
+    const auto indexed_bytes = idx.memory_usage();
+    idx.drop_lookup();
+    EXPECT_EQ(idx.size(), n);
+    EXPECT_EQ(idx.indexed(), 0u);
+    EXPECT_FALSE(idx.fully_indexed());
+    idx.check_invariants();
+    const double per_entry = static_cast<double>(idx.memory_usage())
+                             / static_cast<double>(n);
+    EXPECT_LT(per_entry, 17.0);
+    EXPECT_LT(idx.memory_usage(), indexed_bytes * 3 / 4);
+}
+
+// Each step of a bulk index is bounded however large the index: a slot probe
+// or a split for index_next(), a few segments for prepare_step().
+TEST(DedupCompactIndex, BulkIndexingStepsDoBoundedWork) {
+    for (size_t n : {20'000ul, 2'000'000ul}) {
+        index_t idx;
+        uint64_t keys = n;
+        for (size_t i = 0; i < n; ++i) {
+            ASSERT_TRUE(idx.append_unindexed(random_digest(keys), 1));
+        }
+        idx.begin_bulk_index();
+        size_t worst_prepare = 0;
+        size_t worst_index = 0;
+        for (;;) {
+            const auto before = idx.work();
+            const bool more = idx.prepare_step(4);
+            worst_prepare = std::max(worst_prepare, idx.work() - before);
+            if (!more) {
+                break;
+            }
+        }
+        size_t dup = 0;
+        while (!idx.fully_indexed()) {
+            const auto before = idx.work();
+            ASSERT_EQ(idx.index_next(dup), index_t::index_outcome::indexed);
+            worst_index = std::max(worst_index, idx.work() - before);
+        }
+        EXPECT_LE(worst_prepare, 4 * size_t{index_t::max_segment_slots}) << n;
+        EXPECT_LT(
+          worst_index, 6 * index_t::max_segment_slots + (size_t{1} << 12))
+          << n;
+    }
+}
+
 } // namespace
 } // namespace cluster

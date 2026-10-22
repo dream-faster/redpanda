@@ -37,6 +37,7 @@
 #include <functional>
 #include <iterator>
 #include <limits>
+#include <map>
 #include <memory>
 #include <optional>
 #include <random>
@@ -4059,4 +4060,197 @@ TEST(DedupShardBudget, LaggingButActiveIndexIsNotReclaimed) {
         + lagging.unindexed_records() + busy.unindexed_records(),
       0u);
     EXPECT_LE(budget->entries, 1'000u);
+}
+
+namespace {
+
+std::map<std::pair<uint64_t, uint64_t>, int64_t>
+live_entries(const cluster::dedup_window_filter& f) {
+    std::map<std::pair<uint64_t, uint64_t>, int64_t> out;
+    f.for_each_live_entry(
+      [&out](cluster::dedup_identity_digest d, model::timestamp t) {
+          auto [it, inserted] = out.emplace(std::make_pair(d.hi, d.lo), t());
+          if (!inserted) {
+              it->second = std::max(it->second, t());
+          }
+      });
+    return out;
+}
+
+} // namespace
+
+// A replica that does not filter keeps what it applies without the lookup
+// table, in less memory, and once built the table finds all of it.
+TEST(DedupDeferredLookup, EntriesKeptUnindexedAreFoundOnceBuilt) {
+    cluster::dedup_window_filter deferred(3'600'000ms);
+    cluster::dedup_window_filter eager(3'600'000ms);
+    deferred.defer_lookup();
+    EXPECT_TRUE(deferred.lookup_deferred());
+    EXPECT_FALSE(deferred.lookup_ready());
+    for (int i = 0; i < 20'000; ++i) {
+        const auto key = iobuf::from(fmt::format("key-{}", i));
+        deferred.populate(key.copy(), ts(1000 + i));
+        eager.populate(key.copy(), ts(1000 + i));
+    }
+    EXPECT_EQ(deferred.map_size(), eager.map_size());
+    EXPECT_LT(deferred.memory_usage(), eager.memory_usage());
+    EXPECT_LT(deferred.memory_usage(), 18 * deferred.map_size());
+    EXPECT_EQ(live_entries(deferred), live_entries(eager));
+
+    deferred.build_lookup().get();
+    EXPECT_FALSE(deferred.lookup_deferred());
+    ASSERT_TRUE(deferred.lookup_ready());
+    EXPECT_EQ(deferred.map_size(), eager.map_size());
+    EXPECT_EQ(live_entries(deferred), live_entries(eager));
+    EXPECT_FALSE(
+      deferred.filter(make_batch("key-7", "v", ts(30'000))).has_value());
+    EXPECT_FALSE(
+      deferred.filter(make_batch("key-19999", "v", ts(30'000))).has_value());
+    EXPECT_TRUE(
+      deferred.filter(make_batch("key-20000", "v", ts(30'000))).has_value());
+}
+
+// Without the lookup table an identity applied twice is kept twice; building
+// it keeps one, with the newer timestamp, as populate() would have.
+TEST(DedupDeferredLookup, BuildingMergesRepeatsToTheNewest) {
+    // An hour, so nothing ages out before the build: the window's edge is
+    // what tells which of the three timestamps was kept.
+    constexpr int64_t window = 3'600'000;
+    cluster::dedup_window_filter f(std::chrono::milliseconds{window});
+    f.defer_lookup();
+    f.populate(iobuf::from("x"), ts(1000));
+    f.populate(iobuf::from("y"), ts(1000));
+    f.populate(iobuf::from("x"), ts(3000));
+    f.populate(iobuf::from("x"), ts(2000));
+    EXPECT_EQ(f.map_size(), 4u);
+    f.build_lookup().get();
+    ASSERT_TRUE(f.lookup_ready());
+    EXPECT_EQ(f.map_size(), 2u);
+    const auto entries = live_entries(f);
+    const auto x = cluster::dedup_digest_of(iobuf::from("x"));
+    ASSERT_TRUE(entries.contains({x.hi, x.lo}));
+    EXPECT_EQ(entries.at({x.hi, x.lo}), 3000);
+    // Within the window of 3000, and of neither 1000 nor 2000.
+    EXPECT_FALSE(
+      f.filter(make_batch("x", "v", ts(3000 + window - 1))).has_value());
+}
+
+// The same applied stream, repeats and all, ends in the same index whether
+// the lookup table was there all along or was built at the end.
+TEST(DedupDeferredLookup, MatchesIndexingAsTheEntriesCame) {
+    std::mt19937_64 rng(11);
+    cluster::dedup_window_filter deferred(3'600'000ms);
+    cluster::dedup_window_filter eager(3'600'000ms);
+    deferred.defer_lookup();
+    for (int i = 0; i < 50'000; ++i) {
+        const auto key = iobuf::from(fmt::format("k{}", rng() % 30'000));
+        const auto at = ts(1'000'000 + static_cast<int64_t>(rng() % 100'000));
+        deferred.populate(key.copy(), at);
+        eager.populate(key.copy(), at);
+    }
+    EXPECT_GT(deferred.map_size(), eager.map_size());
+    deferred.build_lookup().get();
+    ASSERT_TRUE(deferred.lookup_ready());
+    EXPECT_EQ(deferred.map_size(), eager.map_size());
+    EXPECT_EQ(live_entries(deferred), live_entries(eager));
+}
+
+// A restore into a deferred index keeps the entries unindexed too.
+TEST(DedupDeferredLookup, RestoreKeepsEntriesUnindexed) {
+    cluster::dedup_window_filter source(3'600'000ms);
+    for (int i = 0; i < 5'000; ++i) {
+        source.populate(iobuf::from(fmt::format("r{}", i)), ts(1000 + i));
+    }
+    cluster::dedup_window_filter target(3'600'000ms);
+    target.defer_lookup();
+    target.restore(source.snapshot());
+    EXPECT_FALSE(target.lookup_ready());
+    EXPECT_EQ(target.map_size(), source.map_size());
+    EXPECT_LT(target.memory_usage(), source.memory_usage());
+    target.build_lookup().get();
+    ASSERT_TRUE(target.lookup_ready());
+    EXPECT_EQ(live_entries(target), live_entries(source));
+    EXPECT_FALSE(target.filter(make_batch("r4999", "v", ts(9000))).has_value());
+}
+
+// The entry ceiling and the window hold while the lookup table is deferred:
+// capacity trims and expiry work from the entries alone, and with every
+// identity new they make the same choices they make with it.
+TEST(DedupDeferredLookup, CeilingAndExpiryHoldWhileDeferred) {
+    cluster::dedup_window_filter capped(3'600'000ms, 1'000);
+    cluster::dedup_window_filter capped_eager(3'600'000ms, 1'000);
+    capped.defer_lookup();
+    for (int i = 0; i < 10'000; ++i) {
+        // Spread over the cursor's histogram: an index packed into one narrow
+        // range is never trimmed for capacity (see finish_pass()).
+        const auto key = iobuf::from(fmt::format("c{}", i));
+        capped.populate(key.copy(), ts(1000 + i * 100));
+        capped_eager.populate(key.copy(), ts(1000 + i * 100));
+        ASSERT_LE(capped.map_size(), 1'000u);
+    }
+    EXPECT_GT(capped.capacity_evicted_entries(), 0u);
+    EXPECT_EQ(live_entries(capped), live_entries(capped_eager));
+    capped.build_lookup().get();
+    ASSERT_TRUE(capped.lookup_ready());
+    EXPECT_EQ(live_entries(capped), live_entries(capped_eager));
+
+    cluster::dedup_window_filter windowed(1000ms);
+    cluster::dedup_window_filter windowed_eager(1000ms);
+    windowed.defer_lookup();
+    for (int i = 0; i < 5'500; ++i) {
+        const auto key = iobuf::from(fmt::format("w{}", i));
+        const auto at = i < 500 ? ts(1000) : ts(1'000'000 + i);
+        windowed.populate(key.copy(), at);
+        windowed_eager.populate(key.copy(), at);
+    }
+    EXPECT_LT(windowed.map_size(), 5'500u);
+    EXPECT_EQ(windowed.map_size(), windowed_eager.map_size());
+    EXPECT_EQ(live_entries(windowed), live_entries(windowed_eager));
+}
+
+// Deferring again frees the lookup table and keeps the entries; building it
+// again restores lookups.
+TEST(DedupDeferredLookup, DeferringAgainKeepsTheEntries) {
+    cluster::dedup_window_filter f(3'600'000ms);
+    for (int i = 0; i < 10'000; ++i) {
+        f.populate(iobuf::from(fmt::format("d{}", i)), ts(1000 + i));
+    }
+    ASSERT_TRUE(f.lookup_ready());
+    const auto indexed_bytes = f.memory_usage();
+    const auto before = live_entries(f);
+    f.defer_lookup();
+    EXPECT_FALSE(f.lookup_ready());
+    EXPECT_LT(f.memory_usage(), indexed_bytes);
+    EXPECT_EQ(live_entries(f), before);
+    f.populate(iobuf::from("d-new"), ts(20'000));
+    f.build_lookup().get();
+    ASSERT_TRUE(f.lookup_ready());
+    EXPECT_EQ(f.map_size(), 10'001u);
+    EXPECT_FALSE(f.filter(make_batch("d0", "v", ts(20'000))).has_value());
+    EXPECT_FALSE(f.filter(make_batch("d-new", "v", ts(20'000))).has_value());
+    // A cleared index stays deferred-or-not as it was.
+    f.defer_lookup();
+    f.clear();
+    EXPECT_TRUE(f.lookup_deferred());
+    f.build_lookup().get();
+    EXPECT_TRUE(f.lookup_ready());
+    EXPECT_EQ(f.map_size(), 0u);
+}
+
+// Indexes on one shard share its budget whichever of them are deferred:
+// a deferred one is trimmed for the shard as an indexed one is.
+TEST(DedupDeferredLookup, DeferredIndexesShareTheShardBudget) {
+    auto budget = make_budget(2'000);
+    cluster::dedup_window_filter leader(3'600'000ms, 100'000, budget);
+    cluster::dedup_window_filter follower(3'600'000ms, 100'000, budget);
+    follower.defer_lookup();
+    for (int i = 0; i < 3'000; ++i) {
+        leader.populate(iobuf::from(fmt::format("l{}", i)), ts(1000 + i));
+        follower.populate(iobuf::from(fmt::format("f{}", i)), ts(1000 + i));
+    }
+    EXPECT_LE(budget->entries, 2'000u);
+    EXPECT_EQ(budget->entries, leader.map_size() + follower.map_size());
+    follower.build_lookup().get();
+    ASSERT_TRUE(follower.lookup_ready());
+    EXPECT_EQ(budget->entries, leader.map_size() + follower.map_size());
 }

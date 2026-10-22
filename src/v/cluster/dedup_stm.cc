@@ -28,6 +28,7 @@
 #include "storage/types.h"
 
 #include <seastar/core/byteorder.hh>
+#include <seastar/core/lowres_clock.hh>
 #include <seastar/core/memory.hh>
 #include <seastar/core/metrics.hh>
 #include <seastar/core/with_timeout.hh>
@@ -53,6 +54,10 @@ dedup_stm::dedup_stm(
   , _kvstore(kvstore)
   , _sync_timeout(std::move(sync_timeout))
   , _state(std::chrono::milliseconds{0}, max_entries, std::move(shard_budget)) {
+    // Until this replica leads, it only applies: a restore and every applied
+    // batch keep their entries without the lookup table, and the first
+    // request it filters builds it (see do_replicate()).
+    _state.defer_lookup();
 }
 
 void dedup_stm::setup_metrics() {
@@ -75,6 +80,13 @@ void dedup_stm::setup_metrics() {
           "records_dropped",
           [this] { return _state.dropped_records(); },
           sm::description("Number of records dropped as duplicates."),
+          labels),
+        sm::make_counter(
+          "lookup_builds",
+          [this] { return _lookup_builds; },
+          sm::description(
+            "Number of times a request waited for this replica to index the "
+            "entries it kept unindexed while it was not leading."),
           labels),
         sm::make_counter(
           "records_skew_clamped",
@@ -150,6 +162,13 @@ void dedup_stm::setup_metrics() {
           "index_entries",
           [this] { return _state.map_size(); },
           sm::description("Number of identities in the dedup index."),
+          labels),
+        sm::make_gauge(
+          "index_memory_bytes",
+          [this] { return _state.memory_usage(); },
+          sm::description(
+            "Memory the dedup index holds: its entries, and the lookup table "
+            "while this replica filters (a follower keeps none)."),
           labels),
       },
       {},
@@ -454,6 +473,12 @@ ss::future<> dedup_stm::do_apply(const model::record_batch& batch) {
         co_return;
     }
 
+    if (_unsettled == 0 && !_raft->is_leader()) {
+        // Not filtering, so nothing here needs the lookup table, and nothing
+        // left from leading needs it to be reverted.
+        _state.defer_lookup();
+    }
+
     // A batch this replica cannot read is skipped, not retried: the STM
     // manager treats an exception from apply as transient and retries the
     // batch forever, which also holds up every raft snapshot and so the
@@ -589,6 +614,28 @@ ss::future<result<kafka_result>> dedup_stm::do_replicate(
     }
     if (!opts.expected_term) {
         opts.expected_term = _insync_term;
+    }
+    if (!_state.lookup_ready()) {
+        // Leading since entries went in unindexed: index them all first.
+        const auto entries = _state.map_size();
+        const auto started = ss::lowres_clock::now();
+        co_await _state.build_lookup();
+        ++_lookup_builds;
+        vlogl(
+          clusterlog,
+          entries >= lookup_build_log_threshold ? ss::log_level::info
+                                                : ss::log_level::debug,
+          "{} dedup lookup built for {} entries in {}ms",
+          _raft->ntp(),
+          entries,
+          std::chrono::duration_cast<std::chrono::milliseconds>(
+            ss::lowres_clock::now() - started)
+            .count());
+        if (!_state.lookup_ready()) {
+            // Applying as a follower again deferred it meanwhile, or the
+            // build this request waited for failed.
+            co_return errc::not_leader;
+        }
     }
 
     const auto original_count = batch.record_count();
@@ -778,6 +825,11 @@ ss::future<result<kafka_result>> dedup_stm::do_replicate(
     const auto evictions_before = _self_filtered_evictions;
     const auto term = _insync_term;
     auto stages = _raft->replicate_in_stages(std::move(*filtered.batch), opts);
+    // Counted only now, as every path from here ends in settle(): a throw
+    // above (an allocation) would otherwise keep the lookup table for good.
+    // Nothing since filter_request() suspended, so do_apply() has not had a
+    // chance to drop it.
+    ++_unsettled;
     auto enqueued_result = co_await ss::coroutine::as_future(
       std::move(stages.request_enqueued));
     if (enqueued_result.failed()) {
@@ -918,6 +970,7 @@ void dedup_stm::settle(
             forget_self_filtered(*self_key);
         }
     }
+    --_unsettled;
     mine->appended.set_value(appended);
 }
 
