@@ -1229,20 +1229,24 @@ void dedup_window_filter::replace_oldest_visited(model::timestamp incoming) {
         // nothing older is to be had. They are behind the cursor -- an erase
         // that moved one also moved the cursor past it -- or in the array's
         // tail, where the batch is appended, so a window without an older
-        // entry is in that tail, and the front of the array is searched
-        // instead, a few windows at most. The cursor stays where it is.
+        // entry is in that tail, and the rest of the array is searched
+        // instead, a few windows at most. That search keeps its own place,
+        // so successive ones cover the array rather than the same windows,
+        // and the cursor and its pass are left as they are.
         auto oldest = oldest_below(begin, end, bound);
         for (size_t window = 0; !oldest && bound < incoming.value()
                                 && window < replace_search_windows;
              ++window) {
-            const size_t from = window * capacity_emergency_budget;
-            if (from >= _index.size()) {
-                break;
+            if (_replace_search_pos >= _index.size()) {
+                _replace_search_pos = 0;
             }
-            oldest = oldest_below(
-              from,
-              std::min(from + capacity_emergency_budget, _index.size()),
-              bound);
+            const size_t from = _replace_search_pos;
+            const size_t to = std::min(
+              from + capacity_emergency_budget, _index.size());
+            oldest = oldest_below(from, to, bound);
+            if (!oldest) {
+                _replace_search_pos = to;
+            }
         }
         if (!oldest) {
             // A batch larger than all this index may hold beside what is
