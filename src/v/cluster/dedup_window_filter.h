@@ -18,6 +18,7 @@
 #include "model/record.h"
 #include "model/timestamp.h"
 #include "ssx/semaphore.h"
+#include "utils/vint.h"
 
 #include <seastar/core/coroutine.hh>
 #include <seastar/core/shared_ptr.hh>
@@ -34,6 +35,7 @@
 #include <cstring>
 #include <limits>
 #include <optional>
+#include <span>
 #include <stdexcept>
 #include <type_traits>
 #include <vector>
@@ -125,16 +127,127 @@ enum class dedup_identity_lookup {
 /// Where one record lies in its batch's records buffer, as offsets from the
 /// start of the buffer, for a caller that copies records out of it.
 struct dedup_record_span {
-    /// The first byte the record's length counts: the attributes.
+    /// The first byte the length counts: the attributes.
     size_t body{0};
+    /// The offset delta varint, and the first byte after it.
+    size_t offset_delta{0};
+    size_t after_offset_delta{0};
     /// One past the record's last byte.
     size_t end{0};
-    int64_t timestamp_delta{0};
-    /// Where the offset delta varint starts, counted from body, and its
-    /// size. Bytes suffice: a varint is at most vint::max_length bytes long
-    /// and only the attributes and the timestamp delta come before it.
-    uint8_t offset_delta_at{0};
-    uint8_t offset_delta_size{0};
+};
+
+/// \brief Reads a batch's records buffer for for_each_dedup_identity().
+///
+/// Decodes straight from the bytes of the fragment it is in whenever the field
+/// lies within it, which with records far smaller than fragments is nearly
+/// always; only a field that spans two fragments takes the byte-at-a-time
+/// path. iobuf_const_parser copies every varint out of the buffer to decode
+/// it, then skips over it, and that was most of what reading a record cost.
+class dedup_record_reader {
+public:
+    explicit dedup_record_reader(const iobuf& buf) noexcept
+      : _it(buf.cbegin())
+      , _end(buf.cend())
+      , _size(buf.size_bytes()) {
+        load();
+    }
+
+    size_t bytes_consumed() const noexcept {
+        return _base + static_cast<size_t>(_p - _begin);
+    }
+    size_t bytes_left() const noexcept { return _size - bytes_consumed(); }
+
+    /// A zigzag varint, read as vint::deserialize() reads one: at most
+    /// vint::max_length bytes, and what there is of it at the buffer's end.
+    int64_t read_varlong() noexcept {
+        if (_e - _p >= static_cast<ptrdiff_t>(vint::max_length)) [[likely]] {
+            const auto [v, n] = vint::deserialize(
+              std::span<const uint8_t>(
+                reinterpret_cast<const uint8_t*>(_p), vint::max_length));
+            _p += n;
+            return v;
+        }
+        return read_varlong_slow();
+    }
+
+    /// Throws std::out_of_range, having consumed what there was, when fewer
+    /// than \p n bytes are left.
+    void skip(size_t n) {
+        if (static_cast<size_t>(_e - _p) >= n) [[likely]] {
+            _p += n;
+            return;
+        }
+        if (consume(n, [](const char*, size_t) {}) != n) [[unlikely]] {
+            throw std::out_of_range(
+              fmt::format("dedup: skip of {} bytes past the batch's end", n));
+        }
+    }
+
+    /// Pass the next \p n bytes to \p f in contiguous pieces, f(data, size),
+    /// and return how many there were: fewer than n only at the end.
+    template<typename F>
+    size_t consume(size_t n, F&& f) {
+        size_t done = 0;
+        while (done < n) {
+            settle();
+            if (_p == _e) {
+                break;
+            }
+            const size_t k = std::min(n - done, static_cast<size_t>(_e - _p));
+            f(_p, k);
+            _p += k;
+            done += k;
+        }
+        return done;
+    }
+
+private:
+    void load() noexcept {
+        while (_it != _end && _it->size() == 0) {
+            ++_it;
+        }
+        if (_it == _end) {
+            _begin = _p = _e = nullptr;
+        } else {
+            _begin = _p = _it->get();
+            _e = _p + _it->size();
+        }
+    }
+    // A read that ends a fragment leaves the position at its end; this moves
+    // it to the start of the next one with bytes in it, if there is one.
+    void settle() noexcept {
+        while (_p == _e && _it != _end) {
+            _base += static_cast<size_t>(_e - _begin);
+            ++_it;
+            load();
+        }
+    }
+    // Gathers the varint's bytes across fragments for vint::deserialize().
+    int64_t read_varlong_slow() noexcept {
+        std::array<uint8_t, vint::max_length> buf{};
+        size_t n = 0;
+        while (n < buf.size()) {
+            settle();
+            if (_p == _e) {
+                break;
+            }
+            const auto b = static_cast<uint8_t>(*_p++);
+            buf[n++] = b;
+            if ((b & 0x80U) == 0) {
+                break;
+            }
+        }
+        return vint::deserialize(std::span<const uint8_t>(buf.data(), n)).first;
+    }
+
+    iobuf::const_iterator _it;
+    iobuf::const_iterator _end;
+    size_t _size;
+    // Bytes in the fragments before the current one.
+    size_t _base{0};
+    const char* _begin{nullptr};
+    const char* _p{nullptr};
+    const char* _e{nullptr};
 };
 
 /// \brief Walk a batch's records reading only what dedup needs.
@@ -161,13 +274,12 @@ void for_each_dedup_identity(
   const std::optional<ss::sstring>& key_header,
   F&& emit) {
     const auto base_ts = readable.header().first_timestamp.value();
-    iobuf_const_parser parser(readable.data());
+    dedup_record_reader parser(readable.data());
     auto digest_bytes = [&parser](int64_t len) {
         dedup_digester digester;
         const auto consumed = parser.consume(
           static_cast<size_t>(len), [&digester](const char* data, size_t n) {
               digester.update(data, n);
-              return ss::stop_iteration::no;
           });
         if (consumed != static_cast<size_t>(len)) [[unlikely]] {
             throw std::out_of_range(
@@ -185,7 +297,7 @@ void for_each_dedup_identity(
     };
     // Reads a length and checks it against what is left before it is used.
     auto read_length = [&parser]() {
-        auto [len, _] = parser.read_varlong();
+        const auto len = parser.read_varlong();
         if (len > static_cast<int64_t>(parser.bytes_left())) [[unlikely]] {
             throw std::out_of_range(
               fmt::format(
@@ -207,9 +319,11 @@ void for_each_dedup_identity(
         const size_t body = parser.bytes_consumed();
         const size_t record_end = body + static_cast<size_t>(size);
         parser.skip(1); // attributes
-        auto [ts_delta, ts_delta_size] = parser.read_varlong();
-        [[maybe_unused]] const auto [_od, offset_delta_size]
-          = parser.read_varlong();
+        const auto ts_delta = parser.read_varlong();
+        [[maybe_unused]] const size_t offset_delta = parser.bytes_consumed();
+        parser.read_varlong();
+        [[maybe_unused]] const size_t after_offset_delta
+          = parser.bytes_consumed();
         const auto key_len = read_length();
         auto lookup = dedup_identity_lookup::no_identity;
         dedup_identity_digest digest;
@@ -237,7 +351,6 @@ void for_each_dedup_identity(
                       [&want, &matches](const char* data, size_t n) {
                           matches = matches && std::memcmp(want, data, n) == 0;
                           want += n;
-                          return ss::stop_iteration::no;
                       });
                 } else {
                     skip_bytes(hkey_len);
@@ -286,10 +399,9 @@ void for_each_dedup_identity(
               model::timestamp{ts},
               dedup_record_span{
                 .body = body,
-                .end = record_end,
-                .timestamp_delta = ts_delta,
-                .offset_delta_at = static_cast<uint8_t>(1 + ts_delta_size),
-                .offset_delta_size = offset_delta_size});
+                .offset_delta = offset_delta,
+                .after_offset_delta = after_offset_delta,
+                .end = record_end});
         } else {
             go_on = emit(lookup, digest, model::timestamp{ts});
         }

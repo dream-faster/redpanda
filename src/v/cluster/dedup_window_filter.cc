@@ -9,6 +9,7 @@
 
 #include "cluster/dedup_window_filter.h"
 
+#include "base/vassert.h"
 #include "hashing/xx.h"
 #include "model/batch_compression.h"
 #include "model/record.h"
@@ -20,6 +21,7 @@
 #include <array>
 #include <chrono>
 #include <cstddef>
+#include <cstring>
 #include <iterator>
 #include <ranges>
 
@@ -203,6 +205,79 @@ bool within_window(int64_t a, int64_t b, int64_t window) {
     return diff >= -window && diff <= window;
 }
 
+/// Writes a buffer of a size known up front into fragments it allocates
+/// itself, at most an iobuf fragment's largest each, with plain stores:
+/// iobuf::append() keeps its bookkeeping for every call, and the rebuild
+/// makes four of them per record.
+class exact_iobuf_writer {
+public:
+    explicit exact_iobuf_writer(size_t size)
+      : _size(size)
+      , _left(size) {}
+
+    void append(const char* src, size_t n) {
+        while (n > 0) {
+            if (_p == _e) {
+                roll();
+            }
+            const size_t k = std::min(n, static_cast<size_t>(_e - _p));
+            std::memcpy(_p, src, k);
+            _p += k;
+            src += k;
+            n -= k;
+        }
+    }
+    void append_varint(int64_t v) {
+        if (_e - _p >= static_cast<ptrdiff_t>(vint::max_length)) {
+            _p += vint::serialize(v, reinterpret_cast<uint8_t*>(_p));
+            return;
+        }
+        std::array<uint8_t, vint::max_length> buf{};
+        const auto n = vint::serialize(v, buf.data());
+        append(reinterpret_cast<const char*>(buf.data()), n);
+    }
+    iobuf finish() && {
+        flush();
+        // Also what keeps the fragments free of slack: they were allocated
+        // to add up to the size, so writing that many bytes filled them.
+        vassert(
+          _out.size_bytes() == _size,
+          "dedup rebuild wrote {} bytes, sized for {}",
+          _out.size_bytes(),
+          _size);
+        return std::move(_out);
+    }
+
+private:
+    void roll() {
+        flush();
+        // The size given up front is what gets written, so no fragment is
+        // left with room that would stay allocated behind the batch.
+        const size_t n = std::max<size_t>(
+          std::min<size_t>(_left, iobuf::max_linearize_size), 1);
+        _buf = ss::temporary_buffer<char>(n);
+        _p = _buf.get_write();
+        _e = _p + n;
+        _left -= std::min(_left, n);
+    }
+    void flush() {
+        if (_buf.size() > 0) {
+            _buf.trim(static_cast<size_t>(_p - _buf.get()));
+            // As a fragment of its own: appending the buffer instead copies
+            // one no larger than the last into a freshly allocated fragment.
+            _out.append(std::make_unique<iobuf::fragment>(std::move(_buf)));
+        }
+        _p = _e = nullptr;
+    }
+
+    size_t _size;
+    size_t _left;
+    iobuf _out;
+    ss::temporary_buffer<char> _buf;
+    char* _p{nullptr};
+    char* _e{nullptr};
+};
+
 } // namespace
 
 int64_t dedup_window_filter::expiry_cutoff() const {
@@ -341,17 +416,24 @@ dedup_window_filter::filter_request(model::record_batch batch) {
     // in header mode one record missing the configured header rejects the
     // entire request, and the index must not have been mutated by then.
     // Digesting each identity up front is what makes deferring cheap -- what
-    // has to survive the pass is 64 bytes per record, the identity and where
-    // the record lies, not the records themselves, whose iobufs would
-    // otherwise pin a multiple of the batch size for the duration of the
-    // call.
+    // has to survive the pass is 32 bytes per record, not the records
+    // themselves, whose iobufs would otherwise pin a multiple of the batch
+    // size for the duration of the call.
+    //
+    // Where each record lies is found again by the rebuild, which only a
+    // request with something dropped pays for; kept here, it made each
+    // record's entry 80 bytes written for every produce.
     struct classified {
         dedup_identity_digest identity;
         model::timestamp timestamp;
-        dedup_record_span span;
+        // The record's length less its offset delta's bytes, the part of it
+        // a rebuild keeps as it is. Saturated: a record this long, which only
+        // decompression can produce, cannot be kept in a rebuilt batch.
+        uint32_t unchanged{0};
         bool has_identity{false};
         bool dropped{false};
     };
+    static_assert(sizeof(classified) == 32);
     chunked_vector<classified> records;
     records.reserve(static_cast<size_t>(total));
 
@@ -368,10 +450,14 @@ dedup_window_filter::filter_request(model::record_batch batch) {
               missing_header = true;
               return false;
           }
+          const size_t unchanged
+            = (span.end - span.body)
+              - (span.after_offset_delta - span.offset_delta);
           records.push_back(
             {.identity = digest,
              .timestamp = clamp_to_broker_time(ts),
-             .span = span,
+             .unchanged = static_cast<uint32_t>(std::min<size_t>(
+               unchanged, std::numeric_limits<uint32_t>::max())),
              .has_identity = lookup == dedup_identity_lookup::identity});
           return true;
       });
@@ -432,53 +518,72 @@ dedup_window_filter::filter_request(model::record_batch batch) {
     // undone before an error propagates: the request fails and nothing of it
     // stays behind.
     try {
-        // A survivor's length once its offset delta is re-encoded as
-        // offset_delta: what reserving exactly and writing the length need.
-        const auto spliced_size =
-          [](const dedup_record_span& span, int32_t offset_delta) {
-              return static_cast<int64_t>(
-                       span.end - span.body - span.offset_delta_size)
-                     + static_cast<int64_t>(vint::vint_size(offset_delta));
-          };
-        size_t spliced_bytes = 0;
-        int32_t offset_delta = 0;
-        for (const auto& c : records) {
-            if (!c.dropped) {
-                const auto record_size = spliced_size(c.span, offset_delta++);
-                spliced_bytes += vint::vint_size(record_size)
-                                 + static_cast<size_t>(record_size);
+        // A kept record's length counts its new offset delta's bytes in
+        // place of the old one's.
+        const auto length_of = [](const classified& c, int32_t delta) {
+            return static_cast<int64_t>(c.unchanged)
+                   + static_cast<int64_t>(vint::vint_size(delta));
+        };
+        size_t size = 0;
+        {
+            int32_t offset_delta = 0;
+            for (const auto& c : records) {
+                if (c.dropped) {
+                    continue;
+                }
+                const auto length = length_of(c, offset_delta++);
+                size += vint::vint_size(length) + static_cast<size_t>(length);
             }
         }
-        iobuf data;
-        data.reserve_memory(spliced_bytes);
-        iobuf_const_parser parser(readable.data());
-        std::array<uint8_t, vint::max_length> varint{};
-        const auto append_varint = [&data, &varint](int64_t v) {
-            const auto n = vint::serialize(v, varint.data());
-            data.append(reinterpret_cast<const char*>(varint.data()), n);
-        };
-        const auto copy = [&data, &parser](size_t from, size_t to) {
-            parser.skip(from - parser.bytes_consumed());
-            parser.consume(to - from, [&data](const char* src, size_t n) {
-                data.append(src, n);
-                return ss::stop_iteration::no;
-            });
+        // A batch's size is an int32, which also bounds any record whose
+        // `unchanged` saturated.
+        if (
+          size > static_cast<size_t>(std::numeric_limits<int32_t>::max())
+                   - model::packed_record_batch_header_size) [[unlikely]] {
+            throw std::out_of_range(
+              fmt::format(
+                "dedup: rebuilt batch of {} bytes of records is larger than "
+                "a batch can be",
+                size));
+        }
+        exact_iobuf_writer data(size);
+        // One reader finds each record's fields, the other copies the bytes
+        // between them. The walk above already checked every length against
+        // the buffer.
+        dedup_record_reader scan(readable.data());
+        dedup_record_reader source(readable.data());
+        const auto copy_to = [&data, &source](size_t to) {
+            source.consume(
+              to - source.bytes_consumed(),
+              [&data](const char* src, size_t n) { data.append(src, n); });
         };
         int64_t max_timestamp_delta = std::numeric_limits<int64_t>::min();
-        offset_delta = 0;
+        int32_t offset_delta = 0;
         for (const auto& c : records) {
+            const auto length = static_cast<size_t>(scan.read_varlong());
+            const size_t body = scan.bytes_consumed();
+            const size_t end = body + length;
             if (c.dropped) {
+                scan.skip(length);
                 continue;
             }
-            const auto& span = c.span;
-            const auto offset_delta_begin = span.body + span.offset_delta_at;
-            append_varint(spliced_size(span, offset_delta));
-            copy(span.body, offset_delta_begin);
-            append_varint(offset_delta++);
-            copy(offset_delta_begin + span.offset_delta_size, span.end);
+            scan.skip(1); // attributes
+            const auto timestamp_delta = scan.read_varlong();
+            const size_t old_delta = scan.bytes_consumed();
+            scan.read_varlong();
+            const size_t after_delta = scan.bytes_consumed();
+            scan.skip(end - after_delta);
+
+            data.append_varint(length_of(c, offset_delta));
+            source.skip(body - source.bytes_consumed());
+            copy_to(old_delta);
+            data.append_varint(offset_delta++);
+            source.skip(after_delta - old_delta);
+            copy_to(end);
             max_timestamp_delta = std::max(
-              max_timestamp_delta, span.timestamp_delta);
+              max_timestamp_delta, timestamp_delta);
         }
+        iobuf records_data = std::move(data).finish();
 
         // As model::batch_builder::build_header() lays it out for the same
         // records, but for a max timestamp that saturates where the builder
@@ -498,19 +603,15 @@ dedup_window_filter::filter_request(model::record_batch batch) {
         auto max_timestamp = base_ts;
         if (
           header.attrs.timestamp_type() == model::timestamp_type::create_time) {
-            int64_t max_ts{};
-            if (__builtin_add_overflow(base_ts(), max_timestamp_delta, &max_ts))
-              [[unlikely]] {
-                max_ts = max_timestamp_delta < 0
-                           ? std::numeric_limits<int64_t>::min()
-                           : std::numeric_limits<int64_t>::max();
-            }
-            max_timestamp = model::timestamp{max_ts};
+            // Saturating, as the walk's per-record timestamps are: the delta
+            // is client-controlled.
+            max_timestamp = model::timestamp{
+              saturating_add(base_ts(), max_timestamp_delta)};
         }
         model::record_batch_header out{
           .header_crc = 0,
           .size_bytes = static_cast<int32_t>(
-            model::packed_record_batch_header_size + data.size_bytes()),
+            model::packed_record_batch_header_size + records_data.size_bytes()),
           .base_offset = header.base_offset,
           .type = header.type,
           .crc = 0,
@@ -525,7 +626,7 @@ dedup_window_filter::filter_request(model::record_batch batch) {
           .ctx = ctx,
         };
         model::record_batch rebuilt(
-          out, std::move(data), model::record_batch::tag_ctor_ng{});
+          out, std::move(records_data), model::record_batch::tag_ctor_ng{});
         // From the original batch, not `header`: `readable` may be the
         // decompressed temporary, whose attrs no longer name the compression
         // the rebuilt batch should be written back with.

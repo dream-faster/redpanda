@@ -33,6 +33,9 @@
 #include <array>
 #include <chrono>
 #include <cstddef>
+#include <cstring>
+#include <functional>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -1903,6 +1906,221 @@ TEST(DedupIdentityWalk, RejectsATruncatedBatch) {
     EXPECT_THROW(walk(truncated, std::nullopt), std::out_of_range);
     EXPECT_THROW(
       walk(truncated, std::optional<ss::sstring>{"h"}), std::out_of_range);
+}
+
+namespace {
+
+// The same batch with its records buffer split into fragments of the sizes
+// \p next_size gives, each its own fragment, so every field can be made to
+// straddle a boundary.
+template<typename F>
+model::record_batch refragmented(const model::record_batch& b, F next_size) {
+    const auto flat = b.data().copy();
+    const auto bytes = iobuf_const_parser(flat).peek_bytes(flat.size_bytes());
+    iobuf data;
+    for (size_t at = 0; at < bytes.size();) {
+        const size_t n = std::min<size_t>(next_size(), bytes.size() - at);
+        ss::temporary_buffer<char> piece(n);
+        std::memcpy(piece.get_write(), bytes.data() + at, n);
+        iobuf one;
+        one.append(std::move(piece));
+        data.append_fragments(std::move(one));
+        at += n;
+    }
+    return {b.header(), std::move(data), model::record_batch::tag_ctor_ng{}};
+}
+
+size_t fragments_of(const iobuf& b) {
+    return static_cast<size_t>(std::distance(b.begin(), b.end()));
+}
+
+struct walked_span {
+    walked w;
+    cluster::dedup_record_span span;
+
+    bool operator==(const walked_span& o) const {
+        return w == o.w && span.body == o.span.body
+               && span.offset_delta == o.span.offset_delta
+               && span.after_offset_delta == o.span.after_offset_delta
+               && span.end == o.span.end;
+    }
+};
+
+std::vector<walked_span> walk_spans(
+  const model::record_batch& b, const std::optional<ss::sstring>& key_header) {
+    std::vector<walked_span> out;
+    cluster::for_each_dedup_identity(
+      b,
+      key_header,
+      [&out](
+        cluster::dedup_identity_lookup lookup,
+        cluster::dedup_identity_digest digest,
+        model::timestamp ts,
+        const cluster::dedup_record_span& span) {
+          out.push_back({{lookup, digest, ts}, span});
+          return true;
+      });
+    return out;
+}
+
+// Records whose fields take every varint width a produce batch can carry:
+// timestamp deltas of one to ten bytes, keys and values from empty to longer
+// than a fragment, headers.
+model::record_batch make_varied_batch() {
+    std::vector<record_spec> specs;
+    const std::vector<int64_t> deltas{
+      0,
+      -1,
+      63,
+      -8192,
+      1'000'000,
+      int64_t{1} << 40,
+      -(int64_t{1} << 55),
+      // Ten-byte varints, still clear of the overflow the walk saturates
+      // and the record parse it is checked against does not.
+      int64_t{1} << 62,
+      -(int64_t{1} << 62)};
+    for (size_t i = 0; i < 40; ++i) {
+        record_spec spec;
+        if (i % 7 != 3) {
+            spec.key = ss::sstring(i % 5 == 0 ? 300 : i % 9, 'k')
+                       + fmt::format("-{}", i);
+        }
+        spec.value = ss::sstring(i % 6 == 0 ? 700 : i % 4, 'v');
+        spec.timestamp_delta = deltas[i % deltas.size()];
+        if (i % 3 == 0) {
+            spec.headers = {
+              {"dedup-id", fmt::format("id-{}", i / 2)}, {"other", "x"}};
+        } else if (i % 3 == 1) {
+            spec.headers = {{"other", "y"}, {"dedup-id", ""}};
+        } else {
+            spec.headers = {{"dedup-id", fmt::format("id-{}", i)}};
+        }
+        specs.push_back(std::move(spec));
+    }
+    return make_batch_of(specs, ts(1'000'000));
+}
+
+} // namespace
+
+// The walk reads fields straight from a fragment's bytes and falls back to a
+// byte at a time only for a field that spans two: wherever the boundaries
+// fall, it reads what a single fragment yields.
+TEST(DedupIdentityWalk, IsIndependentOfFragmentation) {
+    const auto batch = refragmented(
+      make_varied_batch(), [] { return std::numeric_limits<size_t>::max(); });
+    ASSERT_EQ(fragments_of(batch.data()), 1u);
+    const std::optional<ss::sstring> header{"dedup-id"};
+    const auto by_key = walk_spans(batch, std::nullopt);
+    const auto by_header = walk_spans(batch, header);
+    ASSERT_EQ(walk(batch, std::nullopt), parse(batch, std::nullopt));
+    ASSERT_EQ(walk(batch, header), parse(batch, header));
+
+    std::mt19937_64 rng(5);
+    std::vector<std::function<size_t()>> splits;
+    for (size_t n = 1; n <= 24; ++n) {
+        splits.emplace_back([n] { return n; });
+    }
+    for (size_t limit : {3, 16, 200, 2000}) {
+        splits.emplace_back([&rng, limit] { return 1 + rng() % limit; });
+    }
+    for (auto& split : splits) {
+        const auto pieces = refragmented(batch, split);
+        ASSERT_EQ(pieces.data(), batch.data());
+        ASSERT_GT(fragments_of(pieces.data()), 1u);
+        EXPECT_EQ(walk_spans(pieces, std::nullopt), by_key);
+        EXPECT_EQ(walk_spans(pieces, header), by_header);
+    }
+}
+
+// The rebuild copies spans out of a fragmented buffer into fragments of its
+// own: the result is the same bytes however the input was split.
+TEST(DedupWindowFilter, SplicedRebuildIsIndependentOfFragmentation) {
+    const auto batch = make_varied_batch();
+    const auto filter_once = [](const model::record_batch& b) {
+        cluster::dedup_window_filter f(3'600'000ms);
+        // Every third record's key is indexed already, and the batch repeats
+        // none of its own, so a third of it drops.
+        size_t i = 0;
+        b.copy().for_each_record([&](model::record r) {
+            if (r.has_key() && i++ % 3 == 0) {
+                f.populate(r.key().copy(), ts(1'000'000));
+            }
+        });
+        return f.filter_request(b.copy());
+    };
+    auto whole = filter_once(batch);
+    ASSERT_TRUE(whole.batch);
+    ASSERT_LT(whole.batch->record_count(), batch.record_count());
+    ASSERT_GT(whole.batch->record_count(), 0);
+    for (size_t n : {1, 2, 3, 5, 8, 13, 64, 500}) {
+        auto got = filter_once(refragmented(batch, [n] { return n; }));
+        ASSERT_TRUE(got.batch);
+        EXPECT_EQ(got.batch->header(), whole.batch->header());
+        EXPECT_EQ(got.batch->data(), whole.batch->data());
+        EXPECT_EQ(got.dropped, whole.dropped);
+    }
+}
+
+// A rebuilt batch larger than an iobuf fragment is split across several, each
+// as large as a fragment can be but the last. That none keeps room allocated
+// behind the batch is the writer's own assertion: a trimmed buffer reports
+// its trimmed size as its capacity.
+TEST(DedupWindowFilter, LargeRebuildIsWrittenInFullFragments) {
+    std::vector<record_spec> specs;
+    for (size_t i = 0; i < 600; ++i) {
+        specs.push_back(
+          {.key = fmt::format("key-{}", i % 400),
+           .value = ss::sstring(1000, 'v')});
+    }
+    auto batch = make_batch_of(specs, ts(1'000'000));
+    cluster::dedup_window_filter f(3'600'000ms);
+    auto got = f.filter_request(batch.copy());
+    ASSERT_TRUE(got.batch);
+    ASSERT_EQ(got.batch->record_count(), 400);
+    const auto& data = got.batch->data();
+    ASSERT_GT(data.size_bytes(), iobuf::max_linearize_size);
+    EXPECT_EQ(
+      fragments_of(data),
+      (data.size_bytes() + iobuf::max_linearize_size - 1)
+        / iobuf::max_linearize_size);
+    size_t left = data.size_bytes();
+    for (const auto& frag : data) {
+        const auto want = std::min<size_t>(left, iobuf::max_linearize_size);
+        EXPECT_EQ(frag.size(), want);
+        EXPECT_EQ(frag.capacity(), want);
+        left -= std::min(left, frag.size());
+    }
+    std::vector<bool> dropped(600, false);
+    for (size_t i = 400; i < 600; ++i) {
+        dropped[i] = true;
+    }
+    const auto expected = rebuild_through_builder(batch, dropped);
+    EXPECT_EQ(got.batch->header(), expected.header());
+    EXPECT_EQ(data, expected.data());
+}
+
+// A rebuilt batch's max timestamp saturates where the base timestamp plus the
+// largest kept delta would overflow, as the walk's per-record timestamps do.
+TEST(DedupWindowFilter, RebuiltMaxTimestampSaturates) {
+    // The base is set after building: the builder adds the delta itself.
+    auto batch = make_batch_of(
+      {{.key = "a", .value = "1"},
+       {.key = "b", .value = "2", .timestamp_delta = 1000},
+       {.key = "a", .value = "3"}},
+      ts(1'000'000));
+    batch.header().first_timestamp = model::timestamp{
+      std::numeric_limits<int64_t>::max() - 10};
+    cluster::dedup_window_filter f(3'600'000ms);
+    auto got = f.filter_request(std::move(batch));
+    ASSERT_TRUE(got.batch);
+    ASSERT_EQ(got.batch->record_count(), 2);
+    EXPECT_EQ(
+      got.batch->header().first_timestamp,
+      model::timestamp{std::numeric_limits<int64_t>::max() - 10});
+    EXPECT_EQ(
+      got.batch->header().max_timestamp,
+      model::timestamp{std::numeric_limits<int64_t>::max()});
 }
 
 // Identities that reach the index as digests (the apply path) land in the
