@@ -23,8 +23,10 @@
 #include "storage/record_batch_builder.h"
 #include "utils/vint.h"
 
+#include <seastar/core/coroutine.hh>
 #include <seastar/core/future.hh>
 #include <seastar/core/lowres_clock.hh>
+#include <seastar/core/shared_future.hh>
 
 #include <fmt/format.h>
 #include <gtest/gtest.h>
@@ -3786,6 +3788,122 @@ TEST(DedupShardBudget, ABurstIntoAFullShardKeepsItsOwnIdentities) {
               limit,
               burst,
               cycle,
+              resent->record_count());
+            now += 1'000;
+        }
+    }
+}
+
+// As above, with the partitions kept the way a leader keeps them after a
+// restart -- restored deferred, the burst's partition building its lookup on
+// its first request -- and the burst arriving while another partition's
+// restore is part way: suspended at a random entry of one of its passes, its
+// claim on the shard budget standing. Bursts stay within a quarter of one
+// partition's share of the shard; a burst larger than all its partition may
+// keep cannot be kept whole by any policy.
+TEST(DedupShardBudget, ABurstDuringAnotherPartitionsRestoreKeepsItsIdentities) {
+    for (uint64_t seed = 1; seed <= 400; ++seed) {
+        std::mt19937_64 rng(seed);
+        const size_t limit = 2'000 + rng() % 30'000;
+        auto budget = make_budget(limit);
+        std::array<std::unique_ptr<cluster::dedup_window_filter>, 4> fs;
+        for (auto& f : fs) {
+            f = std::make_unique<cluster::dedup_window_filter>(
+              3'600'000ms, 1'000'000, budget);
+        }
+        int64_t now = 1'000'000;
+        for (size_t p = 0; p < fs.size(); ++p) {
+            for (size_t i = 0; i < limit / 3; ++i) {
+                fs[p]->populate(
+                  iobuf::from(fmt::format("p{}-{}", p, i)),
+                  ts(now + static_cast<int64_t>(i / 50)));
+            }
+            now += static_cast<int64_t>(limit / 3 / 50) + 1;
+        }
+        const size_t burst = std::min<size_t>(50 + rng() % 1'000, limit / 16);
+        for (size_t cycle = 0; cycle < 12; ++cycle) {
+            std::array<cluster::dedup_index_snapshot, 4> snaps;
+            for (size_t p = 0; p < fs.size(); ++p) {
+                snaps[p] = fs[p]->snapshot();
+                fs[p].reset();
+            }
+            const size_t leader = cycle % fs.size();
+            const size_t paused = (leader + 1 + rng() % 3) % fs.size();
+            std::vector<size_t> order;
+            for (size_t p = 0; p < fs.size(); ++p) {
+                if (p != paused) {
+                    order.push_back(p);
+                }
+            }
+            std::shuffle(order.begin(), order.end(), rng);
+            const bool paused_first = rng() % 2 == 0;
+            const size_t pause_in_call = rng() % 4;
+            const auto& snap = snaps[paused];
+            const size_t pause_at = snap.entries.empty()
+                                      ? 0
+                                      : rng() % snap.entries.size();
+            ss::promise<> resume;
+            ss::shared_future<> resumed(resume.get_future());
+            size_t calls = 0;
+            bool did_pause = false;
+            std::optional<ss::future<>> restoring;
+            auto start_paused = [&] {
+                fs[paused] = std::make_unique<cluster::dedup_window_filter>(
+                  3'600'000ms, 1'000'000, budget);
+                fs[paused]->defer_lookup();
+                restoring.emplace(
+                  fs[paused]->restore_from(
+                    snap.entries.size(),
+                    snap.max_timestamp,
+                    [&](auto emit) -> ss::future<> {
+                        const bool pause_here = !did_pause
+                                                && calls++ == pause_in_call;
+                        for (size_t i = 0; i < snap.entries.size(); ++i) {
+                            if (pause_here && i == pause_at) {
+                                did_pause = true;
+                                co_await resumed.get_future();
+                            }
+                            emit(
+                              snap.entries[i].identity,
+                              snap.entries[i].timestamp);
+                        }
+                    }));
+            };
+            if (paused_first) {
+                start_paused();
+            }
+            for (auto p : order) {
+                fs[p] = std::make_unique<cluster::dedup_window_filter>(
+                  3'600'000ms, 1'000'000, budget);
+                fs[p]->defer_lookup();
+                fs[p]->restore(snaps[p]);
+            }
+            if (!paused_first) {
+                start_paused();
+            }
+            auto& f = *fs[leader];
+            f.build_lookup().get();
+            now += 2'000;
+            std::vector<record_spec> specs;
+            for (size_t i = 0; i < burst; ++i) {
+                specs.push_back(
+                  {.key = fmt::format("cycle{}-{}", cycle, i),
+                   .value = "v",
+                   .timestamp_delta = static_cast<int64_t>(i / 100)});
+            }
+            ASSERT_TRUE(f.filter(make_batch_of(specs, ts(now))).has_value());
+            resume.set_value();
+            restoring->get();
+            const auto resent = f.filter(make_batch_of(specs, ts(now + 50)));
+            ASSERT_FALSE(resent.has_value()) << fmt::format(
+              "seed {} limit {} burst {} cycle {} (restore of {} paused: "
+              "{}): {} of the burst's identities admitted again",
+              seed,
+              limit,
+              burst,
+              cycle,
+              paused,
+              did_pause,
               resent->record_count());
             now += 1'000;
         }
