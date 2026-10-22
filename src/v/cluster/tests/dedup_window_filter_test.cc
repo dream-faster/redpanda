@@ -3910,6 +3910,31 @@ TEST(DedupShardBudget, ABurstDuringAnotherPartitionsRestoreKeepsItsIdentities) {
     }
 }
 
+// A batch with more new identities than its partition may hold beside the
+// shard's other entries keeps the newest of them, all indexed: its own
+// oldest make room for its newest once nothing older is to be had, as they
+// would at the partition's own ceiling.
+TEST(DedupShardBudget, ABatchLargerThanItsShareKeepsItsNewest) {
+    constexpr size_t shard_limit = 2'000;
+    auto budget = make_budget(shard_limit);
+    cluster::dedup_window_filter idle(3'600'000ms, 1'000'000, budget);
+    cluster::dedup_window_filter busy(3'600'000ms, 1'000'000, budget);
+    populate_n(idle, "idle", shard_limit / 2, 1'000'000, 1);
+    constexpr size_t batch = 3 * shard_limit;
+    std::vector<record_spec> specs;
+    for (size_t i = 0; i < batch; ++i) {
+        specs.push_back(
+          {.key = fmt::format("busy-{}", i),
+           .value = "v",
+           .timestamp_delta = static_cast<int64_t>(i)});
+    }
+    ASSERT_TRUE(busy.filter(make_batch_of(specs, ts(2'000'000))).has_value());
+    EXPECT_EQ(busy.unindexed_records(), 0u);
+    EXPECT_LE(budget->entries, shard_limit);
+    std::vector<record_spec> newest(specs.end() - 200, specs.end());
+    EXPECT_FALSE(busy.filter(make_batch_of(newest, ts(2'000'000))).has_value());
+}
+
 // Shard pressure trims down to the shard's soft limit and no further: the
 // condition is re-checked as each entry is dropped, so a sweep step does not
 // keep trimming live identities once its own erases have brought the shard
