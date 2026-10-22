@@ -24,6 +24,7 @@
 #include "test_utils/test.h"
 
 #include <seastar/core/byteorder.hh>
+#include <seastar/util/defer.hh>
 
 #include <gtest/gtest.h>
 
@@ -85,6 +86,41 @@ struct dedup_stm_test_accessor {
         return ss::make_lw_shared<dedup_stm::inflight_request>();
     }
 
+    /// Index \p key as a request still in flight leaves it: in the index,
+    /// and pending on \p introducer.
+    static void introduce(
+      dedup_stm& stm,
+      std::string_view key,
+      model::timestamp ts,
+      const dedup_stm::inflight_ptr& introducer) {
+        const auto digest = dedup_digest_of(iobuf::from(key));
+        stm._state.populate(digest, ts);
+        stm._pending.insert_or_assign(digest, introducer);
+    }
+
+    /// Settle what introduce() set up, as for a request raft did (\p
+    /// appended) or did not append. A no-op once it is settled, so a test can
+    /// also call it on exit to release requests still waiting on it.
+    static void settle_introduction(
+      dedup_stm& stm,
+      std::string_view key,
+      model::timestamp ts,
+      const dedup_stm::inflight_ptr& introducer,
+      bool appended) {
+        const auto digest = dedup_digest_of(iobuf::from(key));
+        if (
+          auto it = stm._pending.find(digest);
+          it == stm._pending.end() || it->second != introducer) {
+            return;
+        }
+        dedup_request_undo undo;
+        undo.entries.push_back(
+          {.identity = digest,
+           .applied_timestamp = ts,
+           .previous_timestamp = std::nullopt});
+        stm.settle(introducer, undo, appended, std::nullopt);
+    }
+
     static size_t pending_size(const dedup_stm& stm) {
         return stm._pending.size();
     }
@@ -132,13 +168,22 @@ struct dedup_stm_test_accessor {
 
 namespace {
 
-model::record_batch make_batch(
-  std::string_view key, std::string_view value, model::timestamp timestamp) {
+model::record_batch make_batch_of(
+  std::initializer_list<std::string_view> keys,
+  model::timestamp timestamp,
+  std::string_view value = "value") {
     storage::record_batch_builder builder(
       model::record_batch_type::raft_data, model::offset{0});
     builder.set_timestamp(timestamp);
-    builder.add_raw_kv(iobuf::from(key), iobuf::from(value));
+    for (auto key : keys) {
+        builder.add_raw_kv(iobuf::from(key), iobuf::from(value));
+    }
     return std::move(builder).build();
+}
+
+model::record_batch make_batch(
+  std::string_view key, std::string_view value, model::timestamp timestamp) {
+    return make_batch_of({key}, timestamp, value);
 }
 
 // Build a single-record batch with a Kafka key and, optionally, one header
@@ -1088,6 +1133,124 @@ TEST_F_CORO(dedup_stm_fixture, concurrent_same_key_is_admitted_once) {
     auto stm = get_stm<0>(node(leader));
     ASSERT_EQ_CORO(dedup_stm_test_accessor::pending_size(*stm), 0);
     ASSERT_EQ_CORO(dedup_stm_test_accessor::resolving_size(*stm), 0);
+}
+
+// A request that drops records against a request still in flight hands its
+// own records to raft straight away: only its acknowledgment waits for the
+// introducer. Its enqueued stage -- which the Kafka connection waits on before
+// it reads the next request -- must not wait on another request's
+// replication.
+TEST_F_CORO(
+  dedup_stm_fixture, partial_duplicate_is_enqueued_before_introducer) {
+    co_await initialize_state_machines();
+    set_dedup_config(1h);
+    auto leader = co_await wait_for_leader(10s);
+    // Sync the leader before setting up the in-flight introducer.
+    co_await produce(leader, "warm-up", "v", model::timestamp{1000});
+    auto stm = get_stm<0>(node(leader));
+    const auto before = node(leader).raft()->dirty_offset();
+
+    auto introducer = dedup_stm_test_accessor::make_inflight();
+    dedup_stm_test_accessor::introduce(
+      *stm, "k1", model::timestamp{1000}, introducer);
+    // A failed assertion must not leave the request waiting on it until the
+    // sync timeout, holding up the fixture's teardown.
+    auto release = ss::defer([&] {
+        dedup_stm_test_accessor::settle_introduction(
+          *stm, "k1", model::timestamp{1000}, introducer, false);
+    });
+
+    auto stages = stm->replicate_in_stages(
+      make_batch_of({"k1", "k2"}, model::timestamp{1000}),
+      raft::replicate_options(raft::consistency_level::quorum_ack));
+    // Well within sync_timeout, which is how long the introducer could keep
+    // a request that waited on it before enqueueing.
+    co_await ss::with_timeout(
+      model::timeout_clock::now() + 5s, std::move(stages.request_enqueued));
+    // k2 reaches the log while the introducer is still unresolved.
+    co_await wait_for_stms(before + model::offset{1});
+    ASSERT_FALSE_CORO(stages.replicate_finished.available());
+
+    dedup_stm_test_accessor::settle_introduction(
+      *stm, "k1", model::timestamp{1000}, introducer, true);
+    auto result = co_await std::move(stages.replicate_finished);
+    ASSERT_TRUE_CORO(result.has_value());
+    ASSERT_EQ_CORO(result.value().replicated_record_count, 1);
+    ASSERT_EQ_CORO(dedup_stm_test_accessor::pending_size(*stm), 0);
+}
+
+// The introducer was never appended: the request whose records were already
+// replicated fails for retry, keeping what it appended. The retry drops those
+// against themselves and admits the identity the introducer gave back.
+TEST_F_CORO(
+  dedup_stm_fixture, partial_duplicate_of_a_failed_introducer_retries_cleanly) {
+    co_await initialize_state_machines();
+    set_dedup_config(1h);
+    auto leader = co_await wait_for_leader(10s);
+    co_await produce(leader, "warm-up", "v", model::timestamp{1000});
+    auto stm = get_stm<0>(node(leader));
+    const auto before = node(leader).raft()->dirty_offset();
+
+    auto introducer = dedup_stm_test_accessor::make_inflight();
+    dedup_stm_test_accessor::introduce(
+      *stm, "k1", model::timestamp{1000}, introducer);
+    auto release = ss::defer([&] {
+        dedup_stm_test_accessor::settle_introduction(
+          *stm, "k1", model::timestamp{1000}, introducer, false);
+    });
+    auto stages = stm->replicate_in_stages(
+      make_batch_of({"k1", "k2"}, model::timestamp{1000}),
+      raft::replicate_options(raft::consistency_level::quorum_ack));
+    co_await std::move(stages.request_enqueued);
+    co_await wait_for_stms(before + model::offset{1});
+    dedup_stm_test_accessor::settle_introduction(
+      *stm, "k1", model::timestamp{1000}, introducer, false);
+
+    auto failed = co_await std::move(stages.replicate_finished);
+    ASSERT_FALSE_CORO(failed.has_value());
+    // k2 was appended and stays indexed; k1 was given back.
+    ASSERT_EQ_CORO(stm->map_size(), 2); // warm-up and k2
+
+    auto retried = co_await produce_batch(
+      leader, make_batch_of({"k1", "k2"}, model::timestamp{1000}));
+    ASSERT_TRUE_CORO(retried.has_value());
+    ASSERT_EQ_CORO(retried.value().replicated_record_count, 1);
+    // One batch each: k2 alone, then k1 alone.
+    ASSERT_EQ_CORO(
+      node(leader).raft()->dirty_offset(), before + model::offset{2});
+    ASSERT_EQ_CORO(stm->map_size(), 3);
+    ASSERT_EQ_CORO(dedup_stm_test_accessor::pending_size(*stm), 0);
+}
+
+// An all-duplicate request has nothing to replicate, so nothing for the
+// requests behind it to be ordered after: it is enqueued at once and only its
+// acknowledgment waits on the introducer.
+TEST_F_CORO(dedup_stm_fixture, all_duplicate_is_enqueued_before_introducer) {
+    co_await initialize_state_machines();
+    set_dedup_config(1h);
+    auto leader = co_await wait_for_leader(10s);
+    co_await produce(leader, "warm-up", "v", model::timestamp{1000});
+    auto stm = get_stm<0>(node(leader));
+
+    auto introducer = dedup_stm_test_accessor::make_inflight();
+    dedup_stm_test_accessor::introduce(
+      *stm, "k1", model::timestamp{1000}, introducer);
+    auto release = ss::defer([&] {
+        dedup_stm_test_accessor::settle_introduction(
+          *stm, "k1", model::timestamp{1000}, introducer, false);
+    });
+    auto stages = stm->replicate_in_stages(
+      make_batch_of({"k1"}, model::timestamp{1000}),
+      raft::replicate_options(raft::consistency_level::quorum_ack));
+    co_await ss::with_timeout(
+      model::timeout_clock::now() + 5s, std::move(stages.request_enqueued));
+    ASSERT_FALSE_CORO(stages.replicate_finished.available());
+
+    dedup_stm_test_accessor::settle_introduction(
+      *stm, "k1", model::timestamp{1000}, introducer, true);
+    auto result = co_await std::move(stages.replicate_finished);
+    ASSERT_TRUE_CORO(result.has_value());
+    ASSERT_EQ_CORO(result.value().replicated_record_count, 0);
 }
 
 // A committed batch whose records cannot be read is skipped, not retried:
