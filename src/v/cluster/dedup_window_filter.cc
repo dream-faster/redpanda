@@ -164,6 +164,17 @@ bool dedup_window_filter::over_shard_soft_limit() const {
                 _shard_budget->max_entries, capacity_soft_margin_divisor);
 }
 
+bool dedup_window_filter::counts_for_capacity() const {
+    if (
+      _index.size()
+      >= soft_limit_of(_max_entries, capacity_count_margin_divisor)) {
+        return true;
+    }
+    return _shard_budget
+           && _shard_budget->entries >= soft_limit_of(
+                _shard_budget->max_entries, capacity_count_margin_divisor);
+}
+
 bool dedup_window_filter::over_shard_reclaim_limit() const {
     return _shard_budget
            && _shard_budget->entries >= soft_limit_of(
@@ -329,7 +340,8 @@ dedup_window_filter::clamp_to_broker_time(model::timestamp ts) {
 bool dedup_window_filter::is_duplicate(
   dedup_identity_digest identity,
   model::timestamp ts,
-  dedup_request_undo* undo) {
+  dedup_request_undo* undo,
+  size_t* matched) {
     dassert(lookup_ready(), "dedup: lookup without a lookup table");
     note_shard_time(ts);
     const auto pos = _index.find(identity);
@@ -339,6 +351,9 @@ bool dedup_window_filter::is_duplicate(
           stored_ts.value() != dedup_compact_index::expired
           && within_window(ts.value(), stored_ts.value(), _window.count())) {
             ++_dropped_records;
+            if (matched) {
+                *matched = pos;
+            }
             return true;
         }
         _max_ts = std::max(_max_ts, ts);
@@ -374,6 +389,7 @@ bool dedup_window_filter::is_duplicate(
         ++_unindexed_records;
         return false;
     }
+    note_stored(_index.size() - 1);
     note_admitted(ts.value());
     sync_shard_budget();
     if (undo) {
@@ -482,6 +498,11 @@ dedup_window_filter::filter_request(model::record_batch batch) {
     undo.entries.reserve(static_cast<size_t>(total));
     chunked_vector<dedup_identity_digest> dropped;
     int32_t kept = 0;
+    // Positions from here on hold only what this request inserts: an erase
+    // moves the array's last entry into its hole, and while the array is
+    // longer than this, its last entry is one of this request's. A record
+    // found there repeats one earlier in the request.
+    const size_t own_from = _index.size();
     const size_t n = records.size();
     const auto identity_at =
       [&records](size_t j) -> const dedup_identity_digest* {
@@ -490,10 +511,13 @@ dedup_window_filter::filter_request(model::record_batch batch) {
     for (size_t i = 0; i < n; ++i) {
         prefetch_ahead(i, n, identity_at);
         auto& c = records[i];
+        size_t matched = 0;
         c.dropped = c.has_identity
-                    && is_duplicate(c.identity, c.timestamp, &undo);
+                    && is_duplicate(c.identity, c.timestamp, &undo, &matched);
         if (c.dropped) {
-            dropped.push_back(c.identity);
+            if (matched < own_from) {
+                dropped.push_back(c.identity);
+            }
         } else {
             ++kept;
         }
@@ -681,8 +705,10 @@ void dedup_window_filter::revert_request(const dedup_request_undo& undo) {
         }
         if (entry.previous_timestamp) {
             _index.set_timestamp_at(pos, entry.previous_timestamp->value());
+            note_stored(pos);
         } else {
             note_erase(pos);
+            note_erase_behind_cursor(pos);
             _index.erase_at(pos);
         }
     }
@@ -746,6 +772,7 @@ void dedup_window_filter::populate(
         ++_unindexed_records;
         return;
     }
+    note_stored(_index.size() - 1);
     note_admitted(ts.value());
     sync_shard_budget();
 }
@@ -765,6 +792,7 @@ void dedup_window_filter::populate_unindexed(
         ++_unindexed_records;
         return;
     }
+    note_stored(_index.size() - 1);
     note_admitted(ts.value());
     sync_shard_budget();
 }
@@ -841,8 +869,17 @@ ss::future<> dedup_window_filter::build_lookup() {
 
 void dedup_window_filter::erase_at(size_t index) {
     note_erase(index);
+    note_erase_behind_cursor(index);
     _index.erase_at(index);
     sync_shard_budget();
+}
+
+void dedup_window_filter::note_erase_behind_cursor(size_t index) {
+    // The array's last entry moves to \p index, where this pass's cursor has
+    // been already: the pass will not see it.
+    if (index < _sweep_pos && index + 1 != _index.size()) {
+        _pass_saw_all = false;
+    }
 }
 
 void dedup_window_filter::note_erase(size_t index) {
@@ -874,6 +911,9 @@ void dedup_window_filter::invalidate_walks() {
 void dedup_window_filter::begin_pass() {
     _pass_counts.fill(0);
     _pass_visited = 0;
+    _pass_uncounted = false;
+    _pass_saw_all = true;
+    _pass_rebase_expired = _index.expired_by_rebase();
     // The frame the pass measures entries against, frozen for its duration:
     // _max_ts advances while the cursor walks, and buckets shifting underneath
     // it would describe no single moment. Rounding the width up keeps
@@ -912,12 +952,33 @@ void dedup_window_filter::finish_pass() {
         accumulated += _pass_counts[bucket];
         ++bucket;
     }
-    if (accumulated == 0) {
+    // A pass that counted only part of what it visited -- the sweep began
+    // counting partway through it -- would take its quarter of that part
+    // alone, and the entries it left uncounted below the cutoff could make
+    // the cutoff mark most of the index. The next pass counts every entry.
+    if (accumulated == 0 || _pass_uncounted) {
         _capacity_cutoff = model::timestamp::min();
     } else {
         _capacity_cutoff = model::timestamp{
           _pass_lo + static_cast<int64_t>(bucket) * _pass_width};
     }
+    if (_pass_saw_all) {
+        _oldest_bound = _pass_oldest;
+        _rebase_expired_seen = _pass_rebase_expired;
+    }
+    begin_pass();
+}
+
+void dedup_window_filter::restart_pass() {
+    // The pass the skipped steps interrupted is framed as of when it began:
+    // for an index that filled while its sweep had nothing to do, that is the
+    // empty index's frame, which puts every entry in one bucket. That pass
+    // would end without a cutoff, and the index would go a whole pass more
+    // without one just as it nears a limit, where the cutoff decides what it
+    // gives up. The bound frames a fresh pass over the index as it is now.
+    _sweep_skipped = false;
+    _sweep_pos = 0;
+    _pass_oldest = _oldest_bound;
     begin_pass();
 }
 
@@ -979,6 +1040,19 @@ void dedup_window_filter::sweep_step(size_t budget) {
     // shard back under it.
     const bool largest_here = _shard_budget && over_shard_soft_limit()
                               && among_the_largest();
+    // Far from every limit the cutoff decides nothing, so the visit skips the
+    // histogram. The oldest timestamp is still taken: it frames the next pass.
+    const bool counting = counts_for_capacity();
+    if (
+      !counting && _oldest_bound >= cutoff
+      && _index.expired_by_rebase() == _rebase_expired_seen) {
+        // Nothing has expired, and nothing is near a limit to trim for.
+        _sweep_skipped = true;
+        return;
+    }
+    if (_sweep_skipped) {
+        restart_pass();
+    }
 
     for (size_t step = 0; step < budget; ++step) {
         if (_index.empty()) {
@@ -1014,7 +1088,12 @@ void dedup_window_filter::sweep_step(size_t budget) {
             ++_capacity_evicted_entries;
             continue;
         }
-        count_in_pass(stamp);
+        if (counting) {
+            count_in_pass(stamp);
+        } else {
+            _pass_oldest = std::min(_pass_oldest, stamp.value());
+            _pass_uncounted = true;
+        }
         ++_sweep_pos;
     }
 }
@@ -1079,11 +1158,18 @@ void dedup_window_filter::replace_oldest_visited(model::timestamp incoming) {
     // (see CapacityEvictionFailsOpenWhenNoSliceCanBeFreed), and only an entry
     // strictly older than the incoming one is replaced, so an index whose
     // entries all share the incoming timestamp keeps them.
-    if (_sweep_pos >= _index.size()) {
-        // The step ended with the cursor at the end, so there is nothing ahead
-        // of it in this pass. Wrap as the next step would, and look at the
-        // start of the next pass instead: on a small index that is every
-        // entry, and an empty window would replace nothing.
+    if (
+      _sweep_pos > 0
+      && _sweep_pos + capacity_emergency_budget > _index.size()) {
+        // Fewer than a window's worth of entries are left ahead of the cursor,
+        // and the array's tail is the newest arrivals: the oldest of a few of
+        // them is still a recent identity, which a resend would then get
+        // through. Wrap as the next step would, and look at the start of the
+        // next pass instead -- on a small index that is every entry. The tail
+        // goes unvisited this pass, so the pass bounds nothing.
+        if (_sweep_pos < _index.size()) {
+            _pass_saw_all = false;
+        }
         _sweep_pos = 0;
         finish_pass();
     }
@@ -1115,6 +1201,9 @@ void dedup_window_filter::replace_oldest_visited(model::timestamp incoming) {
             // the oldest of a short window there is likely one of them, and
             // replacing many per insert would otherwise drop the newest
             // identities while older ones stay.
+            if (_sweep_pos < _index.size()) {
+                _pass_saw_all = false;
+            }
             _sweep_pos = 0;
             finish_pass();
         }
@@ -1148,6 +1237,7 @@ void dedup_window_filter::replace_oldest_visited(model::timestamp incoming) {
               !wrapped
               || _sweep_pos + capacity_emergency_budget > _index.size()) {
                 wrapped = true;
+                _pass_saw_all = false;
                 _sweep_pos = 0;
                 finish_pass();
             } else {
@@ -1178,6 +1268,7 @@ void dedup_window_filter::replace_oldest_visited(model::timestamp incoming) {
 
 void dedup_window_filter::visit_through(size_t pos) {
     const int64_t cutoff = expiry_cutoff();
+    const bool counting = counts_for_capacity();
     for (; _sweep_pos <= pos && _sweep_pos < _index.size(); ++_sweep_pos) {
         ++_sweep_visits;
         const auto stamp = model::timestamp{_index.timestamp_at(_sweep_pos)};
@@ -1186,7 +1277,12 @@ void dedup_window_filter::visit_through(size_t pos) {
             // entry in ahead of the cursor.
             continue;
         }
-        count_in_pass(stamp);
+        if (counting) {
+            count_in_pass(stamp);
+        } else {
+            _pass_oldest = std::min(_pass_oldest, stamp.value());
+            _pass_uncounted = true;
+        }
     }
 }
 
@@ -1340,6 +1436,9 @@ void dedup_window_filter::clear() {
     _shard_time_seen = std::numeric_limits<int64_t>::min();
     _capacity_cutoff = model::timestamp::min();
     _pass_oldest = no_pass_oldest;
+    _oldest_bound = std::numeric_limits<int64_t>::max();
+    _rebase_expired_seen = 0;
+    _sweep_skipped = false;
     begin_pass();
 }
 

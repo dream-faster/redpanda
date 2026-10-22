@@ -434,9 +434,11 @@ struct dedup_request_undo {
 struct dedup_filter_result {
     std::optional<model::record_batch> batch;
     dedup_request_undo undo;
-    /// The identity of every record dropped as a duplicate, in record order.
-    /// The caller uses them to find the requests that introduced those
-    /// identities and are still in flight (see dedup_stm::do_replicate()).
+    /// The identity of every record dropped as a duplicate of one an earlier
+    /// request introduced, in record order. The caller uses them to find the
+    /// requests that introduced those identities and are still in flight (see
+    /// dedup_stm::do_replicate()). A record repeating one earlier in the same
+    /// request is left out: its introducer is the request itself.
     chunked_vector<dedup_identity_digest> dropped;
     /// True iff header mode is active and some record in the request lacked
     /// the configured header: the caller must fail the whole request rather
@@ -986,6 +988,9 @@ public:
     /// delta is what proves there is no O(index) work on the produce or apply
     /// path. Exposed for tests rather than as a metric.
     size_t sweep_visits() const { return _sweep_visits; }
+    /// Timestamp below which the cursor trims an index near a limit; see
+    /// _capacity_cutoff. Exposed for tests.
+    model::timestamp capacity_cutoff() const { return _capacity_cutoff; }
     /// Produce requests rebuilt because some, but not all, of their records
     /// were dropped. These are the only requests that pay for a batch rebuild
     /// and a recompression, so this is the rate that drives the dedup
@@ -1008,10 +1013,13 @@ private:
     /// broker time, so log replay is unaffected.
     model::timestamp clamp_to_broker_time(model::timestamp);
 
+    /// Whether \p identity is in the index within the window of \p ts. If it
+    /// is, \p matched is set to the position it was found at.
     bool is_duplicate(
       dedup_identity_digest identity,
       model::timestamp ts,
-      dedup_request_undo* undo);
+      dedup_request_undo* undo,
+      size_t* matched = nullptr);
 
     /// The sweeping every new identity pays for, on the leader's path and
     /// the follower's alike: reclaim_expired_elsewhere(), then sweep_step().
@@ -1121,8 +1129,19 @@ private:
     /// Turn a completed pass's histogram into the next capacity cutoff and
     /// start the following pass.
     void finish_pass();
+    /// Abandon the pass in progress for one framed from _oldest_bound,
+    /// starting at the front of the index.
+    void restart_pass();
     /// Add \p stamp to the histogram of the pass in progress, \p times over.
     void count_in_pass(model::timestamp stamp, size_t times = 1);
+    /// Lower _oldest_bound to the timestamp stored at \p pos, and mark the
+    /// pass incomplete if the cursor has been there already.
+    void note_stored(size_t pos) {
+        _oldest_bound = std::min(_oldest_bound, _index.timestamp_at(pos));
+        if (pos < _sweep_pos) {
+            _pass_saw_all = false;
+        }
+    }
 
     /// Erase the entry the cursor is on. The map moves its last entry into
     /// the freed slot, so the caller must re-examine the same index rather
@@ -1142,6 +1161,9 @@ private:
     /// the map will move into its place for every walk that has passed the
     /// index but not reached the end of the array.
     void note_erase(size_t index);
+    /// Mark the pass incomplete if an erase at \p index moves an entry where
+    /// the cursor has already been.
+    void note_erase_behind_cursor(size_t index);
     /// Called when the whole entry array is discarded.
     void invalidate_walks();
     /// Entries emitted between preemption checks. 16 bytes each on the wire,
@@ -1182,6 +1204,8 @@ private:
             // Twice in the snapshot is twice here, until build_lookup().
             if (!_index.append_unindexed(identity, ts.value())) {
                 ++_truncated_entries;
+            } else {
+                note_stored(_index.size() - 1);
             }
             return;
         }
@@ -1192,6 +1216,8 @@ private:
             }
         } else if (!_index.push_back(identity, ts.value())) {
             ++_truncated_entries;
+        } else {
+            note_stored(_index.size() - 1);
         }
     }
     /// Account for the restored entries.
@@ -1204,6 +1230,9 @@ private:
     bool over_shard_soft_limit() const;
     /// Whether the shard is within reclaim_margin_divisor of its limit.
     bool over_shard_reclaim_limit() const;
+    /// Whether this index or its shard is within
+    /// capacity_count_margin_divisor of its limit.
+    bool counts_for_capacity() const;
     /// Whether no index on the shard is larger than this one by more than a
     /// tenth of its size; those are the indices whose cursors trim under shard
     /// pressure. Requires a shard budget.
@@ -1240,6 +1269,12 @@ private:
     // entry. Dropping an expired entry costs no coverage, so starting earlier
     // costs only the bounded step.
     static constexpr size_t reclaim_margin_divisor = 5;
+    // Margin below a limit, as a divisor of it, from which the sweep counts
+    // the entries it visits toward the capacity cutoff: half. Below it no
+    // trim is near -- an index growing from half its limit to the soft limit
+    // takes several passes, each of which measures a fresh cutoff -- and the
+    // count is most of what a visit costs once the window is full.
+    static constexpr size_t capacity_count_margin_divisor = 2;
 
     // Fraction of the index the capacity cutoff designates as droppable:
     // size/capacity_evict_divisor, so a quarter, measured over a completed
@@ -1355,6 +1390,8 @@ private:
     // single moment, so the frame is fixed for the pass.
     std::array<size_t, capacity_evict_buckets> _pass_counts{};
     size_t _pass_visited{0};
+    // The pass in progress visited an entry without counting it.
+    bool _pass_uncounted{false};
     int64_t _pass_lo{0};
     int64_t _pass_span{0};
     int64_t _pass_width{1};
@@ -1363,11 +1400,30 @@ private:
     static constexpr int64_t no_pass_oldest
       = std::numeric_limits<int64_t>::max();
     int64_t _pass_oldest{no_pass_oldest};
+    // No entry is older than this: the oldest a complete pass saw, lowered by
+    // every timestamp stored since. While the expiry cutoff is below it the
+    // cursor has nothing to find, and away from every limit nothing to trim
+    // or count either, so the sweep skips its visits. A pass is complete when
+    // nothing was stored behind the cursor -- a revert can restore an older
+    // timestamp there -- and no erase moved an unvisited entry there. A block's
+    // re-base can turn older entries into expired ones below the bound; they
+    // can never match, and go once the cutoff passes the bound.
+    int64_t _oldest_bound{std::numeric_limits<int64_t>::max()};
+    bool _pass_saw_all{true};
+    // expired_by_rebase() at the start of this pass, and as of the last
+    // complete one: a re-base since then may have left expired entries the
+    // bound says nothing about.
+    size_t _pass_rebase_expired{0};
+    size_t _rebase_expired_seen{0};
+    // A step was skipped since the cursor last moved, so the pass in progress
+    // is stale: see restart_pass().
+    bool _sweep_skipped{false};
     // Timestamp below which the oldest quarter of the index lay when the last
     // pass completed. timestamp::min() means that pass found no bucket prefix
     // small enough to cut, so nothing is dropped for capacity -- more than a
     // quarter shares one narrow range, and dropping it would throw away
-    // coverage nobody asked to lose.
+    // coverage nobody asked to lose -- or that it did not count every entry
+    // it visited (see finish_pass()).
     model::timestamp _capacity_cutoff{model::timestamp::min()};
     size_t _sweep_visits{0};
     size_t _dropped_records{0};

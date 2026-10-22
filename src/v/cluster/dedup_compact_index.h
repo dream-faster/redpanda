@@ -329,6 +329,9 @@ public:
     };
     /// O(segments + slots): for tests and benchmarks.
     table_stats stats() const noexcept;
+    /// How many entries a block's re-base could not keep in its span, and so
+    /// turned into ones that read back as expired.
+    size_t expired_by_rebase() const noexcept { return _expired_by_rebase; }
     /// table_stats::work, in O(1).
     size_t work() const noexcept { return _work; }
 
@@ -451,6 +454,7 @@ private:
     uint32_t _bulk_slots{0};
 
     size_t _rebases{0};
+    size_t _expired_by_rebase{0};
     size_t _refused_inserts{0};
     size_t _segment_splits{0};
     mutable size_t _work{0};

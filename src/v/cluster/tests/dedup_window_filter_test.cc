@@ -338,6 +338,15 @@ TEST(DedupWindowFilter, FilterRequestReportsDroppedIdentities) {
     ASSERT_EQ(all.dropped.size(), 2u);
     EXPECT_EQ(all.dropped[0], cluster::dedup_digest_of(iobuf::from("c")));
     EXPECT_EQ(all.dropped[1], cluster::dedup_digest_of(iobuf::from("a")));
+
+    // A repeat of a record earlier in the same request is not reported: that
+    // request is its own introducer.
+    auto repeats = f.filter_request(make_multi_batch(
+      {{"d", "8"}, {"d", "9"}, {"a", "10"}, {"d", "11"}}, ts(1300)));
+    ASSERT_TRUE(repeats.batch.has_value());
+    EXPECT_EQ(record_count(*repeats.batch), 1);
+    ASSERT_EQ(repeats.dropped.size(), 1u);
+    EXPECT_EQ(repeats.dropped[0], cluster::dedup_digest_of(iobuf::from("a")));
 }
 
 // A record's timestamp delta is client-controlled. One that carries the
@@ -1025,6 +1034,97 @@ TEST(DedupWindowFilter, CapacityEvictionKeepsDedupWorkingWhenSaturated) {
     EXPECT_EQ(f.unindexed_records(), 0u);
     EXPECT_GT(f.capacity_evicted_entries(), 0u);
     EXPECT_FALSE(f.filter(make_batch("id-40", "v", ts(80000))).has_value());
+}
+
+// While every entry is younger than the window, the cursor has nothing to
+// expire and, away from every limit, nothing to trim or count, so new
+// identities pay for no visits. Once the cutoff passes the oldest entry it
+// sweeps again, frees what expired, and stops again after a pass that saw
+// every entry.
+TEST(DedupWindowFilter, SweepWaitsUntilSomethingCanHaveExpired) {
+    constexpr int64_t window_ms = 10'000;
+    cluster::dedup_window_filter f(
+      std::chrono::milliseconds(window_ms), 100'000);
+    for (int64_t i = 0; i < 1000; ++i) {
+        f.populate(iobuf::from(fmt::format("old-{}", i)), ts(1000 + i));
+    }
+    EXPECT_EQ(f.sweep_visits(), 0u);
+    EXPECT_EQ(f.map_size(), 1000u);
+
+    for (int64_t i = 0; i < 2000; ++i) {
+        f.populate(iobuf::from(fmt::format("new-{}", i)), ts(30'000 + i));
+    }
+    EXPECT_GT(f.sweep_visits(), 0u);
+    EXPECT_EQ(f.map_size(), 2000u);
+    EXPECT_TRUE(f.filter(make_batch("old-0", "v", ts(32'000))).has_value());
+    EXPECT_FALSE(f.filter(make_batch("new-0", "v", ts(32'000))).has_value());
+
+    const auto before = f.sweep_visits();
+    for (int64_t i = 0; i < 100; ++i) {
+        f.populate(iobuf::from(fmt::format("later-{}", i)), ts(32'001 + i));
+    }
+    EXPECT_EQ(f.sweep_visits(), before);
+}
+
+// A revert can store an older timestamp where the pass in progress has been
+// already. That pass did not see it, so it bounds nothing: the sweep goes on
+// until a pass that does see it frees the expired entry, rather than resting
+// on a bound that entry is older than.
+TEST(DedupWindowFilter, RevertBehindTheCursorKeepsTheSweepGoing) {
+    cluster::dedup_window_filter f(std::chrono::milliseconds{10'000}, 100'000);
+    for (int i = 0; i < 20; ++i) {
+        f.populate(iobuf::from(fmt::format("y-{}", i)), ts(5000));
+    }
+    f.populate(iobuf::from("x"), ts(3000));
+    for (int i = 20; i < 30; ++i) {
+        f.populate(iobuf::from(fmt::format("y-{}", i)), ts(5000));
+    }
+    ASSERT_EQ(f.map_size(), 31u);
+
+    // "x" is older than the window here, so the request rewrites it, and its
+    // new identities move the cursor past it before the revert puts it back.
+    auto result = f.filter_request(make_multi_batch(
+      {{"x", "v"}, {"n-0", "v"}, {"n-1", "v"}, {"n-2", "v"}}, ts(14'000)));
+    ASSERT_TRUE(result.batch.has_value());
+    EXPECT_EQ(record_count(*result.batch), 4);
+    f.revert_request(result.undo);
+    ASSERT_EQ(f.map_size(), 31u);
+
+    for (int i = 0; i < 10; ++i) {
+        f.populate(iobuf::from(fmt::format("m-{}", i)), ts(14'000));
+    }
+    EXPECT_EQ(f.map_size(), 30u + 10u);
+}
+
+// Below half its limit the sweep counts nothing toward the capacity cutoff.
+// An index that grew from far below its limit has still measured one by the
+// time it trims, and trims its oldest entries, not its newest. Without one it
+// would trim nothing and admit everything past the ceiling unindexed; with
+// one, only the few records that arrive at the ceiling before the cursor
+// reaches the oldest entries are.
+TEST(DedupWindowFilter, CapacityTrimsTheOldestAfterGrowingFromFarBelow) {
+    constexpr size_t cap = 20'000;
+    constexpr size_t identities = cap + cap / 2;
+    cluster::dedup_window_filter f(1000s, cap);
+    const auto stamp = [](size_t i) {
+        return ts(1000 + static_cast<int64_t>(i) * 10);
+    };
+    for (size_t i = 0; i < identities; ++i) {
+        f.populate(iobuf::from(fmt::format("id-{}", i)), stamp(i));
+        ASSERT_LE(f.map_size(), f.max_entries());
+    }
+    const size_t unindexed = f.unindexed_records();
+    EXPECT_LE(unindexed, cap / 64);
+    EXPECT_GT(f.capacity_evicted_entries(), cap / 4);
+    size_t held = 0;
+    for (size_t i = identities - cap / 4; i < identities; ++i) {
+        held += f.filter(make_batch(fmt::format("id-{}", i), "v", stamp(i)))
+                    .has_value()
+                  ? 0
+                  : 1;
+    }
+    EXPECT_GE(held, cap / 4 - unindexed);
+    EXPECT_TRUE(f.filter(make_batch("id-0", "v", stamp(0))).has_value());
 }
 
 // A timestamp cutoff cannot drop a bounded slice when more than that slice
@@ -4253,4 +4353,78 @@ TEST(DedupDeferredLookup, DeferredIndexesShareTheShardBudget) {
     follower.build_lookup().get();
     ASSERT_TRUE(follower.lookup_ready());
     EXPECT_EQ(budget->entries, leader.map_size() + follower.map_size());
+}
+
+// The acceptance scenario of ManySmallIdleIndicesCannotStarveABusyOne at its
+// real scale and timestamps: the first idle indices fill while the shard is
+// below half, where their sweeps have nothing to do, and the busy one must
+// still grow to parity with them and keep every one of its newest identities.
+TEST(DedupShardBudget, IdleIndicesFilledFarFromTheLimitStillGiveRoom) {
+    constexpr size_t shard_limit = 20'000;
+    constexpr size_t idle_count = 20;
+    constexpr size_t share = shard_limit / idle_count;
+    constexpr auto window = std::chrono::milliseconds{3'600'000};
+    constexpr size_t no_ceiling = 1'000'000'000;
+    const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                          std::chrono::system_clock::now().time_since_epoch())
+                          .count();
+    auto budget = make_budget(shard_limit);
+    std::vector<std::unique_ptr<cluster::dedup_window_filter>> idle;
+    for (size_t j = 0; j < idle_count; ++j) {
+        idle.push_back(
+          std::make_unique<cluster::dedup_window_filter>(
+            window, no_ceiling, budget));
+        populate_n(
+          *idle.back(),
+          fmt::format("idle{}", j),
+          share,
+          now - 3'000'000 + static_cast<int64_t>(j) * 10'000);
+    }
+    cluster::dedup_window_filter busy(window, no_ceiling, budget);
+    constexpr size_t busy_count = 20'000;
+    populate_n(
+      busy, "busy", busy_count, now - 1'000'000, 1'000'000 / busy_count);
+    EXPECT_LE(budget->entries, shard_limit);
+    EXPECT_EQ(busy.unindexed_records(), 0);
+    EXPECT_GE(busy.map_size(), share - share / 10 - 64);
+    for (size_t i = busy_count - 500; i < busy_count; ++i) {
+        EXPECT_FALSE(
+          busy.filter(make_batch(fmt::format("busy-{}", i), "dup", ts(now)))
+            .has_value())
+          << "busy-" << i;
+    }
+}
+
+// The sweep counts toward the capacity cutoff only near a limit, and here a
+// neighbour brings the shard near one partway through a pass. A cutoff taken
+// from what that pass counted, its newest entries, would mark most of the
+// index; it ends with none, and the next pass, which counts every entry,
+// marks at most a quarter.
+TEST(DedupShardBudget, CountingFromPartwayThroughAPassMarksAtMostAQuarter) {
+    constexpr auto window = std::chrono::milliseconds{100'000};
+    constexpr size_t no_ceiling = 1'000'000'000;
+    auto budget = make_budget(2'000);
+    cluster::dedup_window_filter f(window, no_ceiling, budget);
+    cluster::dedup_window_filter neighbour(window, no_ceiling, budget);
+    const auto marked = [&f] {
+        size_t n = 0;
+        f.for_each_live_entry([&f, &n](const auto&, model::timestamp t) {
+            n += t < f.capacity_cutoff() ? 1 : 0;
+        });
+        return n;
+    };
+    // Nothing expires and nothing is near a limit: the sweep rests.
+    populate_n(f, "old", 400, 1000, 100);
+    // The oldest entry expires, so the sweep runs, counting nothing.
+    populate_n(f, "new", 40, 101'001, 0);
+    ASSERT_GT(f.sweep_visits(), 0u);
+    ASSERT_EQ(f.capacity_cutoff(), model::timestamp::min());
+    // Half the shard's limit: from here on the sweep counts.
+    populate_n(neighbour, "n", 700, 101'001, 0);
+    ASSERT_GE(budget->entries, 1'000u);
+    for (size_t i = 0; i < 200; ++i) {
+        f.populate(iobuf::from(fmt::format("late-{}", i)), ts(101'001));
+        ASSERT_LE(marked(), f.map_size() / 4 + 1) << "late-" << i;
+    }
+    EXPECT_GT(f.capacity_cutoff(), model::timestamp::min());
 }

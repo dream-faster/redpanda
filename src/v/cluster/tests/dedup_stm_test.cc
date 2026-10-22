@@ -98,6 +98,9 @@ struct dedup_stm_test_accessor {
         const auto digest = dedup_digest_of(iobuf::from(key));
         stm._state.populate(digest, ts);
         stm._pending.insert_or_assign(digest, introducer);
+        // Registered, as a request whose identity another one needed is, so
+        // that settle() takes it out of the pending set again.
+        introducer->registered = true;
         // As do_replicate() counts an admitted request, so that settle()
         // has one to discount.
         ++stm._unsettled;
@@ -131,7 +134,7 @@ struct dedup_stm_test_accessor {
     }
 
     static size_t pending_size(const dedup_stm& stm) {
-        return stm._pending.size();
+        return stm._pending.size() + stm._unregistered.size();
     }
 
     static size_t resolving_size(const dedup_stm& stm) {
@@ -1549,6 +1552,75 @@ TEST_F_CORO(dedup_stm_fixture, relaxed_introducer_is_fenced_until_committed) {
     ASSERT_TRUE_CORO(acknowledged.has_value());
     ASSERT_EQ_CORO(acknowledged.value().replicated_record_count, 0);
     ASSERT_GE_CORO(node(leader).raft()->committed_offset(), relaxed_offset);
+}
+
+// A request's identities go into the pending set only once a later request
+// needs one, and are found in its undo log until then. Either way, a
+// duplicate of a record still in flight waits for it: one dropping a few
+// records reads the in-flight request's log, one dropping many registers
+// every request in flight and looks them up.
+TEST_F_CORO(dedup_stm_fixture, duplicates_of_a_request_in_flight_wait_for_it) {
+    co_await initialize_state_machines();
+    set_dedup_config(1h);
+    auto leader = co_await wait_for_leader(10s);
+    co_await produce(leader, "warm-up", "v", model::timestamp{1000});
+    auto stm = get_stm<0>(node(leader));
+
+    replication_gate gate(node(leader));
+    auto introducer = stm->replicate_in_stages(
+      make_batch_of(
+        {"k1", "k2", "k3", "k4", "k5", "k6", "k7", "k8"},
+        model::timestamp{1000}),
+      raft::replicate_options(raft::consistency_level::quorum_ack));
+    co_await std::move(introducer.request_enqueued);
+
+    // Nothing of their own to replicate: without the introducer to wait for,
+    // both would be acknowledged at once.
+    auto few = produce_batch(
+      leader, make_batch_of({"k2"}, model::timestamp{1000}));
+    auto many = produce_batch(
+      leader,
+      make_batch_of(
+        {"k1", "k2", "k3", "k4", "k5", "k6"}, model::timestamp{1000}));
+    co_await ss::sleep(500ms);
+    ASSERT_FALSE_CORO(few.available());
+    ASSERT_FALSE_CORO(many.available());
+
+    gate.release();
+    auto appended = co_await std::move(introducer.replicate_finished);
+    ASSERT_TRUE_CORO(appended.has_value());
+    auto few_result = co_await std::move(few);
+    auto many_result = co_await std::move(many);
+    ASSERT_TRUE_CORO(few_result.has_value());
+    ASSERT_TRUE_CORO(many_result.has_value());
+    ASSERT_EQ_CORO(few_result.value().replicated_record_count, 0);
+    ASSERT_EQ_CORO(many_result.value().replicated_record_count, 0);
+    ASSERT_EQ_CORO(dedup_stm_test_accessor::pending_size(*stm), 0);
+}
+
+// A snapshot leaves out the identities of requests still in flight, whether
+// or not anything has registered them yet.
+TEST_F_CORO(dedup_stm_fixture, snapshot_leaves_out_requests_in_flight) {
+    co_await initialize_state_machines();
+    set_dedup_config(1h);
+    auto leader = co_await wait_for_leader(10s);
+    co_await produce(leader, "warm-up", "v", model::timestamp{1000});
+    auto stm = get_stm<0>(node(leader));
+
+    replication_gate gate(node(leader));
+    auto in_flight = stm->replicate_in_stages(
+      make_batch_of({"k1", "k2"}, model::timestamp{1000}),
+      raft::replicate_options(raft::consistency_level::quorum_ack));
+    co_await std::move(in_flight.request_enqueued);
+    ASSERT_EQ_CORO(stm->map_size(), 3);
+
+    auto snapshot = co_await stm->take_raft_snapshot(model::offset{});
+    ASSERT_EQ_CORO(
+      dedup_stm_test_accessor::snapshot_size(std::move(snapshot)), 1);
+
+    gate.release();
+    auto appended = co_await std::move(in_flight.replicate_finished);
+    ASSERT_TRUE_CORO(appended.has_value());
 }
 
 // What a leader admitted with relaxed acks in an earlier term was either

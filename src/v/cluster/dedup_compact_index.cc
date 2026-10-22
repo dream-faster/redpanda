@@ -264,9 +264,12 @@ void dedup_compact_index::rebase(size_t b, int64_t ts) {
         auto& e = entries[i];
         const auto t = decode(m.base, e.rel);
         const i128 offset = i128{t} - base;
-        e.rel = t == expired || offset < 0 || offset > block_span
-                  ? 0
-                  : static_cast<uint32_t>(offset + 1);
+        if (t != expired && (offset < 0 || offset > block_span)) {
+            ++_expired_by_rebase;
+            e.rel = 0;
+        } else {
+            e.rel = t == expired ? 0 : static_cast<uint32_t>(offset + 1);
+        }
     }
     m.base = base;
     m.newest = static_cast<int64_t>(hi);

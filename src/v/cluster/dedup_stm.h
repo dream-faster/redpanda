@@ -27,6 +27,8 @@
 #include <seastar/core/shared_future.hh>
 #include <seastar/core/shared_ptr.hh>
 
+#include <deque>
+
 namespace cluster {
 
 struct dedup_stm_test_accessor;
@@ -183,8 +185,16 @@ private:
     /// it is acknowledged, and a snapshot leaves them out. `appended` resolves
     /// true once the batch is appended at the request's consistency level,
     /// false once it is known never to have been and its entries are reverted.
+    ///
+    /// Its identities go into _pending only once another request needs to
+    /// look one up: most requests are settled before any later one drops a
+    /// record against them, and registering each identity only to erase it
+    /// again was a tenth of what dedup cost the leader. Until then `undo`
+    /// points at the request's undo log, which lists them.
     struct inflight_request {
         ss::shared_promise<bool> appended;
+        const dedup_request_undo* undo{nullptr};
+        bool registered{false};
     };
     using inflight_ptr = ss::lw_shared_ptr<inflight_request>;
     using pending_identities = chunked_hash_map<
@@ -224,6 +234,15 @@ private:
       const std::vector<inflight_ptr>& introducers,
       std::optional<std::reference_wrapper<ss::abort_source>> as);
 
+    /// Put every unregistered request's identities into _pending, oldest
+    /// request first, so a newer one's registration wins as it would have.
+    void register_pending();
+    /// Take \p request off _unregistered, if it is there, and forget its
+    /// undo log.
+    void unlist(const inflight_ptr& request) noexcept;
+    /// The request in flight that introduced \p identity, if any.
+    inflight_ptr pending_introducer(const dedup_identity_digest& identity);
+    inflight_ptr lookup_registered(const dedup_identity_digest& identity) const;
     /// Resolve an in-flight request: drop its identities from the pending
     /// set, revert its insertions if the batch was never appended, and
     /// release the requests waiting on it.
@@ -282,6 +301,20 @@ private:
     /// Identities introduced by requests still in flight on this leader; see
     /// inflight_request. Bounded by the records in flight.
     pending_identities _pending;
+    /// Requests in flight whose identities are not in _pending yet, oldest
+    /// first. All of them are newer than any request that is. The front may
+    /// be marked registered: register_pending() threw partway through it.
+    std::deque<inflight_ptr> _unregistered;
+    /// Snapshots being written: while one is, requests register at once, so
+    /// it leaves out everything in flight.
+    size_t _snapshots_walking{0};
+    /// A request dropping more records than this against other requests
+    /// registers every unregistered one and looks them up in _pending;
+    /// fewer are found by reading the unregistered requests' undo logs.
+    static constexpr size_t scan_dropped_limit = 4;
+    /// Undo entries pending_introducer() reads before it registers every
+    /// unregistered request and looks the identity up in _pending instead.
+    static constexpr size_t scan_entries_limit = 512;
     // Requests admitted and not yet settled. While any is, the lookup table
     // stays: settle() may have to revert one (see do_apply()).
     size_t _unsettled{0};
