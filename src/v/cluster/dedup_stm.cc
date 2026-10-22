@@ -38,6 +38,7 @@
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <limits>
 #include <new>
 #include <vector>
 
@@ -293,32 +294,56 @@ ss::future<iobuf> dedup_stm::serialize_snapshot(
     // Entries are staged in a fixed local buffer and appended a chunk at a
     // time, so the pass costs a memcpy per entry rather than an iobuf append
     // per entry.
-    constexpr size_t chunk_entries = 16_KiB / packed_entry_size;
-    std::array<char, chunk_entries * packed_entry_size> chunk{};
+    std::array<char, 16_KiB> chunk{};
     iobuf entries;
+    // Ages are taken below the watermark as the walk starts, and every entry
+    // live then is at most a window below it, so a window a 32-bit age cannot
+    // span is written wide. One inserted meanwhile with a newer timestamp is
+    // written at the watermark, older than it is: its batch lies past the
+    // offset the snapshot covers, and replaying it after a restore puts the
+    // newer timestamp back.
+    model::timestamp max_timestamp;
+    uint32_t entry_size = packed_entry_size;
     for (;;) {
+        max_timestamp = state.max_timestamp();
+        entry_size = static_cast<uint32_t>(
+          state.window().count() > std::numeric_limits<uint32_t>::max()
+            ? wide_entry_size
+            : packed_entry_size);
+        const size_t chunk_bytes = chunk.size() - chunk.size() % entry_size;
         size_t staged = 0;
         const bool complete = co_await state.for_each_live_entry_async(
           [&](dedup_identity_digest identity, model::timestamp timestamp) {
               if (pending && pending->contains(identity)) {
                   return;
               }
-              char* out = chunk.data() + staged * packed_entry_size;
+              char* out = chunk.data() + staged;
               const auto lo = ss::cpu_to_le(identity.lo);
               const auto hi = ss::cpu_to_le(
                 static_cast<uint32_t>(identity.hi & dedup_digest_hi_mask));
-              const auto ts = ss::cpu_to_le(timestamp.value());
               std::memcpy(out, &lo, sizeof(lo));
               std::memcpy(out + sizeof(lo), &hi, sizeof(hi));
-              std::memcpy(out + sizeof(lo) + sizeof(hi), &ts, sizeof(ts));
-              if (++staged == chunk_entries) {
-                  entries.append(chunk.data(), staged * packed_entry_size);
+              out += sizeof(lo) + sizeof(hi);
+              if (entry_size == wide_entry_size) {
+                  const auto ts = ss::cpu_to_le(timestamp.value());
+                  std::memcpy(out, &ts, sizeof(ts));
+              } else {
+                  const auto age = std::clamp<__int128>(
+                    __int128{max_timestamp.value()} - timestamp.value(),
+                    0,
+                    std::numeric_limits<uint32_t>::max());
+                  const auto le_age = ss::cpu_to_le(static_cast<uint32_t>(age));
+                  std::memcpy(out, &le_age, sizeof(le_age));
+              }
+              staged += entry_size;
+              if (staged == chunk_bytes) {
+                  entries.append(chunk.data(), staged);
                   staged = 0;
               }
           });
         if (complete) {
             if (staged > 0) {
-                entries.append(chunk.data(), staged * packed_entry_size);
+                entries.append(chunk.data(), staged);
             }
             break;
         }
@@ -333,9 +358,9 @@ ss::future<iobuf> dedup_stm::serialize_snapshot(
       state_snapshot{
         .window_ms = state.window().count(),
         .generation = generation,
-        .max_timestamp = state.max_timestamp(),
+        .max_timestamp = max_timestamp,
         .entries = std::move(entries),
-        .entry_size = packed_entry_size});
+        .entry_size = entry_size});
 }
 
 namespace {
@@ -343,7 +368,11 @@ namespace {
 /// Decode the packed entries of a state_snapshot, yielding every few
 /// thousand so a large restore shares the reactor.
 template<typename Emit>
-ss::future<> for_each_packed_entry(const iobuf& packed, Emit emit) {
+ss::future<> for_each_packed_entry(
+  const iobuf& packed,
+  size_t entry_size,
+  model::timestamp max_timestamp,
+  Emit emit) {
     constexpr size_t entries_per_yield = 4096;
     iobuf_const_parser parser(packed);
     size_t n = 0;
@@ -351,7 +380,15 @@ ss::future<> for_each_packed_entry(const iobuf& packed, Emit emit) {
         dedup_identity_digest identity;
         identity.lo = ss::le_to_cpu(parser.consume_type<uint64_t>());
         identity.hi = ss::le_to_cpu(parser.consume_type<uint32_t>());
-        const auto ts = ss::le_to_cpu(parser.consume_type<int64_t>());
+        int64_t ts{};
+        if (entry_size == dedup_stm::packed_entry_size) {
+            const auto age = ss::le_to_cpu(parser.consume_type<uint32_t>());
+            ts = static_cast<int64_t>(std::max<__int128>(
+              std::numeric_limits<int64_t>::min(),
+              __int128{max_timestamp.value()} - age));
+        } else {
+            ts = ss::le_to_cpu(parser.consume_type<int64_t>());
+        }
         emit(identity, model::timestamp{ts});
         if ((++n % entries_per_yield) == 0) {
             co_await ss::coroutine::maybe_yield();
@@ -368,7 +405,7 @@ dedup_stm::state_snapshot dedup_stm::decode_snapshot(iobuf buffer) {
 ss::future<> dedup_stm::restore_snapshot(
   dedup_window_filter& state, int64_t& generation, state_snapshot snapshot) {
     const size_t entry_size = snapshot.entry_size;
-    if (entry_size != packed_entry_size) {
+    if (entry_size != packed_entry_size && entry_size != wide_entry_size) {
         throw serde::serde_exception(
           ssx::sformat(
             "dedup snapshot entries of unknown size {}", entry_size));
@@ -388,12 +425,16 @@ ss::future<> dedup_stm::restore_snapshot(
     // each index is memory a starting broker may not have. restore_from()
     // owns the selection of which entries to keep.
     const auto& packed = snapshot.entries;
+    const auto max_timestamp = snapshot.max_timestamp;
     co_await state.restore_from(
       packed_bytes / entry_size,
-      snapshot.max_timestamp,
-      [&packed](auto&& emit) {
+      max_timestamp,
+      [&packed, entry_size, max_timestamp](auto&& emit) {
           return for_each_packed_entry(
-            packed, std::forward<decltype(emit)>(emit));
+            packed,
+            entry_size,
+            max_timestamp,
+            std::forward<decltype(emit)>(emit));
       });
     generation = snapshot.generation;
 }

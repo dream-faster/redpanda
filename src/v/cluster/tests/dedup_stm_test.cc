@@ -168,17 +168,17 @@ struct dedup_stm_test_accessor {
             .window_ms = 1000, .generation = 1, .entries = std::move(entries)});
     }
 
-    /// \p entries in the packed layout (digest lo, low 32 bits of digest hi,
-    /// timestamp).
-    static iobuf
-    state_snapshot_with_entries(iobuf entries, model::timestamp max_timestamp) {
+    /// \p entries in the wide layout (digest lo, low 32 bits of digest hi,
+    /// timestamp), as earlier version 4 snapshots hold them.
+    static iobuf state_snapshot_with_wide_entries(
+      iobuf entries, model::timestamp max_timestamp) {
         return serde::to_iobuf(
           dedup_stm::state_snapshot{
             .window_ms = 3'600'000,
             .generation = 1,
             .max_timestamp = max_timestamp,
             .entries = std::move(entries),
-            .entry_size = dedup_stm::packed_entry_size});
+            .entry_size = dedup_stm::wide_entry_size});
     }
 
     static bytes legacy_kvstore_key(const model::ntp& ntp) {
@@ -390,7 +390,7 @@ struct v3_state_snapshot
     int64_t generation{0};
     model::timestamp max_timestamp{model::timestamp::min()};
     iobuf entries;
-    uint32_t entry_size{dedup_stm::packed_entry_size};
+    uint32_t entry_size{dedup_stm::wide_entry_size};
 
     auto serde_fields() {
         return std::tie(
@@ -416,7 +416,7 @@ TEST(dedup_stm_snapshot, xxhash64_snapshots_are_refused) {
           .window_ms = 3'600'000,
           .generation = 4,
           .entries = iobuf::from(
-            std::string(dedup_stm::packed_entry_size, 'x'))}));
+            std::string(dedup_stm::wide_entry_size, 'x'))}));
     for (auto& buffer : buffers) {
         dedup_window_filter target(1h);
         int64_t generation = 0;
@@ -462,7 +462,7 @@ TEST(dedup_stm_snapshot, a_restored_identity_matches_its_key) {
     dedup_stm_test_accessor::restore(
       target,
       generation,
-      dedup_stm_test_accessor::state_snapshot_with_entries(
+      dedup_stm_test_accessor::state_snapshot_with_wide_entries(
         std::move(entries), model::timestamp{1'000'000}));
     ASSERT_EQ(target.map_size(), 1u);
     EXPECT_EQ(target.snapshot().entries[0].identity, digest);
@@ -484,7 +484,7 @@ TEST(dedup_stm_snapshot, unknown_entry_size_is_refused) {
         target,
         generation,
         dedup_stm_test_accessor::state_snapshot_with_entry_size(
-          iobuf::from(std::string(32, 'x')), 16)),
+          iobuf::from(std::string(48, 'x')), 24)),
       serde::serde_exception);
     EXPECT_EQ(target.map_size(), 0u);
 }
@@ -537,7 +537,7 @@ TEST(dedup_stm_snapshot, restore_into_a_smaller_ceiling_keeps_the_newest) {
     }
 }
 
-// The serialized size is the format's whole point: a fixed header plus 20
+// The serialized size is the format's whole point: a fixed header plus 16
 // bytes an entry, against 30 for the version 1 envelope-per-entry layout.
 TEST(dedup_stm_snapshot, packed_format_is_smaller_than_version_1) {
     constexpr size_t count = 10'000;
@@ -551,9 +551,103 @@ TEST(dedup_stm_snapshot, packed_format_is_smaller_than_version_1) {
     source.restore(seed);
     const auto packed
       = dedup_stm_test_accessor::serialize(source, 0).size_bytes();
-    static_assert(dedup_stm::packed_entry_size == 20);
+    static_assert(dedup_stm::packed_entry_size == 16);
     EXPECT_LE(packed, count * dedup_stm::packed_entry_size + 64);
     EXPECT_LT(packed, v1_snapshot_with(count).size_bytes());
+}
+
+// An entry's timestamp is written as its age below the snapshot's watermark,
+// which is exact for every age the index keeps an entry at.
+TEST(dedup_stm_snapshot, timestamps_round_trip_as_ages) {
+    constexpr int64_t newest = 1'700'000'000'000;
+    constexpr int64_t day = 86'400'000;
+    const std::vector<int64_t> ages{0, 1, 999, day, 30 * day, 36 * day};
+    dedup_window_filter source(std::chrono::milliseconds{37 * day});
+    dedup_index_snapshot seed{.max_timestamp = model::timestamp{newest}};
+    for (size_t i = 0; i < ages.size(); ++i) {
+        seed.entries.push_back(
+          {.identity = {.hi = i + 1, .lo = (i + 7) * 0x9e37'79b9'7f4a'7c15ULL},
+           .timestamp = model::timestamp{newest - ages[i]}});
+    }
+    source.restore(seed);
+    auto buffer = dedup_stm_test_accessor::serialize(source, 3);
+    ASSERT_EQ(
+      dedup_stm_test_accessor::snapshot_layout(buffer.copy()).first,
+      dedup_stm::packed_entry_size);
+    ASSERT_EQ(
+      dedup_stm_test_accessor::snapshot_size(buffer.copy()), ages.size());
+    dedup_window_filter target(std::chrono::milliseconds{37 * day});
+    int64_t generation = 0;
+    dedup_stm_test_accessor::restore(target, generation, std::move(buffer));
+    EXPECT_EQ(target.max_timestamp(), model::timestamp{newest});
+    std::vector<int64_t> got;
+    for (const auto& e : target.snapshot().entries) {
+        got.push_back(newest - e.timestamp.value());
+    }
+    std::ranges::sort(got);
+    EXPECT_EQ(got, ages);
+}
+
+namespace {
+
+// Snapshots an index holding a block of entries `old_age` below its watermark
+// and a few at it, then restores it. The old entries come first, so they fill
+// an index block of their own and keep their timestamps exactly at any age.
+// Returns the entry layout written and the restored ages, sorted.
+std::pair<uint32_t, std::vector<int64_t>>
+round_trip_an_old_block(std::chrono::milliseconds window, int64_t old_age) {
+    constexpr int64_t newest = 1'700'000'000'000;
+    constexpr size_t old_count = dedup_compact_index::block_entries;
+    constexpr size_t new_count = 3;
+    dedup_index_snapshot seed{.max_timestamp = model::timestamp{newest}};
+    for (size_t i = 0; i < old_count + new_count; ++i) {
+        const int64_t age = i < old_count ? old_age : 0;
+        seed.entries.push_back(
+          {.identity = {.hi = i + 1, .lo = (i + 7) * 0x9e37'79b9'7f4a'7c15ULL},
+           .timestamp = model::timestamp{newest - age}});
+    }
+    dedup_window_filter source(window);
+    source.restore(seed);
+    auto buffer = dedup_stm_test_accessor::serialize(source, 3);
+    const auto entry_size
+      = dedup_stm_test_accessor::snapshot_layout(buffer.copy()).first;
+    dedup_window_filter target(window);
+    int64_t generation = 0;
+    dedup_stm_test_accessor::restore(target, generation, std::move(buffer));
+    std::vector<int64_t> ages;
+    for (const auto& e : target.snapshot().entries) {
+        ages.push_back(newest - e.timestamp.value());
+    }
+    std::ranges::sort(ages);
+    return {entry_size, ages};
+}
+
+std::vector<int64_t> ages_of_an_old_block(int64_t old_age) {
+    std::vector<int64_t> ages(3, 0);
+    ages.resize(3 + dedup_compact_index::block_entries, old_age);
+    return ages;
+}
+
+} // namespace
+
+// A window a 32-bit age spans keeps the 16-byte layout up to its edge; a
+// longer one writes the timestamps in full rather than lose the entries a
+// 32-bit age cannot reach.
+TEST(dedup_stm_snapshot, a_window_beyond_32_bit_ages_is_written_wide) {
+    constexpr int64_t max_age = std::numeric_limits<uint32_t>::max();
+    constexpr int64_t day = 86'400'000;
+    const std::vector<std::pair<int64_t, size_t>> cases{
+      {max_age, dedup_stm::packed_entry_size},
+      {max_age + 1, dedup_stm::wide_entry_size},
+      {60 * day, dedup_stm::wide_entry_size},
+    };
+    for (const auto& [window_ms, layout] : cases) {
+        const auto [entry_size, ages] = round_trip_an_old_block(
+          std::chrono::milliseconds{window_ms}, window_ms);
+        EXPECT_EQ(entry_size, layout) << "window " << window_ms;
+        EXPECT_EQ(ages, ages_of_an_old_block(window_ms))
+          << "window " << window_ms;
+    }
 }
 
 // --- The yielding walk the snapshot is written from ---
@@ -751,7 +845,8 @@ TEST_CORO(dedup_live_walk, a_replaced_index_invalidates_the_walk) {
 
 // A snapshot can carry an identity twice when it was erased and admitted
 // again during the walk; the restore keeps the newer timestamp, as populate()
-// would.
+// would. Written in the wide layout, which version 4 snapshots first used and
+// this build still reads.
 TEST(dedup_stm_snapshot, a_repeated_identity_restores_to_the_newer_timestamp) {
     dedup_window_filter target(1h);
     int64_t generation = 0;
@@ -769,7 +864,7 @@ TEST(dedup_stm_snapshot, a_repeated_identity_restores_to_the_newer_timestamp) {
     dedup_stm_test_accessor::restore(
       target,
       generation,
-      dedup_stm_test_accessor::state_snapshot_with_entries(
+      dedup_stm_test_accessor::state_snapshot_with_wide_entries(
         std::move(entries), model::timestamp{walk_base_ts + 9}));
     ASSERT_EQ(target.map_size(), 1u);
     const auto restored = target.snapshot().entries;

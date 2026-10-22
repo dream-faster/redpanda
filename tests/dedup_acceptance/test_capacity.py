@@ -344,9 +344,9 @@ def test_default_shard_limit_follows_shard_memory(make_cluster, pytestconfig):
     m = c.node(0).metrics()
     limits = [v for _, v in m.select(SHARD_MAX)]
     assert len(limits) == 2
-    # 15% of each shard's ~1 GiB at 52 bytes an entry, give or take what
+    # 15% of each shard's ~1 GiB at 48 bytes an entry, give or take what
     # seastar keeps for itself.
-    expect = (1 << 30) * 15 // 100 // 52
+    expect = (1 << 30) * 15 // 100 // 48
     for v in limits:
         assert 0.7 * expect <= v <= 1.05 * expect, (v, expect)
 
