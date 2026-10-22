@@ -1079,6 +1079,9 @@ private:
     /// ahead of the cursor that are older than \p incoming, as many as it
     /// takes to get back under the limit, up to capacity_emergency_budget.
     void replace_oldest_visited(model::timestamp incoming);
+    // Advance the sweep cursor over \p pos, visiting each entry on the way
+    // as sweep_step() does but erasing none.
+    void visit_through(size_t pos);
 
     /// At the shard limit: take one bounded sweep step on the largest index
     /// on the shard, if it is larger than this one, before this index trims

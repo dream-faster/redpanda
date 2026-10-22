@@ -1221,6 +1221,13 @@ void dedup_window_filter::replace_oldest_visited(model::timestamp incoming) {
         debug_note(_index.timestamp_at(*oldest), 2);
         erase_at(*oldest);
         ++_capacity_evicted_entries;
+        // The erase moved the array's last entry -- the newest, as a rule an
+        // identity just admitted -- into the freed slot. Left ahead of the
+        // cursor it is a candidate for the next replacement, and a window
+        // holding only such entries gives up the oldest of them: identities a
+        // burst has just admitted, while older ones stay. Visit up to and over
+        // the slot, so it is behind the cursor for the rest of the pass.
+        visit_through(*oldest);
     }
     if (over_limit) {
         // Up to capacity_emergency_budget entries a call shrinks this index
@@ -1228,6 +1235,26 @@ void dedup_window_filter::replace_oldest_visited(model::timestamp incoming) {
         // index trimming itself would go on counting as the largest until it
         // was empty, while a larger one kept everything.
         stop_being_largest();
+    }
+}
+
+void dedup_window_filter::visit_through(size_t pos) {
+    const int64_t cutoff = expiry_cutoff();
+    const bool counting = counts_for_capacity();
+    for (; _sweep_pos <= pos && _sweep_pos < _index.size(); ++_sweep_pos) {
+        ++_sweep_visits;
+        const auto stamp = model::timestamp{_index.timestamp_at(_sweep_pos)};
+        if (!is_live(stamp.value(), cutoff)) {
+            // Left for the next pass to drop: erasing here would move another
+            // entry in ahead of the cursor.
+            continue;
+        }
+        if (counting) {
+            count_in_pass(stamp);
+        } else {
+            _pass_oldest = std::min(_pass_oldest, stamp.value());
+            _pass_uncounted = true;
+        }
     }
 }
 
