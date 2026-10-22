@@ -494,19 +494,32 @@ ss::future<> dedup_stm::do_apply(const model::record_batch& batch) {
         // already validated and committed under an older config, so a
         // record here may lack the *current* header; it is left unindexed
         // rather than rejecting an already committed batch.
-        auto batch_scope = _state.admit_batch();
-        for_each_dedup_identity(
-          readable,
-          _state.key_header(),
-          [this](
-            dedup_identity_lookup lookup,
-            dedup_identity_digest digest,
-            model::timestamp ts) {
-              if (lookup == dedup_identity_lookup::identity) {
-                  _state.populate(digest, ts);
-              }
-              return true;
-          });
+        //
+        // Digested first and indexed after, so the index can start each
+        // lookup's loads a few records ahead (see populate()).
+        chunked_vector<dedup_index_entry> entries;
+        entries.reserve(static_cast<size_t>(readable.record_count()));
+        try {
+            for_each_dedup_identity(
+              readable,
+              _state.key_header(),
+              [&entries](
+                dedup_identity_lookup lookup,
+                dedup_identity_digest digest,
+                model::timestamp ts) {
+                  if (lookup == dedup_identity_lookup::identity) {
+                      entries.push_back({.identity = digest, .timestamp = ts});
+                  }
+                  return true;
+              });
+        } catch (...) {
+            // The records ahead of an unreadable one are still indexed, as
+            // they were when each was indexed as soon as it was walked, so
+            // replicas on either side of an upgrade agree.
+            _state.populate(entries);
+            throw;
+        }
+        _state.populate(entries);
     } catch (const std::bad_alloc&) {
         throw;
     } catch (...) {

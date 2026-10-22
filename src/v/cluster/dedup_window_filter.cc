@@ -383,7 +383,14 @@ dedup_window_filter::filter_request(model::record_batch batch) {
     undo.entries.reserve(static_cast<size_t>(total));
     chunked_vector<dedup_identity_digest> dropped;
     int32_t kept = 0;
-    for (auto& c : records) {
+    const size_t n = records.size();
+    const auto identity_at =
+      [&records](size_t j) -> const dedup_identity_digest* {
+        return records[j].has_identity ? &records[j].identity : nullptr;
+    };
+    for (size_t i = 0; i < n; ++i) {
+        prefetch_ahead(i, n, identity_at);
+        auto& c = records[i];
         c.dropped = c.has_identity
                     && is_duplicate(c.identity, c.timestamp, &undo);
         if (c.dropped) {
@@ -490,6 +497,19 @@ void dedup_window_filter::revert_request(const dedup_request_undo& undo) {
         }
     }
     sync_shard_budget();
+}
+
+void dedup_window_filter::populate(
+  const chunked_vector<dedup_index_entry>& entries) {
+    auto batch = admit_batch();
+    const size_t n = entries.size();
+    const auto identity_at = [&entries](size_t j) {
+        return &entries[j].identity;
+    };
+    for (size_t i = 0; i < n; ++i) {
+        prefetch_ahead(i, n, identity_at);
+        populate(entries[i].identity, entries[i].timestamp);
+    }
 }
 
 void dedup_window_filter::populate(const iobuf& key, model::timestamp ts) {

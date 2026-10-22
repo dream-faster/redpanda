@@ -175,6 +175,35 @@ size_t dedup_compact_index::find(
     return npos;
 }
 
+void dedup_compact_index::prefetch(
+  const dedup_identity_digest& identity, prefetch_stage stage) const noexcept {
+    if (_directory.empty()) {
+        return;
+    }
+    const uint64_t h = identity.lo;
+    const segment* seg = _directory[directory_index(h)];
+    if (stage == prefetch_stage::segment) {
+        __builtin_prefetch(seg);
+        return;
+    }
+    const uint32_t* slot = &seg->slots[static_cast<uint32_t>(h) & seg->mask];
+    if (stage == prefetch_stage::slot) {
+        __builtin_prefetch(slot);
+        return;
+    }
+    // The home slot's entry: where find() reads first when the key is
+    // present and was not displaced, which at the table's load is most keys.
+    // A displaced occupant's entry is one find() never reads.
+    const uint32_t s = *slot;
+    if (s != 0 && slot_dist(s) == 0) {
+        const size_t pos = slot_pos(s);
+        if (pos < _size) {
+            __builtin_prefetch(&entry(pos));
+            __builtin_prefetch(&_meta[pos >> block_shift]);
+        }
+    }
+}
+
 size_t dedup_compact_index::block_size(size_t b) const noexcept {
     const size_t begin = b << block_shift;
     return _size <= begin ? 0 : std::min(block_entries, _size - begin);

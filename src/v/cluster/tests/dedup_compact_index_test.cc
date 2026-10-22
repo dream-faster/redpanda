@@ -12,6 +12,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <limits>
 #include <random>
@@ -744,6 +745,42 @@ TEST(DedupTimestampSelector, MatchesNthElement) {
     int passes = -1;
     EXPECT_EQ(select_kth({5, 5, 5}, 1, &passes), 5);
     EXPECT_EQ(passes, 0);
+}
+
+// prefetch() is a hint: whatever it is asked, at any stage and whatever the
+// index holds, it changes nothing a lookup or a later write sees.
+TEST(DedupCompactIndex, PrefetchChangesNothing) {
+    using stage = index_t::prefetch_stage;
+    constexpr std::array stages{stage::segment, stage::slot, stage::entry};
+    index_t idx;
+    uint64_t seed = 11;
+    // An empty index has no directory yet.
+    for (auto st : stages) {
+        idx.prefetch(random_digest(seed), st);
+    }
+    std::vector<dedup_identity_digest> present;
+    for (size_t i = 0; i < 20'000; ++i) {
+        present.push_back(dedup_canonical_digest(random_digest(seed)));
+        ASSERT_TRUE(idx.push_back(present.back(), 1'000 + i));
+        // Present and absent keys, as the table splits and grows under it.
+        const auto growing = idx.work();
+        for (auto st : stages) {
+            idx.prefetch(present[i / 2], st);
+            idx.prefetch(random_digest(seed), st);
+        }
+        ASSERT_EQ(idx.work(), growing);
+    }
+    const auto work = idx.work();
+    for (size_t i = 0; i < present.size(); i += 7) {
+        for (auto st : stages) {
+            idx.prefetch(present[i], st);
+        }
+    }
+    EXPECT_EQ(idx.work(), work);
+    idx.check_invariants();
+    for (size_t i = 0; i < present.size(); ++i) {
+        ASSERT_EQ(idx.find(present[i]), i);
+    }
 }
 
 TEST(DedupTimestampSelector, NarrowRangesTakeFewPasses) {
