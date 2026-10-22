@@ -26,6 +26,7 @@
 #include <seastar/core/coroutine.hh>
 #include <seastar/core/future.hh>
 #include <seastar/core/lowres_clock.hh>
+#include <seastar/core/shared_future.hh>
 
 #include <fmt/format.h>
 #include <gtest/gtest.h>
@@ -4505,7 +4506,7 @@ TEST(DedupShardBudgetFuzz, FreshIdentitiesWhileAnotherPartitionRestores) {
               3'600'000ms, 1'000'000, budget);
             fs[paused]->defer_lookup();
             ss::promise<> resume;
-            auto resumed = resume.get_future().share();
+            ss::shared_future<> resumed(resume.get_future());
             const size_t calls_before_pause = rng() % 4;
             const size_t entries_before_pause = snaps[paused].entries.empty()
                                                   ? 0
