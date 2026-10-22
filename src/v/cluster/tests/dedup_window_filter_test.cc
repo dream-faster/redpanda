@@ -3820,8 +3820,7 @@ TEST(DedupShardBudget, ABurstDuringAnotherPartitionsRestoreKeepsItsIdentities) {
             }
             now += static_cast<int64_t>(limit / 3 / 50) + 1;
         }
-        const size_t burst = std::min<size_t>(
-          50 + rng() % 1'000, limit / 16);
+        const size_t burst = std::min<size_t>(50 + rng() % 1'000, limit / 16);
         for (size_t cycle = 0; cycle < 12; ++cycle) {
             std::array<cluster::dedup_index_snapshot, 4> snaps;
             for (size_t p = 0; p < fs.size(); ++p) {
@@ -3852,22 +3851,23 @@ TEST(DedupShardBudget, ABurstDuringAnotherPartitionsRestoreKeepsItsIdentities) {
                 fs[paused] = std::make_unique<cluster::dedup_window_filter>(
                   3'600'000ms, 1'000'000, budget);
                 fs[paused]->defer_lookup();
-                restoring.emplace(fs[paused]->restore_from(
-                  snap.entries.size(),
-                  snap.max_timestamp,
-                  [&](auto emit) -> ss::future<> {
-                      const bool pause_here = !did_pause
-                                              && calls++ == pause_in_call;
-                      for (size_t i = 0; i < snap.entries.size(); ++i) {
-                          if (pause_here && i == pause_at) {
-                              did_pause = true;
-                              co_await resumed.get_future();
-                          }
-                          emit(
-                            snap.entries[i].identity,
-                            snap.entries[i].timestamp);
-                      }
-                  }));
+                restoring.emplace(
+                  fs[paused]->restore_from(
+                    snap.entries.size(),
+                    snap.max_timestamp,
+                    [&](auto emit) -> ss::future<> {
+                        const bool pause_here = !did_pause
+                                                && calls++ == pause_in_call;
+                        for (size_t i = 0; i < snap.entries.size(); ++i) {
+                            if (pause_here && i == pause_at) {
+                                did_pause = true;
+                                co_await resumed.get_future();
+                            }
+                            emit(
+                              snap.entries[i].identity,
+                              snap.entries[i].timestamp);
+                        }
+                    }));
             };
             if (paused_first) {
                 start_paused();
