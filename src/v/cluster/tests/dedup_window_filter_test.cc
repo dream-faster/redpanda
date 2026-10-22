@@ -29,6 +29,7 @@
 #include <fmt/format.h>
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstddef>
@@ -4362,4 +4363,91 @@ TEST(DedupShardBudget, CountingFromPartwayThroughAPassMarksAtMostAQuarter) {
         ASSERT_LE(marked(), f.map_size() / 4 + 1) << "late-" << i;
     }
     EXPECT_GT(f.capacity_cutoff(), model::timestamp::min());
+}
+
+// Experiment: the crash-restart loop on a full shard. Four partitions share a
+// shard filled past its budget; each "restart" snapshots every index and
+// restores it into a fresh, deferred one; the partition taking traffic builds
+// its lookup and filters a burst of fresh identities, and then their resend.
+// Every resend must be dropped.
+TEST(DedupShardBudgetFuzz, FreshIdentitiesOnAFullShardSurviveRestarts) {
+    size_t failures = 0;
+    for (uint64_t seed = 1; seed <= 60; ++seed) {
+        std::mt19937_64 rng(seed);
+        const size_t limit = 2'000 + rng() % 30'000;
+        auto budget = make_budget(limit);
+        std::array<std::unique_ptr<cluster::dedup_window_filter>, 4> fs;
+        for (auto& f : fs) {
+            f = std::make_unique<cluster::dedup_window_filter>(
+              3'600'000ms, 1'000'000, budget);
+        }
+        int64_t now = 1'000'000;
+        for (size_t p = 0; p < 4; ++p) {
+            for (size_t i = 0; i < limit / 3; ++i) {
+                fs[p]->populate(
+                  iobuf::from(fmt::format("p{}-{}", p, i)),
+                  ts(now + static_cast<int64_t>(i / 50)));
+            }
+            now += static_cast<int64_t>(limit / 3 / 50) + 1;
+        }
+        const size_t burst = 50 + rng() % 1'000;
+        for (size_t cycle = 0; cycle < 8; ++cycle) {
+            std::array<cluster::dedup_index_snapshot, 4> snaps;
+            for (size_t p = 0; p < 4; ++p) {
+                snaps[p] = fs[p]->snapshot();
+                fs[p].reset();
+            }
+            std::array<size_t, 4> order{0, 1, 2, 3};
+            std::shuffle(order.begin(), order.end(), rng);
+            for (auto p : order) {
+                fs[p] = std::make_unique<cluster::dedup_window_filter>(
+                  3'600'000ms, 1'000'000, budget);
+                fs[p]->defer_lookup();
+                fs[p]->restore(snaps[p]);
+            }
+            const size_t p = cycle % 4;
+            fs[p]->build_lookup().get();
+            now += 2'000;
+            std::vector<record_spec> specs;
+            for (size_t i = 0; i < burst; ++i) {
+                specs.push_back(
+                  {.key = fmt::format("cycle{}-{}", cycle, i),
+                   .value = "v",
+                   .timestamp_delta = static_cast<int64_t>(i / 100)});
+            }
+            const auto unindexed = fs[p]->unindexed_records();
+            const auto evicted = fs[p]->capacity_evicted_entries();
+            auto first = fs[p]->filter(make_batch_of(specs, ts(now)));
+            const auto unindexed_first = fs[p]->unindexed_records();
+            const auto evicted_first = fs[p]->capacity_evicted_entries();
+            auto second = fs[p]->filter(make_batch_of(specs, ts(now + 50)));
+            const size_t through = second ? second->record_count() : 0;
+            if (through > 0) {
+                ++failures;
+                ADD_FAILURE() << fmt::format(
+                  "seed {} limit {} burst {} cycle {}: {} resent identities "
+                  "admitted; unindexed {}->{}, evicted {}->{}->{}, sizes {} {} "
+                  "{} {}, shard {}/{}",
+                  seed,
+                  limit,
+                  burst,
+                  cycle,
+                  through,
+                  unindexed,
+                  unindexed_first,
+                  evicted,
+                  evicted_first,
+                  fs[p]->capacity_evicted_entries(),
+                  fs[0]->map_size(),
+                  fs[1]->map_size(),
+                  fs[2]->map_size(),
+                  fs[3]->map_size(),
+                  budget->entries,
+                  limit);
+                break;
+            }
+            now += 1'000;
+        }
+    }
+    EXPECT_EQ(failures, 0u);
 }
