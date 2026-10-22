@@ -1105,9 +1105,11 @@ private:
     // Advance the sweep cursor over \p pos, visiting each entry on the way
     // as sweep_step() does but erasing none.
     void visit_through(size_t pos);
-    // Windows replace_oldest_visited() looks through for an entry it may
-    // replace, when the first holds only entries it may not.
+    // Windows replace_oldest_visited() looks through for an entry older than
+    // the current batch when the window at the cursor holds none, and where
+    // the next such search starts.
     static constexpr size_t replace_search_windows = 8;
+    size_t _replace_search_pos{0};
     void note_admitted(int64_t ts) {
         if (_in_batch) {
             _batch_floor = std::min(_batch_floor, ts);

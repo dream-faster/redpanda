@@ -1207,55 +1207,65 @@ void dedup_window_filter::replace_oldest_visited(model::timestamp incoming) {
             _sweep_pos = 0;
             finish_pass();
         }
-        // Only entries older than the incoming identity, and older than
-        // anything this batch has admitted: its own identities are never
-        // the room for its next one. They are either behind the cursor --
-        // where an erase that moved one also moved the cursor past it -- or
-        // in the array's tail, where the batch is appended. A window holding
-        // nothing else is in that tail, so the search wraps to the front,
-        // and then goes on a few windows at most.
-        std::optional<size_t> oldest;
-        bool wrapped = false;
-        for (size_t searched = 0;; ++searched) {
-            const auto begin = _sweep_pos;
-            const auto end = std::min(
-              begin + capacity_emergency_budget, _index.size());
-            for (size_t i = begin; i < end; ++i) {
+        // The oldest entry of a window that is older than `below`.
+        const auto oldest_below = [this](
+                                    size_t from, size_t to, int64_t below) {
+            std::optional<size_t> oldest;
+            for (size_t i = from; i < to; ++i) {
                 const auto stamp = _index.timestamp_at(i);
                 if (
-                  stamp < bound
+                  stamp < below
                   && (!oldest || stamp < _index.timestamp_at(*oldest))) {
                     oldest = i;
                 }
             }
-            if (
-              oldest || searched + 1 >= replace_search_windows
-              || (begin == 0 && end == _index.size())) {
-                break;
+            return oldest;
+        };
+        const auto begin = _sweep_pos;
+        const auto end = std::min(
+          begin + capacity_emergency_budget, _index.size());
+        // Entries older than anything this batch has admitted go first: a
+        // batch's own identities are the room for its next one only when
+        // nothing older is to be had. They are behind the cursor -- an erase
+        // that moved one also moved the cursor past it -- or in the array's
+        // tail, where the batch is appended, so a window without an older
+        // entry is in that tail, and the rest of the array is searched
+        // instead, a few windows at most. That search keeps its own place,
+        // so successive ones cover the array rather than the same windows,
+        // and the cursor and its pass are left as they are.
+        auto oldest = oldest_below(begin, end, bound);
+        for (size_t window = 0; !oldest && window < replace_search_windows;
+             ++window) {
+            if (_replace_search_pos >= _index.size()) {
+                _replace_search_pos = 0;
             }
-            if (
-              !wrapped
-              || _sweep_pos + capacity_emergency_budget > _index.size()) {
-                wrapped = true;
-                _pass_saw_all = false;
-                _sweep_pos = 0;
-                finish_pass();
-            } else {
-                visit_through(end - 1);
+            const size_t from = _replace_search_pos;
+            const size_t to = std::min(
+              from + capacity_emergency_budget, _index.size());
+            oldest = oldest_below(from, to, bound);
+            if (!oldest) {
+                _replace_search_pos = to;
             }
+        }
+        if (!oldest) {
+            // A batch larger than all this index may hold beside what is
+            // older: it gives up its own oldest, as any index at its ceiling
+            // gives up its oldest.
+            oldest = oldest_below(begin, end, incoming.value());
         }
         if (!oldest) {
             break;
         }
         erase_at(*oldest);
         ++_capacity_evicted_entries;
-        // The erase moved the array's last entry -- the newest, as a rule an
-        // identity just admitted -- into the freed slot. Left ahead of the
-        // cursor it is a candidate for the next replacement, and a window
-        // holding only such entries gives up the oldest of them: identities a
-        // burst has just admitted, while older ones stay. Visit up to and over
-        // the slot, so it is behind the cursor for the rest of the pass.
-        visit_through(*oldest);
+        if (*oldest >= _sweep_pos) {
+            // The erase moved the array's last entry -- the newest, as a rule
+            // an identity just admitted -- into the freed slot. Left ahead of
+            // the cursor it would be a candidate for the next replacement:
+            // visit up to and over the slot, so it is behind the cursor for
+            // the rest of the pass.
+            visit_through(*oldest);
+        }
     }
     if (over_limit) {
         // Up to capacity_emergency_budget entries a call shrinks this index
