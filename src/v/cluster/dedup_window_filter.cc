@@ -390,6 +390,7 @@ bool dedup_window_filter::is_duplicate(
         return false;
     }
     note_stored(_index.size() - 1);
+    note_admitted(ts.value());
     sync_shard_budget();
     if (undo) {
         undo->entries.push_back(
@@ -408,6 +409,7 @@ dedup_window_filter::filter(model::record_batch batch) {
 
 dedup_filter_result
 dedup_window_filter::filter_request(model::record_batch batch) {
+    auto admitting = admit_batch();
     vassert(
       lookup_ready(),
       "dedup: filtering without a lookup table (deferred: {}, {} of {} "
@@ -715,6 +717,7 @@ void dedup_window_filter::revert_request(const dedup_request_undo& undo) {
 
 void dedup_window_filter::populate(
   const chunked_vector<dedup_index_entry>& entries) {
+    auto batch = admit_batch();
     if (!lookup_ready()) {
         for (const auto& e : entries) {
             populate_unindexed(e.identity, e.timestamp);
@@ -770,6 +773,7 @@ void dedup_window_filter::populate(
         return;
     }
     note_stored(_index.size() - 1);
+    note_admitted(ts.value());
     sync_shard_budget();
 }
 
@@ -789,6 +793,7 @@ void dedup_window_filter::populate_unindexed(
         return;
     }
     note_stored(_index.size() - 1);
+    note_admitted(ts.value());
     sync_shard_budget();
 }
 
@@ -1186,6 +1191,7 @@ void dedup_window_filter::replace_oldest_visited(model::timestamp incoming) {
     const bool over_limit
       = _index.size() > _max_entries
         || (_shard_budget && _shard_budget->entries > _shard_budget->max_entries);
+    const int64_t bound = std::min(incoming.value(), _batch_floor);
     for (; need > 0 && _sweep_pos < _index.size(); --need) {
         if (
           over_limit && _index.size() > capacity_emergency_budget
@@ -1201,22 +1207,55 @@ void dedup_window_filter::replace_oldest_visited(model::timestamp incoming) {
             _sweep_pos = 0;
             finish_pass();
         }
-        const auto begin = _sweep_pos;
-        const auto end = std::min(
-          begin + capacity_emergency_budget, _index.size());
+        // Only entries older than the incoming identity, and older than
+        // anything this batch has admitted: its own identities are never
+        // the room for its next one. They are either behind the cursor --
+        // where an erase that moved one also moved the cursor past it -- or
+        // in the array's tail, where the batch is appended. A window holding
+        // nothing else is in that tail, so the search wraps to the front,
+        // and then goes on a few windows at most.
         std::optional<size_t> oldest;
-        for (size_t i = begin; i < end; ++i) {
+        bool wrapped = false;
+        for (size_t searched = 0;; ++searched) {
+            const auto begin = _sweep_pos;
+            const auto end = std::min(
+              begin + capacity_emergency_budget, _index.size());
+            for (size_t i = begin; i < end; ++i) {
+                const auto stamp = _index.timestamp_at(i);
+                if (
+                  stamp < bound
+                  && (!oldest || stamp < _index.timestamp_at(*oldest))) {
+                    oldest = i;
+                }
+            }
             if (
-              !oldest
-              || _index.timestamp_at(i) < _index.timestamp_at(*oldest)) {
-                oldest = i;
+              oldest || searched + 1 >= replace_search_windows
+              || (begin == 0 && end == _index.size())) {
+                break;
+            }
+            if (
+              !wrapped
+              || _sweep_pos + capacity_emergency_budget > _index.size()) {
+                wrapped = true;
+                _pass_saw_all = false;
+                _sweep_pos = 0;
+                finish_pass();
+            } else {
+                visit_through(end - 1);
             }
         }
-        if (!oldest || !(_index.timestamp_at(*oldest) < incoming.value())) {
+        if (!oldest) {
             break;
         }
         erase_at(*oldest);
         ++_capacity_evicted_entries;
+        // The erase moved the array's last entry -- the newest, as a rule an
+        // identity just admitted -- into the freed slot. Left ahead of the
+        // cursor it is a candidate for the next replacement, and a window
+        // holding only such entries gives up the oldest of them: identities a
+        // burst has just admitted, while older ones stay. Visit up to and over
+        // the slot, so it is behind the cursor for the rest of the pass.
+        visit_through(*oldest);
     }
     if (over_limit) {
         // Up to capacity_emergency_budget entries a call shrinks this index
@@ -1224,6 +1263,26 @@ void dedup_window_filter::replace_oldest_visited(model::timestamp incoming) {
         // index trimming itself would go on counting as the largest until it
         // was empty, while a larger one kept everything.
         stop_being_largest();
+    }
+}
+
+void dedup_window_filter::visit_through(size_t pos) {
+    const int64_t cutoff = expiry_cutoff();
+    const bool counting = counts_for_capacity();
+    for (; _sweep_pos <= pos && _sweep_pos < _index.size(); ++_sweep_pos) {
+        ++_sweep_visits;
+        const auto stamp = model::timestamp{_index.timestamp_at(_sweep_pos)};
+        if (!is_live(stamp.value(), cutoff)) {
+            // Left for the next pass to drop: erasing here would move another
+            // entry in ahead of the cursor.
+            continue;
+        }
+        if (counting) {
+            count_in_pass(stamp);
+        } else {
+            _pass_oldest = std::min(_pass_oldest, stamp.value());
+            _pass_uncounted = true;
+        }
     }
 }
 
