@@ -837,6 +837,40 @@ public:
         finish_restore(count - keep);
     }
 
+    /// \brief Scope of one batch of admissions.
+    ///
+    /// While it lives, room for a new identity is never made by evicting an
+    /// identity the same batch admitted (see replace_oldest_visited()): a
+    /// full index would otherwise give up a batch's first identities for its
+    /// last ones, and a resend of the batch would get the first ones through.
+    /// filter_request() and populate() of a batch's entries take one
+    /// themselves; a caller populating a batch record by record holds one
+    /// around the loop, so that leader and followers decide alike.
+    class batch_scope {
+    public:
+        explicit batch_scope(dedup_window_filter& f)
+          : _f(f)
+          , _outer_floor(f._batch_floor)
+          , _outer_in_batch(f._in_batch) {
+            _f._batch_floor = std::numeric_limits<int64_t>::max();
+            _f._in_batch = true;
+        }
+        batch_scope(const batch_scope&) = delete;
+        batch_scope& operator=(const batch_scope&) = delete;
+        batch_scope(batch_scope&&) = delete;
+        batch_scope& operator=(batch_scope&&) = delete;
+        ~batch_scope() {
+            _f._batch_floor = _outer_floor;
+            _f._in_batch = _outer_in_batch;
+        }
+
+    private:
+        dedup_window_filter& _f;
+        int64_t _outer_floor;
+        bool _outer_in_batch;
+    };
+    [[nodiscard]] batch_scope admit_batch() { return batch_scope(*this); }
+
     /// \brief Record an identity admitted into the log.
     ///
     /// Keeps the most recent timestamp per identity (idempotent, max-wins),
@@ -1039,6 +1073,21 @@ private:
     /// ahead of the cursor that are older than \p incoming, as many as it
     /// takes to get back under the limit, up to capacity_emergency_budget.
     void replace_oldest_visited(model::timestamp incoming);
+    // Advance the sweep cursor over \p pos, visiting each entry on the way
+    // as sweep_step() does but erasing none.
+    void visit_through(size_t pos);
+    // Windows replace_oldest_visited() looks through for an entry it may
+    // replace, when the first holds only entries it may not.
+    static constexpr size_t replace_search_windows = 8;
+    void note_admitted(int64_t ts) {
+        if (_in_batch) {
+            _batch_floor = std::min(_batch_floor, ts);
+        }
+    }
+    // The oldest timestamp the current batch_scope has admitted, and whether
+    // one is open.
+    int64_t _batch_floor{std::numeric_limits<int64_t>::max()};
+    bool _in_batch{false};
 
     /// At the shard limit: take one bounded sweep step on the largest index
     /// on the shard, if it is larger than this one, before this index trims
