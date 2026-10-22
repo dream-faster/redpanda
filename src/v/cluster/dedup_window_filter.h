@@ -1115,7 +1115,7 @@ private:
     void replace_oldest_visited(model::timestamp incoming);
     // Windows replace_oldest_visited() looks through for an entry it may
     // replace, when the first holds only entries it may not.
-    static constexpr size_t replace_search_windows = 4;
+    static constexpr size_t replace_search_windows = 8;
     void note_admitted(int64_t ts) {
         if (_in_batch) {
             _batch_floor = std::min(_batch_floor, ts);

@@ -1212,10 +1212,13 @@ void dedup_window_filter::replace_oldest_visited(model::timestamp incoming) {
         }
         // Only entries older than the incoming identity, and older than
         // anything this batch has admitted: its own identities are never
-        // the room for its next one. A window holding nothing else -- the
-        // array's tail, where the batch is appended -- is passed over for
-        // the next, a few windows at most.
+        // the room for its next one. They are either behind the cursor --
+        // where an erase that moved one also moved the cursor past it -- or
+        // in the array's tail, where the batch is appended. A window holding
+        // nothing else is in that tail, so the search wraps to the front,
+        // and then goes on a few windows at most.
         std::optional<size_t> oldest;
+        bool wrapped = false;
         for (size_t searched = 0;; ++searched) {
             const auto begin = _sweep_pos;
             const auto end = std::min(
@@ -1233,13 +1236,15 @@ void dedup_window_filter::replace_oldest_visited(model::timestamp incoming) {
               || (begin == 0 && end == _index.size())) {
                 break;
             }
-            visit_through(end - 1);
-            if (_sweep_pos + capacity_emergency_budget > _index.size()) {
-                if (_sweep_pos < _index.size()) {
-                    _pass_saw_all = false;
-                }
+            if (
+              !wrapped
+              || _sweep_pos + capacity_emergency_budget > _index.size()) {
+                wrapped = true;
+                _pass_saw_all = false;
                 _sweep_pos = 0;
                 finish_pass();
+            } else {
+                visit_through(end - 1);
             }
         }
         if (!oldest) {
