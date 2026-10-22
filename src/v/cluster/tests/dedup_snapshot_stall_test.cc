@@ -20,6 +20,7 @@
 #include <seastar/core/coroutine.hh>
 #include <seastar/core/future.hh>
 #include <seastar/core/memory.hh>
+#include <seastar/core/thread_cputime_clock.hh>
 #include <seastar/coroutine/maybe_yield.hh>
 #include <seastar/util/later.hh>
 
@@ -114,7 +115,13 @@ iobuf legacy_snapshot(const dedup_window_filter& state, int64_t generation) {
 
 namespace {
 
-using clock = std::chrono::steady_clock;
+/// The reactor thread's CPU time, user and system, in place of the wall
+/// clock. A stall is the reactor running without reaching a preemption point,
+/// which this counts in full; what it leaves out is time the host gave the
+/// CPU to someone else. On a busy shared CI runner that is tens of
+/// milliseconds at a time, and it made these limits fail on code that
+/// passes them on a quiet one.
+using clock = ss::thread_cputime_clock;
 
 int64_t us(clock::duration d) {
     return std::chrono::duration_cast<std::chrono::microseconds>(d).count();
@@ -123,8 +130,9 @@ int64_t us(clock::duration d) {
 /// \brief Longest stretch the reactor spent inside a single task.
 ///
 /// A fiber that does nothing but yield can only be scheduled when whatever
-/// else is runnable gives the CPU up, so the gap between its own turns is
-/// how long the work under test ran without reaching a preemption point.
+/// else is runnable gives the CPU up, so the reactor CPU time between its own
+/// turns is how long the work under test ran without reaching a preemption
+/// point.
 /// That gap is the quantity a reactor stall report prints, measured here
 /// directly rather than inferred from the stall detector.
 class stall_probe {

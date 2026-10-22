@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import random
+import statistics
 import threading
 import time
 from collections import Counter
@@ -198,7 +199,27 @@ def test_chaos_loses_nothing_and_duplicates_nothing(make_cluster, pytestconfig):
     and stripped of leadership. Every acknowledged record must be readable,
     and no identity may appear twice: a retry of a write that did land is
     exactly what dedup must absorb."""
-    c = make_cluster(nodes=3, smp=1, memory="1G")
+    run_chaos(make_cluster, feeds=1)
+
+
+def test_chaos_with_redundant_feeds(make_cluster, pytestconfig):
+    """The chaos above with two producers sending the same identities in the
+    same order, as redundant feeds of one stream do: about half of what
+    arrives duplicates a record still being replicated, so requests depend on
+    other requests' outcomes while leaders move and nodes die. Every record
+    either feed had acknowledged must be readable, and none written twice."""
+    run_chaos(make_cluster, feeds=2)
+
+
+def run_chaos(make_cluster, feeds: int) -> None:
+    # Producers run for as long as the chaos does, so the index grows with
+    # SCALE; past the per-partition cap it would admit duplicates unindexed.
+    c = make_cluster(
+        nodes=3,
+        smp=1,
+        memory="1G",
+        cluster_config={"dedup_max_entries_per_partition": scaled(2_000_000)},
+    )
     t = kafka.unique("chaos")
     partitions = 3
     kafka.create_topic(c.brokers, t, partitions, 3, {kafka.DEDUP_WINDOW: "3600000"})
@@ -271,7 +292,7 @@ def test_chaos_loses_nothing_and_duplicates_nothing(make_cluster, pytestconfig):
             c.wait_healthy(timeout_s=180)
         stop.set()
 
-    run_threads([producer, chaos])
+    run_threads([producer] * feeds + [chaos])
     assert not failed, f"{len(failed)} records failed for good: {failed[:3]}"
     assert len(acked) > 1000
     present = set()
@@ -284,6 +305,86 @@ def test_chaos_loses_nothing_and_duplicates_nothing(make_cluster, pytestconfig):
         present.update(keys)
     lost = [k for k in acked if k not in present]
     assert not lost, f"{len(lost)} acknowledged records missing, e.g. {lost[:3]}"
+    assert_memory_healthy(c)
+
+
+def test_redundant_feeds_at_full_speed(make_cluster, pytestconfig):
+    """Three producers send the same identities in the same order as fast as
+    they can -- two with acks=all, one with acks=1 -- while leadership moves
+    between nodes. Nearly every duplicate arrives while the record it repeats
+    is still being replicated. Each identity must be written exactly once,
+    and every one an acks=all producer had acknowledged must be readable."""
+    c = make_cluster(nodes=3, smp=2, memory="1G")
+    t = kafka.unique("feeds")
+    partitions = 8
+    kafka.create_topic(c.brokers, t, partitions, 3, {kafka.DEDUP_WINDOW: "3600000"})
+    kafka.wait_for_leaders(c.brokers, t, partitions)
+    n = scaled(150_000)
+    acked_all: list[bytes] = []
+    failed: list = []
+    lock = threading.Lock()
+    done = threading.Event()
+
+    def feed(acks: str):
+        p = kafka.producer(
+            c.brokers,
+            acks=acks,
+            **{
+                "linger.ms": 2,
+                "retries": 1_000_000,
+                "message.timeout.ms": 300_000,
+                "queue.buffering.max.messages": 200_000,
+            },
+        )
+
+        def cb(err, msg):
+            with lock:
+                if err is not None:
+                    failed.append(err)
+                elif acks == "all":
+                    acked_all.append(msg.key())
+
+        for i in range(n):
+            while True:
+                try:
+                    p.produce(
+                        t,
+                        key=f"f-{i}".encode(),
+                        value=b"v" * 64,
+                        partition=i % partitions,
+                        on_delivery=cb,
+                    )
+                    break
+                except BufferError:
+                    p.poll(0.05)
+            if i % 2000 == 0:
+                p.poll(0)
+        assert p.flush(300) == 0
+
+    def feeds():
+        try:
+            run_threads([lambda: feed("all"), lambda: feed("all"), lambda: feed("1")])
+        finally:
+            done.set()
+
+    def move_leaders():
+        rng = random.Random(7)
+        while not done.wait(rng.uniform(1, 3)):
+            part = rng.randrange(partitions)
+            try:
+                c.transfer_leadership(t, part, rng.randrange(3))
+            except AssertionError:
+                pass  # already the leader, or the target is catching up
+
+    run_threads([feeds, move_leaders])
+    assert not failed, f"{len(failed)} records failed for good: {failed[:3]}"
+    admitted = assert_each_key_once(c, t, partitions, prefix=b"f-")
+    present = set()
+    for part in range(partitions):
+        present.update(kafka.keys_in(c.brokers, t, part, timeout_s=300))
+    lost = {k for k in acked_all if k not in present}
+    assert not lost, f"{len(lost)} acknowledged records missing, e.g. {list(lost)[:3]}"
+    assert admitted == n, f"{admitted} identities written, {n} sent"
     assert_memory_healthy(c)
 
 
@@ -501,10 +602,11 @@ def test_topic_churn_returns_the_budget(make_cluster, pytestconfig):
     partition gives its entries back, so the shard's count returns to what
     the surviving topics hold and the budget cannot leak.
 
-    Allocated memory is compared only once the broker has warmed up: its own
-    caches grow by a couple of hundred MiB over the first rounds and then
-    stay put, with or without dedup. A leaked index would instead keep
-    growing, by several MiB a round at this size."""
+    Allocated memory is judged by how much it grows a round once the broker
+    has warmed up: its own caches grow by a couple of hundred MiB in one step,
+    with or without dedup, sometimes only after the warm-up rounds. A leaked
+    index would instead grow every round, by several MiB at this size, so
+    the median round's growth catches it while one step does not."""
     c = make_cluster(nodes=1, smp=1, memory="1G")
     require_new_build(c, pytestconfig)
     keeper = topic_on_one_node(c, 1)
@@ -514,7 +616,7 @@ def test_topic_churn_returns_the_budget(make_cluster, pytestconfig):
     per = 50_000
     warmup = scaled(20)
     measured = scaled(8)
-    warm_alloc = 0.0
+    allocs: list[float] = []
     for round_ in range(warmup + measured):
         t = topic_on_one_node(c, 2)
         for p in range(2):
@@ -529,11 +631,11 @@ def test_topic_churn_returns_the_budget(make_cluster, pytestconfig):
             assert got == 5000, got
 
         kafka.eventually(released, timeout_s=60)
-        if round_ == warmup - 1:
-            warm_alloc = c.node(0).metrics().sum("vectorized_memory_allocated_memory")
-    alloc = c.node(0).metrics().sum("vectorized_memory_allocated_memory")
-    assert alloc < warm_alloc + 16 * 2**20, (
-        f"allocated memory grew from {warm_alloc} to {alloc} over {measured} rounds"
+        if round_ >= warmup - 1:
+            allocs.append(c.node(0).metrics().sum("vectorized_memory_allocated_memory"))
+    growth = [b - a for a, b in zip(allocs, allocs[1:])]
+    assert statistics.median(growth) < 2**20, (
+        f"allocated memory grew every round: {[int(g) for g in growth]} bytes"
     )
     assert_memory_healthy(c)
 
@@ -541,7 +643,12 @@ def test_topic_churn_returns_the_budget(make_cluster, pytestconfig):
 def test_huge_header_identities_cost_the_same_as_small_ones(make_cluster, pytestconfig):
     """The index stores a digest, so 4 KiB identities must not make the index
     any larger than 8-byte ones."""
-    c = make_cluster(nodes=1, smp=1, memory="1G", cluster_config={})
+    # The batch cache would hold the 4 KiB identities themselves, as much of
+    # them as memory allows, so with it on the growth says nothing about the
+    # index.
+    c = make_cluster(
+        nodes=1, smp=1, memory="1G", cluster_config={"disable_batch_cache": True}
+    )
     t = topic_on_one_node(c, 1, extra={"max.message.bytes": str(8 * 1024 * 1024)})
     kafka.set_topic_config(c.brokers, t, {kafka.DEDUP_KEY_HEADER: "x-id"})
     n = scaled(60_000)
@@ -570,10 +677,10 @@ def test_huge_header_identities_cost_the_same_as_small_ones(make_cluster, pytest
     assert len(kafka.consume_all(c.brokers, t)) == n
     m = c.node(0).metrics()
     assert m.sum(PART_ENTRIES, topic=t) == n
-    # The batch cache may hold some of the produced data; the index itself is
-    # well under 200 bytes an entry however large the identity.
+    # The index is well under 200 bytes an entry however large the identity;
+    # keeping the identities themselves would cost over 4 KiB an entry.
     grown = m.sum("vectorized_memory_allocated_memory") - before
-    assert grown < n * 200 + 256 * 2**20, grown
+    assert grown < n * 200 + 32 * 2**20, grown
     assert_memory_healthy(c)
 
 
@@ -674,9 +781,16 @@ def test_many_small_idle_partitions_do_not_starve_a_busy_one(
     # A twentieth of the shard is what each idle partition held. The busy one
     # takes room from them until it is within a tenth of their size, where it
     # counts as one of the largest and trims itself instead: parity with the
-    # idle partitions, less that margin, is the designed steady state.
+    # idle partitions, less that margin, is the designed steady state. Whether
+    # it is among the largest is decided once per cursor step, so the step
+    # that crosses the margin can trim up to a step's worth below it -- at
+    # most the 64 entries of the step taken at the ceiling
+    # (dedup_window_filter::capacity_emergency_budget).
     share = limit // idle
-    assert m.sum(PART_ENTRIES, topic=t, partition=str(idle)) >= share - share // 10
+    step = 64
+    assert (
+        m.sum(PART_ENTRIES, topic=t, partition=str(idle)) >= share - share // 10 - step
+    )
     newest = [f"busy-{i}".encode() for i in range(busy - 500, busy)]
     assert _readmitted(c, t, idle, newest) == 0
 
