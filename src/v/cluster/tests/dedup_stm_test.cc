@@ -24,6 +24,8 @@
 #include "test_utils/test.h"
 
 #include <seastar/core/byteorder.hh>
+#include <seastar/core/sleep.hh>
+#include <seastar/core/with_timeout.hh>
 #include <seastar/util/defer.hh>
 
 #include <gtest/gtest.h>
@@ -131,6 +133,18 @@ struct dedup_stm_test_accessor {
 
     static uint64_t batches_skipped(const dedup_stm& stm) {
         return stm._batches_skipped;
+    }
+
+    static model::offset relaxed_admitted_offset(const dedup_stm& stm) {
+        return stm._relaxed_admitted_offset;
+    }
+
+    /// Record what do_replicate() records for a batch raft reported done
+    /// before it committed.
+    static void record_relaxed_admission(
+      dedup_stm& stm, model::offset offset, model::term_id term) {
+        stm._relaxed_admitted_offset = offset;
+        stm._relaxed_admitted_term = term;
     }
 
     static void
@@ -1251,6 +1265,137 @@ TEST_F_CORO(dedup_stm_fixture, all_duplicate_is_enqueued_before_introducer) {
     auto result = co_await std::move(stages.replicate_finished);
     ASSERT_TRUE_CORO(result.has_value());
     ASSERT_EQ_CORO(result.value().replicated_record_count, 0);
+}
+
+namespace {
+
+/// Holds the leader's append_entries to its followers until released, so
+/// nothing appended meanwhile commits. Releases on destruction too, and takes
+/// its handler off the node, so an early test exit leaves nothing behind.
+class replication_gate {
+public:
+    explicit replication_gate(raft::raft_node_instance& leader)
+      : _leader(leader) {
+        _leader.on_dispatch([this](model::node_id, raft::msg_type t) {
+            if (t == raft::msg_type::append_entries) {
+                return _released.get_shared_future();
+            }
+            return ss::now();
+        });
+    }
+    replication_gate(const replication_gate&) = delete;
+    replication_gate& operator=(const replication_gate&) = delete;
+    ~replication_gate() {
+        release();
+        _leader.reset_dispatch_handlers();
+    }
+
+    void release() {
+        if (!_is_released) {
+            _is_released = true;
+            _released.set_value();
+        }
+    }
+
+private:
+    raft::raft_node_instance& _leader;
+    ss::shared_promise<> _released;
+    bool _is_released{false};
+};
+
+} // namespace
+
+// An all-duplicate quorum-ack request whose identities are all committed is
+// acknowledged without waiting for anything else to commit: here a request
+// replicating meanwhile cannot commit at all until the gate opens.
+TEST_F_CORO(dedup_stm_fixture, committed_duplicate_skips_the_commit_fence) {
+    co_await initialize_state_machines();
+    set_dedup_config(1h);
+    auto leader = co_await wait_for_leader(10s);
+    co_await produce(leader, "k1", "v", model::timestamp{1000});
+    const auto before = node(leader).raft()->dirty_offset();
+
+    replication_gate gate(node(leader));
+    auto blocked = produce_batch(
+      leader, make_batch_of({"k9"}, model::timestamp{1000}));
+    // k9 on the leader's log, uncommitted: a fence on the dirty offset would
+    // now hold the duplicate until the gate opens.
+    const auto deadline = model::timeout_clock::now() + 5s;
+    while (node(leader).raft()->dirty_offset() <= before) {
+        ASSERT_TRUE_CORO(model::timeout_clock::now() < deadline);
+        co_await ss::sleep(1ms);
+    }
+    ASSERT_LT_CORO(
+      node(leader).raft()->committed_offset(),
+      node(leader).raft()->dirty_offset());
+
+    auto duplicate = co_await ss::with_timeout(
+      model::timeout_clock::now() + 5s,
+      produce_batch(leader, make_batch_of({"k1"}, model::timestamp{1000})));
+    ASSERT_TRUE_CORO(duplicate.has_value());
+    ASSERT_EQ_CORO(duplicate.value().replicated_record_count, 0);
+
+    gate.release();
+    auto unblocked = co_await std::move(blocked);
+    ASSERT_TRUE_CORO(unblocked.has_value());
+}
+
+// A record an acks=1 request admitted is appended on the leader alone until
+// it commits: an acks=all duplicate of it waits for that.
+TEST_F_CORO(dedup_stm_fixture, relaxed_introducer_is_fenced_until_committed) {
+    co_await initialize_state_machines();
+    set_dedup_config(1h);
+    auto leader = co_await wait_for_leader(10s);
+    co_await produce(leader, "warm-up", "v", model::timestamp{1000});
+    auto stm = get_stm<0>(node(leader));
+
+    replication_gate gate(node(leader));
+    auto relaxed = stm->replicate_in_stages(
+      make_batch_of({"k1"}, model::timestamp{1000}),
+      raft::replicate_options(raft::consistency_level::leader_ack));
+    co_await std::move(relaxed.request_enqueued);
+    auto appended = co_await std::move(relaxed.replicate_finished);
+    ASSERT_TRUE_CORO(appended.has_value());
+    const auto relaxed_offset = node(leader).raft()->dirty_offset();
+    ASSERT_EQ_CORO(
+      dedup_stm_test_accessor::relaxed_admitted_offset(*stm), relaxed_offset);
+
+    auto duplicate = produce_batch(
+      leader, make_batch_of({"k1"}, model::timestamp{1000}));
+    // Nothing can commit while the gate is closed, so the duplicate can only
+    // resolve by skipping the fence; long enough for that to show.
+    co_await ss::sleep(500ms);
+    ASSERT_LT_CORO(node(leader).raft()->committed_offset(), relaxed_offset);
+    ASSERT_FALSE_CORO(duplicate.available());
+
+    gate.release();
+    auto acknowledged = co_await std::move(duplicate);
+    ASSERT_TRUE_CORO(acknowledged.has_value());
+    ASSERT_EQ_CORO(acknowledged.value().replicated_record_count, 0);
+    ASSERT_GE_CORO(node(leader).raft()->committed_offset(), relaxed_offset);
+}
+
+// What a leader admitted with relaxed acks in an earlier term was either
+// truncated by a later one or committed by its sync, so it fences nothing:
+// here the earlier term's offset lies past the end of the log, where a fence
+// on it would wait for unrelated writes.
+TEST_F_CORO(
+  dedup_stm_fixture, relaxed_admission_of_an_earlier_term_is_not_fenced) {
+    co_await initialize_state_machines();
+    set_dedup_config(1h);
+    auto leader = co_await wait_for_leader(10s);
+    co_await produce(leader, "k1", "v", model::timestamp{1000});
+    auto stm = get_stm<0>(node(leader));
+    dedup_stm_test_accessor::record_relaxed_admission(
+      *stm,
+      node(leader).raft()->dirty_offset() + model::offset{100},
+      node(leader).raft()->term() - model::term_id{1});
+
+    auto duplicate = co_await ss::with_timeout(
+      model::timeout_clock::now() + 5s,
+      produce_batch(leader, make_batch_of({"k1"}, model::timestamp{1000})));
+    ASSERT_TRUE_CORO(duplicate.has_value());
+    ASSERT_EQ_CORO(duplicate.value().replicated_record_count, 0);
 }
 
 // A committed batch whose records cannot be read is skipped, not retried:
