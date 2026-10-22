@@ -35,6 +35,7 @@
 #include <limits>
 #include <optional>
 #include <stdexcept>
+#include <type_traits>
 #include <vector>
 
 namespace cluster {
@@ -93,6 +94,21 @@ enum class dedup_identity_lookup {
     missing_header,
 };
 
+/// Where one record lies in its batch's records buffer, as offsets from the
+/// start of the buffer, for a caller that copies records out of it.
+struct dedup_record_span {
+    /// The first byte the record's length counts: the attributes.
+    size_t body{0};
+    /// One past the record's last byte.
+    size_t end{0};
+    int64_t timestamp_delta{0};
+    /// Where the offset delta varint starts, counted from body, and its
+    /// size. Bytes suffice: a varint is at most vint::max_length bytes long
+    /// and only the attributes and the timestamp delta come before it.
+    uint8_t offset_delta_at{0};
+    uint8_t offset_delta_size{0};
+};
+
 /// \brief Walk a batch's records reading only what dedup needs.
 ///
 /// For each record, in order, calls emit(lookup, digest, timestamp) with the
@@ -105,7 +121,8 @@ enum class dedup_identity_lookup {
 /// key, value and header) on both.
 ///
 /// emit returns whether to go on; the walk stops at the first false. The
-/// digest is meaningful only for dedup_identity_lookup::identity.
+/// digest is meaningful only for dedup_identity_lookup::identity. An emit that
+/// also takes a dedup_record_span is told where the record lies.
 ///
 /// The decoding mirrors model::parse_one_record_from_buffer(): batches reach
 /// here already validated, but a malformed one still throws rather than
@@ -159,11 +176,12 @@ void for_each_dedup_identity(
             throw std::out_of_range(
               fmt::format("dedup: record of negative size {}", size));
         }
-        const size_t record_end = parser.bytes_consumed()
-                                  + static_cast<size_t>(size);
+        const size_t body = parser.bytes_consumed();
+        const size_t record_end = body + static_cast<size_t>(size);
         parser.skip(1); // attributes
-        auto [ts_delta, _tv] = parser.read_varlong();
-        parser.read_varlong(); // offset delta
+        auto [ts_delta, ts_delta_size] = parser.read_varlong();
+        [[maybe_unused]] const auto [_od, offset_delta_size]
+          = parser.read_varlong();
         const auto key_len = read_length();
         auto lookup = dedup_identity_lookup::no_identity;
         dedup_identity_digest digest;
@@ -226,7 +244,28 @@ void for_each_dedup_identity(
             ts = ts_delta < 0 ? std::numeric_limits<int64_t>::min()
                               : std::numeric_limits<int64_t>::max();
         }
-        if (!emit(lookup, digest, model::timestamp{ts})) {
+        bool go_on = false;
+        if constexpr (
+          std::is_invocable_v<
+            F&,
+            dedup_identity_lookup,
+            dedup_identity_digest,
+            model::timestamp,
+            const dedup_record_span&>) {
+            go_on = emit(
+              lookup,
+              digest,
+              model::timestamp{ts},
+              dedup_record_span{
+                .body = body,
+                .end = record_end,
+                .timestamp_delta = ts_delta,
+                .offset_delta_at = static_cast<uint8_t>(1 + ts_delta_size),
+                .offset_delta_size = offset_delta_size});
+        } else {
+            go_on = emit(lookup, digest, model::timestamp{ts});
+        }
+        if (!go_on) {
             return;
         }
     }

@@ -1806,6 +1806,7 @@ redpanda_cc_library(
         "//src/v/utils:tristate",
         "//src/v/utils:unresolved_address",
         "//src/v/utils:uuid",
+        "//src/v/utils:vint",
         "//src/v/utils:waiter_queue",
         "//src/v/version",
         "@abseil-cpp//absl/container:btree",
