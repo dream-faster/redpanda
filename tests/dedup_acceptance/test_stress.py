@@ -212,7 +212,14 @@ def test_chaos_with_redundant_feeds(make_cluster, pytestconfig):
 
 
 def run_chaos(make_cluster, feeds: int) -> None:
-    c = make_cluster(nodes=3, smp=1, memory="1G")
+    # Producers run for as long as the chaos does, so the index grows with
+    # SCALE; past the per-partition cap it would admit duplicates unindexed.
+    c = make_cluster(
+        nodes=3,
+        smp=1,
+        memory="1G",
+        cluster_config={"dedup_max_entries_per_partition": scaled(2_000_000)},
+    )
     t = kafka.unique("chaos")
     partitions = 3
     kafka.create_topic(c.brokers, t, partitions, 3, {kafka.DEDUP_WINDOW: "3600000"})
@@ -636,7 +643,12 @@ def test_topic_churn_returns_the_budget(make_cluster, pytestconfig):
 def test_huge_header_identities_cost_the_same_as_small_ones(make_cluster, pytestconfig):
     """The index stores a digest, so 4 KiB identities must not make the index
     any larger than 8-byte ones."""
-    c = make_cluster(nodes=1, smp=1, memory="1G", cluster_config={})
+    # The batch cache would hold the 4 KiB identities themselves, as much of
+    # them as memory allows, so with it on the growth says nothing about the
+    # index.
+    c = make_cluster(
+        nodes=1, smp=1, memory="1G", cluster_config={"disable_batch_cache": True}
+    )
     t = topic_on_one_node(c, 1, extra={"max.message.bytes": str(8 * 1024 * 1024)})
     kafka.set_topic_config(c.brokers, t, {kafka.DEDUP_KEY_HEADER: "x-id"})
     n = scaled(60_000)
@@ -665,10 +677,10 @@ def test_huge_header_identities_cost_the_same_as_small_ones(make_cluster, pytest
     assert len(kafka.consume_all(c.brokers, t)) == n
     m = c.node(0).metrics()
     assert m.sum(PART_ENTRIES, topic=t) == n
-    # The batch cache may hold some of the produced data; the index itself is
-    # well under 200 bytes an entry however large the identity.
+    # The index is well under 200 bytes an entry however large the identity;
+    # keeping the identities themselves would cost over 4 KiB an entry.
     grown = m.sum("vectorized_memory_allocated_memory") - before
-    assert grown < n * 200 + 256 * 2**20, grown
+    assert grown < n * 200 + 32 * 2**20, grown
     assert_memory_healthy(c)
 
 
