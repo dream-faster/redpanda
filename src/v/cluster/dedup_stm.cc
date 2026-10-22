@@ -494,6 +494,7 @@ ss::future<> dedup_stm::do_apply(const model::record_batch& batch) {
         // already validated and committed under an older config, so a
         // record here may lack the *current* header; it is left unindexed
         // rather than rejecting an already committed batch.
+        auto batch_scope = _state.admit_batch();
         for_each_dedup_identity(
           readable,
           _state.key_header(),
