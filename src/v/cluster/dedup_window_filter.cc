@@ -1234,8 +1234,7 @@ void dedup_window_filter::replace_oldest_visited(model::timestamp incoming) {
         // so successive ones cover the array rather than the same windows,
         // and the cursor and its pass are left as they are.
         auto oldest = oldest_below(begin, end, bound);
-        for (size_t window = 0; !oldest && bound < incoming.value()
-                                && window < replace_search_windows;
+        for (size_t window = 0; !oldest && window < replace_search_windows;
              ++window) {
             if (_replace_search_pos >= _index.size()) {
                 _replace_search_pos = 0;
