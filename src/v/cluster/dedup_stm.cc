@@ -322,25 +322,18 @@ ss::future<iobuf> dedup_stm::serialize_snapshot(
 namespace {
 
 /// Decode the packed entries of a state_snapshot, yielding every few
-/// thousand so a large restore shares the reactor. \p entry_size names the
-/// layout: dedup_stm::packed_entry_size, or the version 2 one.
+/// thousand so a large restore shares the reactor.
 template<typename Emit>
-ss::future<>
-for_each_packed_entry(const iobuf& packed, size_t entry_size, Emit emit) {
+ss::future<> for_each_packed_entry(const iobuf& packed, Emit emit) {
     constexpr size_t entries_per_yield = 4096;
     iobuf_const_parser parser(packed);
     size_t n = 0;
     while (parser.bytes_left() > 0) {
         dedup_identity_digest identity;
-        if (entry_size == dedup_stm::legacy_packed_entry_size) {
-            identity.hi = ss::le_to_cpu(parser.consume_type<uint64_t>());
-            identity.lo = ss::le_to_cpu(parser.consume_type<uint64_t>());
-        } else {
-            identity.lo = ss::le_to_cpu(parser.consume_type<uint64_t>());
-            identity.hi = ss::le_to_cpu(parser.consume_type<uint32_t>());
-        }
+        identity.lo = ss::le_to_cpu(parser.consume_type<uint64_t>());
+        identity.hi = ss::le_to_cpu(parser.consume_type<uint32_t>());
         const auto ts = ss::le_to_cpu(parser.consume_type<int64_t>());
-        emit(dedup_canonical_digest(identity), model::timestamp{ts});
+        emit(identity, model::timestamp{ts});
         if ((++n % entries_per_yield) == 0) {
             co_await ss::coroutine::maybe_yield();
         }
@@ -350,30 +343,13 @@ for_each_packed_entry(const iobuf& packed, size_t entry_size, Emit emit) {
 } // namespace
 
 dedup_stm::state_snapshot dedup_stm::decode_snapshot(iobuf buffer) {
-    // An envelope starts with its version.
-    if (buffer.size_bytes() > 0) {
-        iobuf_const_parser peek(buffer);
-        if (
-          peek.consume_type<serde::version_t>()
-          == state_snapshot_v2::redpanda_serde_version) {
-            auto v2 = serde::from_iobuf<state_snapshot_v2>(std::move(buffer));
-            return state_snapshot{
-              .window_ms = v2.window_ms,
-              .generation = v2.generation,
-              .max_timestamp = v2.max_timestamp,
-              .entries = std::move(v2.entries),
-              .entry_size = legacy_packed_entry_size};
-        }
-    }
     return serde::from_iobuf<state_snapshot>(std::move(buffer));
 }
 
 ss::future<> dedup_stm::restore_snapshot(
   dedup_window_filter& state, int64_t& generation, state_snapshot snapshot) {
     const size_t entry_size = snapshot.entry_size;
-    if (
-      entry_size != packed_entry_size
-      && entry_size != legacy_packed_entry_size) {
+    if (entry_size != packed_entry_size) {
         throw serde::serde_exception(
           ssx::sformat(
             "dedup snapshot entries of unknown size {}", entry_size));
@@ -396,9 +372,9 @@ ss::future<> dedup_stm::restore_snapshot(
     co_await state.restore_from(
       packed_bytes / entry_size,
       snapshot.max_timestamp,
-      [&packed, entry_size](auto&& emit) {
+      [&packed](auto&& emit) {
           return for_each_packed_entry(
-            packed, entry_size, std::forward<decltype(emit)>(emit));
+            packed, std::forward<decltype(emit)>(emit));
       });
     generation = snapshot.generation;
 }

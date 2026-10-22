@@ -1631,15 +1631,15 @@ TEST(DedupIdentityDigest, IsIndependentOfFragmentation) {
     }
     ASSERT_GT(fragments, 1u) << "test needs a genuinely fragmented iobuf";
 
-    // The expected values are the xxhash64 of the flat 300k-byte sequence
-    // under each seed, computed independently (python-xxhash). Matching them
+    // The expected values are the XXH3-128 of the flat 300k-byte sequence,
+    // computed independently (python-xxhash). Matching them
     // is exactly the property that matters: a digest taken over fragments
     // equals the digest of the byte sequence those fragments spell out, so a
     // leader classifying a wire-fragmented identity and a replica digesting
     // the same identity after a round trip through the log agree.
     const auto d = cluster::dedup_digest_of(fragmented);
-    EXPECT_EQ(d.hi, 0x6603e3319e7157bbULL & cluster::dedup_digest_hi_mask);
-    EXPECT_EQ(d.lo, 0xc7c5a0e27b0d32daULL);
+    EXPECT_EQ(d.hi, 0x2e523d36bd316445ULL & cluster::dedup_digest_hi_mask);
+    EXPECT_EQ(d.lo, 0x06fe7c0f19bb18bfULL);
 }
 
 // Distinct identities must not share an entry. Prefixes are the case worth
@@ -1656,18 +1656,39 @@ TEST(DedupIdentityDigest, SeparatesDistinctIdentities) {
     EXPECT_EQ(ab, cluster::dedup_digest_of(iobuf::from("ab")));
 }
 
-// The digest is persisted in snapshots and compared across replicas, so the
-// seeds and the algorithm are part of the on-disk format: changing either
-// silently invalidates every existing index without a serde version bump.
-// These constants were computed independently (python-xxhash, xxh64 with the
-// same two seeds), so this also cross-checks the implementation rather than
-// just pinning whatever it happens to produce. The digest keeps the low half
-// of the `hi` hash only (see dedup_canonical_digest()).
+// The digest is persisted in snapshots, so the algorithm and its seed are part
+// of the on-disk format: changing either silently invalidates every existing
+// index unless state_snapshot's compat version is bumped with it.
+// These constants were computed independently (python-xxhash, XXH3-128 with
+// the default seed: high64 and low64), so this also cross-checks the
+// implementation rather than just pinning whatever it happens to produce. The
+// digest keeps the low half of the high64 only (see dedup_canonical_digest()).
 TEST(DedupIdentityDigest, IsPinnedForSnapshotCompatibility) {
     const auto d = cluster::dedup_digest_of(iobuf::from("dedup-identity"));
-    EXPECT_EQ(d.hi, 0xa0e1ea34f71724b7ULL & cluster::dedup_digest_hi_mask);
-    EXPECT_EQ(d.hi, 0xf71724b7ULL);
-    EXPECT_EQ(d.lo, 0x68a86e30b386534dULL);
+    EXPECT_EQ(d.hi, 0x02c4f10fa4cd5644ULL & cluster::dedup_digest_hi_mask);
+    EXPECT_EQ(d.hi, 0xa4cd5644ULL);
+    EXPECT_EQ(d.lo, 0x8cbfa3df121a84d9ULL);
+}
+
+// The digester hashes an identity that arrives in one piece in a single call
+// and switches to XXH3's streaming state only for a second piece: both must
+// give the same digest for the same bytes, however they are split.
+TEST(DedupIdentityDigest, OnePieceAndManyPiecesAgree) {
+    const std::string bytes = "a-dedup-identity-of-some-length-0123456789";
+    cluster::dedup_digester whole;
+    whole.update(bytes.data(), bytes.size());
+    const auto expected = whole.digest();
+    for (size_t first = 0; first <= bytes.size(); ++first) {
+        for (size_t second = first; second <= bytes.size(); second += 7) {
+            cluster::dedup_digester split;
+            split.update(bytes.data(), first);
+            split.update(bytes.data() + first, second - first);
+            split.update(bytes.data() + second, bytes.size() - second);
+            ASSERT_EQ(split.digest(), expected) << first << " " << second;
+        }
+    }
+    cluster::dedup_digester empty;
+    EXPECT_EQ(empty.digest(), cluster::dedup_digest_of(iobuf{}));
 }
 
 // --- Reading identities straight from the batch buffer ---
@@ -3611,7 +3632,7 @@ TEST(DedupCompactIndexInTheFilter, WindowsWithinTheBlockSpanAreExact) {
 
 // The index's table refuses an identity rather than search without bound
 // when digests collide on everything it hashes by. That cannot happen with
-// xxhash64 digests of distinct identities short of a deliberate search for
+// XXH3-128 digests of distinct identities short of a deliberate search for
 // them; when it does, the record is admitted unindexed and counted, as at
 // the entry limit.
 TEST(DedupCompactIndexInTheFilter, RefusedIdentitiesAreAdmittedUnindexed) {

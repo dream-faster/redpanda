@@ -43,30 +43,58 @@ namespace cluster {
 /// \brief Digest one dedup identity.
 ///
 /// Consumes the iobuf fragment by fragment, so no contiguous copy of the
-/// identity is ever materialized. xxhash64's streaming API is independent of
-/// how the input is split across update() calls, so a fragmented and a
-/// contiguous iobuf holding the same bytes digest identically.
+/// identity is ever materialized. XXH3's streaming API is independent of how
+/// the input is split across update() calls, so a fragmented and a contiguous
+/// iobuf holding the same bytes digest identically.
 dedup_identity_digest dedup_digest_of(const iobuf& identity);
 
 /// \brief Streaming form of dedup_digest_of(): feed the identity's bytes in
 /// any pieces, then take the digest. Yields exactly what dedup_digest_of()
 /// yields for the same bytes.
+///
+/// One XXH3-128 pass, where two seeded xxhash64 passes used to read the
+/// identity twice. An identity nearly always lies in one piece of its batch's
+/// buffer, so the digester holds on to the first piece and hashes it in one
+/// call; only a second piece sets up the streaming state, which lives in the
+/// digester itself rather than on the heap.
 class dedup_digester {
 public:
+    dedup_digester() = default;
+    dedup_digester(const dedup_digester&) = delete;
+    dedup_digester& operator=(const dedup_digester&) = delete;
+    dedup_digester(dedup_digester&&) = delete;
+    dedup_digester& operator=(dedup_digester&&) = delete;
+    ~dedup_digester() = default;
+
+    /// Does not copy: the first non-empty piece is read only by digest(), or
+    /// by the update() that brings a second one, so it must stay valid and
+    /// unchanged until then.
     void update(const char* data, size_t size) {
-        _hi.update(data, size);
-        _lo.update(data, size);
+        if (size == 0) {
+            return;
+        }
+        if (_state) {
+            XXH3_128bits_update(&*_state, data, size);
+        } else if (_first == nullptr) {
+            _first = data;
+            _first_size = size;
+        } else {
+            XXH3_128bits_reset(&_state.emplace());
+            XXH3_128bits_update(&*_state, _first, _first_size);
+            XXH3_128bits_update(&*_state, data, size);
+        }
     }
     /// In dedup_canonical_digest() form: the 96 bits the index keeps.
-    dedup_identity_digest digest() {
-        return dedup_canonical_digest({.hi = _hi.digest(), .lo = _lo.digest()});
+    dedup_identity_digest digest() const {
+        const XXH128_hash_t h = _state ? XXH3_128bits_digest(&*_state)
+                                       : XXH3_128bits(_first, _first_size);
+        return dedup_canonical_digest({.hi = h.high64, .lo = h.low64});
     }
 
 private:
-    // Arbitrary distinct constants; they only need to differ from each other
-    // and stay fixed, since the digest is persisted in snapshots.
-    incremental_xxhash64 _hi{0x9E3779B97F4A7C15ULL};
-    incremental_xxhash64 _lo{0xC2B2AE3D27D4EB4FULL};
+    const char* _first{nullptr};
+    size_t _first_size{0};
+    std::optional<XXH3_state_t> _state;
 };
 
 struct dedup_index_entry {
