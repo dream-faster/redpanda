@@ -23,13 +23,19 @@ namespace cluster {
 ///
 /// The index stores this instead of the identity bytes, so an entry costs the
 /// same regardless of how large the Kafka key or header value is. One
-/// XXH3-128 pass is computed, and 96 bits are kept: all of `lo` (its low 64
-/// bits) and the low half of `hi`, whose upper half is always zero (see
-/// dedup_compact_index, which stores exactly those 12 bytes). At the
-/// supported 10^7-entry upper limit, the chance that a new identity matches
-/// some indexed one is on the order of 10^-22 per lookup, far below the
-/// window-edge and generation-change boundaries the feature already documents
-/// as best-effort.
+/// XXH3-128 pass is computed, and 80 bits are kept: all of `lo` (its low 64
+/// bits) and the low 16 bits of `hi`, whose other bits are always zero (see
+/// dedup_compact_index, which stores exactly those 10 bytes).
+///
+/// Keeping fewer bits than the identity has means two identities can share a
+/// digest, and that is a lossy outcome: a new identity whose digest matches
+/// an indexed one is taken for a duplicate, and its record is discarded like
+/// one. Each lookup of a new identity risks this with probability the number
+/// of indexed entries over 2^80: about 8 * 10^-19 at the default 10^6-entry
+/// limit, 8 * 10^-18 at the 10^7-entry maximum. At a sustained 10^6 new
+/// identities a second into a full 10^7-entry index, that is one record
+/// dropped in about 4,000 years per partition. Keeping 96 bits made it 2^16
+/// times less likely, at 2 more bytes an entry.
 ///
 /// XXH3 is not collision-resistant against a chosen-input attacker, which
 /// is deliberate: a producer that wants to suppress another producer's
@@ -49,12 +55,12 @@ struct dedup_identity_digest {
 };
 
 /// The bits of dedup_identity_digest::hi that are part of the identity.
-inline constexpr uint64_t dedup_digest_hi_mask = 0xffff'ffffULL;
+inline constexpr uint64_t dedup_digest_hi_mask = 0xffffULL;
 
-/// The digest as the index keeps it. Digests computed by this build, and
-/// those restored from a snapshot, are already in this form; the index masks
-/// whatever it is handed regardless, so a full 128-bit digest finds the same
-/// entry.
+/// The digest as the index keeps it. Digests computed by this build are
+/// already in this form; one read from a version-4 snapshot, which kept 96
+/// bits, is not. The index masks whatever it is handed regardless, so a wider
+/// digest finds the same entry.
 constexpr dedup_identity_digest
 dedup_canonical_digest(dedup_identity_digest d) noexcept {
     return {.hi = d.hi & dedup_digest_hi_mask, .lo = d.lo};
@@ -118,14 +124,14 @@ private:
     std::array<size_t, size_t{1} << radix_bits> _counts{};
 };
 
-/// \brief The dedup index's table: identity digest to record timestamp, at 16
+/// \brief The dedup index's table: identity digest to record timestamp, at 14
 /// bytes per entry plus a 4-byte lookup slot.
 ///
 /// The general-purpose map this replaced kept a 24-byte value and an 8-byte
 /// bucket at up to 80% load: about 50 bytes an entry with allocation overhead.
-/// Here an entry is a 12-byte digest and a 4-byte timestamp, and the lookup
-/// table holds only the entry's position: 22-25 bytes an entry, so the same
-/// memory holds about twice the identities.
+/// Here an entry is a 10-byte digest and a 4-byte timestamp, and the lookup
+/// table holds only the entry's position: 20-23 bytes an entry, so the same
+/// memory holds more than twice the identities.
 ///
 /// Entries live in a dense array in insertion order, and erasing one moves the
 /// array's last entry into its place. That is the layout the filter's sweep
@@ -145,10 +151,11 @@ private:
 /// the block's entries cannot all be kept together with room above them, those
 /// more than retained_span behind the block's newest are stored as expired.
 ///
-/// Expired is the only lossy outcome, and it can only make an entry stop
-/// matching -- a duplicate admitted, never a record dropped. With a dedup
-/// window up to retained_span (about 37 days), every entry it turns expired
-/// was outside the window already. Timestamps are otherwise exact.
+/// Expired is the only lossy outcome of the encoding, and it can only make an
+/// entry stop matching -- a duplicate admitted, never a record dropped (a
+/// digest match by chance can drop one; see dedup_identity_digest). With a
+/// dedup window up to retained_span (about 37 days), every entry it turns
+/// expired was outside the window already. Timestamps are otherwise exact.
 ///
 /// ## Lookup
 ///
@@ -262,7 +269,7 @@ public:
     ///
     /// Positions [0, indexed()) are in the lookup table, and find() sees only
     /// them; those from indexed() on were appended by append_unindexed() and
-    /// are only in the entry array, at 16 bytes an entry and no lookup cost.
+    /// are only in the entry array, at 14 bytes an entry and no lookup cost.
     /// A replica that is not filtering needs nothing but the entries, and
     /// indexes them in bulk once it is: begin_bulk_index(), prepare_step()
     /// until it returns false, then index_next() up to size(). push_back()
@@ -336,14 +343,19 @@ public:
     size_t work() const noexcept { return _work; }
 
 private:
+    // Packed to 2-byte alignment: 14 bytes, not 16 with padding. An entry
+    // can straddle two cache lines, which a standalone benchmark put at a few
+    // percent on a lookup.
+#pragma pack(push, 2)
     struct packed_entry {
         uint32_t lo_lo;
         uint32_t lo_hi;
-        uint32_t hi;
+        uint16_t hi;
         /// 0: expired. Otherwise the timestamp is the block's base + rel - 1.
         uint32_t rel;
     };
-    static_assert(sizeof(packed_entry) == 16);
+#pragma pack(pop)
+    static_assert(sizeof(packed_entry) == 14);
 
     struct block_meta {
         int64_t base{0};

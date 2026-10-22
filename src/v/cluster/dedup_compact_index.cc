@@ -167,7 +167,7 @@ size_t dedup_compact_index::find(
             if (
               e.lo_lo == static_cast<uint32_t>(h)
               && e.lo_hi == static_cast<uint32_t>(h >> 32)
-              && e.hi == static_cast<uint32_t>(key.hi)) {
+              && e.hi == static_cast<uint16_t>(key.hi)) {
                 return pos;
             }
         }
@@ -199,7 +199,10 @@ void dedup_compact_index::prefetch(
     if (s != 0 && slot_dist(s) == 0) {
         const size_t pos = slot_pos(s);
         if (pos < _size) {
-            __builtin_prefetch(&entry(pos));
+            // At 14 bytes an entry can straddle two cache lines.
+            const auto* e = reinterpret_cast<const char*>(&entry(pos));
+            __builtin_prefetch(e);
+            __builtin_prefetch(e + sizeof(packed_entry) - 1);
             __builtin_prefetch(&_meta[pos >> block_shift]);
         }
     }
@@ -593,7 +596,7 @@ void dedup_compact_index::write_entry(
     auto& e = entry(_size);
     e.lo_lo = static_cast<uint32_t>(key.lo);
     e.lo_hi = static_cast<uint32_t>(key.lo >> 32);
-    e.hi = static_cast<uint32_t>(key.hi);
+    e.hi = static_cast<uint16_t>(key.hi);
     e.rel = 0;
     ++_size;
     e.rel = encode(b, ts);

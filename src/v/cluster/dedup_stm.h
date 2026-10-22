@@ -55,9 +55,14 @@ struct dedup_stm_test_accessor;
 class dedup_stm : public raft::persisted_stm<> {
 public:
     static constexpr std::string_view name = "dedup_stm";
-    /// Bytes one index entry occupies in a snapshot: digest lo, the 32 bits
+    /// Bytes one index entry occupies in a snapshot: digest lo, the 16 bits
     /// of digest hi the index keeps, and the timestamp as its age below the
     /// snapshot's max_timestamp. See state_snapshot.
+    static constexpr size_t narrow_entry_size = sizeof(uint64_t)
+                                                + sizeof(uint16_t)
+                                                + sizeof(uint32_t);
+    /// Version 4's layouts, still read: 32 bits of digest hi, and the
+    /// timestamp as an age (packed) or in full (wide).
     static constexpr size_t packed_entry_size = sizeof(uint64_t)
                                                 + 2 * sizeof(uint32_t);
     /// The timestamp in full instead: written when the window is longer than
@@ -120,7 +125,7 @@ private:
     /// Version history, each a compat break: a reader that cannot read a
     /// version discards the snapshot and rebuilds the index from the log (see
     /// try_restore_snapshot()); the index is advisory and log-derived, so that
-    /// is correct, only slower. This build reads version 4 only:
+    /// is correct, only slower. This build reads versions 4 and 5:
     ///
     /// - 0: full identity bytes per entry.
     /// - 1: a 128-bit digest per entry, each its own serde envelope.
@@ -140,28 +145,39 @@ private:
     ///   2^32 - 1 ms (49.7 days). A longer window is still written wide.
     ///   Both are read; a build that reads only the first refuses the second
     ///   on entry_size, and rebuilds as above.
+    /// - 5: digests are 80 bits, and an entry packs into narrow_entry_size
+    ///   bytes: digest lo, the low 16 bits of digest hi, the age. This build
+    ///   reads version 4 too: its digests, cut to 80 bits, are what this build
+    ///   computes for the same identities, so the compat version stays 4. A
+    ///   version-4 build can only compare 96 bits; it refuses a version-5
+    ///   snapshot on entry_size, which it reads as one it does not know. A
+    ///   window longer than a 32-bit age spans is still written wide.
     ///
     /// The break runs both ways: an older binary rejects a newer snapshot on
-    /// compat version the same way, so a raft snapshot crossing a rolling
-    /// upgrade in either direction never fails the partition. It is not
-    /// rebuilt from, though: a raft snapshot installs where the log before
-    /// its offset is gone, so the identities only it held are lost on that
-    /// replica, which indexes from the snapshot offset on. Each replica
-    /// digests what it applies itself, so replicas on different builds never
-    /// compare digests otherwise. Version 1 snapshots only ever lived in the
-    /// kvstore, which this STM no longer reads.
+    /// compat version or entry_size, never failing the partition. For a local
+    /// snapshot -- a rollback reading what the newer build wrote -- that costs
+    /// a rebuild from the log. A raft snapshot has no log behind it to rebuild
+    /// from: a replica that rejects one keeps none of the identities it
+    /// covers, and if it leads before they leave the window it admits their
+    /// duplicates. Snapshots are not feature-gated, so during a rolling
+    /// upgrade a leader on this build that sends one to a version-4 follower
+    /// leaves that follower in this state. Each replica digests what it
+    /// applies itself, so replicas on different builds never compare digests
+    /// otherwise. Version 1 snapshots only ever lived in the kvstore, which
+    /// this STM no longer reads.
     struct state_snapshot
       : serde::envelope<
           state_snapshot,
-          serde::version<4>,
+          serde::version<5>,
           serde::compat_version<4>> {
         int64_t window_ms{0};
         int64_t generation{0};
         model::timestamp max_timestamp{model::timestamp::min()};
         iobuf entries;
-        /// Bytes per record in `entries`: packed_entry_size, or
-        /// wide_entry_size for a long window or an earlier build.
-        uint32_t entry_size{packed_entry_size};
+        /// Bytes per record in `entries`: narrow_entry_size, wide_entry_size
+        /// for a long window, or packed_entry_size or wide_entry_size for a
+        /// version-4 snapshot.
+        uint32_t entry_size{narrow_entry_size};
 
         auto serde_fields() {
             return std::tie(

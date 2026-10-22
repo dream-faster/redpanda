@@ -149,7 +149,7 @@ Guarantees:
   The per-partition ceiling does not bound a shard: partitions are placed on
   shards by count, not by index size, so several saturated indices can share
   one shard's memory. `dedup_max_entries_per_shard` (0, the default, derives it
-  from 15% of shard memory at ~48 bytes an entry) caps the sum. Every index on
+  from 15% of shard memory at ~44 bytes an entry) caps the sum. Every index on
   the shard reports its size into one shared `dedup_shard_budget`; the same
   cursor trims a partition that inserts while the shard is within a tenth of
   its limit, and at the limit a new identity with nothing freeable in its own
@@ -508,14 +508,14 @@ Versions 0 and 1 are refused on compat version, and the index is rebuilt from
 the log; a version 2 binary refuses version 3 the same way, rather than
 restoring 96-bit digests it would never match against its 128-bit ones.
 
-The index (`dedup_compact_index`) keeps an entry in 16 bytes: a 12-byte digest
+The index (`dedup_compact_index`) keeps an entry in 14 bytes: an 80-bit digest
 and a 32-bit timestamp relative to the base of its block of 4096 entries, in a
 dense array in insertion order whose erase moves the last entry into the hole
 -- the layout the sweep cursor and the snapshot walk depend on. Positions are
 found through a robin-hood table of 4-byte slots (24-bit position, 8-bit probe
 distance) split into segments of at most 4096 slots under a directory indexed
 by the digest's top bits, so a full segment splits on its own and the table
-never rehashes as a whole. That is about 22 bytes an entry against the 50 of
+never rehashes as a whole. That is about 20 bytes an entry against the 50 of
 the general-purpose map it replaced, and no call does work proportional to the
 index: a segment split, the largest step, re-inserts at most one segment's
 keys. A block's timestamps span 2^32 - 2 ms exactly (~49.7 days); a write that

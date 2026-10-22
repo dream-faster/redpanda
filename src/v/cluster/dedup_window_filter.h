@@ -87,7 +87,7 @@ public:
             XXH3_128bits_update(&*_state, data, size);
         }
     }
-    /// In dedup_canonical_digest() form: the 96 bits the index keeps.
+    /// In dedup_canonical_digest() form: the 80 bits the index keeps.
     dedup_identity_digest digest() const {
         const XXH128_hash_t h = _state ? XXH3_128bits_digest(&*_state)
                                        : XXH3_128bits(_first, _first_size);
@@ -532,9 +532,9 @@ struct dedup_shard_budget {
 /// (revert_request).
 ///
 /// Memory is bounded three ways. Each entry costs the same regardless of
-/// identity size, because the index stores a 96-bit digest of the identity
+/// identity size, because the index stores an 80-bit digest of the identity
 /// rather than its bytes, in a table built for this (dedup_compact_index):
-/// about 22 bytes per entry. Entries older than the window (relative to the
+/// about 20 bytes per entry. Entries older than the window (relative to the
 /// most recent timestamp seen) can never cause a drop again, and a cursor
 /// that advances a few entries per new identity drops them as it goes.
 /// Finally, a hard per-partition entry limit prevents a large window,
@@ -1166,8 +1166,8 @@ private:
     void note_erase_behind_cursor(size_t index);
     /// Called when the whole entry array is discarded.
     void invalidate_walks();
-    /// Entries emitted between preemption checks. 16 bytes each on the wire,
-    /// so 64 KiB of snapshot per check.
+    /// Entries emitted between preemption checks. 14 bytes each on the wire,
+    /// so about 56 KiB of snapshot per check.
     static constexpr size_t walk_chunk = 4096;
     /// Restored entries between reports to the shard budget. A power of two.
     static constexpr size_t restore_sync_interval = 4096;

@@ -1766,11 +1766,12 @@ TEST(DedupIdentityDigest, SeparatesDistinctIdentities) {
 // These constants were computed independently (python-xxhash, XXH3-128 with
 // the default seed: high64 and low64), so this also cross-checks the
 // implementation rather than just pinning whatever it happens to produce. The
-// digest keeps the low half of the high64 only (see dedup_canonical_digest()).
+// digest keeps the low 16 bits of the high64 only (see
+// dedup_canonical_digest()).
 TEST(DedupIdentityDigest, IsPinnedForSnapshotCompatibility) {
     const auto d = cluster::dedup_digest_of(iobuf::from("dedup-identity"));
     EXPECT_EQ(d.hi, 0x02c4f10fa4cd5644ULL & cluster::dedup_digest_hi_mask);
-    EXPECT_EQ(d.hi, 0xa4cd5644ULL);
+    EXPECT_EQ(d.hi, 0x5644ULL);
     EXPECT_EQ(d.lo, 0x8cbfa3df121a84d9ULL);
 }
 
@@ -3866,22 +3867,22 @@ TEST(DedupShardBudget, TotalMatchesTheIndicesUnderRandomOperations) {
 
 // --- The compact index under the filter ---
 //
-// The index keeps 96 bits of each digest and a 32-bit timestamp relative to a
+// The index keeps 80 bits of each digest and a 32-bit timestamp relative to a
 // block of entries (dedup_compact_index). What that may change is bounded: an
-// identity is its 96 bits, and an entry whose timestamp a block cannot keep
+// identity is its 80 bits, and an entry whose timestamp a block cannot keep
 // beside much newer ones reads as expired, so it can stop matching but never
 // make a match that should not happen.
 
-TEST(DedupCompactIndexInTheFilter, IdentitiesAre96Bits) {
+TEST(DedupCompactIndexInTheFilter, IdentitiesAre80Bits) {
     cluster::dedup_window_filter f(1000ms);
     const auto d = cluster::dedup_digest_of(iobuf::from("k"));
     EXPECT_EQ(d.hi & ~cluster::dedup_digest_hi_mask, 0u);
     f.populate(d, ts(1000));
-    // The same 96 bits with anything above them is the same identity, as a
-    // digest read from a snapshot written before the index kept 96 bits is.
+    // The same 80 bits with anything above them is the same identity, as a
+    // digest read from a snapshot written before the index kept 80 bits is.
     f.populate(
       cluster::dedup_identity_digest{
-        .hi = d.hi | (0xdeadULL << 40), .lo = d.lo},
+        .hi = d.hi | (0xdeadULL << 16), .lo = d.lo},
       ts(1500));
     EXPECT_EQ(f.map_size(), 1u);
     const auto snap = f.snapshot();

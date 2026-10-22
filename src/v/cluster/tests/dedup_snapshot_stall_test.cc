@@ -253,10 +253,10 @@ ss::future<> compare_at(size_t entries) {
               << us(copy_m.stall) << "us   total " << us(copy_m.total) << "us\n"
               << std::flush;
 
-    // The serialized copy is the snapshot's whole memory cost: 16 bytes per
+    // The serialized copy is the snapshot's whole memory cost: 14 bytes per
     // entry plus a fixed header, against the 30 of a per-entry envelope.
     ASSERT_LE_CORO(
-      packed.size_bytes(), entries * dedup_stm::packed_entry_size + 64);
+      packed.size_bytes(), entries * dedup_stm::narrow_entry_size + 64);
     ASSERT_LT_CORO(packed.size_bytes(), legacy_bytes);
 
     // The packed write yields between chunks of the index, so its longest
@@ -312,10 +312,10 @@ TEST_CORO(dedup_snapshot_stall, index_memory_per_entry_fits_the_budget) {
     // The point of the table: well under the ~50 bytes the map it replaced
     // took.
     ASSERT_LE_CORO(own_worst, 32u);
-    // The packed snapshot adds dedup_stm::packed_entry_size on top while it
+    // The packed snapshot adds dedup_stm::narrow_entry_size on top while it
     // is written; the budget's figure must cover both.
     ASSERT_LE_CORO(
-      own_worst + dedup_stm::packed_entry_size, DEDUP_SHARD_BYTES_PER_ENTRY);
+      own_worst + dedup_stm::narrow_entry_size, DEDUP_SHARD_BYTES_PER_ENTRY);
 }
 
 // Growing an index never stops the reactor for long: the lookup table grows a

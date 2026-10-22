@@ -161,9 +161,9 @@ void run_against_reference(
             const size_t pos = rng() % ref.entries.size();
             const auto& d = ref.entries[pos].first;
             ASSERT_EQ(idx.find(d), pos);
-            // Only 96 bits are the identity.
+            // Only 80 bits are the identity.
             auto upper = d;
-            upper.hi |= (rng() | 1) << 32;
+            upper.hi |= (rng() | 1) << 16;
             ASSERT_EQ(idx.find(upper), pos);
             auto other = d;
             other.hi ^= 1;
@@ -584,7 +584,7 @@ TEST(DedupCompactIndex, RebasesDoNotComeInWaves) {
 }
 
 TEST(DedupCompactIndex, MemoryPerEntry) {
-    // 16 bytes of entry and a 4-byte slot at a load between 7/16 and 7/8.
+    // 14 bytes of entry and a 4-byte slot at a load between 7/16 and 7/8.
     for (size_t n : {10'000ul, 100'000ul, 1'000'000ul}) {
         index_t idx;
         uint64_t keys = n;
@@ -593,8 +593,8 @@ TEST(DedupCompactIndex, MemoryPerEntry) {
         }
         const double per_entry = static_cast<double>(idx.memory_usage())
                                  / static_cast<double>(n);
-        EXPECT_LT(per_entry, 27.0) << n;
-        EXPECT_GT(per_entry, 20.0) << n;
+        EXPECT_LT(per_entry, 25.0) << n;
+        EXPECT_GT(per_entry, 18.0) << n;
     }
     // A small index stays small.
     index_t one;
@@ -658,11 +658,11 @@ TEST(DedupCompactIndex, EmptiesAndRefillsAcrossBlocks) {
     EXPECT_EQ(moved.find({.hi = 1, .lo = 1}), 0);
 }
 
-TEST(DedupCompactIndex, CanonicalDigestKeeps96Bits) {
+TEST(DedupCompactIndex, CanonicalDigestKeeps80Bits) {
     const dedup_identity_digest d{
       .hi = 0xaaaa'bbbb'cccc'ddddULL, .lo = 0x1111'2222'3333'4444ULL};
     const auto c = dedup_canonical_digest(d);
-    EXPECT_EQ(c.hi, 0xcccc'ddddULL);
+    EXPECT_EQ(c.hi, 0xddddULL);
     EXPECT_EQ(c.lo, d.lo);
     EXPECT_EQ(dedup_canonical_digest(c), c);
     index_t idx;
@@ -934,7 +934,7 @@ TEST(DedupCompactIndex, BulkIndexingIsSizedUpFront) {
     }
 }
 
-// Without the lookup table an entry is its 16 bytes.
+// Without the lookup table an entry is its 14 bytes.
 TEST(DedupCompactIndex, DroppingTheLookupLeavesTheEntries) {
     index_t idx;
     uint64_t keys = 9;
@@ -950,7 +950,7 @@ TEST(DedupCompactIndex, DroppingTheLookupLeavesTheEntries) {
     idx.check_invariants();
     const double per_entry = static_cast<double>(idx.memory_usage())
                              / static_cast<double>(n);
-    EXPECT_LT(per_entry, 17.0);
+    EXPECT_LT(per_entry, 15.0);
     EXPECT_LT(idx.memory_usage(), indexed_bytes * 3 / 4);
 }
 

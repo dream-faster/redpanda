@@ -305,13 +305,13 @@ ss::future<iobuf> dedup_stm::serialize_snapshot(
     // offset the snapshot covers, and replaying it after a restore puts the
     // newer timestamp back.
     model::timestamp max_timestamp;
-    uint32_t entry_size = packed_entry_size;
+    uint32_t entry_size = narrow_entry_size;
     for (;;) {
         max_timestamp = state.max_timestamp();
         entry_size = static_cast<uint32_t>(
           state.window().count() > std::numeric_limits<uint32_t>::max()
             ? wide_entry_size
-            : packed_entry_size);
+            : narrow_entry_size);
         const size_t chunk_bytes = chunk.size() - chunk.size() % entry_size;
         size_t staged = 0;
         const bool complete = co_await state.for_each_live_entry_async(
@@ -321,21 +321,24 @@ ss::future<iobuf> dedup_stm::serialize_snapshot(
               }
               char* out = chunk.data() + staged;
               const auto lo = ss::cpu_to_le(identity.lo);
-              const auto hi = ss::cpu_to_le(
-                static_cast<uint32_t>(identity.hi & dedup_digest_hi_mask));
               std::memcpy(out, &lo, sizeof(lo));
-              std::memcpy(out + sizeof(lo), &hi, sizeof(hi));
-              out += sizeof(lo) + sizeof(hi);
+              out += sizeof(lo);
               if (entry_size == wide_entry_size) {
+                  const auto hi = ss::cpu_to_le(
+                    static_cast<uint32_t>(identity.hi & dedup_digest_hi_mask));
                   const auto ts = ss::cpu_to_le(timestamp.value());
-                  std::memcpy(out, &ts, sizeof(ts));
+                  std::memcpy(out, &hi, sizeof(hi));
+                  std::memcpy(out + sizeof(hi), &ts, sizeof(ts));
               } else {
+                  const auto hi = ss::cpu_to_le(
+                    static_cast<uint16_t>(identity.hi & dedup_digest_hi_mask));
                   const auto age = std::clamp<__int128>(
                     __int128{max_timestamp.value()} - timestamp.value(),
                     0,
                     std::numeric_limits<uint32_t>::max());
                   const auto le_age = ss::cpu_to_le(static_cast<uint32_t>(age));
-                  std::memcpy(out, &le_age, sizeof(le_age));
+                  std::memcpy(out, &hi, sizeof(hi));
+                  std::memcpy(out + sizeof(hi), &le_age, sizeof(le_age));
               }
               staged += entry_size;
               if (staged == chunk_bytes) {
@@ -367,34 +370,60 @@ ss::future<iobuf> dedup_stm::serialize_snapshot(
 
 namespace {
 
-/// Decode the packed entries of a state_snapshot, yielding every few
-/// thousand so a large restore shares the reactor.
-template<typename Emit>
-ss::future<> for_each_packed_entry(
-  const iobuf& packed,
-  size_t entry_size,
-  model::timestamp max_timestamp,
-  Emit emit) {
+/// Decode the packed entries of a state_snapshot laid out \p entry_size bytes
+/// each, yielding every few thousand so a large restore shares the reactor.
+template<size_t entry_size, typename Emit>
+ss::future<> for_each_entry_of_size(
+  const iobuf& packed, model::timestamp max_timestamp, Emit emit) {
     constexpr size_t entries_per_yield = 4096;
     iobuf_const_parser parser(packed);
     size_t n = 0;
     while (parser.bytes_left() > 0) {
         dedup_identity_digest identity;
         identity.lo = ss::le_to_cpu(parser.consume_type<uint64_t>());
-        identity.hi = ss::le_to_cpu(parser.consume_type<uint32_t>());
+        if constexpr (entry_size == dedup_stm::narrow_entry_size) {
+            identity.hi = ss::le_to_cpu(parser.consume_type<uint16_t>());
+        } else {
+            // A version-4 entry's 32 bits are cut to the index's 16 on
+            // insert.
+            identity.hi = ss::le_to_cpu(parser.consume_type<uint32_t>());
+        }
         int64_t ts{};
-        if (entry_size == dedup_stm::packed_entry_size) {
+        if constexpr (entry_size == dedup_stm::wide_entry_size) {
+            ts = ss::le_to_cpu(parser.consume_type<int64_t>());
+        } else {
             const auto age = ss::le_to_cpu(parser.consume_type<uint32_t>());
             ts = static_cast<int64_t>(std::max<__int128>(
               std::numeric_limits<int64_t>::min(),
               __int128{max_timestamp.value()} - age));
-        } else {
-            ts = ss::le_to_cpu(parser.consume_type<int64_t>());
         }
         emit(identity, model::timestamp{ts});
         if ((++n % entries_per_yield) == 0) {
             co_await ss::coroutine::maybe_yield();
         }
+    }
+}
+
+template<typename Emit>
+ss::future<> for_each_packed_entry(
+  const iobuf& packed,
+  size_t entry_size,
+  model::timestamp max_timestamp,
+  Emit emit) {
+    switch (entry_size) {
+    case dedup_stm::narrow_entry_size:
+        return for_each_entry_of_size<dedup_stm::narrow_entry_size>(
+          packed, max_timestamp, std::move(emit));
+    case dedup_stm::packed_entry_size:
+        return for_each_entry_of_size<dedup_stm::packed_entry_size>(
+          packed, max_timestamp, std::move(emit));
+    case dedup_stm::wide_entry_size:
+        return for_each_entry_of_size<dedup_stm::wide_entry_size>(
+          packed, max_timestamp, std::move(emit));
+    default:
+        return ss::make_exception_future<>(serde::serde_exception(
+          ssx::sformat(
+            "dedup snapshot entries of unknown size {}", entry_size)));
     }
 }
 
@@ -407,7 +436,9 @@ dedup_stm::state_snapshot dedup_stm::decode_snapshot(iobuf buffer) {
 ss::future<> dedup_stm::restore_snapshot(
   dedup_window_filter& state, int64_t& generation, state_snapshot snapshot) {
     const size_t entry_size = snapshot.entry_size;
-    if (entry_size != packed_entry_size && entry_size != wide_entry_size) {
+    if (
+      entry_size != narrow_entry_size && entry_size != packed_entry_size
+      && entry_size != wide_entry_size) {
         throw serde::serde_exception(
           ssx::sformat(
             "dedup snapshot entries of unknown size {}", entry_size));
