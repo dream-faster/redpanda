@@ -580,6 +580,17 @@ public:
     static constexpr size_t default_max_entries
       = DEFAULT_DEDUP_MAX_ENTRIES_PER_PARTITION;
 
+    // Experiment only: evictions of entries at or above debug_watch_ts, by
+    // path (0 capacity trim in sweep, 1 expired in sweep, 2 replace, 3
+    // reclaim).
+    static inline int64_t debug_watch_ts = std::numeric_limits<int64_t>::max();
+    static inline std::array<size_t, 4> debug_watch_evicted{};
+    static void debug_note(int64_t ts, size_t path) {
+        if (ts >= debug_watch_ts) {
+            ++debug_watch_evicted[path];
+        }
+    }
+
     explicit dedup_window_filter(
       std::chrono::milliseconds window,
       size_t max_entries = default_max_entries,

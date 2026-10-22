@@ -4372,11 +4372,17 @@ TEST(DedupShardBudget, CountingFromPartwayThroughAPassMarksAtMostAQuarter) {
 // restores it into a fresh, deferred one; the partition taking traffic builds
 // its lookup and filters a burst of fresh identities, and then their resend.
 // Every resend must be dropped.
-TEST(DedupShardBudgetFuzz, FreshIdentitiesOnAFullShardSurviveRestarts) {
+namespace {
+size_t run_full_shard_fuzz(
+  uint64_t seeds,
+  size_t limit_min,
+  size_t limit_span,
+  size_t burst_min,
+  size_t burst_span) {
     size_t failures = 0;
-    for (uint64_t seed = 1; seed <= 60; ++seed) {
+    for (uint64_t seed = 1; seed <= seeds; ++seed) {
         std::mt19937_64 rng(seed);
-        const size_t limit = 2'000 + rng() % 30'000;
+        const size_t limit = limit_min + rng() % limit_span;
         auto budget = make_budget(limit);
         std::array<std::unique_ptr<cluster::dedup_window_filter>, 4> fs;
         for (auto& f : fs) {
@@ -4392,7 +4398,7 @@ TEST(DedupShardBudgetFuzz, FreshIdentitiesOnAFullShardSurviveRestarts) {
             }
             now += static_cast<int64_t>(limit / 3 / 50) + 1;
         }
-        const size_t burst = 50 + rng() % 1'000;
+        const size_t burst = burst_min + rng() % burst_span;
         for (size_t cycle = 0; cycle < 8; ++cycle) {
             std::array<cluster::dedup_index_snapshot, 4> snaps;
             for (size_t p = 0; p < 4; ++p) {
@@ -4419,17 +4425,43 @@ TEST(DedupShardBudgetFuzz, FreshIdentitiesOnAFullShardSurviveRestarts) {
             }
             const auto unindexed = fs[p]->unindexed_records();
             const auto evicted = fs[p]->capacity_evicted_entries();
+            cluster::dedup_window_filter::debug_watch_ts = now;
+            cluster::dedup_window_filter::debug_watch_evicted = {};
+            const auto before = fs[p]->snapshot();
+            size_t old_before = 0;
+            int64_t old_newest = 0;
+            for (const auto& e : before.entries) {
+                if (e.timestamp.value() < now) {
+                    ++old_before;
+                    old_newest = std::max(old_newest, e.timestamp.value());
+                }
+            }
             auto first = fs[p]->filter(make_batch_of(specs, ts(now)));
+            const auto watched = cluster::dedup_window_filter::debug_watch_evicted;
+            cluster::dedup_window_filter::debug_watch_ts
+              = std::numeric_limits<int64_t>::max();
+            const auto after = fs[p]->snapshot();
+            size_t old_after = 0;
+            int64_t old_oldest = std::numeric_limits<int64_t>::max();
+            for (const auto& e : after.entries) {
+                if (e.timestamp.value() < now) {
+                    ++old_after;
+                    old_oldest = std::min(old_oldest, e.timestamp.value());
+                }
+            }
             const auto unindexed_first = fs[p]->unindexed_records();
             const auto evicted_first = fs[p]->capacity_evicted_entries();
+            const auto cutoff = fs[p]->capacity_cutoff().value();
             auto second = fs[p]->filter(make_batch_of(specs, ts(now + 50)));
             const size_t through = second ? second->record_count() : 0;
             if (through > 0) {
                 ++failures;
                 ADD_FAILURE() << fmt::format(
                   "seed {} limit {} burst {} cycle {}: {} resent identities "
-                  "admitted; unindexed {}->{}, evicted {}->{}->{}, sizes {} {} "
-                  "{} {}, shard {}/{}",
+                  "admitted; unindexed {}->{}, evicted {}->{}; fresh evicted "
+                  "by trim {} expiry {} replace {} reclaim {}; own old entries "
+                  "{} -> {} (oldest left {}, newest before {}, burst from {}, "
+                  "cutoff {}); sizes {} {} {} {}, shard {}/{}",
                   seed,
                   limit,
                   burst,
@@ -4439,7 +4471,16 @@ TEST(DedupShardBudgetFuzz, FreshIdentitiesOnAFullShardSurviveRestarts) {
                   unindexed_first,
                   evicted,
                   evicted_first,
-                  fs[p]->capacity_evicted_entries(),
+                  watched[0],
+                  watched[1],
+                  watched[2],
+                  watched[3],
+                  old_before,
+                  old_after,
+                  old_oldest,
+                  old_newest,
+                  now,
+                  cutoff,
                   fs[0]->map_size(),
                   fs[1]->map_size(),
                   fs[2]->map_size(),
@@ -4451,7 +4492,16 @@ TEST(DedupShardBudgetFuzz, FreshIdentitiesOnAFullShardSurviveRestarts) {
             now += 1'000;
         }
     }
-    EXPECT_EQ(failures, 0u);
+    return failures;
+}
+} // namespace
+
+TEST(DedupShardBudgetFuzz, FreshIdentitiesOnAFullShardSurviveRestarts) {
+    EXPECT_EQ(run_full_shard_fuzz(60, 2'000, 30'000, 50, 1'000), 0u);
+}
+
+TEST(DedupShardBudgetFuzz, SmallBurstsIntoLargeIndicesSurviveRestarts) {
+    EXPECT_EQ(run_full_shard_fuzz(16, 150'000, 300'000, 200, 1'000), 0u);
 }
 
 // Experiment, as above, but the burst arrives while another partition's

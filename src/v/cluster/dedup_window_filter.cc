@@ -1013,6 +1013,7 @@ void dedup_window_filter::reclaim_expired_step(size_t budget) {
         }
         if (!is_live(_index.timestamp_at(_reclaim_pos), cutoff)) {
             // As in sweep_step(), the erase moved an unvisited entry here.
+            debug_note(_index.timestamp_at(_reclaim_pos), 3);
             erase_at(_reclaim_pos);
             ++_reclaimed_entries;
             continue;
@@ -1069,6 +1070,7 @@ void dedup_window_filter::sweep_step(size_t budget) {
             // Expired: it can never match again, so dropping it costs no
             // coverage. The cursor does not advance -- the erase moved the
             // array's last, still unvisited, entry into this slot.
+            debug_note(stamp.value(), 1);
             erase_at(_sweep_pos);
             continue;
         }
@@ -1079,6 +1081,7 @@ void dedup_window_filter::sweep_step(size_t budget) {
             // here, a few entries at a time from the soft limit upwards, is
             // what replaced dropping a quarter of the index in one step once
             // it hit the ceiling.
+            debug_note(stamp.value(), 0);
             erase_at(_sweep_pos);
             ++_capacity_evicted_entries;
             continue;
@@ -1215,6 +1218,7 @@ void dedup_window_filter::replace_oldest_visited(model::timestamp incoming) {
         if (!oldest || !(_index.timestamp_at(*oldest) < incoming.value())) {
             break;
         }
+        debug_note(_index.timestamp_at(*oldest), 2);
         erase_at(*oldest);
         ++_capacity_evicted_entries;
     }
