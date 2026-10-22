@@ -297,6 +297,7 @@ bool dedup_window_filter::is_duplicate(
         ++_unindexed_records;
         return false;
     }
+    note_admitted(ts.value());
     sync_shard_budget();
     if (undo) {
         undo->entries.push_back(
@@ -315,6 +316,7 @@ dedup_window_filter::filter(model::record_batch batch) {
 
 dedup_filter_result
 dedup_window_filter::filter_request(model::record_batch batch) {
+    auto admitting = admit_batch();
     // Decompress into a temporary so the original (possibly compressed) batch
     // can be returned untouched when nothing is filtered.
     std::optional<model::record_batch> decompressed;
@@ -524,6 +526,7 @@ void dedup_window_filter::populate(
         ++_unindexed_records;
         return;
     }
+    note_admitted(ts.value());
     sync_shard_budget();
 }
 
@@ -784,6 +787,7 @@ void dedup_window_filter::replace_oldest_visited(model::timestamp incoming) {
     const bool over_limit
       = _index.size() > _max_entries
         || (_shard_budget && _shard_budget->entries > _shard_budget->max_entries);
+    const int64_t bound = std::min(incoming.value(), _batch_floor);
     for (; need > 0 && _sweep_pos < _index.size(); --need) {
         if (
           over_limit && _index.size() > capacity_emergency_budget
@@ -796,18 +800,43 @@ void dedup_window_filter::replace_oldest_visited(model::timestamp incoming) {
             _sweep_pos = 0;
             finish_pass();
         }
-        const auto begin = _sweep_pos;
-        const auto end = std::min(
-          begin + capacity_emergency_budget, _index.size());
+        // Only entries older than the incoming identity, and older than
+        // anything this batch has admitted: its own identities are never
+        // the room for its next one. They are either behind the cursor --
+        // where an erase that moved one also moved the cursor past it -- or
+        // in the array's tail, where the batch is appended. A window holding
+        // nothing else is in that tail, so the search wraps to the front,
+        // and then goes on a few windows at most.
         std::optional<size_t> oldest;
-        for (size_t i = begin; i < end; ++i) {
+        bool wrapped = false;
+        for (size_t searched = 0;; ++searched) {
+            const auto begin = _sweep_pos;
+            const auto end = std::min(
+              begin + capacity_emergency_budget, _index.size());
+            for (size_t i = begin; i < end; ++i) {
+                const auto stamp = _index.timestamp_at(i);
+                if (
+                  stamp < bound
+                  && (!oldest || stamp < _index.timestamp_at(*oldest))) {
+                    oldest = i;
+                }
+            }
             if (
-              !oldest
-              || _index.timestamp_at(i) < _index.timestamp_at(*oldest)) {
-                oldest = i;
+              oldest || searched + 1 >= replace_search_windows
+              || (begin == 0 && end == _index.size())) {
+                break;
+            }
+            if (
+              !wrapped
+              || _sweep_pos + capacity_emergency_budget > _index.size()) {
+                wrapped = true;
+                _sweep_pos = 0;
+                finish_pass();
+            } else {
+                visit_through(end - 1);
             }
         }
-        if (!oldest || !(_index.timestamp_at(*oldest) < incoming.value())) {
+        if (!oldest) {
             break;
         }
         erase_at(*oldest);
