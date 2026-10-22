@@ -23,6 +23,7 @@
 #include "storage/record_batch_builder.h"
 #include "utils/vint.h"
 
+#include <seastar/core/coroutine.hh>
 #include <seastar/core/future.hh>
 #include <seastar/core/lowres_clock.hh>
 
@@ -4447,6 +4448,155 @@ TEST(DedupShardBudgetFuzz, FreshIdentitiesOnAFullShardSurviveRestarts) {
                 break;
             }
             now += 1'000;
+        }
+    }
+    EXPECT_EQ(failures, 0u);
+}
+
+// Experiment, as above, but the burst arrives while another partition's
+// restore is part way: suspended at a random entry of one of its passes, with
+// its claim on the shard budget standing.
+TEST(DedupShardBudgetFuzz, FreshIdentitiesWhileAnotherPartitionRestores) {
+    size_t failures = 0;
+    for (uint64_t seed = 1; seed <= 400; ++seed) {
+        std::mt19937_64 rng(seed);
+        const size_t limit = 2'000 + rng() % 30'000;
+        auto budget = make_budget(limit);
+        std::array<std::unique_ptr<cluster::dedup_window_filter>, 4> fs;
+        for (auto& f : fs) {
+            f = std::make_unique<cluster::dedup_window_filter>(
+              3'600'000ms, 1'000'000, budget);
+        }
+        int64_t now = 1'000'000;
+        for (size_t p = 0; p < 4; ++p) {
+            for (size_t i = 0; i < limit / 3; ++i) {
+                fs[p]->populate(
+                  iobuf::from(fmt::format("p{}-{}", p, i)),
+                  ts(now + static_cast<int64_t>(i / 50)));
+            }
+            now += static_cast<int64_t>(limit / 3 / 50) + 1;
+        }
+        const size_t burst = 50 + rng() % 1'000;
+        for (size_t cycle = 0; cycle < 12; ++cycle) {
+            std::array<cluster::dedup_index_snapshot, 4> snaps;
+            for (size_t p = 0; p < 4; ++p) {
+                snaps[p] = fs[p]->snapshot();
+                fs[p].reset();
+            }
+            const size_t leader = cycle % 4;
+            // Restored before the burst: the leader, and the others in a
+            // random order, except one, which is part way when it arrives.
+            const size_t paused = (leader + 1 + rng() % 3) % 4;
+            std::vector<size_t> order;
+            for (size_t p = 0; p < 4; ++p) {
+                if (p != paused) {
+                    order.push_back(p);
+                }
+            }
+            std::shuffle(order.begin(), order.end(), rng);
+            const bool paused_first = rng() % 2 == 0;
+            auto restore_now = [&](size_t p) {
+                fs[p] = std::make_unique<cluster::dedup_window_filter>(
+                  3'600'000ms, 1'000'000, budget);
+                fs[p]->defer_lookup();
+                fs[p]->restore(snaps[p]);
+            };
+            fs[paused] = std::make_unique<cluster::dedup_window_filter>(
+              3'600'000ms, 1'000'000, budget);
+            fs[paused]->defer_lookup();
+            ss::promise<> resume;
+            auto resumed = resume.get_future().share();
+            const size_t calls_before_pause = rng() % 4;
+            const size_t entries_before_pause = snaps[paused].entries.empty()
+                                                  ? 0
+                                                  : rng()
+                                                      % snaps[paused]
+                                                          .entries.size();
+            size_t calls = 0;
+            bool did_pause = false;
+            std::optional<ss::future<>> restoring;
+            auto start_paused = [&] {
+                const auto& snap = snaps[paused];
+                restoring.emplace(fs[paused]->restore_from(
+                  snap.entries.size(),
+                  snap.max_timestamp,
+                  [&](auto emit) -> ss::future<> {
+                      const bool pause_here = !did_pause
+                                              && calls++ == calls_before_pause;
+                      for (size_t i = 0; i < snap.entries.size(); ++i) {
+                          if (pause_here && i == entries_before_pause) {
+                              did_pause = true;
+                              co_await resumed.get_future();
+                          }
+                          emit(snap.entries[i].identity,
+                               snap.entries[i].timestamp);
+                      }
+                  }));
+            };
+            if (paused_first) {
+                start_paused();
+            }
+            for (auto p : order) {
+                restore_now(p);
+            }
+            if (!paused_first) {
+                start_paused();
+            }
+            fs[leader]->build_lookup().get();
+            now += 2'000;
+            std::vector<record_spec> specs;
+            for (size_t i = 0; i < burst; ++i) {
+                specs.push_back(
+                  {.key = fmt::format("cycle{}-{}", cycle, i),
+                   .value = "v",
+                   .timestamp_delta = static_cast<int64_t>(i / 100)});
+            }
+            const auto shard_before = budget->entries;
+            const auto unindexed = fs[leader]->unindexed_records();
+            auto first = fs[leader]->filter(make_batch_of(specs, ts(now)));
+            const auto unindexed_first = fs[leader]->unindexed_records();
+            const auto shard_first = budget->entries;
+            resume.set_value();
+            restoring->get();
+            auto second = fs[leader]->filter(
+              make_batch_of(specs, ts(now + 50)));
+            const size_t through = second ? second->record_count() : 0;
+            if (through > 0 || unindexed_first != unindexed) {
+                ++failures;
+                ADD_FAILURE() << fmt::format(
+                  "seed {} limit {} burst {} cycle {} leader {} paused {} "
+                  "(first {}, call {}, entry {}, paused {}): {} resent "
+                  "identities admitted; unindexed {}->{}, shard {}->{}->{} of "
+                  "{}, sizes {} {} {} {}",
+                  seed,
+                  limit,
+                  burst,
+                  cycle,
+                  leader,
+                  paused,
+                  paused_first,
+                  calls_before_pause,
+                  entries_before_pause,
+                  did_pause,
+                  through,
+                  unindexed,
+                  unindexed_first,
+                  shard_before,
+                  shard_first,
+                  budget->entries,
+                  limit,
+                  fs[0]->map_size(),
+                  fs[1]->map_size(),
+                  fs[2]->map_size(),
+                  fs[3]->map_size());
+                if (failures > 10) {
+                    break;
+                }
+            }
+            now += 1'000;
+        }
+        if (failures > 10) {
+            break;
         }
     }
     EXPECT_EQ(failures, 0u);
