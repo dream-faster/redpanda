@@ -541,6 +541,7 @@ ss::future<> dedup_stm::do_apply(const model::record_batch& batch) {
         if (!_state.lookup_ready()) {
             // Kept unindexed, an entry is only appended: there are no
             // lookups to start ahead, so each goes in as the walk reaches it.
+            auto batch_scope = _state.admit_batch();
             for_each_dedup_identity(
               readable,
               _state.key_header(),
