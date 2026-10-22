@@ -4527,7 +4527,9 @@ TEST(DedupShardBudgetFuzz, FreshIdentitiesWhileAnotherPartitionRestores) {
             }
             now += static_cast<int64_t>(limit / 3 / 50) + 1;
         }
-        const size_t burst = 50 + rng() % 1'000;
+        // At most a quarter of one partition's share: a burst larger than the
+        // index its partition may keep cannot be kept whole by any policy.
+        const size_t burst = std::min<size_t>(50 + rng() % 1'000, limit / 16);
         for (size_t cycle = 0; cycle < 12; ++cycle) {
             std::array<cluster::dedup_index_snapshot, 4> snaps;
             for (size_t p = 0; p < 4; ++p) {
