@@ -27,6 +27,8 @@
 #include <fmt/format.h>
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <array>
 #include <chrono>
 #include <limits>
 #include <memory>
@@ -3087,6 +3089,71 @@ TEST(DedupShardBudget, ReplacementNeverDropsANewerEntry) {
     EXPECT_EQ(late.map_size(), 0u);
     EXPECT_EQ(full.capacity_evicted_entries(), 0u);
     EXPECT_EQ(full.map_size(), shard_limit);
+}
+
+// A burst of new identities into a full shard is indexed, every one: room
+// comes from entries older than the burst, never from identities it has just
+// admitted. Replacing the oldest entry ahead of the cursor moves the array's
+// last entry -- one of the burst's own -- into the freed slot, and a cursor
+// left behind it would later find a window of nothing else. Four partitions
+// share the shard, each restart restores them all from snapshots, and one
+// takes a burst and then its resend, which must be dropped in full.
+TEST(DedupShardBudget, ABurstIntoAFullShardKeepsItsOwnIdentities) {
+    for (uint64_t seed = 1; seed <= 60; ++seed) {
+        std::mt19937_64 rng(seed);
+        const size_t limit = 2'000 + rng() % 30'000;
+        auto budget = make_budget(limit);
+        std::array<std::unique_ptr<cluster::dedup_window_filter>, 4> fs;
+        for (auto& f : fs) {
+            f = std::make_unique<cluster::dedup_window_filter>(
+              3'600'000ms, 1'000'000, budget);
+        }
+        int64_t now = 1'000'000;
+        for (size_t p = 0; p < fs.size(); ++p) {
+            for (size_t i = 0; i < limit / 3; ++i) {
+                fs[p]->populate(
+                  iobuf::from(fmt::format("p{}-{}", p, i)),
+                  ts(now + static_cast<int64_t>(i / 50)));
+            }
+            now += static_cast<int64_t>(limit / 3 / 50) + 1;
+        }
+        const size_t burst = 50 + rng() % 1'000;
+        for (size_t cycle = 0; cycle < 8; ++cycle) {
+            std::array<cluster::dedup_index_snapshot, 4> snaps;
+            for (size_t p = 0; p < fs.size(); ++p) {
+                snaps[p] = fs[p]->snapshot();
+                fs[p].reset();
+            }
+            std::array<size_t, 4> order{0, 1, 2, 3};
+            std::shuffle(order.begin(), order.end(), rng);
+            for (auto p : order) {
+                fs[p] = std::make_unique<cluster::dedup_window_filter>(
+                  3'600'000ms, 1'000'000, budget);
+                fs[p]->restore(snaps[p]);
+            }
+            auto& f = *fs[cycle % fs.size()];
+            now += 2'000;
+            // A hundred records a millisecond, as a producer's batch has.
+            std::vector<record_spec> specs;
+            for (size_t i = 0; i < burst; ++i) {
+                specs.push_back(
+                  {.key = fmt::format("cycle{}-{}", cycle, i),
+                   .value = "v",
+                   .timestamp_delta = static_cast<int64_t>(i / 100)});
+            }
+            ASSERT_TRUE(f.filter(make_batch_of(specs, ts(now))).has_value());
+            const auto resent = f.filter(make_batch_of(specs, ts(now + 50)));
+            ASSERT_FALSE(resent.has_value()) << fmt::format(
+              "seed {} limit {} burst {} cycle {}: {} of the burst's "
+              "identities admitted again",
+              seed,
+              limit,
+              burst,
+              cycle,
+              resent->record_count());
+            now += 1'000;
+        }
+    }
 }
 
 // Shard pressure trims down to the shard's soft limit and no further: the
