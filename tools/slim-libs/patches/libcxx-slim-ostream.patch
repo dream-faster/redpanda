@@ -1,0 +1,14 @@
+--- /usr/lib/llvm-22/include/c++/v1/ostream	2026-07-14 13:48:53.000000000 +0000
++++ libcxx-slim/ostream	2026-10-29 17:20:35.097680885 +0000
+@@ -181,9 +181,8 @@
+ 
+ #    include <__ostream/basic_ostream.h>
+ 
+-#    if _LIBCPP_STD_VER >= 23
+-#      include <__ostream/print.h>
+-#    endif
++// slim: <__ostream/print.h> (and with it <print>/<format>) is no longer pulled in
++// by <ostream>; include <print> explicitly to use std::print(std::ostream&, ...).
+ 
+ #    include <version>
+ 

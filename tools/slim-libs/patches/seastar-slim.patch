@@ -1,0 +1,249 @@
+diff --git a/include/seastar/core/shared_ptr.hh b/include/seastar/core/shared_ptr.hh
+index 91f2995..b8e9bab 100644
+--- a/include/seastar/core/shared_ptr.hh
++++ b/include/seastar/core/shared_ptr.hh
+@@ -24,7 +24,7 @@
+ #include <seastar/core/shared_ptr_debug_helper.hh>
+ #include <seastar/util/is_smart_ptr.hh>
+ #include <seastar/util/indirect.hh>
+-#include <boost/intrusive/parent_from_member.hpp>
++#include <seastar/util/parent_from_member.hh>
+ #include <fmt/core.h>
+ #include <concepts>
+ #include <ostream>
+@@ -221,7 +221,7 @@ struct lw_shared_ptr_accessors_no_esft {
+         delete static_cast<concrete_type*>(counter);
+     }
+     static void dispose(T* value_ptr) {
+-        delete boost::intrusive::get_parent_from_member(value_ptr, &concrete_type::_value);
++        delete internal::parent_from_member(value_ptr, &concrete_type::_value);
+     }
+     static void instantiate_to_value(lw_shared_ptr_counter_base*) {
+         // since to_value() is defined above, we don't need to do anything special
+diff --git a/include/seastar/core/smp.hh b/include/seastar/core/smp.hh
+index 379c89c..9dd67ef 100644
+--- a/include/seastar/core/smp.hh
++++ b/include/seastar/core/smp.hh
+@@ -30,7 +30,7 @@
+ #include <seastar/core/resource.hh>
+ #include <seastar/core/shard_id.hh>
+ 
+-#include <boost/lockfree/spsc_queue.hpp>
++#include <seastar/util/spsc_queue.hh>
+ #include <deque>
+ #include <optional>
+ #include <thread>
+@@ -182,8 +182,7 @@ class smp_message_queue {
+     struct lf_queue_remote {
+         reactor* remote;
+     };
+-    using lf_queue_base = boost::lockfree::spsc_queue<work_item*,
+-                            boost::lockfree::capacity<queue_length>>;
++    using lf_queue_base = internal::spsc_queue<work_item*, queue_length>;
+     // use inheritence to control placement order
+     struct lf_queue : lf_queue_remote, lf_queue_base {
+         lf_queue(reactor* remote) : lf_queue_remote{remote} {}
+diff --git a/include/seastar/util/backtrace.hh b/include/seastar/util/backtrace.hh
+index 83306dd..ca6880a 100644
+--- a/include/seastar/util/backtrace.hh
++++ b/include/seastar/util/backtrace.hh
+@@ -35,7 +35,7 @@
+ #include <iosfwd>
+ #include <memory>
+ #include <variant>
+-#include <boost/container/static_vector.hpp>
++#include <seastar/util/static_vector.hh>
+ #include <fmt/ostream.h>
+ 
+ namespace seastar {
+@@ -109,7 +109,7 @@ void backtrace(Func&& func, bool incremental = false) noexcept(noexcept(func(fra
+ // Represents a call stack of a single thread.
+ class simple_backtrace {
+ public:
+-    using vector_type = boost::container::static_vector<frame, 64>;
++    using vector_type = internal::static_vector<frame, 64>;
+ private:
+     vector_type _frames;
+     size_t _hash = 0;
+@@ -178,7 +178,7 @@ class tasktrace {
+                     && std::string_view{ resume_point.file_name() } == std::string_view{ other.resume_point.file_name() };
+         }
+     };
+-    using vector_type = boost::container::static_vector<entry, 16>;
++    using vector_type = internal::static_vector<entry, 16>;
+ private:
+     simple_backtrace _main;
+     vector_type _prev;
+diff --git a/include/seastar/util/parent_from_member.hh b/include/seastar/util/parent_from_member.hh
+new file mode 100644
+index 0000000..8fb3113
+--- /dev/null
++++ b/include/seastar/util/parent_from_member.hh
+@@ -0,0 +1,16 @@
++#pragma once
++// Replacement for boost::intrusive::get_parent_from_member that avoids pulling
++// ~35 Boost headers into every translation unit through shared_ptr.hh.
++#include <cstddef>
++
++namespace seastar::internal {
++
++template <class Parent, class Member>
++inline Parent* parent_from_member(Member* member, const Member Parent::*ptr_to_member) noexcept {
++    // Same offset trick Boost uses, without its configuration headers.
++    const Parent* const p = nullptr;
++    const auto offset = reinterpret_cast<const char*>(&(p->*ptr_to_member)) - reinterpret_cast<const char*>(p);
++    return reinterpret_cast<Parent*>(reinterpret_cast<char*>(member) - offset);
++}
++
++} // namespace seastar::internal
+diff --git a/include/seastar/util/spsc_queue.hh b/include/seastar/util/spsc_queue.hh
+new file mode 100644
+index 0000000..8d5cf14
+--- /dev/null
++++ b/include/seastar/util/spsc_queue.hh
+@@ -0,0 +1,63 @@
++#pragma once
++// Minimal bounded single-producer/single-consumer ring replacing
++// boost::lockfree::spsc_queue<T, boost::lockfree::capacity<N>> in smp.hh.
++#include <atomic>
++#include <cstddef>
++#include <array>
++
++namespace seastar::internal {
++
++template <typename T, std::size_t Capacity>
++class spsc_queue {
++    // one slot is kept free to distinguish full from empty, like boost does
++    static constexpr std::size_t slots = Capacity + 1;
++    alignas(64) std::atomic<std::size_t> _write{0};
++    alignas(64) std::atomic<std::size_t> _read{0};
++    alignas(64) std::array<T, slots> _ring;
++    static std::size_t next(std::size_t i) noexcept { return i + 1 == slots ? 0 : i + 1; }
++public:
++    bool push(const T& v) noexcept {
++        auto w = _write.load(std::memory_order_relaxed);
++        auto n = next(w);
++        if (n == _read.load(std::memory_order_acquire)) {
++            return false;
++        }
++        _ring[w] = v;
++        _write.store(n, std::memory_order_release);
++        return true;
++    }
++    template <typename It>
++    It push(It begin, It end) noexcept {
++        while (begin != end && push(*begin)) {
++            ++begin;
++        }
++        return begin;
++    }
++    bool pop(T& out) noexcept {
++        auto r = _read.load(std::memory_order_relaxed);
++        if (r == _write.load(std::memory_order_acquire)) {
++            return false;
++        }
++        out = _ring[r];
++        _read.store(next(r), std::memory_order_release);
++        return true;
++    }
++    template <typename F>
++    std::size_t consume_all(F&& f) {
++        std::size_t n = 0;
++        T v;
++        while (pop(v)) {
++            f(v);
++            ++n;
++        }
++        return n;
++    }
++    bool empty() const noexcept { return _read.load(std::memory_order_acquire) == _write.load(std::memory_order_acquire); }
++    std::size_t read_available() const noexcept {
++        auto w = _write.load(std::memory_order_acquire);
++        auto r = _read.load(std::memory_order_acquire);
++        return w >= r ? w - r : slots - r + w;
++    }
++};
++
++} // namespace seastar::internal
+diff --git a/include/seastar/util/static_vector.hh b/include/seastar/util/static_vector.hh
+new file mode 100644
+index 0000000..55dcd2c
+--- /dev/null
++++ b/include/seastar/util/static_vector.hh
+@@ -0,0 +1,54 @@
++#pragma once
++// Minimal fixed-capacity vector, a stand-in for boost::container::static_vector
++// on the headers that are included by almost every translation unit.
++#include <cstddef>
++#include <new>
++#include <algorithm>
++#include <utility>
++#include <initializer_list>
++
++namespace seastar::internal {
++
++template <typename T, std::size_t N>
++class static_vector {
++    alignas(T) unsigned char _buf[sizeof(T) * N];
++    std::size_t _size = 0;
++    T* ptr() noexcept { return std::launder(reinterpret_cast<T*>(_buf)); }
++    const T* ptr() const noexcept { return std::launder(reinterpret_cast<const T*>(_buf)); }
++public:
++    using value_type = T;
++    using size_type = std::size_t;
++    using iterator = T*;
++    using const_iterator = const T*;
++    static_vector() noexcept = default;
++    static_vector(const static_vector& o) { for (auto& e : o) emplace_back(e); }
++    static_vector(static_vector&& o) noexcept(std::is_nothrow_move_constructible_v<T>) { for (auto& e : o) emplace_back(std::move(e)); }
++    static_vector& operator=(const static_vector& o) { if (this != &o) { clear(); for (auto& e : o) emplace_back(e); } return *this; }
++    static_vector& operator=(static_vector&& o) noexcept(std::is_nothrow_move_constructible_v<T>) { if (this != &o) { clear(); for (auto& e : o) emplace_back(std::move(e)); } return *this; }
++    ~static_vector() { clear(); }
++    template <typename... A> T& emplace_back(A&&... a) { auto* p = new (ptr() + _size) T(std::forward<A>(a)...); ++_size; return *p; }
++    void push_back(const T& v) { emplace_back(v); }
++    void push_back(T&& v) { emplace_back(std::move(v)); }
++    void pop_back() { ptr()[--_size].~T(); }
++    void clear() noexcept { while (_size) pop_back(); }
++    bool empty() const noexcept { return _size == 0; }
++    std::size_t size() const noexcept { return _size; }
++    static constexpr std::size_t capacity() noexcept { return N; }
++    static constexpr std::size_t max_size() noexcept { return N; }
++    T* data() noexcept { return ptr(); }
++    const T* data() const noexcept { return ptr(); }
++    iterator begin() noexcept { return ptr(); }
++    iterator end() noexcept { return ptr() + _size; }
++    const_iterator begin() const noexcept { return ptr(); }
++    const_iterator end() const noexcept { return ptr() + _size; }
++    T& operator[](std::size_t i) noexcept { return ptr()[i]; }
++    const T& operator[](std::size_t i) const noexcept { return ptr()[i]; }
++    T& back() noexcept { return ptr()[_size - 1]; }
++    const T& back() const noexcept { return ptr()[_size - 1]; }
++    T& front() noexcept { return ptr()[0]; }
++    friend bool operator==(const static_vector& a, const static_vector& b) {
++        return a._size == b._size && std::equal(a.begin(), a.end(), b.begin());
++    }
++};
++
++} // namespace seastar::internal
+diff --git a/src/core/syscall_work_queue.hh b/src/core/syscall_work_queue.hh
+index 7a4135f..3525831 100644
+--- a/src/core/syscall_work_queue.hh
++++ b/src/core/syscall_work_queue.hh
+@@ -26,15 +26,14 @@
+ #include <seastar/core/semaphore.hh>
+ #include <seastar/util/std-compat.hh>
+ #include <seastar/util/noncopyable_function.hh>
+-#include <boost/lockfree/spsc_queue.hpp>
++#include <seastar/util/spsc_queue.hh>
+ 
+ namespace seastar {
+ 
+ class syscall_work_queue {
+     static constexpr size_t queue_length = 128;
+     struct work_item;
+-    using lf_queue = boost::lockfree::spsc_queue<work_item*,
+-                            boost::lockfree::capacity<queue_length>>;
++    using lf_queue = internal::spsc_queue<work_item*, queue_length>;
+     lf_queue _pending;
+     lf_queue _completed;
+     writeable_eventfd _start_eventfd;

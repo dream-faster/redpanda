@@ -1,0 +1,46 @@
+--- /usr/lib/llvm-22/include/c++/v1/chrono	2026-07-14 13:48:53.000000000 +0000
++++ libcxx-slim/chrono	2026-10-29 17:20:35.158383148 +0000
+@@ -1099,42 +1099,7 @@
+ #  include <__chrono/time_point.h>
+ 
+ #  if _LIBCPP_STD_VER >= 20
+-#    include <__chrono/calendar.h>
+-#    include <__chrono/day.h>
+-#    include <__chrono/exception.h>
+-#    include <__chrono/hh_mm_ss.h>
+-#    include <__chrono/is_clock.h>
+-#    include <__chrono/literals.h>
+-#    include <__chrono/local_info.h>
+-#    include <__chrono/month.h>
+-#    include <__chrono/month_weekday.h>
+-#    include <__chrono/monthday.h>
+-#    include <__chrono/sys_info.h>
+-#    include <__chrono/weekday.h>
+-#    include <__chrono/year.h>
+-#    include <__chrono/year_month.h>
+-#    include <__chrono/year_month_day.h>
+-#    include <__chrono/year_month_weekday.h>
+-
+-#    if _LIBCPP_HAS_LOCALIZATION
+-#      include <__chrono/formatter.h>
+-#      include <__chrono/ostream.h>
+-#      include <__chrono/parser_std_format_spec.h>
+-#      include <__chrono/statically_widen.h>
+-#    endif
+-
+-#    if _LIBCPP_HAS_TIME_ZONE_DATABASE && _LIBCPP_HAS_FILESYSTEM && _LIBCPP_HAS_LOCALIZATION
+-#      include <__chrono/gps_clock.h>
+-#      include <__chrono/leap_second.h>
+-#      include <__chrono/tai_clock.h>
+-#      include <__chrono/time_zone.h>
+-#      include <__chrono/time_zone_link.h>
+-#      include <__chrono/tzdb.h>
+-#      include <__chrono/tzdb_list.h>
+-#      include <__chrono/utc_clock.h>
+-#      include <__chrono/zoned_time.h>
+-#    endif
+-
++#    include <__chrono/literals.h>   // slim: calendar, tz, formatter and ostream support removed
+ #  endif
+ 
+ #  include <version>
