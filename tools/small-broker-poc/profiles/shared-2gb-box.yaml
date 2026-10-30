@@ -1,0 +1,7 @@
+# Three brokers sharing one 2 GB machine (~640 MiB each), ~1000
+# single-partition RF=3 topics. Same reasoning as two-gib.yaml; the
+# partition pool is widened rather than understating the per-replica cost.
+topic_partitions_memory_allocation_percent: 20
+topic_memory_per_partition: 102400
+storage_compaction_key_map_memory: 16777216
+segment_fallocation_step: 4194304

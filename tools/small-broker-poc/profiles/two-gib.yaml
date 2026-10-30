@@ -1,0 +1,19 @@
+# Three brokers with 2 GiB each, ~1000-3000 single-partition RF=3 topics.
+# Measured basis for each value: docs/small-brokers/README.md.
+
+# Admission control charges each replica this much against
+# topic_partitions_memory_allocation_percent (10%) of broker memory. The
+# 200 KiB default caps a 2 GiB broker at ~1014-1048 replicas. Measured cost
+# is ~100 KiB per idle replica, and peak hard usage stayed at ~650 MiB with
+# 3000 replicas per broker under load and through a restart.
+topic_memory_per_partition: 65536
+
+# The sliding-window compaction key map is allocated at this size on the
+# first housekeeping pass and never freed (128 MiB by default), even when
+# the only compacted logs are __consumer_offsets with a few thousand keys.
+# Compaction stays correct with a smaller map; it indexes in more passes.
+storage_compaction_key_map_memory: 16777216
+
+# Disk, not memory: every active segment preallocates this much (32 MiB by
+# default), so 1000 replicas reserve 32 GB per broker before any data lands.
+segment_fallocation_step: 4194304
