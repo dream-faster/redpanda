@@ -1,0 +1,43 @@
+diff --git a/absl/hash/internal/hash.h b/absl/hash/internal/hash.h
+index 2f91a8b..cc2817d 100644
+--- a/absl/hash/internal/hash.h
++++ b/absl/hash/internal/hash.h
+@@ -88,7 +88,8 @@
+ #include "absl/types/variant.h"
+ #include "absl/utility/utility.h"
+ 
+-#if defined(__cpp_lib_filesystem) && __cpp_lib_filesystem >= 201703L && \
++#if defined(ABSL_HASH_ENABLE_FILESYSTEM_PATH) &&                           \
++    defined(__cpp_lib_filesystem) && __cpp_lib_filesystem >= 201703L && \
+     !defined(__XTENSA__)
+ #include <filesystem>  // NOLINT
+ #endif
+@@ -630,7 +631,8 @@ H AbslHashValue(H hash_state, std::basic_string_view<Char> str) {
+   return H::combine_contiguous(std::move(hash_state), str.data(), str.size());
+ }
+ 
+-#if defined(__cpp_lib_filesystem) && __cpp_lib_filesystem >= 201703L && \
++#if defined(ABSL_HASH_ENABLE_FILESYSTEM_PATH) &&                           \
++    defined(__cpp_lib_filesystem) && __cpp_lib_filesystem >= 201703L && \
+     (!defined(__ENVIRONMENT_IPHONE_OS_VERSION_MIN_REQUIRED__) ||        \
+      __ENVIRONMENT_IPHONE_OS_VERSION_MIN_REQUIRED__ >= 130000) &&       \
+     (!defined(__ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__) ||         \
+diff --git a/absl/types/span.h b/absl/types/span.h
+index 016376e..d947143 100644
+--- a/absl/types/span.h
++++ b/absl/types/span.h
+@@ -89,7 +89,14 @@ ABSL_NAMESPACE_END
+ #include <version>  // NOLINT(misc-include-cleaner)
+ #endif
+ #if defined(__cpp_lib_ranges) && __cpp_lib_ranges >= 201911L
++#if defined(_LIBCPP_VERSION)
++// slim: libc++'s <ranges> is large; these two internal headers declare the
++// variable templates specialised below.
++#include <__ranges/enable_borrowed_range.h>
++#include <__ranges/enable_view.h>
++#else
+ #include <ranges>  // NOLINT(build/c++20)
++#endif
+ template <typename T>
+  // NOLINTNEXTLINE(build/c++20)
+ inline constexpr bool std::ranges::enable_view<absl::Span<T>> = true;
