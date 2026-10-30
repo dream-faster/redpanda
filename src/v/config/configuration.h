@@ -298,6 +298,7 @@ struct configuration final : public config_store {
     bounded_property<uint64_t> storage_max_concurrent_replay;
     bounded_property<uint64_t> storage_compaction_index_memory;
     bounded_property<uint64_t> storage_compaction_key_map_memory;
+    bounded_property<uint64_t> storage_compaction_key_map_min_memory;
     bounded_property<double, numeric_bounds>
       storage_compaction_key_map_memory_limit_percent;
     property<size_t> max_compacted_log_segment_size;

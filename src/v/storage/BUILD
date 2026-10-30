@@ -129,6 +129,13 @@ redpanda_cc_library(
 )
 
 redpanda_cc_library(
+    name = "compaction_key_map_sizer",
+    hdrs = [
+        "compaction_key_map_sizer.h",
+    ],
+)
+
+redpanda_cc_library(
     name = "chunk_cache",
     srcs = [
         "chunk_cache.cc",
@@ -315,6 +322,7 @@ redpanda_cc_library(
         "version.h",
     ],
     implementation_deps = [
+        ":compaction_key_map_sizer",
         ":log_manager_probe",
         "//src/v/ssx:abort_source",
         "//src/v/syschecks",

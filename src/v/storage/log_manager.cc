@@ -25,6 +25,7 @@
 #include "ssx/watchdog.h"
 #include "storage/batch_cache.h"
 #include "storage/compacted_index_writer.h"
+#include "storage/compaction_key_map_sizer.h"
 #include "storage/disk_log_impl.h"
 #include "storage/fs_utils.h"
 #include "storage/kvstore.h"
@@ -38,6 +39,7 @@
 #include "storage/storage_resources.h"
 #include "storage/types.h"
 #include "utils/directory_walker.h"
+#include "utils/human.h"
 
 #include <seastar/core/abort_source.hh>
 #include <seastar/core/file.hh>
@@ -252,14 +254,8 @@ log_manager::housekeeping_scan(model::timestamp collection_threshold) {
 
     if (
       config::shard_local_cfg().log_compaction_use_sliding_window.value()
-      && !_compaction_hash_key_map
       && (!_logs_list.empty() || !_priority_logs_list.empty())) {
-        auto compaction_mem_bytes
-          = memory_groups().compaction_reserved_memory();
-        auto compaction_map
-          = std::make_unique<compaction::hash_key_offset_map>();
-        co_await compaction_map->initialize(compaction_mem_bytes);
-        _compaction_hash_key_map = std::move(compaction_map);
+        co_await resize_compaction_key_map();
     }
 
     sort_logs_by_compaction_heuristic(_logs_list);
@@ -359,6 +355,38 @@ log_manager::housekeeping_scan(model::timestamp collection_threshold) {
             vlog(gclog.info, "{} - {}", ntp, e);
         }
     }
+}
+
+ss::future<> log_manager::resize_compaction_key_map() {
+    const compaction_key_map_sizer sizer{
+      .min_bytes
+      = config::shard_local_cfg().storage_compaction_key_map_min_memory(),
+      .max_bytes = memory_groups().compaction_reserved_memory()};
+    const auto peak_keys = std::exchange(
+      _compaction_hash_key_map_peak_keys, std::nullopt);
+    const size_t capacity_keys = _compaction_hash_key_map
+                                   ? _compaction_hash_key_map->capacity()
+                                   : 0;
+    const auto target = sizer.next_size(
+      _compaction_hash_key_map_bytes, capacity_keys, peak_keys);
+    if (_compaction_hash_key_map && target == _compaction_hash_key_map_bytes) {
+        co_return;
+    }
+
+    vlog(
+      gclog.info,
+      "Resizing compaction key map from {} to {} (most keys used since last "
+      "resize: {}, capacity: {})",
+      human::bytes(_compaction_hash_key_map_bytes),
+      human::bytes(target),
+      peak_keys.value_or(0),
+      capacity_keys);
+    if (!_compaction_hash_key_map) {
+        _compaction_hash_key_map
+          = std::make_unique<compaction::hash_key_offset_map>();
+    }
+    co_await _compaction_hash_key_map->initialize(target);
+    _compaction_hash_key_map_bytes = target;
 }
 
 ss::future<> log_manager::run_housekeeping_job(
@@ -804,6 +832,14 @@ ss::future<> log_manager::do_housekeeping(
         max_compactible_offset = *max_unpinned_offset;
     }
 
+    // The map keeps its contents until the next compaction resets it, so a
+    // change in size or max offset is what tells us a compaction used it.
+    auto* key_map = _compaction_hash_key_map.get();
+    std::optional<std::pair<size_t, model::offset>> key_map_before;
+    if (key_map) {
+        key_map_before.emplace(key_map->size(), key_map->max_offset());
+    }
+
     co_await log->housekeeping(
       housekeeping_config::make_config(
         collection_threshold,
@@ -816,7 +852,15 @@ ss::future<> log_manager::do_housekeeping(
         log->config().min_compaction_lag_ms(),
         as,
         std::move(ntp_sanitizer_cfg),
-        _compaction_hash_key_map.get()));
+        key_map));
+
+    if (
+      key_map
+      && std::make_pair(key_map->size(), key_map->max_offset())
+           != *key_map_before) {
+        _compaction_hash_key_map_peak_keys = std::max(
+          _compaction_hash_key_map_peak_keys.value_or(0), key_map->size());
+    }
 
     meta.flags |= log_housekeeping_meta::bitflags::compacted;
     meta.last_compaction = ss::lowres_clock::now();

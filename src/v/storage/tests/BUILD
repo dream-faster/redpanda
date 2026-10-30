@@ -293,6 +293,20 @@ redpanda_cc_gtest(
 )
 
 redpanda_cc_gtest(
+    name = "compaction_key_map_sizer_test",
+    timeout = "short",
+    srcs = [
+        "compaction_key_map_sizer_test.cc",
+    ],
+    deps = [
+        "//src/v/base",
+        "//src/v/storage:compaction_key_map_sizer",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+redpanda_cc_gtest(
     name = "kvstore_test",
     timeout = "short",
     srcs = [

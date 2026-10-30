@@ -335,6 +335,10 @@ private:
     ss::future<>
     priority_housekeeping_scan(model::timestamp collection_threshold);
 
+    // Sizes the compaction key map for the next scan from how full it got in
+    // the last one (see compaction_key_map_sizer).
+    ss::future<> resize_compaction_key_map();
+
     disk_space_alert _disk_space_alert{disk_space_alert::ok};
 
     ss::future<> dispatch_topic_dir_deletion(ss::sstring dir);
@@ -358,6 +362,10 @@ private:
     // Hash key-map to use across multiple compactions to reuse reserved memory
     // rather than reallocating repeatedly.
     std::unique_ptr<compaction::hash_key_offset_map> _compaction_hash_key_map;
+    size_t _compaction_hash_key_map_bytes{0};
+    // The most keys a compaction put in the map since it was last resized,
+    // nullopt if no compaction used it.
+    std::optional<size_t> _compaction_hash_key_map_peak_keys;
 
     // Metrics.
     std::unique_ptr<log_manager_probe> _probe;
