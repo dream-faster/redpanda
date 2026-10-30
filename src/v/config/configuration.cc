@@ -1490,6 +1490,21 @@ configuration::configuration()
        .visibility = visibility::tunable},
       128_MiB,
       {.min = 16_MiB, .max = 100_GiB})
+  , storage_compaction_key_map_min_memory(
+      *this,
+      "storage_compaction_key_map_min_memory",
+      "Size, in bytes, at which each shard's compaction key-offset map "
+      "starts. The map doubles after a housekeeping pass in which it filled "
+      "up, up to `storage_compaction_key_map_memory`, and halves after a pass "
+      "in which compaction used less than a quarter of it. Set this to "
+      "`storage_compaction_key_map_memory` or more to allocate the whole map "
+      "up front and keep it. Only applies when "
+      "`log_compaction_use_sliding_window` is set to `true`.",
+      {.needs_restart = needs_restart::no,
+       .example = "134217728",
+       .visibility = visibility::tunable},
+      16_MiB,
+      {.min = 1_MiB, .max = 100_GiB})
   , storage_compaction_key_map_memory_limit_percent(
       *this,
       "storage_compaction_key_map_memory_limit_percent",
