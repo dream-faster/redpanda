@@ -141,7 +141,7 @@ script_package(
 # NOTE: this image is currently experimental, don't use this for production.
 oci_image(
     name = "image",
-    base = "@debian_bookworm_slim",
+    base = "@debian_trixie_slim",
     cmd = [
         "redpanda",
         "start",

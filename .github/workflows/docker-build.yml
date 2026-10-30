@@ -229,7 +229,7 @@ jobs:
           # is the build context, so ADD can reference the tarball.
           # <<'EOF' prevents bash from expanding $(...) inside the Dockerfile.
           docker build -t "$FINAL_REF" -f - "$STAGING" <<'EOF'
-          FROM debian:bookworm-slim
+          FROM debian:trixie-slim
           RUN apt-get update && \
               apt-get install -y --no-install-recommends \
                 bash ca-certificates coreutils curl grep sed tzdata wget && \
